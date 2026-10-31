@@ -172,7 +172,7 @@ func startAzurite(ctx context.Context, t *testing.T) (*azblob.Client, string) {
 		Started: true,
 	})
 	if err != nil {
-		t.Skipf("Azurite unavailable: %v", err)
+		t.Fatalf("Azurite: %v", err)
 	}
 	t.Cleanup(func() { _ = container.Terminate(context.Background()) })
 

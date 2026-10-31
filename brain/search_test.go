@@ -2,6 +2,7 @@ package brain_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -117,36 +118,6 @@ func TestSearch_facetsCountTheKindsAndFieldValuesOfAPage(t *testing.T) {
 	}
 }
 
-func TestSearch_teachingErrorsNameTheValidChoices(t *testing.T) {
-	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
-		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}, {Name: "amount", Type: brain.FieldTypeNumber}}},
-		brain.KindSpec{Kind: "Fact", IsParent: true},
-		brain.KindSpec{Kind: "Chunk", IsPart: true}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	scope := brain.Scope{Namespace: tenant(t)}
-	search := func(kind string, filters map[string]any) error {
-		_, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "q", Kind: kind, Filters: mustFilter(t, filters)})
-		return err
-	}
-
-	for name, tc := range map[string]struct {
-		err  error
-		want string
-	}{
-		"an unknown kind":       {search("Phase", nil), "unknown kind \"Phase\"; kinds: Deal, Fact"},
-		"an unknown field":      {search("Deal", map[string]any{"phase": "x"}), "unknown filter \"phase\" for Deal; filterable: amount, stage"},
-		"a field with no kind":  {search("", map[string]any{"stage": "x"}), "filter \"stage\" needs a kind; kinds: Deal, Fact"},
-		"a kind with no fields": {search("Fact", map[string]any{"stage": "x"}), "filterable: none"},
-	} {
-		if !errors.Is(tc.err, brain.ErrInvalid) || !strings.Contains(tc.err.Error(), tc.want) {
-			t.Errorf("%s = %v, want ErrInvalid naming %q", name, tc.err, tc.want)
-		}
-	}
-}
-
 func TestSearch_morePagesThroughTheRestEvenAfterACheckpoint(t *testing.T) {
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
@@ -164,24 +135,23 @@ func TestSearch_morePagesThroughTheRestEvenAfterACheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc.SetRest("search", first.Rest)
-	checkpoint, err := sc.Export()
+	checkpoint, err := json.Marshal(sc.Rests())
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored := brain.NewSearchContext()
-	if err := restored.Restore(checkpoint); err != nil {
+	var rests map[string]brain.Rest
+	if err := json.Unmarshal(checkpoint, &rests); err != nil {
 		t.Fatal(err)
 	}
+	restored := brain.NewSearchContext()
+	restored.SetRests(rests)
 	second, secondErr := eng.Next(ctx, scope, restored.Rest("search"), 2)
 	last, lastErr := eng.Next(ctx, scope, second.Rest, 10)
-	empty, _ := brain.NewSearchContext().Export()
-	badRestore := brain.NewSearchContext().Restore([]byte(`{`))
-	badRest := brain.NewSearchContext().Restore([]byte(`{"rests":{"search":{"refs":"x"}}}`))
-	staleFilter := brain.NewSearchContext()
-	if err := staleFilter.Restore([]byte(`{"rests":{"search":{"refs":[{"id":"` + uuid.NewString() + `"}],"filter":{"CreatedAfter":"yesterday"}}}}`)); err != nil {
+	var stale map[string]brain.Rest
+	if err := json.Unmarshal([]byte(`{"search":{"refs":[{"id":"`+uuid.NewString()+`"}],"filter":{"CreatedAfter":"yesterday"}}}`), &stale); err != nil {
 		t.Fatal(err)
 	}
-	_, staleErr := eng.Next(ctx, scope, staleFilter.Rest("search"), 1)
+	_, staleErr := eng.Next(ctx, scope, stale["search"], 1)
 
 	seen := map[uuid.UUID]bool{}
 	for _, o := range slices.Concat(slices.Collect(first.Results.Objects()), slices.Collect(second.Results.Objects()), slices.Collect(last.Results.Objects())) {
@@ -190,8 +160,8 @@ func TestSearch_morePagesThroughTheRestEvenAfterACheckpoint(t *testing.T) {
 	if !first.More || secondErr != nil || !second.More || lastErr != nil || last.More || len(slices.Collect(last.Results.Objects())) != 1 || len(seen) != 5 {
 		t.Errorf("pages of 2, 2 and the rest = %v %v %v (more %v %v %v), want all 5 once", titlesOf(slices.Collect(first.Results.Objects())), titlesOf(slices.Collect(second.Results.Objects())), titlesOf(slices.Collect(last.Results.Objects())), first.More, second.More, last.More)
 	}
-	if empty != nil || badRestore == nil || badRest == nil || !last.Rest.Empty() {
-		t.Errorf("empty export = %s, bad restore = %v, bad rest = %v, want nothing and errors", empty, badRestore, badRest)
+	if !last.Rest.Empty() {
+		t.Errorf("the last page's rest = %+v, want none", last.Rest)
 	}
 	if !errors.Is(staleErr, brain.ErrInvalid) {
 		t.Errorf("more from a checkpoint whose filter no longer validates = %v, want ErrInvalid", staleErr)

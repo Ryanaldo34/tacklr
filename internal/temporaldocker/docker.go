@@ -18,12 +18,14 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"google.golang.org/protobuf/types/known/durationpb"
+
+	"github.com/ryanaldo34/tacklr/internal/pgtest"
 )
 
 const (
-	serverImage = "temporalio/server:latest"
-	adminImage  = "temporalio/admin-tools:latest"
-	pgImage     = "tacklr-pg-brain:test"
+	// The latest stable Temporal server, pinned.
+	serverImage = "temporalio/server:1.32.1"
+	adminImage  = "temporalio/admin-tools:1.32.1"
 )
 
 var (
@@ -36,8 +38,7 @@ var (
 	started  bool
 )
 
-// HostPort returns the shared Temporal frontend. The test skips when Docker
-// or the Postgres image is not available.
+// HostPort returns the shared Temporal frontend. It needs Docker.
 func HostPort(t testing.TB) string {
 	t.Helper()
 	mu.Lock()
@@ -47,7 +48,7 @@ func HostPort(t testing.TB) string {
 		startErr = start()
 	}
 	if startErr != nil {
-		t.Skipf("Temporal docker unavailable: %v", startErr)
+		t.Fatalf("Temporal docker: %v", startErr)
 	}
 	return addr
 }
@@ -101,7 +102,7 @@ func start() error {
 		return err
 	}
 	netw = nw
-	db, err := postgres.Run(ctx, pgImage,
+	db, err := postgres.Run(ctx, pgtest.Image,
 		postgres.WithDatabase("temporal"),
 		postgres.WithUsername("temporal"),
 		postgres.WithPassword("temporal"),
@@ -110,7 +111,7 @@ func start() error {
 	)
 	if err != nil {
 		stop()
-		return fmt.Errorf("%w (build image: make brain-pg-image)", err)
+		return err
 	}
 	pg = db
 	if code, _, err := db.Exec(ctx, []string{"psql", "-U", "temporal", "-d", "temporal", "-c", "CREATE DATABASE temporal_visibility;"}); err != nil || code != 0 {

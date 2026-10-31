@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,58 +16,18 @@ import (
 	"sync"
 
 	"github.com/stretchr/testify/mock"
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
-
-func TestSessionWorkflow_inferenceRefusedFailsTurn(t *testing.T) {
-	env := newTestWorkflow(t)
-	var attempts atomic.Int32
-	agent := tacklr.AgentOptions{Model: testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		attempts.Add(1)
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Error: tacklr.ErrModelRefused}
-	}),
-		MaxWindowSize: 8192}
-	_, fallback := registerSession(env, agent)
-
-	id := session.SessionID("sess-model-refused")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "hi"}})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
-	}, 50*time.Millisecond)
-
-	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, ActivityAttempts: 3})
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	if n := attempts.Load(); n != 3 {
-		t.Fatalf("refusal attempts = %d, want 3", n)
-	}
-	st := querySession(t, env)
-	if st.State != session.SessionFailed || st.Waiting {
-		t.Fatalf("status %+v", st)
-	}
-	var saw bool
-	for _, ev := range drainLog(t, fallback, id) {
-		if ev.Type == tacklr.StreamEventError && (errors.Is(ev.Error, tacklr.ErrModelRefused) ||
-			strings.Contains(ev.Content, tacklr.ErrModelRefused.Error()) ||
-			strings.Contains(ev.Fail, tacklr.ErrModelRefused.Error())) {
-			saw = true
-		}
-	}
-	if !saw {
-		t.Fatal("want StreamEventError with model refused")
-	}
-}
 
 func TestSessionWorkflow_permanentInferenceDoesNotRetry(t *testing.T) {
 	env := newTestWorkflow(t)
@@ -721,86 +682,6 @@ func TestSessionWorkflow_steerDuringYieldKeepsPark(t *testing.T) {
 	}
 }
 
-func TestSessionWorkflow_failedAsyncChildJobAbsorbed(t *testing.T) {
-	env := newTestWorkflow(t)
-	id := session.SessionID("sess-async-fail")
-	childID := session.ChildSessionID(id, "researcher", "sp1")
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		last := lastMsg(msgs)
-		if last != nil && last.Role == tacklr.RoleUser && last.Content == "child-task" {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: "boom-child", IsComplete: true}
-			return
-		}
-		var scheduled, collected bool
-		for _, m := range msgs {
-			if m == nil {
-				continue
-			}
-			if m.Role == tacklr.RoleTool && strings.Contains(m.Content, "scheduled") {
-				scheduled = true
-			}
-			if m.Role == tacklr.RoleUser && strings.Contains(m.Content, "failed:") && strings.Contains(m.Content, string(childID)) {
-				collected = true
-			}
-		}
-		switch {
-		case collected:
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-continued", IsComplete: true}
-		case scheduled:
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "waiting", IsComplete: true}
-		default:
-			ch <- tacklr.LLMResponseChunk{
-				Type: tacklr.StreamEventFunctionCall,
-				ToolCalls: []tacklr.ToolCall{{
-					ID: "sp1", CallID: "sp1", Name: "spawn_specialist",
-					Arguments: `{"specialist":"researcher","task_description_and_context":"child-task","block":false}`,
-				}},
-				IsComplete: true,
-			}
-		}
-	})
-	agent := tacklr.AgentOptions{Model: model,
-		MaxWindowSize: 8192,
-		Specialists: []*tacklr.Specialist{{
-			Name:  "researcher",
-			Model: model,
-		}}}
-	_, fallback := registerSession(env, agent)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
-	}, 80*time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	got := drainLog(t, fallback, id)
-	var sawParent bool
-	for _, ev := range got {
-		if ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-continued" {
-			sawParent = true
-		}
-	}
-	if !sawParent {
-		t.Fatalf("parent must absorb failed job RoleUser, events=%+v", got)
-	}
-	val, err := env.QueryWorkflow(queryChildren)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var kids []session.SessionID
-	if err := val.Get(&kids); err != nil {
-		t.Fatal(err)
-	}
-	for _, k := range kids {
-		if k == childID {
-			t.Fatalf("failed child still listed: %v", kids)
-		}
-	}
-}
-
 func TestSessionWorkflow_workerChildCompletesParent(t *testing.T) {
 	env := newTestWorkflow(t)
 	id := session.SessionID("sess-worker")
@@ -921,51 +802,6 @@ func TestSessionWorkflow_toolFailureStaysInTheWindow(t *testing.T) {
 	}
 	if !saw {
 		t.Fatalf("want the failure text in the assistant reply, got %+v", drainLog(t, fallback, id))
-	}
-}
-
-func TestSessionWorkflow_missingPathIsACorrection(t *testing.T) {
-	env := newTestWorkflow(t)
-	dir := t.TempDir()
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: last.Content, IsComplete: true}
-			return
-		}
-		ch <- tacklr.LLMResponseChunk{
-			Type: tacklr.StreamEventFunctionCall,
-			ToolCalls: []tacklr.ToolCall{{
-				ID: "r1", CallID: "r1", Name: "read",
-				Arguments: `{"path":"/workspace/docs/missing.txt"}`,
-			}},
-			IsComplete: true,
-		}
-	})
-	agent := tacklr.AgentOptions{
-		Model: model, MaxWindowSize: 8192,
-		OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir))),
-	}
-	_, fallback := registerSession(env, agent)
-	id := session.SessionID("sess-missing-path")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "read"}})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 80*time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	if st := querySession(t, env); st.State != session.SessionComplete {
-		t.Fatalf("status %+v", st)
-	}
-	var saw bool
-	for _, ev := range drainLog(t, fallback, id) {
-		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "does not exist") {
-			saw = true
-		}
-	}
-	if !saw {
-		t.Fatalf("want the missing-path correction in the reply, got %+v", drainLog(t, fallback, id))
 	}
 }
 
@@ -1314,68 +1150,6 @@ func TestSessionWorkflow_steerDuringToolJoinsTheNextReply(t *testing.T) {
 	}
 }
 
-func TestSessionWorkflow_cancelDropsUnreadPromptThenNextPromptRuns(t *testing.T) {
-	release, _ := releaseLater(t)
-	var n atomic.Int32
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		if n.Add(1) == 1 {
-			select {
-			case <-release:
-			case <-ctx.Done():
-			}
-			return
-		}
-		text := ""
-		if last := lastMsg(msgs); last != nil {
-			text = last.Content
-		}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "reply:" + text, IsComplete: true}
-	})
-	env := newTestWorkflow(t)
-	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}
-	_, log := registerSession(env, agent)
-	id := session.SessionID("sess-cancel-unread")
-	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
-	signalAt(env, 15*time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "do-not-keep"}})
-	signalAt(env, 20*time.Millisecond, session.Wake{Kind: session.WakeCancel})
-	signalAt(env, 40*time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "keep-this"}})
-	signalAt(env, 90*time.Millisecond, session.Wake{Kind: session.WakeClose})
-	got := finishSession(t, env, log, id)
-	text := visibleText(got)
-	if strings.Contains(text, "do-not-keep") || !strings.Contains(text, "reply:keep-this") {
-		t.Fatalf("cancel must drop the unread prompt and run the next one, got %s", text)
-	}
-}
-
-func TestSessionWorkflow_idleCancelThenPromptSentTogetherRunsThePrompt(t *testing.T) {
-	// Arrange
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		text := ""
-		if last := lastMsg(msgs); last != nil {
-			text = last.Content
-		}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "reply:" + text, IsComplete: true}
-	})
-	env := newTestWorkflow(t)
-	_, log := registerSession(env, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
-	id := session.SessionID("sess-cancel-then-prompt")
-	// At time zero both wakes are queued before the workflow's first task, as
-	// when a client cancels and prompts faster than the worker picks them up.
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeCancel})
-		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "after-cancel"}})
-	}, 0)
-	signalAt(env, 60*time.Millisecond, session.Wake{Kind: session.WakeClose})
-
-	// Act
-	got := finishSession(t, env, log, id)
-
-	// Assert
-	if text := visibleText(got); !strings.Contains(text, "reply:after-cancel") {
-		t.Fatalf("a cancel sent before a prompt must not cancel that prompt's turn, got %s", text)
-	}
-}
-
 func TestSessionWorkflow_unknownSpecialistStaysInTheWindow(t *testing.T) {
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool && strings.Contains(last.Content, "not registered") {
@@ -1486,5 +1260,733 @@ func TestSessionWorkflow_readSkillReturnsTheSkillBody(t *testing.T) {
 	got := finishSession(t, env, log, id)
 	if !strings.Contains(visibleText(got), "skill-loaded") {
 		t.Fatalf("read_skill must return the skill body, got %s", visibleText(got))
+	}
+}
+
+// waitAll blocks until every caller has arrived, or fails after a deadline:
+// a group whose calls did not run at once never gets past it.
+type waitAll struct {
+	arrived sync.WaitGroup
+	all     chan struct{}
+}
+
+func newWaitAll(n int) *waitAll {
+	w := &waitAll{all: make(chan struct{})}
+	w.arrived.Add(n)
+	go func() { w.arrived.Wait(); close(w.all) }()
+	return w
+}
+
+func (w *waitAll) arrive() error {
+	w.arrived.Done()
+	select {
+	case <-w.all:
+		return nil
+	case <-time.After(10 * time.Second):
+		return errors.New("the other calls of the group never ran alongside this one")
+	}
+}
+
+func TestSessionWorkflow_toolCallsRunConcurrentlyAndRecordInCallOrder(t *testing.T) {
+	env := newTestWorkflow(t)
+	all := newWaitAll(3)
+	bDone := make(chan struct{})
+	var runs sync.Map // tool name -> *atomic.Int32
+	ran := func(name string) {
+		n, _ := runs.LoadOrStore(name, new(atomic.Int32))
+		n.(*atomic.Int32).Add(1)
+	}
+	var results []string
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		var seen []string
+		for _, m := range msgs {
+			if m != nil && m.Role == tacklr.RoleTool {
+				seen = append(seen, m.Content)
+			}
+		}
+		if len(seen) > 0 {
+			results = seen
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+			return
+		}
+		call := func(name string) tacklr.ToolCall {
+			return tacklr.ToolCall{ID: "fc_" + name, CallID: "call_" + name, Name: name, Arguments: `{}`}
+		}
+		ch <- tacklr.LLMResponseChunk{
+			Type:       tacklr.StreamEventFunctionCall,
+			ToolCalls:  []tacklr.ToolCall{call("a"), call("b"), call("nope"), call("c")},
+			IsComplete: true,
+		}
+	})
+	tool := func(name string, fn func(tacklr.HarnessRuntime) (string, error)) *tacklr.Tool {
+		return tacklr.NewTool(tacklr.ToolConfig{Name: name, Handler: func(_ context.Context, rt tacklr.HarnessRuntime) (string, error) {
+			ran(name)
+			return fn(rt)
+		}})
+	}
+	agent := tacklr.AgentOptions{MaxWindowSize: 8192, Model: model, Tools: []*tacklr.Tool{
+		// a, b and c run at once; a finishes after b, but its result still comes first.
+		tool("a", func(tacklr.HarnessRuntime) (string, error) {
+			if err := all.arrive(); err != nil {
+				return "", err
+			}
+			<-bDone
+			return "from-a", nil
+		}),
+		tool("b", func(tacklr.HarnessRuntime) (string, error) {
+			defer close(bDone)
+			return "from-b", all.arrive()
+		}),
+		tool("c", func(tacklr.HarnessRuntime) (string, error) { return "from-c", all.arrive() }),
+	}}
+	registerSession(env, agent)
+
+	id := session.SessionID("sess-concurrent-tools")
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 200*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 4 || results[0] != "from-a" || results[1] != "from-b" || !strings.Contains(results[2], "not a registered tool") || results[3] != "from-c" {
+		t.Fatalf("tool results = %q, want a, b, the unknown tool's correction, then c", results)
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		if n, _ := runs.Load(name); n == nil || n.(*atomic.Int32).Load() != 1 {
+			t.Errorf("%s ran %v times, want once", name, n)
+		}
+	}
+}
+
+func TestSessionWorkflow_twoPermissionPromptsInOneGroupParkOneAtATime(t *testing.T) {
+	env := newTestWorkflow(t)
+	var runs atomic.Int32
+	var results []string
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		var seen []string
+		for _, m := range msgs {
+			if m != nil && m.Role == tacklr.RoleTool {
+				seen = append(seen, m.Content)
+			}
+		}
+		if len(seen) == 3 {
+			results = seen
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+			return
+		}
+		ch <- tacklr.LLMResponseChunk{
+			Type: tacklr.StreamEventFunctionCall,
+			ToolCalls: []tacklr.ToolCall{
+				{ID: "fc_g1", CallID: "call_g1", Name: "gate1", Arguments: `{}`},
+				{ID: "fc_free", CallID: "call_free", Name: "free", Arguments: `{}`},
+				{ID: "fc_g2", CallID: "call_g2", Name: "gate2", Arguments: `{}`},
+			},
+			IsComplete: true,
+		}
+	})
+	gate := func(name string) *tacklr.Tool {
+		return tacklr.NewTool(tacklr.ToolConfig{
+			Name:   name,
+			OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
+			Handler: func(context.Context) (string, error) {
+				runs.Add(1)
+				return name + "-ok", nil
+			},
+		})
+	}
+	agent := tacklr.AgentOptions{MaxWindowSize: 8192, Model: model, Tools: []*tacklr.Tool{
+		gate("gate1"), gate("gate2"),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "free", Handler: func(context.Context) (string, error) { return "free-ok", nil }}),
+	}}
+	_, log := registerSession(env, agent)
+
+	id := session.SessionID("sess-two-prompts")
+	allow, _ := json.Marshal(map[string]string{"optionId": "allow-once"})
+	parked := func() []string {
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		defer cancel()
+		ch, err := log.Subscribe(ctx, id, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for ev := range ch {
+			if ev.Type == tacklr.StreamEventInterrupt {
+				ids = append(ids, ev.MessageID)
+			}
+		}
+		return ids
+	}
+	var parks []string
+	var resumeWhenParked func()
+	resumeWhenParked = func() {
+		if ids := parked(); len(ids) > len(parks) {
+			next := ids[len(parks)]
+			parks = append(parks, next)
+			env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeResume, Resume: session.ResumeIn{Responses: map[string][]byte{next: allow}}})
+		}
+		if len(parks) < 2 {
+			env.RegisterDelayedCallback(resumeWhenParked, 5*time.Millisecond)
+		}
+	}
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(resumeWhenParked, 5*time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 400*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(parks, []string{"fc_g1", "fc_g2"}) {
+		t.Errorf("parks = %v, want gate1 then gate2, one at a time", parks)
+	}
+	if !slices.Equal(results, []string{"gate1-ok", "free-ok", "gate2-ok"}) || runs.Load() != 2 {
+		t.Errorf("results = %v after %d gated runs, want every result in call order, each gate run once", results, runs.Load())
+	}
+}
+
+func TestSessionWorkflow_cancelWhileWaitingOnABlockingSpecialist(t *testing.T) {
+	env := newTestWorkflow(t)
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleUser && last.Content == "child-task" {
+			<-ctx.Done()
+			return
+		}
+		ch <- tacklr.LLMResponseChunk{
+			Type: tacklr.StreamEventFunctionCall,
+			ToolCalls: []tacklr.ToolCall{{
+				ID: "sp1", CallID: "sp1", Name: "spawn_specialist",
+				Arguments: `{"specialist":"researcher","task_description_and_context":"child-task","block":true}`,
+			}},
+			IsComplete: true,
+		}
+	})
+	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}}
+	registerSession(env, agent)
+	env.SetOnChildWorkflowStartedListener(func(*workflow.Info, workflow.Context, converter.EncodedValues) {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeCancel})
+	})
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 80*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: "sess-cancel-wait"})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if st := querySession(t, env); st.State != session.SessionFailed || st.Waiting {
+		t.Errorf("status after cancelling the wait = %+v, want the turn failed by the cancel", st)
+	}
+}
+
+func TestSessionWorkflow_aToolSchedulingAJobTwiceStartsItOnceAndListsIt(t *testing.T) {
+	env := newTestWorkflow(t)
+	var listed string
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleUser && last.Content == "job-task" {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "job-done", IsComplete: true}
+			return
+		}
+		for _, m := range msgs {
+			if m != nil && m.Role == tacklr.RoleTool {
+				listed = m.Content
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+				return
+			}
+		}
+		ch <- tacklr.LLMResponseChunk{
+			Type:       tacklr.StreamEventFunctionCall,
+			ToolCalls:  []tacklr.ToolCall{{ID: "fc_twice", CallID: "call_twice", Name: "twice", Arguments: `{}`}},
+			IsComplete: true,
+		}
+	})
+	agent := tacklr.AgentOptions{MaxWindowSize: 8192, Model: model,
+		Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}},
+		Tools: []*tacklr.Tool{tacklr.NewTool(tacklr.ToolConfig{Name: "twice", Handler: func(ctx context.Context, rt tacklr.HarnessRuntime) (string, error) {
+			first, err := rt.Schedule(ctx, tacklr.JobRequest{Name: "researcher", Task: "job-task"})
+			if err != nil {
+				return "", err
+			}
+			again, err := rt.Schedule(ctx, tacklr.JobRequest{Name: "researcher", Task: "job-task"})
+			if err != nil {
+				return "", err
+			}
+			var ids []string
+			for _, j := range rt.Jobs() {
+				ids = append(ids, j.ID)
+			}
+			return fmt.Sprintf("same=%v jobs=%v", first.ID == again.ID, ids), nil
+		}})}}
+	registerSession(env, agent)
+	var started atomic.Int32
+	env.SetOnChildWorkflowStartedListener(func(*workflow.Info, workflow.Context, converter.EncodedValues) { started.Add(1) })
+	id := session.SessionID("sess-schedule-twice")
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 120*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("same=true jobs=[%s]", session.ChildSessionID(id, "researcher", "fc_twice"))
+	if listed != want || started.Load() != 1 {
+		t.Errorf("tool saw %q with %d children started, want %q and one child", listed, started.Load(), want)
+	}
+}
+
+func TestSessionWorkflow_blockingSpecialistsFromOneReplyRunAtOnce(t *testing.T) {
+	env := newTestWorkflow(t)
+	both := newWaitAll(2)
+	var results []string
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleUser && strings.HasPrefix(last.Content, "child-") {
+			if err := both.arrive(); err != nil {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: err.Error(), IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: last.Content + "-done", IsComplete: true}
+			return
+		}
+		var seen []string
+		for _, m := range msgs {
+			if m != nil && m.Role == tacklr.RoleTool {
+				seen = append(seen, m.Content)
+			}
+		}
+		if len(seen) > 0 {
+			results = seen
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+			return
+		}
+		spawn := func(id, task string) tacklr.ToolCall {
+			return tacklr.ToolCall{ID: id, CallID: id, Name: "spawn_specialist",
+				Arguments: fmt.Sprintf(`{"specialist":"researcher","task_description_and_context":%q,"block":true}`, task)}
+		}
+		ch <- tacklr.LLMResponseChunk{
+			Type:       tacklr.StreamEventFunctionCall,
+			ToolCalls:  []tacklr.ToolCall{spawn("sp_a", "child-a"), spawn("sp_b", "child-b")},
+			IsComplete: true,
+		}
+	})
+	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}}
+	registerSession(env, agent)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 400*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: "sess-two-blocking"})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 || !strings.Contains(results[0], "child-a-done") || !strings.Contains(results[1], "child-b-done") {
+		t.Fatalf("tool results = %q, want both specialists' results in call order", results)
+	}
+}
+
+func TestSessionWorkflow_aBlockingSpecialistsResultIsKeptAsAnEpisode(t *testing.T) {
+	env := newTestWorkflow(t)
+	const token = "unique-retain-specialist-token"
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(t.Context(), tacklr.EpisodeKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	ns, err := brain.ParseNamespace("org", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleUser && last.Content == "look it up" {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: token, IsComplete: true}
+			return
+		}
+		if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+			return
+		}
+		ch <- tacklr.LLMResponseChunk{
+			Type: tacklr.StreamEventFunctionCall,
+			ToolCalls: []tacklr.ToolCall{{ID: "sp1", CallID: "sp1", Name: "spawn_specialist",
+				Arguments: `{"specialist":"researcher","task_description_and_context":"look it up"}`}},
+			IsComplete: true,
+		}
+	})
+	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Brain: eng, SearchNamespace: ns,
+		Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}}
+	registerSession(env, agent)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 200*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: "sess-episode"})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	page, err := eng.Search(t.Context(), brain.Scope{Namespace: ns}, brain.SearchRequest{Query: token, Kind: tacklr.KindEpisode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := slices.Collect(page.Results.Objects())
+	if len(hits) == 0 {
+		t.Fatal("no episode, want the specialist's result kept")
+	}
+	if kept, err := eng.Get(t.Context(), brain.Scope{Namespace: ns}, hits[0].ID); err != nil || kept.Content != token {
+		t.Fatalf("episode = %+v %v, want the specialist's result", kept, err)
+	}
+}
+
+func TestSessionWorkflow_aFailedBlockingSpecialistGivesItsCallAnErrorResult(t *testing.T) {
+	env := newTestWorkflow(t)
+	var parentSaw string
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		last := lastMsg(msgs)
+		if last != nil && last.Role == tacklr.RoleUser && last.Content == "child-task" {
+			ch <- tacklr.LLMResponseChunk{Error: errors.New("child model broke")}
+			return
+		}
+		if last != nil && last.Role == tacklr.RoleTool {
+			parentSaw = last.Content
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+			return
+		}
+		ch <- tacklr.LLMResponseChunk{
+			Type: tacklr.StreamEventFunctionCall,
+			ToolCalls: []tacklr.ToolCall{{ID: "sp1", CallID: "sp1", Name: "spawn_specialist",
+				Arguments: `{"specialist":"researcher","task_description_and_context":"child-task"}`}},
+			IsComplete: true,
+		}
+	})
+	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}}
+	_, log := registerSession(env, agent)
+	id := session.SessionID("sess-failed-specialist")
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 400*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	events, err := log.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := ""
+	for ev := range events {
+		if ev.Type == tacklr.StreamEventToolResult && ev.MessageID == "sp1" {
+			status = ev.ToolCalls[0].Status
+		}
+	}
+	if status != "error" || !strings.Contains(parentSaw, "child failed") {
+		t.Fatalf("specialist result status = %q, parent saw %q, want an error result naming the child's failure", status, parentSaw)
+	}
+}
+
+// TestSessionWorkflow_aRoundThatCannotFitFailsTheStepThatCommitsIt: a reply
+// too large for the window, with no result to cut, fails the commit, and
+// the turn fails with it: in the Tools activity for a tool's round, and in
+// CommitToolOutput when a blocking specialist's result completes the round.
+func TestSessionWorkflow_aRoundThatCannotFitFailsTheStepThatCommitsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call tacklr.ToolCall
+	}{
+		{"a tool's round", tacklr.ToolCall{ID: "f1", CallID: "f1", Name: "free", Arguments: `{}`}},
+		{"a blocking specialist's round", tacklr.ToolCall{ID: "sp1", CallID: "sp1", Name: "spawn_specialist",
+			Arguments: `{"specialist":"researcher","task_description_and_context":"child-task"}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestWorkflow(t)
+			model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+				if last := lastMsg(msgs); last != nil && last.Content == "child-task" {
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "found", IsComplete: true}
+					return
+				}
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: strings.Repeat("w", 3000), IsComplete: true}
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{tc.call}, IsComplete: true}
+			})
+			free := tacklr.NewTool(tacklr.ToolConfig{Name: "free", Handler: func(context.Context) (string, error) { return "ok", nil }})
+			agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 6000, Tools: []*tacklr.Tool{free},
+				Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}}
+			_, log := registerSession(env, agent)
+			id := session.SessionID("sess-too-large")
+			env.RegisterDelayedCallback(func() {
+				env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+			}, time.Millisecond)
+			env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 400*time.Millisecond)
+			env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
+
+			if err := env.GetWorkflowError(); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+			defer cancel()
+			events, err := log.Subscribe(ctx, id, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failure := ""
+			for ev := range events {
+				if ev.Type == tacklr.StreamEventError {
+					failure = ev.Fail
+				}
+			}
+			if !strings.Contains(failure, "the round needs") {
+				t.Fatalf("turn failure = %q, want the round that could not fit", failure)
+			}
+		})
+	}
+}
+
+func TestSessionWorkflow_aRetriedCommitDoesNotRunTheToolsAgain(t *testing.T) {
+	env := newTestWorkflow(t)
+	var aRuns, bRuns, summaries atomic.Int32
+	big := strings.Repeat("b", 600)
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		for _, m := range msgs {
+			if m != nil && strings.Contains(m.Content, "Summarize the entire message history") {
+				if summaries.Add(1) == 1 {
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Error: fmt.Errorf("%w: blip", tacklr.ErrNetwork)}
+					return
+				}
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "S", IsComplete: true}
+				return
+			}
+		}
+		call := func(name string) {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, IsComplete: true,
+				ToolCalls: []tacklr.ToolCall{{ID: "fc_" + name, CallID: "call_" + name, Name: name, Arguments: `{}`}}}
+		}
+		switch last := lastMsg(msgs); {
+		case last != nil && last.Role == tacklr.RoleTool && last.Content == "ok":
+			call("b")
+		case last != nil && last.Role == tacklr.RoleTool:
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+		default:
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: strings.Repeat("w", 600), IsComplete: true}
+			call("a")
+		}
+	})
+	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 6000, Tools: []*tacklr.Tool{
+		tacklr.NewTool(tacklr.ToolConfig{Name: "a", Handler: func(context.Context) (string, error) { aRuns.Add(1); return "ok", nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "b", Handler: func(context.Context) (string, error) { bRuns.Add(1); return big, nil }}),
+	}}
+	registerSession(env, agent)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, time.Minute)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: "sess-retried-commit"})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if st := querySession(t, env); st.State != session.SessionComplete || summaries.Load() != 2 || aRuns.Load() != 1 || bRuns.Load() != 1 {
+		t.Fatalf("state %v after %d summary requests, a ran %d and b ran %d times; want complete after a retried summary, each tool once",
+			st.State, summaries.Load(), aRuns.Load(), bRuns.Load())
+	}
+}
+
+func TestSessionWorkflow_aResumeIsOneToolsStep(t *testing.T) {
+	env := newTestWorkflow(t)
+	var mu sync.Mutex
+	var steps []string
+	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
+		if name := info.ActivityType.Name; name != "EmitEvent" {
+			mu.Lock()
+			steps = append(steps, name)
+			mu.Unlock()
+		}
+	})
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+			return
+		}
+		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, IsComplete: true,
+			ToolCalls: []tacklr.ToolCall{{ID: "g1", CallID: "g1", Name: "gate", Arguments: `{}`}}}
+	})
+	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{tacklr.NewTool(tacklr.ToolConfig{
+		Name: "gate", OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
+		Handler: func(context.Context) (string, error) { return "gate-ok", nil },
+	})}}
+	registerSession(env, agent)
+	allow, _ := json.Marshal(map[string]string{"optionId": "allow-once"})
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	signalAt(env, 50*time.Millisecond, session.Wake{Kind: session.WakeResume, Resume: session.ResumeIn{Responses: map[string][]byte{"g1": allow}}})
+	signalAt(env, 200*time.Millisecond, session.Wake{Kind: session.WakeClose})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: "sess-resume-one-step"})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"Inference", "Tools", "Tools", "Inference"}; !slices.Equal(steps, want) {
+		t.Fatalf("steps = %v, want the park's Tools step, then the resume as one Tools step, then the model", steps)
+	}
+	if st := querySession(t, env); st.State != session.SessionComplete {
+		t.Fatalf("state = %v, want complete", st.State)
+	}
+}
+
+func TestSessionWorkflow_jobRequestsTheRuntimeCannotServeFail(t *testing.T) {
+	env := newTestWorkflow(t)
+	var seen string
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
+			seen = last.Content
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+			return
+		}
+		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, IsComplete: true,
+			ToolCalls: []tacklr.ToolCall{{ID: "j1", CallID: "j1", Name: "jobs", Arguments: `{}`}}}
+	})
+	jobs := tacklr.NewTool(tacklr.ToolConfig{Name: "jobs", Handler: func(ctx context.Context, rt tacklr.HarnessRuntime) (string, error) {
+		_, emptyTask := rt.Schedule(ctx, tacklr.JobRequest{Name: "indexer", Task: " "})
+		_, emptyName := rt.Schedule(ctx, tacklr.JobRequest{Name: " ", Task: "x"})
+		return fmt.Sprintf("worker=%v | cancel=%v | task=%v | name=%v",
+			rt.RunSpecialist(ctx, "indexer", "x"), rt.CancelJob(ctx, "nope"), emptyTask, emptyName), nil
+	}})
+	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{jobs}}
+	acts, _ := registerSession(env, agent)
+	acts.Jobs = map[string]session.JobHandler{"indexer": func(context.Context, string) (string, error) { return "", nil }}
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	signalAt(env, 100*time.Millisecond, session.Wake{Kind: session.WakeClose})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: "sess-bad-jobs"})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"worker=not found: indexer is not a specialist", `cancel=job "nope" is unknown`, "task=task is required"} {
+		if !strings.Contains(seen, want) {
+			t.Errorf("tool saw %q, want %q", seen, want)
+		}
+	}
+	if strings.Contains(seen, "name=<nil>") {
+		t.Errorf("tool saw %q, want an empty job name rejected", seen)
+	}
+}
+
+func TestSessionWorkflow_aJobFromAnEarlierReplyStaysListedWhileItRuns(t *testing.T) {
+	env := newTestWorkflow(t)
+	var listed string
+	release := make(chan struct{})
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleUser && last.Content == "child-task" {
+			<-release // the jobs run until the parent has listed them
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "child-done", IsComplete: true}
+			return
+		}
+		var results []string
+		for _, m := range msgs {
+			if m != nil && m.Role == tacklr.RoleTool {
+				results = append(results, m.Content)
+			}
+		}
+		spawn := func(id string) tacklr.ToolCall {
+			return tacklr.ToolCall{ID: id, CallID: id, Name: "spawn_specialist",
+				Arguments: `{"specialist":"researcher","task_description_and_context":"child-task","block":false}`}
+		}
+		call := func(tc tacklr.ToolCall) {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, IsComplete: true, ToolCalls: []tacklr.ToolCall{tc}}
+		}
+		switch len(results) {
+		case 0:
+			call(spawn("sp1"))
+		case 1:
+			call(spawn("sp2"))
+		case 2:
+			call(tacklr.ToolCall{ID: "l1", CallID: "l1", Name: "list_children", Arguments: `{}`})
+		default:
+			if listed == "" {
+				listed = results[2]
+				close(release)
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+		}
+	})
+	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}}
+	registerSession(env, agent)
+	id := session.SessionID("sess-listed-jobs")
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	signalAt(env, 200*time.Millisecond, session.Wake{Kind: session.WakeClose})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range []string{"sp1", "sp2"} {
+		if child := string(session.ChildSessionID(id, "researcher", call)); !strings.Contains(listed, child) {
+			t.Errorf("list_children = %q, want the running job %s", listed, child)
+		}
+	}
+}
+
+// TestSessionWorkflow_hostStateIsAppliedOnceAndSurvivesAPark: a prompt's
+// state reaches a tool that parks and resumes, and a tool's own change to
+// that key is not overwritten by a later step.
+func TestSessionWorkflow_hostStateIsAppliedOnceAndSurvivesAPark(t *testing.T) {
+	env := newTestWorkflow(t)
+	var results []string
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		var seen []string
+		for _, m := range msgs {
+			if m != nil && m.Role == tacklr.RoleTool {
+				seen = append(seen, m.Content)
+			}
+		}
+		switch len(seen) {
+		case 0:
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, IsComplete: true,
+				ToolCalls: []tacklr.ToolCall{{ID: "fc_gate", CallID: "call_gate", Name: "gated", Arguments: `{}`}}}
+		case 1:
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, IsComplete: true,
+				ToolCalls: []tacklr.ToolCall{{ID: "fc_read", CallID: "call_read", Name: "read_state", Arguments: `{}`}}}
+		default:
+			results = seen
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+		}
+	})
+	agent := tacklr.AgentOptions{MaxWindowSize: 8192, Model: model, Tools: []*tacklr.Tool{
+		tacklr.NewTool(tacklr.ToolConfig{Name: "gated", OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
+			Handler: func(_ context.Context, rt tacklr.HarnessRuntime) (string, error) {
+				v, _ := rt.StateGet("k")
+				return fmt.Sprintf("gated saw %v", v), rt.StateSet("k", "tool")
+			}}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "read_state", Handler: func(_ context.Context, rt tacklr.HarnessRuntime) (string, error) {
+			v, _ := rt.StateGet("k")
+			return fmt.Sprintf("read saw %v", v), nil
+		}}),
+	}}
+	registerSession(env, agent)
+	allow, _ := json.Marshal(map[string]string{"optionId": "allow-once"})
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go", State: map[string]any{"k": "host"}}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeResume, Resume: session.ResumeIn{Responses: map[string][]byte{"fc_gate": allow}}})
+	}, 50*time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 200*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: "sess-host-state"})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(results, []string{"gated saw host", "read saw tool"}) {
+		t.Fatalf("tool results = %q, want the host value across the park, then the tool's own change kept", results)
 	}
 }

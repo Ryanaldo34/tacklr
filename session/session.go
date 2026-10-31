@@ -41,7 +41,9 @@ type Mailbox interface {
 type Ledger interface {
 	IDs() []SessionID
 	Start(ToolOutput) error
-	Await(SessionID) (string, error)
+	// Await waits for a child and returns its output. failed is a child that
+	// failed; output is then its error.
+	Await(SessionID) (output string, failed bool, err error)
 	CancelAll()
 }
 
@@ -93,7 +95,7 @@ func (s *Session) dispatch(w Wake, step Step, sig Mailbox, ledger Ledger) {
 		s.cancel(step, ledger)
 	case WakePrompt:
 		if s.Turn.Yielded {
-			s.Turn.Steer(w.Prompt, &s.Turn.Overlay)
+			s.Turn.Steer(w.Prompt)
 			return
 		}
 		if s.Turn.Worker != "" {
@@ -135,8 +137,7 @@ func (s *Session) cancel(step Step, ledger Ledger) {
 		return
 	}
 	s.Turn.Yielded = false
-	s.Turn.Parked = false
-	s.Turn.Overlay = nil
+	s.Turn.State = nil
 	s.Turn.Terminal = SessionFailed
 	msg := context.Canceled.Error()
 	step.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})

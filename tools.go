@@ -8,11 +8,10 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
-// Tool definitions, JSON schema, and post-tool ACM result hooks.
+// Tool definitions, JSON schema, and tool outcomes.
 
 type ToolPermission uint8
 
@@ -39,12 +38,6 @@ func (a ToolAccess) Allows(p ToolPermission) bool { return a&ToolAccess(p) != 0 
 
 type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
 
-// toolCallResult is the internal success path for a single tool invoke.
-type toolCallResult struct {
-	output string
-	disp   ToolOutcome
-}
-
 // Tool is a registered harness tool. Construct with NewTool(ToolConfig{...}).
 // Fields are unexported; hosts read metadata through the getters below.
 type Tool struct {
@@ -59,7 +52,7 @@ type Tool struct {
 	// onCall is the pre-invoke middleware stack. Each constructor may park.
 	onCall []OnCallFunc
 
-	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error)
+	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (ToolOutcome, error)
 	parameters  map[string]any
 	strict      bool
 }
@@ -67,24 +60,23 @@ type Tool struct {
 // Name is the programmatic tool name presented to the model.
 func (t *Tool) Name() string { return t.name }
 
-// DisplayName is the optional human title from ToolConfig. Empty means unset;
-// stream titles fall back to Name via ResolveToolTitle.
-func (t *Tool) DisplayName() string { return t.displayName }
-
-// Description is the model-facing tool description.
-func (t *Tool) Description() string { return t.description }
-
 // Namespace is the optional tool namespace (MCP server name, host grouping).
 func (t *Tool) Namespace() string { return t.namespace }
+
+// QualifiedName is the name the model calls the tool by: namespace__name
+// for a namespaced tool, else its name.
+func (t *Tool) QualifiedName() string {
+	if t.namespace == "" {
+		return t.name
+	}
+	return t.namespace + "__" + t.name
+}
 
 // Category is the coarse streaming category for client presentation.
 func (t *Tool) Category() ToolCategory { return t.category }
 
 // Access is the permission bitmask for this tool.
 func (t *Tool) Access() ToolAccess { return t.access }
-
-// Timeout is the optional per-invocation deadline. Zero means none.
-func (t *Tool) Timeout() time.Duration { return t.timeout }
 
 type ToolConfig struct {
 	Name        string
@@ -103,7 +95,8 @@ type ToolConfig struct {
 	Handler any
 }
 
-// OnCallFunc builds a pre-invoke  Return nil to skip that layer.
+// OnCallFunc builds a check that runs before the handler and may park the
+// call. Return nil to skip it.
 type OnCallFunc func(ToolInvocation) Interrupt
 
 type mcpToolConfig struct {
@@ -137,8 +130,7 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	numIn := fnType.NumIn()
-	// Handlers are at most (ctx, args, runtime). Extra params are rejected below
-	// when the third parameter is not HarnessRuntime (or via count when >3).
+	// Handlers take at most (ctx, args, runtime); anything else panics below.
 	if numIn > 3 {
 		panic(fmt.Sprintf("tool %q: handler has too many parameters (%d)", cfg.Name, numIn))
 	}
@@ -212,7 +204,7 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	handlerValue := reflect.ValueOf(cfg.Handler)
-	t.handlerFunc = func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error) {
+	t.handlerFunc = func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (ToolOutcome, error) {
 		var callArgs []reflect.Value
 
 		callArgs = append(callArgs, reflect.ValueOf(ctx))
@@ -222,10 +214,10 @@ func NewTool(cfg ToolConfig) *Tool {
 			if len(args) > 0 {
 				b, err := json.Marshal(args)
 				if err != nil {
-					return toolCallResult{}, fmt.Errorf("marshal args: %w", err)
+					return ToolOutcome{}, fmt.Errorf("marshal args: %w", err)
 				}
 				if err := json.Unmarshal(b, argPtr.Interface()); err != nil {
-					return toolCallResult{}, fmt.Errorf("unmarshal args: %w", err)
+					return ToolOutcome{}, fmt.Errorf("unmarshal args: %w", err)
 				}
 			}
 			if argsIsPtr {
@@ -237,26 +229,26 @@ func NewTool(cfg ToolConfig) *Tool {
 
 		if hasRuntime {
 			if runtime == nil {
-				return toolCallResult{}, fmt.Errorf("%w: tool %q requires a HarnessRuntime", ErrFailed, t.name)
+				return ToolOutcome{}, fmt.Errorf("%w: tool %q requires a HarnessRuntime", ErrFailed, t.name)
 			}
 			callArgs = append(callArgs, reflect.ValueOf(runtime))
 		}
 
 		results := handlerValue.Call(callArgs)
 		if err, ok := results[1].Interface().(error); ok && err != nil {
-			return toolCallResult{}, err
+			return ToolOutcome{}, err
 		}
 		if results[0].Kind() == reflect.String {
-			return toolCallResult{output: results[0].String()}, nil
+			return ToolOutcome{Output: results[0].String()}, nil
 		}
-		if br, ok := results[0].Interface().(ToolOutcome); ok {
-			return toolCallResult{output: br.Output, disp: br}, nil
+		if outcome, ok := results[0].Interface().(ToolOutcome); ok {
+			return outcome, nil
 		}
 		b, err := json.Marshal(results[0].Interface())
 		if err != nil {
-			return toolCallResult{}, fmt.Errorf("marshal result: %w", err)
+			return ToolOutcome{}, fmt.Errorf("marshal result: %w", err)
 		}
-		return toolCallResult{output: string(b)}, nil
+		return ToolOutcome{Output: string(b)}, nil
 	}
 
 	return t
@@ -279,9 +271,9 @@ func newMCPTool(cfg mcpToolConfig) *Tool {
 		timeout:     cfg.Timeout,
 		strict:      false,
 		parameters:  params,
-		handlerFunc: func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error) {
+		handlerFunc: func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (ToolOutcome, error) {
 			out, err := cfg.Handler(ctx, args, runtime)
-			return toolCallResult{output: out}, err
+			return ToolOutcome{Output: out}, err
 		},
 	}
 }
@@ -311,7 +303,7 @@ func ResolveToolTitle(displayName, toolName, argsJSON string) string {
 
 // invoke runs the tool handler. Only the harness tool runner should call this
 // so interceptors, permissions, and effects apply.
-func (t *Tool) invoke(ctx context.Context, argsJson string, runtime HarnessRuntime) (toolCallResult, error) {
+func (t *Tool) invoke(ctx context.Context, argsJson string, runtime HarnessRuntime) (ToolOutcome, error) {
 	res, err := t.invokeRaw(ctx, argsJson, runtime)
 	if err != nil {
 		return res, presentToolError(t.name, err)
@@ -319,11 +311,11 @@ func (t *Tool) invoke(ctx context.Context, argsJson string, runtime HarnessRunti
 	return res, nil
 }
 
-func (t *Tool) invokeRaw(ctx context.Context, argsJson string, runtime HarnessRuntime) (toolCallResult, error) {
+func (t *Tool) invokeRaw(ctx context.Context, argsJson string, runtime HarnessRuntime) (ToolOutcome, error) {
 	var args map[string]any
 	if argsJson != "" {
 		if err := json.Unmarshal([]byte(argsJson), &args); err != nil {
-			return toolCallResult{}, Correctionf(ErrInvalid, "%s: arguments were not valid JSON. Check the tool schema and retry with a JSON object", t.name)
+			return ToolOutcome{}, Correctionf(ErrInvalid, "%s: arguments were not valid JSON. Check the tool schema and retry with a JSON object", t.name)
 		}
 	}
 
@@ -334,27 +326,27 @@ func (t *Tool) invokeRaw(ctx context.Context, argsJson string, runtime HarnessRu
 	callCtx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 
-	type outcome struct {
-		res toolCallResult
-		err error
+	type result struct {
+		outcome ToolOutcome
+		err     error
 	}
-	done := make(chan outcome, 1)
+	done := make(chan result, 1)
 	go func() {
-		res, err := t.handlerFunc(callCtx, args, runtime)
-		done <- outcome{res: res, err: err}
+		outcome, err := t.handlerFunc(callCtx, args, runtime)
+		done <- result{outcome: outcome, err: err}
 	}()
 
 	select {
 	case res := <-done:
 		if res.err != nil && ctx.Err() == nil && errors.Is(res.err, context.DeadlineExceeded) {
-			return toolCallResult{}, Correctionf(ErrToolTimeout, "%s timed out. Retry with a smaller request, fewer URLs, or a narrower search", t.name)
+			return ToolOutcome{}, Correctionf(ErrToolTimeout, "%s timed out. Retry with a smaller request, fewer URLs, or a narrower search", t.name)
 		}
-		return res.res, res.err
+		return res.outcome, res.err
 	case <-callCtx.Done():
 		if err := ctx.Err(); err != nil {
-			return toolCallResult{}, err
+			return ToolOutcome{}, err
 		}
-		return toolCallResult{}, Correctionf(ErrToolTimeout, "%s timed out. Retry with a smaller request, fewer URLs, or a narrower search", t.name)
+		return ToolOutcome{}, Correctionf(ErrToolTimeout, "%s timed out. Retry with a smaller request, fewer URLs, or a narrower search", t.name)
 	}
 }
 
@@ -563,9 +555,7 @@ func ToolsAsJson(tools []*Tool) string {
 	defs := make([]map[string]any, 0, len(tools))
 	for _, t := range tools {
 		def := t.AsJson()
-		if t.namespace != "" {
-			def["name"] = t.namespace + "__" + t.name
-		}
+		def["name"] = t.QualifiedName()
 		defs = append(defs, def)
 	}
 
@@ -573,100 +563,25 @@ func ToolsAsJson(tools []*Tool) string {
 	return string(b)
 }
 
-// ToolResultEffect is applied once after a successful tool batch (no open interrupts).
+// ToolResultEffect changes the window when the round of the call that asked
+// for it commits. Higher values win when a round asks for two.
 type ToolResultEffect int
 
 const (
 	EffectNone ToolResultEffect = iota
-	// EffectInstallPlanDocument sets the window to [user, plan document].
-	EffectInstallPlanDocument
 	// EffectHandoff rebuilds the window for the next open todos.
 	EffectHandoff
+	// EffectInstallPlanDocument sets the window to [user, plan document].
+	EffectInstallPlanDocument
 )
 
-// ToolOutcome is the single post-tool result: model-visible output plus a
-// window effect. Plan builtins return this. A host ToolResultHook may also set
-// Output to replace the model-visible result, for example to cap a large one.
+// ToolOutcome is a call's result: the model-visible output and the window
+// effect it asks for. A handler may return it (the plan tools do); an
+// interceptor may change it after next returns.
 type ToolOutcome struct {
 	Output string
-	// Effect is merged for the batch and applied once at batch end.
+	// Effect applies once, when the call's round commits.
 	Effect ToolResultEffect
-	// SuppressWindowMessage omits the tool Message from the window.
-	// The client still receives StreamEventToolResult.
-	SuppressWindowMessage bool
-}
-
-// ToolResultObservation is a successful tool result seen by a ToolResultHook.
-type ToolResultObservation struct {
-	Name     string
-	ArgsJSON string
-	Output   string
-	Runtime  HarnessRuntime
-}
-
-// ToolResultHook runs after a successful host tool and before the tool result is emitted.
-// Effects apply at batch end. Plan builtins return ToolOutcome instead.
-type ToolResultHook func(ctx context.Context, obs ToolResultObservation) ToolOutcome
-
-// hookOutput returns the model-visible tool output, preferring a replacement a
-// host ToolResultHook provides in ToolOutcome.Output.
-func hookOutput(output string, disp ToolOutcome) string {
-	if disp.Output != "" {
-		return disp.Output
-	}
-	return output
-}
-
-type toolResultHookRegistry struct {
-	byName map[string]ToolResultHook
-}
-
-func newToolResultHookRegistry(hooks map[string]ToolResultHook) *toolResultHookRegistry {
-	cp := make(map[string]ToolResultHook, len(hooks))
-	for k, v := range hooks {
-		cp[k] = v
-	}
-	return &toolResultHookRegistry{byName: cp}
-}
-
-func (r *toolResultHookRegistry) observe(ctx context.Context, obs ToolResultObservation) ToolOutcome {
-	if r == nil {
-		return ToolOutcome{}
-	}
-	hook := r.byName[obs.Name]
-	if hook == nil {
-		return ToolOutcome{}
-	}
-	return hook(ctx, obs)
-}
-
-type batchToolResultEffects struct {
-	installPlan atomic.Bool
-	handoff     atomic.Bool
-	suppress    atomic.Bool
-}
-
-func (b *batchToolResultEffects) merge(d ToolOutcome) {
-	switch d.Effect {
-	case EffectInstallPlanDocument:
-		b.installPlan.Store(true)
-	case EffectHandoff:
-		b.handoff.Store(true)
-	}
-	if d.SuppressWindowMessage {
-		b.suppress.Store(true)
-	}
-}
-
-// resolved prefers install over handoff when both appear in one batch.
-func (b *batchToolResultEffects) resolved() ToolResultEffect {
-	if b.installPlan.Load() {
-		return EffectInstallPlanDocument
-	}
-	if b.handoff.Load() {
-		return EffectHandoff
-	}
-	return EffectNone
 }
 
 // correctionError is a model-facing tool failure. Error() is what the model sees
@@ -709,8 +624,9 @@ func Correctionf(cause error, format string, args ...any) error {
 	return Correction(cause, fmt.Sprintf(format, args...))
 }
 
-// presentToolError is the turn processor table: interrupt (yield), cancel,
-// already Correction, ErrFailed (service), else Correction(err, err.Error()).
+// presentToolError makes a handler's error the model's to correct, named by
+// the tool. A park, a cancel, a correction, and a service failure
+// (ErrFailed) pass through as they are.
 func presentToolError(name string, err error) error {
 	var intr Interrupt
 	if errors.As(err, &intr) || errors.Is(err, context.Canceled) || errors.Is(err, ErrCorrection) || errors.Is(err, ErrFailed) {

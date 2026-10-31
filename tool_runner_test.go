@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-// TestHarness_planningWriteLock_thenUnlockAfterCreatePlan: a WritePermission
-// tool is denied until create_plan; the next call parks tool_permission and
-// allow-once after reload runs the handler.
+// TestOnCallMiddleware_permissionThenInvoke: a permission-gated call parks
+// tool_permission; after allow-once the handler runs, and the call runs
+// again without a new park (the layer is on its round call).
 func TestOnCallMiddleware_permissionThenInvoke(t *testing.T) {
 	var calls int
 	var seen string
@@ -27,96 +27,128 @@ func TestOnCallMiddleware_permissionThenInvoke(t *testing.T) {
 	runner := newToolRunner(onCallMiddleware(sm))
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{"path":"/a"}`, Runtime: rt}
 
-	_, _, err := runner.Run(t.Context(), inv)
+	_, err := runner.Run(t.Context(), inv)
 	requireParked(t, err, "tool_permission")
-	if _, err := sm.Resume("c1", []byte(`{"optionId":"allow-once"}`)); err != nil {
+	if err := sm.Resume("c1", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
-	out, _, err := runner.Run(t.Context(), inv)
-	if err != nil || calls != 1 || seen != "/a" || out != "ok" {
-		t.Fatalf("invoke: calls=%d seen=%q out=%q err=%v", calls, seen, out, err)
+	out, err := runner.Run(t.Context(), inv)
+	if err != nil || calls != 1 || seen != "/a" || out.Output != "ok" {
+		t.Fatalf("invoke: calls=%d seen=%q out=%q err=%v", calls, seen, out.Output, err)
 	}
-	out, _, err = runner.Run(t.Context(), inv)
-	if err != nil || calls != 2 || seen != "/a" || out != "ok" {
-		t.Fatalf("re-entry: calls=%d seen=%q out=%q err=%v", calls, seen, out, err)
+	out, err = runner.Run(t.Context(), inv)
+	if err != nil || calls != 2 || seen != "/a" || out.Output != "ok" {
+		t.Fatalf("re-entry: calls=%d seen=%q out=%q err=%v", calls, seen, out.Output, err)
 	}
 }
 
-// TestOnCallMiddleware_permissionMemory: allow-always skips the next park;
-// reject-always denies without a yield.
-func TestOnCallMiddleware_permissionMemory(t *testing.T) {
+// TestOnCallMiddleware_twoLayersParkOneAfterTheOther: a call with two
+// OnCall layers parks on the first, then on the second; each answer goes to
+// its own layer, and the handler runs once.
+func TestOnCallMiddleware_twoLayersParkOneAfterTheOther(t *testing.T) {
 	var calls int
+	choose := func(ToolInvocation) Interrupt {
+		return &UserSelectionInterrupt{Question: "which?", Options: []UserChoice{{Title: "a"}, {Title: "b"}}}
+	}
 	tool := NewTool(ToolConfig{
-		Name:   "sensitive",
-		OnCall: []OnCallFunc{ToolPermissionOnCall},
-		Handler: func(ctx context.Context) (string, error) {
-			calls++
-			return "secret", nil
-		},
+		Name:    "two_layers",
+		OnCall:  []OnCallFunc{ToolPermissionOnCall, choose},
+		Handler: func(context.Context) (string, error) { calls++; return "ok", nil },
 	})
 	rt, sm := onCallRuntime()
-	sm.Permissions.Remember("sensitive", permAllowAlways)
 	runner := newToolRunner(onCallMiddleware(sm))
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt}
-	out, _, err := runner.Run(t.Context(), inv)
-	if err != nil || calls != 1 || out != "secret" {
-		t.Fatalf("allow-always: calls=%d out=%q err=%v", calls, out, err)
-	}
 
-	denyRT, denySM := onCallRuntime()
-	denySM.Permissions.Remember("sensitive", permDenyAlways)
-	runner = newToolRunner(onCallMiddleware(denySM))
-	denyInv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: denyRT}
-	_, _, err = runner.Run(t.Context(), denyInv)
-	if !errors.Is(err, ErrToolPermissionDenied) || calls != 1 {
-		t.Fatalf("reject-always: calls=%d err=%v", calls, err)
-	}
-	_, _, err = runner.Run(t.Context(), denyInv)
-	if !errors.Is(err, ErrToolPermissionDenied) || calls != 1 {
-		t.Fatalf("denied re-entry: calls=%d err=%v", calls, err)
+	_, first := runner.Run(t.Context(), inv)
+	firstAnswer := sm.Resume("c1", []byte(`{"optionId":"allow-once"}`))
+	_, second := runner.Run(t.Context(), inv)
+	secondAnswer := sm.Resume("c1", []byte(`{"selectionIdx":1}`))
+	out, err := runner.Run(t.Context(), inv)
+
+	requireParked(t, first, "tool_permission")
+	requireParked(t, second, "user_selection_choice")
+	if firstAnswer != nil || secondAnswer != nil || err != nil || out.Output != "ok" || calls != 1 {
+		t.Fatalf("answers %v %v, run %+v %v after %d calls, want one run", firstAnswer, secondAnswer, out, err, calls)
 	}
 }
 
-// TestOnCallMiddleware_requiresRuntime: OnCall constructors need a runtime.
-func TestOnCallMiddleware_requiresRuntime(t *testing.T) {
+// TestOnCallMiddleware_permissionAnswersWithoutAPark: a host grant and a
+// user's allow-always run the tool without a park; a user's reject-always
+// denies it, even over a grant.
+func TestOnCallMiddleware_permissionAnswersWithoutAPark(t *testing.T) {
+	var calls int
+	tool := NewTool(ToolConfig{
+		Name:    "sensitive",
+		OnCall:  []OnCallFunc{ToolPermissionOnCall},
+		Handler: func(ctx context.Context) (string, error) { calls++; return "secret", nil },
+	})
+	run := func(answer string, granted bool) (ToolOutcome, error) {
+		rt, sm := onCallRuntime()
+		if granted {
+			sm.Permissions.granted = map[string]bool{"sensitive": true}
+		}
+		if answer != "" {
+			sm.Permissions.rememberAnswer(&ToolPermissionInterrupt{ToolName: "sensitive", SelectedKind: answer})
+		}
+		return newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt})
+	}
+
+	allowed, allowErr := run(PermissionAllowAlways, false)
+	grantedOut, grantErr := run("", true)
+	_, denyErr := run(PermissionRejectAlways, true)
+
+	if allowErr != nil || grantErr != nil || allowed.Output != "secret" || grantedOut.Output != "secret" || calls != 2 {
+		t.Fatalf("allow-always %v, granted %v, calls %d, want both to run", allowErr, grantErr, calls)
+	}
+	if !errors.Is(denyErr, ErrToolPermissionDenied) {
+		t.Fatalf("reject-always over a grant = %v, want denied", denyErr)
+	}
+}
+
+// TestOnCallMiddleware_requiresARuntimeAndAnOpenCall: OnCall layers need a
+// runtime, and a park needs the call in the open round.
+func TestOnCallMiddleware_requiresARuntimeAndAnOpenCall(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:    "gated",
 		OnCall:  []OnCallFunc{ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) { return "x", nil },
 	})
-	_, _, err := newToolRunner(onCallMiddleware(nil)).Run(t.Context(), ToolInvocation{
-		Tool: tool, ArgsJSON: `{}`,
-	})
-	if !errors.Is(err, ErrFailed) {
-		t.Fatalf("err=%v", err)
-	}
 	rt, sm := onCallRuntime()
-	rt = rt.WithToolCallID("")
-	_, _, err = newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{
-		Tool: tool, ArgsJSON: `{}`, Runtime: rt,
-	})
-	if err == nil {
-		t.Fatal("empty tool call id must fail adopt")
+
+	_, noRuntime := newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`})
+	_, noCall := newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt.WithToolCallID("other")})
+
+	var parked Interrupt
+	if !errors.Is(noRuntime, ErrFailed) || noCall == nil || errors.As(noCall, &parked) {
+		t.Fatalf("no runtime = %v, a call outside the round = %v", noRuntime, noCall)
 	}
 }
 
-// TestHarness_writeTool_parksPermission: injected write parks tool_permission.
-func TestOnCallMiddleware_emptyStackInvokes(t *testing.T) {
-	tool := NewTool(ToolConfig{
-		Name:    "echo",
-		Handler: func(ctx context.Context) (string, error) { return "hi", nil },
-	})
-	rt, sm := onCallRuntime()
-	out, _, err := newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{
-		Tool: tool, ArgsJSON: `{}`, Runtime: rt,
-	})
-	if err != nil || out != "hi" {
-		t.Fatalf("out=%q err=%v", out, err)
+// TestToolInterceptor_changesTheOutcome: an interceptor replaces what the
+// model sees and sets the window effect after next returns.
+func TestToolInterceptor_changesTheOutcome(t *testing.T) {
+	tool := NewTool(ToolConfig{Name: "big", Handler: func(context.Context) (string, error) { return "very long output", nil }})
+	capOutput := func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (ToolOutcome, error) {
+		out, err := next(ctx, inv)
+		out.Output = out.Output[:4]
+		return out, err
+	}
+	handoff := func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (ToolOutcome, error) {
+		out, err := next(ctx, inv)
+		out.Effect = EffectHandoff
+		return out, err
+	}
+
+	out, err := newToolRunner(capOutput, handoff).Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`})
+
+	if err != nil || out.Output != "very" || out.Effect != EffectHandoff {
+		t.Fatalf("outcome = %+v %v, want the capped output and a handoff", out, err)
 	}
 }
 
 func onCallRuntime() (toolRuntime, *sessionManager) {
 	sm := newSessionManager()
+	sm.round = newOpenRound(nil, []ToolCall{{ID: "c1", CallID: "c1"}})
 	ch := make(chan StreamEvent, 8)
 	go func() {
 		for range ch {

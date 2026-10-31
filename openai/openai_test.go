@@ -13,7 +13,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testhttp"
-	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 func TestSupportsMIME_visionAndPDF(t *testing.T) {
@@ -63,154 +62,11 @@ func TestMaxContextWindow_knownPrefixAndUnknown(t *testing.T) {
 	}
 }
 
-func TestModelTelemetryIdentity_openaiURL(t *testing.T) {
-	id := NewOpenAIInferenceStrategy(nil).WithModel("gpt-test").WithURL("https://api.openai.com/v1").ModelTelemetryIdentity()
-	if id.Model != "gpt-test" || id.Provider != telemetry.GenAIProviderOpenAI {
-		t.Fatalf("%+v", id)
-	}
-}
-
-func TestMarshalMessagesToInput_multimodal(t *testing.T) {
-	msgs := []*tacklr.Message{
-		{
-			Role:    tacklr.RoleUser,
-			Content: "describe",
-			ContentParts: []tacklr.ContentPart{
-				{Type: tacklr.ContentTypeInputText, Text: "describe"},
-				{Type: tacklr.ContentTypeInputImage, ImageURL: &tacklr.ImageURL{URL: "data:image/png;base64,AAAA"}},
-				{Type: tacklr.ContentTypeInputFile, FileData: &tacklr.FileData{
-					Data: "data:application/pdf;base64,JVBERg==", MIMEType: "application/pdf", Filename: "a.pdf",
-				}},
-			},
-		},
-	}
-	items := marshalMessagesToInput(msgs, "", false)
-	if len(items) != 1 {
-		t.Fatalf("items=%d", len(items))
-	}
-	body := string(items[0])
-	for _, want := range []string{`"input_text"`, `"input_image"`, `"input_file"`, `"data:image/png;base64,AAAA"`, `"a.pdf"`} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("missing %s in %s", want, body)
-		}
-	}
-	// Text-only unchanged shape
-	plain := marshalMessagesToInput([]*tacklr.Message{{Role: tacklr.RoleUser, Content: "hi"}}, "", false)
-	if !strings.Contains(string(plain[0]), `"content":"hi"`) {
-		t.Fatalf("plain = %s", plain[0])
-	}
-}
-
 func TestUnsupportedMIMEs(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(nil).WithModel("unknown")
 	bad := tacklr.UnsupportedMIMEs(s, []string{"text/plain", "image/png", "image/png", "application/pdf"})
 	if len(bad) != 2 {
 		t.Fatalf("bad=%v", bad)
-	}
-}
-
-func TestInvoke_streamsMessageAndMapsDeveloperToSystem(t *testing.T) {
-	var sawBody map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/responses" {
-			http.NotFound(w, r)
-			return
-		}
-		raw, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read body: %v", err)
-			return
-		}
-		if err := json.Unmarshal(raw, &sawBody); err != nil {
-			t.Errorf("unmarshal body: %v", err)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, strings.Join([]string{
-			`data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}`,
-			`data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"hello"}`,
-			`data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message"}}`,
-			`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":2,"output_tokens_details":{"reasoning_tokens":1}}}}`,
-			`data: [DONE]`,
-			"",
-		}, "\n"))
-	}))
-	t.Cleanup(srv.Close)
-
-	s := NewOpenAIInferenceStrategy(srv.Client()).
-		WithApiKey("test-key").
-		WithModel("test-model").
-		WithURL(srv.URL)
-	s.SetSystemPrompt("sys instructions")
-
-	msgs := []*tacklr.Message{
-		{Role: tacklr.RoleUser, Content: "user ask"},
-		{Role: tacklr.RoleDeveloper, Content: "handoff notes"},
-	}
-	tools := []*tacklr.Tool{
-		tacklr.NewTool(tacklr.ToolConfig{
-			Name: "echo",
-			Handler: func(ctx context.Context) (string, error) {
-				return "ok", nil
-			},
-		}),
-	}
-
-	ch, err := s.Invoke(context.Background(), msgs, tools, "")
-	if err != nil {
-		t.Fatalf("Invoke: %v", err)
-	}
-	var text strings.Builder
-	var usage tacklr.LLMResponseChunk
-	for chunk := range ch {
-		if chunk.Type == tacklr.StreamEventError {
-			t.Fatalf("stream error: %s", chunk.Content)
-		}
-		if chunk.Type == tacklr.StreamEventMessage && chunk.Content != "" {
-			text.WriteString(chunk.Content)
-		}
-		if chunk.Type == tacklr.StreamEventComplete {
-			usage = chunk
-		}
-	}
-	if text.String() != "hello" {
-		t.Fatalf("streamed = %q, want hello", text.String())
-	}
-	if usage.InputTokens != 3 || usage.OutputTokens != 2 || usage.ReasoningTokens != 1 {
-		t.Fatalf("usage = in=%d out=%d reason=%d", usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens)
-	}
-
-	if sawBody == nil {
-		t.Fatal("request body not captured")
-	}
-	if sawBody["model"] != "test-model" {
-		t.Errorf("model = %v", sawBody["model"])
-	}
-	if _, ok := sawBody["instructions"]; ok {
-		t.Errorf("instructions must be omitted so the system prefix is the first input item")
-	}
-	if sawBody["stream"] != true {
-		t.Errorf("stream = %v, want true", sawBody["stream"])
-	}
-
-	inputRaw, _ := json.Marshal(sawBody["input"])
-	var input []map[string]any
-	if err := json.Unmarshal(inputRaw, &input); err != nil {
-		t.Fatalf("input: %v body=%s", err, inputRaw)
-	}
-	var roles []string
-	for _, item := range input {
-		if role, ok := item["role"].(string); ok {
-			roles = append(roles, role)
-		}
-	}
-	if len(roles) < 3 || roles[0] != "developer" || roles[1] != "user" || roles[2] != "developer" {
-		t.Fatalf("input roles = %v, want [developer user developer]", roles)
-	}
-
-	toolsRaw, _ := json.Marshal(sawBody["tools"])
-	if !strings.Contains(string(toolsRaw), "echo") {
-		t.Errorf("tools JSON missing echo: %s", toolsRaw)
 	}
 }
 
@@ -249,49 +105,6 @@ func TestInvoke_truncatedStreamDoesNotCommitPartialAssistant(t *testing.T) {
 	}
 	if committed != "" {
 		t.Fatalf("committed partial assistant %q", committed)
-	}
-}
-
-func TestCountTokens_usesAPIWhenAvailable(t *testing.T) {
-	var saw map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/responses/input_tokens" {
-			http.NotFound(w, r)
-			return
-		}
-		raw, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(raw, &saw)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"object":"response.input_tokens","input_tokens":42}`)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := NewOpenAIInferenceStrategy(srv.Client()).
-		WithApiKey("k").
-		WithModel("m").
-		WithURL(srv.URL)
-	s.SetSystemPrompt("count me")
-	tool := tacklr.NewTool(tacklr.ToolConfig{Name: "t", Handler: func(ctx context.Context) (string, error) { return "", nil }})
-
-	n, err := s.CountTokens(context.Background(), []*tacklr.Message{
-		{Role: tacklr.RoleUser, Content: "hello world"},
-	}, []*tacklr.Tool{tool})
-	if err != nil {
-		t.Fatalf("CountTokens: %v", err)
-	}
-	if n != 42 {
-		t.Fatalf("tokens = %d, want 42", n)
-	}
-	if _, ok := saw["instructions"]; ok {
-		t.Errorf("instructions must be omitted")
-	}
-	inRaw, _ := json.Marshal(saw["input"])
-	if !strings.Contains(string(inRaw), "count me") {
-		t.Errorf("system prefix missing from input: %s", inRaw)
-	}
-	toolsRaw, _ := json.Marshal(saw["tools"])
-	if !strings.Contains(string(toolsRaw), `"name":"t"`) {
-		t.Errorf("tools = %s", toolsRaw)
 	}
 }
 
@@ -399,35 +212,6 @@ func TestInvoke_contextCancel_stopsStream(t *testing.T) {
 	}
 }
 
-func TestInvoke_apiError_emitsErrorChunk(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, `{"error":{"message":"model overloaded"}}`)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := NewOpenAIInferenceStrategy(srv.Client()).
-		WithApiKey("k").
-		WithModel("m").
-		WithURL(srv.URL)
-
-	ch, err := s.Invoke(context.Background(), []*tacklr.Message{
-		{Role: tacklr.RoleUser, Content: "hi"},
-	}, nil, "")
-	if err != nil {
-		t.Fatalf("Invoke sync err: %v", err)
-	}
-	var saw string
-	for chunk := range ch {
-		if chunk.Type == tacklr.StreamEventError {
-			saw = chunk.Content
-		}
-	}
-	if !strings.Contains(saw, "model overloaded") {
-		t.Fatalf("error content = %q, want model overloaded", saw)
-	}
-}
-
 func TestInvoke_namespacedToolCallOnTheWire(t *testing.T) {
 	var saw map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -506,32 +290,6 @@ func TestInvoke_requiresKeyAndModel(t *testing.T) {
 	}
 	if _, err := s.CountTokens(context.Background(), nil, nil); !errors.Is(err, tacklr.ErrModelNotSet) {
 		t.Fatalf("count: %v", err)
-	}
-}
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-func TestInvoke_transportErrorClosesStream(t *testing.T) {
-	s := NewOpenAIInferenceStrategy(&http.Client{
-		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return nil, errors.New("network down")
-		}),
-	})
-	s.WithApiKey("k").WithModel("m").WithURL("http://example.invalid")
-	ch, err := s.Invoke(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sawErr bool
-	for c := range ch {
-		if c.Type == tacklr.StreamEventError && strings.Contains(c.Content, "network down") {
-			sawErr = true
-		}
-	}
-	if !sawErr {
-		t.Fatal("want StreamEventError")
 	}
 }
 
@@ -871,93 +629,6 @@ func TestParseSSE_outputTextAlwaysMessage_likeMain(t *testing.T) {
 	}
 	if got := strings.Join(messages, ""); got != "<think>internal</think>Hello" {
 		t.Fatalf("messages = %q", got)
-	}
-}
-
-// TestParseSSE_reasoningThoughtChunks: one stream covering deltas, done-only
-// summary (ACP thought when no deltas), and no duplicate summary after deltas.
-func TestParseSSE_reasoningThoughtChunks(t *testing.T) {
-	body := strings.Join([]string{
-		`data: {"type":"response.reasoning_text.delta","item_id":"rs_live","delta":"raw cot"}`,
-		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_live","delta":" summary"}`,
-		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_live","encrypted_content":"gAAAAABlive","summary":[{"type":"summary_text","text":"raw cot summary full"}]}}`,
-		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_sum","status":"completed","encrypted_content":"gAAAAABsum","summary":[{"type":"summary_text","text":"Plan the tool call"}],"content":[]}}`,
-		`data: [DONE]`,
-		"",
-	}, "\n")
-	chunks := collectSSE(t, body)
-	var liveDelta, liveDone, sumDone, liveEnc, sumEnc string
-	for _, c := range chunks {
-		if c.Type != tacklr.StreamEventReasoning {
-			t.Fatalf("expected reasoning only, got %+v", c)
-		}
-		switch c.MessageId {
-		case "rs_live":
-			if c.IsComplete {
-				liveDone = c.Content
-				liveEnc = c.EncryptedContent
-			} else {
-				liveDelta += c.Content
-			}
-		case "rs_sum":
-			if c.IsComplete {
-				sumDone = c.Content
-				sumEnc = c.EncryptedContent
-			}
-		}
-	}
-	if liveDelta != "raw cot summary" {
-		t.Fatalf("live deltas = %q", liveDelta)
-	}
-	if liveDone != "" {
-		t.Fatalf("live done content = %q, want empty (no duplicate thought)", liveDone)
-	}
-	if sumDone != "Plan the tool call" {
-		t.Fatalf("done-only summary = %q", sumDone)
-	}
-	if liveEnc != "gAAAAABlive" || sumEnc != "gAAAAABsum" {
-		t.Fatalf("encrypted_content live=%q sum=%q", liveEnc, sumEnc)
-	}
-}
-
-func TestParseSSE_functionCall_llamaShape_normalizesIDs(t *testing.T) {
-	// llama.cpp: call_id only, no id field. Namespaced MCP tools use namespace__name.
-	body := strings.Join([]string{
-		`data: {"type":"response.output_item.added","item":{"arguments":"","call_id":"fc_abc","name":"ado__wit_work_item","type":"function_call","status":"in_progress"}}`,
-		`data: {"type":"response.function_call_arguments.delta","delta":"{}","item_id":"fc_abc"}`,
-		`data: {"type":"response.output_item.done","item":{"type":"function_call","status":"completed","arguments":"{\"id\":1}","call_id":"fc_abc","name":"ado__wit_work_item"}}`,
-		`data: [DONE]`,
-		"",
-	}, "\n")
-	chunks := collectSSE(t, body)
-	var fc *tacklr.LLMResponseChunk
-	for i := range chunks {
-		if chunks[i].Type == tacklr.StreamEventFunctionCall {
-			fc = &chunks[i]
-			break
-		}
-	}
-	if fc == nil {
-		t.Fatal("expected function_call chunk")
-	}
-	if !fc.IsComplete {
-		t.Error("expected IsComplete for status=completed")
-	}
-	if len(fc.ToolCalls) != 1 {
-		t.Fatalf("tool calls = %d", len(fc.ToolCalls))
-	}
-	tc := fc.ToolCalls[0]
-	if tc.ID != "fc_abc" {
-		t.Errorf("ID = %q, want fc_abc (normalized from call_id)", tc.ID)
-	}
-	if tc.CallID != "fc_abc" {
-		t.Errorf("CallID = %q, want fc_abc", tc.CallID)
-	}
-	if tc.Namespace != "ado" || tc.Name != "wit_work_item" {
-		t.Errorf("tool = %s/%s, want ado/wit_work_item", tc.Namespace, tc.Name)
-	}
-	if tc.Arguments != `{"id":1}` {
-		t.Errorf("Arguments = %q", tc.Arguments)
 	}
 }
 

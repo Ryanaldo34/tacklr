@@ -27,7 +27,7 @@ func TestLocal_contract(t *testing.T) {
 }
 
 func TestS3_contract(t *testing.T) {
-	client, bucket := startMinIO(t.Context(), t)
+	client, bucket := startS3(t.Context(), t)
 	vfstest.Run(t, func(t *testing.T) vfstest.Backend {
 		return prefixedBackend(t, vfs.S3(vfs.AWSS3{Client: client}, bucket))
 	})

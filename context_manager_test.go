@@ -33,21 +33,6 @@ func TestModelContextManager_enforcesMessageInvariantsAtMutation(t *testing.T) {
 	}
 }
 
-func TestContextPolicy_validateRejectsInvalidRatios(t *testing.T) {
-	// Act
-	compressErr := ContextPolicy{CompressFraction: 2}.Validate()
-	negativeCompressErr := ContextPolicy{CompressFraction: -1}.Validate()
-	negativePressureErr := ContextPolicy{PressureRatio: -1}.Validate()
-
-	// Assert
-	if compressErr == nil || negativeCompressErr == nil || negativePressureErr == nil {
-		t.Fatalf("errors = %v %v %v", compressErr, negativeCompressErr, negativePressureErr)
-	}
-	if err := DefaultContextPolicy().Validate(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestModelContextManager_installPlanDocument(t *testing.T) {
 	manager := newModelContextManager()
 

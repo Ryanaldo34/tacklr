@@ -3,7 +3,6 @@ package tacklr
 import (
 	"context"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
 
@@ -18,22 +17,16 @@ import (
 // A session runtime uses OpenVFS to build the workspace for each turn, then
 // BindTurn attaches the session id and that tree. SkillsPath is a directory
 // on that tree when it is mounted, and a local directory when it is not.
-//
-// ContextPolicy knobs stay host-settable. Adaptive Case Management itself
-// is harness-owned and cannot be replaced.
 type AgentOptions struct {
 	// MaxWindowSize is the context window in tokens. Zero uses the model's
 	// reported window.
 	MaxWindowSize uint
 	SystemPrompt  string
-	// MaxTurnRequests limits Model.Invoke calls per turn. Zero means no limit.
-	MaxTurnRequests uint
-	Model           InferenceStrategy
+	Model         InferenceStrategy
 	// sessionID is the thread id for this turn. BindTurn sets it.
 	sessionID string
 	// Name is the label used in logs. It does not select behavior.
-	Name     string
-	WatchDog AgentWatchDog
+	Name string
 	// Tools are host tools, including optional tools from email and web.
 	// Give each tool its clients by closing
 	// over them in the constructor (see NewTool). Session-world tools
@@ -44,18 +37,21 @@ type AgentOptions struct {
 	// connection. Inline client credentials remain session-scoped.
 	MCPCredentialResolver mcp.CredentialResolver
 	Specialists           []*Specialist
-	// ContextPolicy sets pressure/compress ratios when non-zero fields are set.
-	ContextPolicy ContextPolicy
+	// OverflowPath is a directory on a writable workspace mount (for example
+	// an object-storage mount). When a round is too large for the window even
+	// with the history fully summarized, its largest results are trimmed;
+	// each one's full text is first written to
+	// <OverflowPath>/<session>/<call id>.txt and the trimmed result names
+	// that path. Empty: the full text is not kept.
+	OverflowPath string
 	// ToolInterceptors wrap each tool call (outermost first). Built-in
 	// planning lock and OnCall middleware are installed after these.
 	// Hosts cannot omit the planning lock; specialists skip it via WithSpecialist.
 	ToolInterceptors []ToolInterceptor
-	// UnattendedWrite injects write without ToolPermissionOnCall.
-	// Default false: write parks for permission.
-	UnattendedWrite bool
-	// ToolResultHooks map tool name → post-success window effects for host tools.
-	// Plan builtins use ToolOutcome instead.
-	ToolResultHooks map[string]ToolResultHook
+	// AllowTools are tools (by the name the model calls them, namespace__name
+	// for a namespaced tool) that run without a permission prompt. A user's
+	// reject-always still wins. An unknown name fails construction.
+	AllowTools []string
 	// SkillsLoader loads skills. When nil, SkillsPath is walked with skills.Loader.
 	SkillsLoader skills.SkillLoader
 	// SkillsPath is the skills directory. When the turn has a workspace mount,
@@ -90,9 +86,6 @@ type AgentOptions struct {
 	// mountSession is that tree for this turn. BindTurn sets it from the
 	// tree OpenVFS returned. The runtime closes it after the turn.
 	mountSession *vfs.MountSession
-	// UnattendedRunCommand injects run_command without ToolPermissionOnCall.
-	// Default false: run_command parks for permission.
-	UnattendedRunCommand bool
 	// skipPlanningLock is set only by WithSpecialist. The parent session always
 	// gates write tools on an active plan.
 	skipPlanningLock bool
@@ -113,53 +106,34 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		return nil, err
 	}
 	sm := newSessionManager()
-	h := &TurnManager{
-		model:                 opts.Model,
-		maxWindowSize:         int(opts.MaxWindowSize),
-		maxTurnRequests:       int(opts.MaxTurnRequests),
-		instructions:          opts.SystemPrompt,
-		session:               sm,
-		watchDog:              opts.WatchDog,
-		tools:                 opts.Tools,
-		mcpConfigs:            opts.MCPConfigs,
-		mcpCredentialResolver: opts.MCPCredentialResolver,
-		skillsLoader:          skillsSource(opts),
-		hostInterceptors:      slices.Clone(opts.ToolInterceptors),
-		hostResultHooks:       maps.Clone(opts.ToolResultHooks),
-		brain:                 opts.Brain,
-		brainWriteKinds:       opts.BrainWriteKinds,
-		indexReaders:          opts.IndexReaders,
-		sessionId:             opts.sessionID,
-		specialists:           make(map[string]*Specialist),
-		pendingToolCalls:      make(map[string]PendingToolCall),
-		context:               newModelContextManager(),
-		contextPolicy:         opts.ContextPolicy,
-		runCommandUnattended:  opts.UnattendedRunCommand,
-		writeUnattended:       opts.UnattendedWrite,
-	}
-	if opts.mountSession != nil {
-		sm.VFS = opts.mountSession
-	}
+	sm.VFS = opts.mountSession
 	if !opts.SearchNamespace.Empty() {
 		sm.Search.SetNamespace(opts.SearchNamespace)
 	}
 	sm.Search.SetPrincipals(opts.SearchPrincipals)
-	def := DefaultContextPolicy()
-	if h.contextPolicy.PressureRatio <= 0 {
-		h.contextPolicy.PressureRatio = def.PressureRatio
+	h := &TurnManager{
+		model:                 opts.Model,
+		maxWindowSize:         int(opts.MaxWindowSize),
+		instructions:          opts.SystemPrompt,
+		session:               sm,
+		tools:                 opts.Tools,
+		mcpConfigs:            opts.MCPConfigs,
+		mcpCredentialResolver: opts.MCPCredentialResolver,
+		skillsLoader:          skillsSource(opts),
+		brain:                 opts.Brain,
+		brainWriteKinds:       opts.BrainWriteKinds,
+		sessionId:             opts.sessionID,
+		specialists:           make(map[string]*Specialist),
+		context:               newModelContextManager(),
+		overflowPath:          opts.OverflowPath,
 	}
-	if h.contextPolicy.CompressFraction <= 0 {
-		h.contextPolicy.CompressFraction = def.CompressFraction
-	}
-	h.tasks = newDefaultModelTasks(h.model, h.context, h.contextPolicy, h.maxWindowSize)
-	chain := append([]ToolInterceptor{}, opts.ToolInterceptors...)
+	chain := slices.Clone(opts.ToolInterceptors)
 	if !opts.skipPlanningLock {
 		chain = append(chain, h.planningWriteLock)
 	}
-	chain = append(chain, onCallMiddleware(sm))
-	h.toolRunner = newToolRunner(chain...)
-	h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
-	if err := h.finishInit(ctx, opts.Specialists); err != nil {
+	h.toolRunner = newToolRunner(append(chain, onCallMiddleware(sm))...)
+	if err := h.finishInit(ctx, opts); err != nil {
+		h.Close()
 		return nil, err
 	}
 	return h, nil
@@ -181,7 +155,7 @@ func (opts *AgentOptions) Validate() error {
 		}
 		opts.MaxWindowSize = uint(size)
 	}
-	if err := opts.ContextPolicy.Validate(); err != nil {
+	if err := opts.validateOverflowPath(); err != nil {
 		return err
 	}
 	if opts.Brain != nil {
@@ -211,18 +185,41 @@ func (opts *AgentOptions) Validate() error {
 	return nil
 }
 
-func (h *TurnManager) finishInit(ctx context.Context, specialists []*Specialist) error {
+// validateOverflowPath checks that OverflowPath, when set, is a directory
+// path on a writable mount of the turn's workspace.
+func (opts *AgentOptions) validateOverflowPath() error {
+	if opts.OverflowPath == "" {
+		return nil
+	}
+	if opts.mountSession == nil {
+		return fmt.Errorf("tacklr: AgentOptions.OverflowPath %q needs a workspace (OpenVFS)", opts.OverflowPath)
+	}
+	spec, err := opts.mountSession.SpecAt(opts.OverflowPath)
+	if err != nil {
+		return fmt.Errorf("tacklr: AgentOptions.OverflowPath %q: %w", opts.OverflowPath, err)
+	}
+	if spec.ReadOnly {
+		return fmt.Errorf("tacklr: AgentOptions.OverflowPath %q is on a read-only mount", opts.OverflowPath)
+	}
+	return nil
+}
+
+func (h *TurnManager) finishInit(ctx context.Context, opts AgentOptions) error {
 	if err := h.initSkills(ctx); err != nil {
 		return fmt.Errorf("initialize skills: %w", err)
 	}
 	h.initMCP(ctx)
-	if err := h.initSpecialists(specialists); err != nil {
+	if err := h.initSpecialists(opts.Specialists); err != nil {
 		return err
 	}
-	if h.vfsBridge == nil {
-		h.initVFSIndexBridge()
+	if h.brain != nil && h.session.VFS != nil {
+		// Validate made SearchNamespace a valid scope for a Brain.
+		h.indexer = &vfsindex.MountIndexer{VFS: h.session.VFS, Brain: h.brain, Scope: h.session.Search.Scope(), Readers: opts.IndexReaders}
 	}
 	h.injectBuiltinTools()
+	if err := h.grantTools(opts.AllowTools); err != nil {
+		return err
+	}
 	if c, ok := h.model.(interface{ Clone() InferenceStrategy }); ok {
 		h.model = c.Clone()
 	}
@@ -235,11 +232,9 @@ func (h *TurnManager) finishInit(ctx context.Context, specialists []*Specialist)
 	return nil
 }
 
-// injectBuiltinTools registers plan tools, session-world VFS/brain/index tools, and spawn_specialist once.
+// injectBuiltinTools registers the plan tools, the session-world VFS, brain
+// and index tools, and the job tools.
 func (a *TurnManager) injectBuiltinTools() {
-	if a.builtinsInjected {
-		return
-	}
 	a.tools = append(a.tools,
 		newCreatePlanTool(a.session),
 		newEditPlanTool(a.session),
@@ -247,43 +242,42 @@ func (a *TurnManager) injectBuiltinTools() {
 		newListPlanTool(a.session),
 		askUserChoiceTool,
 	)
-	br := a.vfsBridge
 	if ms := a.session.VFS; ms != nil {
-		a.tools = append(a.tools, newVFSTools(ms, !a.writeUnattended)...)
-		a.tools = append(a.tools, newRunCommand(ms, !a.runCommandUnattended))
+		a.tools = append(a.tools, newVFSTools(ms)...)
+		a.tools = append(a.tools, newRunCommand(ms))
 	}
 	if a.brain != nil {
 		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search, a.sessionId, a.brainWriteKinds)...)
 	}
-	if br != nil {
-		a.tools = append(a.tools, newVFSIndexTools(br)...)
+	if a.indexer != nil {
+		a.tools = append(a.tools, newVFSIndexTools(a.indexer)...)
 	}
 	if len(a.specialists) > 0 {
 		a.tools = append(a.tools, a.spawnTool(), a.listChildrenTool(), a.cancelChildTool())
 	}
-	a.builtinsInjected = true
 }
 
-// initVFSIndexBridge starts the explicit file indexer when Brain, a workspace,
-// and a search namespace are set. It does not walk the mount or re-index writes.
-func (a *TurnManager) initVFSIndexBridge() {
-	if a.brain == nil || a.session.VFS == nil {
-		return
+// grantTools lets the named tools run without a permission prompt. Each
+// name must be a registered tool's QualifiedName.
+func (a *TurnManager) grantTools(names []string) error {
+	if len(names) == 0 {
+		return nil
 	}
-	br, err := vfsindex.Start(a.session.VFS, a.brain, a.session.Search.Scope())
-	if err != nil {
-		return
+	granted := make(map[string]bool, len(names))
+	for _, name := range names {
+		if !slices.ContainsFunc(a.tools, func(t *Tool) bool { return t.QualifiedName() == name }) {
+			return fmt.Errorf("tacklr: AgentOptions.AllowTools: %q is not a registered tool", name)
+		}
+		granted[name] = true
 	}
-	br.Indexer.Readers = a.indexReaders
-	a.vfsBridge = br
-	a.ownsVFSBridge = true
+	a.session.Permissions.granted = granted
+	return nil
 }
 
 // planningWriteLock blocks write tools until create_plan has set a plan.
-func (a *TurnManager) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-	if inv.Tool != nil && inv.Tool.access.Allows(WritePermission) &&
-		!a.session.Plan.HasActive() {
-		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
+func (a *TurnManager) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (ToolOutcome, error) {
+	if inv.Tool.access.Allows(WritePermission) && !a.session.Plan.HasActive() {
+		return ToolOutcome{}, fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
 	}
 	return next(ctx, inv)
 }

@@ -6,79 +6,28 @@ import (
 	"testing"
 )
 
-func TestNewCheckpoint_rejectsInvalidContextWindow(t *testing.T) {
-	_, err := NewCheckpoint(
-		[]*Message{{Role: RoleTool, Content: "missing id"}},
-		nil, nil, nil, nil, nil,
-	)
-	if err == nil || !strings.Contains(err.Error(), "invalid context window") {
-		t.Fatalf("error = %v", err)
+// TestCheckpoint_aValueThatCannotBeEncodedFailsTheCheckpoint: a user state
+// value JSON cannot hold fails the checkpoint instead of losing it.
+func TestCheckpoint_aValueThatCannotBeEncodedFailsTheCheckpoint(t *testing.T) {
+	h := mustNewTurnManager(t, AgentOptions{Model: &scriptedModel{}})
+	_ = h.session.StateSet("bad", make(chan int))
+
+	_, err := h.Checkpoint()
+
+	if err == nil || !strings.Contains(err.Error(), "checkpoint") {
+		t.Fatalf("checkpoint = %v, want an encoding error", err)
 	}
 }
 
-func TestNewCheckpoint_marshalInterruptErrors(t *testing.T) {
-	if _, err := NewCheckpoint(nil, nil, nil, nil, make(chan int), nil); err == nil {
-		t.Fatal("expected pending interrupt marshal error")
-	}
-	if _, err := NewCheckpoint(nil, nil, nil, nil, nil, make(chan int)); err == nil {
-		t.Fatal("expected resolved interrupt marshal error")
-	}
-}
+// TestSessionCheckpoint_aZeroCheckpointIsNull: a session never saved
+// encodes as null, and null decodes back to it, which does not restore.
+func TestSessionCheckpoint_aZeroCheckpointIsNull(t *testing.T) {
+	raw, err := json.Marshal(SessionCheckpoint{})
+	var back SessionCheckpoint
+	decodeErr := json.Unmarshal([]byte("null"), &back)
+	restoreErr := mustNewTurnManager(t, AgentOptions{Model: &scriptedModel{}}).RestoreCheckpoint(back)
 
-func TestSessionCheckpoint_pendingToolCallRoundTrip(t *testing.T) {
-	ptc := map[string]PendingToolCall{
-		"fc_g": {
-			ToolCall:        &ToolCall{ID: "fc_g", CallID: "call_g", Name: "gate"},
-			InterruptActive: true,
-		},
-	}
-	cp, err := NewCheckpoint([]*Message{{Role: RoleUser, Content: "hi"}}, ptc, nil, nil, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := json.Marshal(cp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got SessionCheckpoint
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatal(err)
-	}
-	g := got.PendingToolCalls()["fc_g"]
-	if !g.InterruptActive || g.ToolCall == nil || g.ToolCall.Name != "gate" {
-		t.Fatalf("gate pending: %+v", g)
-	}
-}
-
-func TestSessionCheckpoint_copyHelpersAndJSON(t *testing.T) {
-	cp, err := NewCheckpoint([]*Message{{Role: RoleUser, Content: "hi"}}, nil, nil, nil, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cp.Version() != CheckpointVersion {
-		t.Fatalf("version = %d, want %d", cp.Version(), CheckpointVersion)
-	}
-	mod := cp.WithModule("plan", json.RawMessage(`{"x":1}`))
-	if string(mod.Modules()["plan"]) != `{"x":1}` {
-		t.Fatalf("module = %s", mod.Modules()["plan"])
-	}
-	mod2 := mod.WithModule("onCall", json.RawMessage(`{}`))
-	if len(mod2.Modules()) != 2 {
-		t.Fatalf("modules = %v", mod2.Modules())
-	}
-	us := mod2.WithUserStateKey("k", json.RawMessage(`"v"`))
-	if string(us.UserState()["k"]) != `"v"` {
-		t.Fatalf("user state = %s", us.UserState()["k"])
-	}
-	us2 := us.WithUserStateKey("k2", json.RawMessage(`1`))
-	if len(us2.UserState()) != 2 {
-		t.Fatalf("user state keys = %v", us2.UserState())
-	}
-	var decoded SessionCheckpoint
-	if err := json.Unmarshal([]byte(`{`), &decoded); err == nil {
-		t.Fatal("want unmarshal error")
-	}
-	if err := decoded.UnmarshalJSON([]byte("not-json")); err == nil {
-		t.Fatal("want UnmarshalJSON error")
+	if err != nil || string(raw) != "null" || decodeErr != nil || restoreErr == nil {
+		t.Fatalf("zero = %s %v, decode %v, restore %v", raw, err, decodeErr, restoreErr)
 	}
 }

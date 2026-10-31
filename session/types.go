@@ -60,9 +60,9 @@ type CreateSession struct {
 	// Worker selects a named job handler. Exclusive with Specialist.
 	// The child session runs that handler instead of a model.
 	Worker string
-	// State seeds checkpoint userState (JSON-serializable values).
-	// Tools read it via HarnessRuntime.StateGet. The canonical copy is
-	// Snapshot.Checkpoint. No tokens or clients.
+	// State is host values for the session's user state
+	// (JSON-serializable). The first step writes them into the checkpoint;
+	// tools read them with HarnessRuntime.StateGet. No tokens or clients.
 	// Child sessions do not inherit this map.
 	State map[string]any
 }
@@ -74,8 +74,9 @@ type Prompt struct {
 	// MCPServers, when non-nil, replaces session-scoped MCP configs for this turn.
 	MCPServers []mcp.MCPConfig
 	Auth       AuthContext
-	// State merges into checkpoint userState for this turn after restore.
-	// JSON-serializable values only. No tokens or clients.
+	// State is host values the turn's first step writes into the
+	// session's user state. JSON-serializable values only. No tokens or
+	// clients.
 	State map[string]any
 }
 
@@ -83,22 +84,20 @@ type Prompt struct {
 type Resume struct {
 	Responses map[string][]byte
 	Auth      AuthContext
-	// State merges into checkpoint userState when the parked turn continues.
+	// State is host values the resumed step writes into the session's
+	// user state.
 	State map[string]any
 }
 
-// Snapshot is the session record in SnapshotStore. Wait-loop fields
-// (leftover tool calls, the MCP overlay, and child handles) stay on the
-// session, not here.
-type Snapshot struct {
+// Identity is who a session is and what it mounts. The session's runtime
+// holds it and gives it to each step, which builds the turn's world from
+// it; the snapshot store does not keep it.
+type Identity struct {
 	Specialist string
-	Parent     SessionID
-	// Children are child session ids in start order (no handles, no tokens).
-	Children   []SessionID
-	Checkpoint tacklr.SessionCheckpoint
-	Mounts     []MountRecipe
 	// Worker, when set, means this session is a named JobHandler child.
 	Worker string
+	Parent SessionID
+	Mounts []MountRecipe
 }
 
 // SessionState is parent-facing session/job state. Child HITL does not change
@@ -177,19 +176,15 @@ type EventLog interface {
 // The zero value means no row exists yet; the next Save creates it.
 type Revision string
 
-// SnapshotStore is the session record: what the harness needs to think again
-// after HITL or a worker recycle. It is not the wait loop and not credentials.
-//
-// Frozen contents: SessionCheckpoint (window, plan, parked interrupt, userState),
-// MountRecipe topology, and session identity (agent, parent, specialist, child
-// ids). Tokens, file bytes, leftover unstarted tool calls, MCP env and
-// headers, and child session handles never go here.
+// SnapshotStore keeps each session's checkpoint: what the harness needs to
+// think again after a park or a worker recycle. Tokens, file bytes, MCP env
+// and headers, the session's identity, and child handles are not in it.
 //
 // Save's expected Revision must match the last Load (zero if no row).
 // Mismatch means another writer already saved — reload and retry.
 type SnapshotStore interface {
-	Save(ctx context.Context, sessionID SessionID, snap Snapshot, expected Revision) (Revision, error)
-	Load(ctx context.Context, sessionID SessionID) (Snapshot, Revision, error)
+	Save(ctx context.Context, sessionID SessionID, cp tacklr.SessionCheckpoint, expected Revision) (Revision, error)
+	Load(ctx context.Context, sessionID SessionID) (tacklr.SessionCheckpoint, Revision, error)
 	Delete(ctx context.Context, sessionID SessionID) error
 }
 

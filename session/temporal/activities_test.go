@@ -4,6 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
@@ -11,30 +14,6 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
-
-func TestActivities_directCallPersistsUserState(t *testing.T) {
-	agent := tacklr.AgentOptions{Model: testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
-	}), MaxWindowSize: 8192}
-	snaps := session.NewMemorySnapshot()
-	log := session.NewMemoryEventLog()
-	acts := &activities{Agent: agent, Snapshots: snaps, Fallback: log, DisableStreams: true, Secrets: session.NewMemorySecretStorage()}
-	out, err := acts.Inference(t.Context(), session.InferenceInput{
-		SessionID: "s", Rec: session.Snapshot{},
-		User:  &tacklr.Message{Role: tacklr.RoleUser, Content: "hi"},
-		State: map[string]any{"user": "Ryan"},
-	})
-	if err != nil || !out.Complete {
-		t.Fatalf("direct inference: %+v %v", out, err)
-	}
-	snap, _, err := snaps.Load(t.Context(), "s")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(snap.Checkpoint.UserState()["user"]) != `"Ryan"` {
-		t.Fatalf("userState=%s", snap.Checkpoint.UserState()["user"])
-	}
-}
 
 func TestActivities_childTurnUsesParentSecrets(t *testing.T) {
 	dir := t.TempDir()
@@ -66,7 +45,7 @@ func TestActivities_childTurnUsesParentSecrets(t *testing.T) {
 	acts.Secrets = store
 	if _, err := acts.Inference(t.Context(), session.InferenceInput{
 		SessionID: "child",
-		Rec: session.Snapshot{
+		Identity: session.Identity{
 			Parent: "parent",
 			Mounts: session.ApplyAuth(nil, parentAuth),
 		},
@@ -76,5 +55,100 @@ func TestActivities_childTurnUsesParentSecrets(t *testing.T) {
 	}
 	if gotToken != "parent-tok" {
 		t.Fatalf("OpenVFS token=%q", gotToken)
+	}
+}
+
+// TestActivities_aRetriedToolsStepReportsWhatItsFirstAttemptRecorded: the
+// Tools step saves, then its result is lost and Temporal runs it again. The
+// retry loads the saved state and reports the same park, await and child
+// starts, without running a tool again, whether the round stayed open or
+// committed.
+func TestActivities_aRetriedToolsStepReportsWhatItsFirstAttemptRecorded(t *testing.T) {
+	spawn := func(id, block string) tacklr.ToolCall {
+		return tacklr.ToolCall{ID: id, CallID: id, Name: "spawn_specialist",
+			Arguments: `{"specialist":"researcher","task_description_and_context":"look","block":` + block + `}`}
+	}
+	child := func(call string) string { return string(session.ChildSessionID("retry", "researcher", call)) }
+	free := tacklr.ToolCall{ID: "f1", CallID: "f1", Name: "free", Arguments: `{}`}
+	for _, tc := range []struct {
+		name  string
+		calls []tacklr.ToolCall
+		check func([]session.ToolOutput) bool
+	}{
+		{"an open round", []tacklr.ToolCall{{ID: "g1", CallID: "g1", Name: "gate", Arguments: `{}`}, spawn("sp1", "true"), spawn("sp2", "false"), free},
+			func(o []session.ToolOutput) bool {
+				return len(o) == 4 && o[0].Interrupted && o[0].InterruptID == "g1" &&
+					o[1].AwaitID == session.SessionID(child("sp1")) && len(o[1].Starts) == 1 && o[1].Starts[0].ID == child("sp1") && o[1].Starts[0].Specialist &&
+					o[2].AwaitID == "" && len(o[2].Starts) == 1 && o[2].Starts[0].ID == child("sp2")
+			}},
+		{"a committed round", []tacklr.ToolCall{spawn("sp2", "false"), free},
+			func(o []session.ToolOutput) bool {
+				return len(o) == 2 && len(o[0].Starts) == 1 && o[0].Starts[0].ID == child("sp2")
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var freeRuns atomic.Int32
+			var seen any
+			model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, IsComplete: true, ToolCalls: tc.calls}
+			})
+			agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192,
+				Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}},
+				Tools: []*tacklr.Tool{
+					tacklr.NewTool(tacklr.ToolConfig{Name: "gate", OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall}, Handler: func(context.Context) (string, error) { return "gate-ok", nil }}),
+					// free sees the host's mode, then changes it.
+					tacklr.NewTool(tacklr.ToolConfig{Name: "free", Handler: func(_ context.Context, rt tacklr.HarnessRuntime) (string, error) {
+						freeRuns.Add(1)
+						seen, _ = rt.StateGet("mode")
+						return "free-ok", rt.StateSet("mode", "tool")
+					}}),
+				}}
+			acts := newActs(agent, session.NewMemoryEventLog(), true)
+			if _, err := acts.Inference(t.Context(), session.InferenceInput{SessionID: "retry", User: &tacklr.Message{Role: tacklr.RoleUser, Content: "go"}}); err != nil {
+				t.Fatal(err)
+			}
+			in := session.ToolsInput{SessionID: "retry", Seq: 1, State: map[string]any{"mode": "host"}}
+
+			first, firstErr := acts.Tools(t.Context(), in)
+			retried, retryErr := acts.Tools(t.Context(), in)
+
+			if firstErr != nil || retryErr != nil {
+				t.Fatal(firstErr, retryErr)
+			}
+			if !reflect.DeepEqual(first, retried) || freeRuns.Load() != 1 {
+				t.Fatalf("retried outputs = %+v after free ran %d times, want %+v and no tool run again", retried, freeRuns.Load(), first)
+			}
+			if !tc.check(first) {
+				t.Fatalf("outputs = %+v", first)
+			}
+			if tc.name != "a committed round" {
+				return
+			}
+			// The next step's tool sees the first attempt's change: the retry
+			// did not apply the host state again.
+			if _, err := acts.Inference(t.Context(), session.InferenceInput{SessionID: "retry"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := acts.Tools(t.Context(), session.ToolsInput{SessionID: "retry", Seq: 2}); err != nil {
+				t.Fatal(err)
+			}
+			if seen != "tool" {
+				t.Fatalf("mode after a retried step = %v, want the tool's change kept over the host's value", seen)
+			}
+		})
+	}
+}
+
+func TestActivities_inferenceRejectsAPromptTheModelCannotRead(t *testing.T) {
+	model := testkit.TextHTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
+	})
+	acts := newActs(tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}, session.NewMemoryEventLog(), true)
+	image := &tacklr.Message{Role: tacklr.RoleUser, ContentParts: []tacklr.ContentPart{{Type: tacklr.ContentTypeInputImage, FileData: &tacklr.FileData{MIMEType: "image/png"}}}}
+
+	_, err := acts.Inference(t.Context(), session.InferenceInput{SessionID: "text-only", User: image})
+
+	if err == nil || !strings.Contains(err.Error(), "unsupported content type") {
+		t.Fatalf("inference = %v, want the image rejected", err)
 	}
 }

@@ -177,3 +177,30 @@ func TestEmbedding_embedBatchesStopsAtTheFirstStageError(t *testing.T) {
 		t.Fatalf("embed batches = %d parts read, %d batches staged, %v, want it to stop at the failed stage", n, staged, err)
 	}
 }
+
+// TestEntityIndexText_includesSummaryAndProperties: entity find text packs attributes.
+func TestEntityIndexText_includesSummaryAndProperties(t *testing.T) {
+	body := strings.Repeat("long body ", 300)
+	got := Object{
+		Title: "Acme renewal", Summary: "enterprise opportunity",
+		Content: body,
+		Properties: map[string]any{
+			"stage":  "negotiation",
+			"amount": 120000.0,
+			"hot":    true,
+		},
+	}.entityIndexText(KindSpec{}, false)
+
+	for _, want := range []string{"Acme renewal", "enterprise opportunity", "stage: negotiation", "amount: 120000", "hot: true", strings.TrimSpace(body)} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %q", want, got)
+		}
+	}
+	withSlug := Object{
+		Title: "Acme", Properties: map[string]any{PropSlug: "acme", "stage": "open"},
+	}.entityIndexText(KindSpec{}, false)
+
+	if strings.Contains(withSlug, "slug:") || !strings.Contains(withSlug, "stage: open") {
+		t.Fatalf("slug must be omitted: %q", withSlug)
+	}
+}

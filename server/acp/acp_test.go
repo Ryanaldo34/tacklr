@@ -198,26 +198,6 @@ func acpRPCError(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 // validateACPRequest
 // ---------------------------------------------------------------------------
 
-// TestValidateACPRequest_outcomes covers each distinct validateACPRequest return
-// path once (success shapes + error strings). Integration HandleRPC tests exercise
-// the same code via the wire; this keeps parse-edge coverage without N micro-tests.
-func TestHandleRPC_sessionNew(t *testing.T) {
-	r := newTestRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
-
-	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-
-	var resp map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	result := resp["result"].(map[string]any)
-	sessionID, ok := result["sessionId"].(string)
-	if !ok || sessionID == "" {
-		t.Fatalf("expected sessionId in result, got %v", result)
-	}
-	if _, ok := result["configOptions"]; ok {
-		t.Fatalf("session/new must not offer an agent picker: %v", result["configOptions"])
-	}
-}
-
 func TestHandleRPC_sessionNew_stripsMCPSecretsFromWire(t *testing.T) {
 	r := newTestRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
 	srv := newACPTestServer(t, r)

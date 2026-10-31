@@ -1,4 +1,0 @@
-# Test image for brain PostgresStore integration tests.
-# Built by Testcontainers FromDockerfile or:
-#   docker build -f brain/testdata/Dockerfile.postgres -t tacklr-pg-brain:test brain/testdata
-FROM pgvector/pgvector:pg17

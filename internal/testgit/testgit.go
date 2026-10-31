@@ -46,7 +46,7 @@ type Server struct {
 func Start(t testing.TB, files map[string]string) *Server {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git CLI not installed")
+		t.Fatal("git CLI not installed")
 	}
 	s := &Server{Token: "test-token", root: t.TempDir()}
 	s.seed(t, files)

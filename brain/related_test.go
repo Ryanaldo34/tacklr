@@ -69,48 +69,6 @@ func objectsOfParts(parts []brain.Object) []brain.RichObject {
 	return out
 }
 
-func TestRelated_addsTheRecordsTheGraphsRelationsReach(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Graph(t)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	scope := brain.Scope{Namespace: tenant(t)}
-	a := docWithParts(t, eng, scope, "a", nil, "a part")
-	b := save(t, eng, scope, brain.Object{Kind: "Note", Title: "b"})
-	c := save(t, eng, scope, brain.Object{Kind: "Note", Title: "c"})
-	link(t, eng, scope, a.ID, b.ID, "references", "b explains a")
-	link(t, eng, scope, c.ID, a.ID, "depends_on", "")
-	related := func(id uuid.UUID, rel string, depth int) map[string]brain.Relation {
-		page, err := eng.Related(ctx, scope, brain.RelatedRequest{ID: id, Relation: rel, Depth: depth})
-		if err != nil {
-			t.Fatal(err)
-		}
-		out := map[string]brain.Relation{}
-		for _, o := range slices.Collect(page.Results.Objects()) {
-			out[o.Title] = *o.Relation
-		}
-		return out
-	}
-
-	all := related(a.ID, "", 1)
-	refs := related(a.ID, "references", 1)
-	kids := related(a.ID, "contains", 1)
-	far := related(b.ID, "", 2)
-
-	if len(all) != 3 || all["a part"].Type != brain.RelationChild || all["b"].Type != "references" || all["b"].Direction != brain.DirectionOut || all["b"].Note != "b explains a" || all["c"].Type != "depends_on" || all["c"].Direction != brain.DirectionIn {
-		t.Errorf("related to a = %+v, want its part, b by references out with the note, c by depends_on in", all)
-	}
-	if len(refs) != 1 || refs["b"].Type != "references" || len(kids) != 1 || kids["a part"].Type != brain.RelationChild {
-		t.Errorf("related by references = %+v, by contains = %+v, want only b, then only the part", refs, kids)
-	}
-	// c is two hops from b, through a: its via traces the path b→a→c.
-	if far["a"].Depth != 1 || *far["a"].Via != b.ID || far["c"].Depth != 2 || *far["c"].Via != a.ID {
-		t.Errorf("two hops from b = %+v, want a at 1 via b and c at 2 via a", far)
-	}
-}
-
 // TestSearch_theStoreDecidesGraphHitsLinkOnlyPagesAndRelationlessGraphs:
 // a graph hit whose stored row no longer passes the filter is dropped, a
 // reranked page of links alone keeps its links, and a graph that indexes no

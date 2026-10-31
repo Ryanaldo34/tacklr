@@ -8,34 +8,6 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-func TestApplyAuthUpsertsRecipesAndRecordsSourceIDs(t *testing.T) {
-	auth := session.AuthContext{Bindings: []vfs.Binding{{
-		Provider: vfs.ProviderGoogleDrive,
-		Point:    "/docs",
-		Params: map[string]string{
-			vfs.ParamFolderID: "fld-1",
-		},
-		Auth:     vfs.Credential{Token: "secret"},
-		Writable: true,
-	}}}
-	got := session.ApplyAuth(nil, auth)
-	if len(got) != 1 {
-		t.Fatalf("len=%d", len(got))
-	}
-	if got[0].Provider != vfs.ProviderGoogleDrive || got[0].Alias != "docs" || !got[0].Writable {
-		t.Fatalf("recipe=%+v", got[0])
-	}
-	if got[0].Params[vfs.ParamFolderID] != "fld-1" {
-		t.Fatalf("params=%v", got[0].Params)
-	}
-	if !slices.Equal(got[0].SourceIDs, []string{vfs.ParamFolderID + ":fld-1"}) {
-		t.Fatalf("sourceIds=%v", got[0].SourceIDs)
-	}
-	if got[0].Params[vfs.ParamName] != "docs" {
-		t.Fatalf("alias param missing")
-	}
-}
-
 func TestApplyAuthDropByAliasThenProvider(t *testing.T) {
 	start := []session.MountRecipe{
 		{Provider: "gdrive", Alias: "docs", Params: map[string]string{vfs.ParamName: "docs"}},

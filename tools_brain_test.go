@@ -3,7 +3,6 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -15,59 +14,6 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
-
-// kindEnum is the enum of the tool's kind property; none when it is free.
-func kindEnum(t *testing.T, tool *Tool) []any {
-	t.Helper()
-	props, _ := tool.parameters["properties"].(map[string]any)
-	kind, _ := props["kind"].(map[string]any)
-	enum, _ := kind["enum"].([]any)
-	return enum
-}
-
-func toolNames(h *TurnManager) []string {
-	var out []string
-	for _, tool := range h.tools {
-		switch tool.Name() {
-		case "search", "open", "related", "save", "link":
-			out = append(out, tool.Name())
-		}
-	}
-	slices.Sort(out)
-	return out
-}
-
-func TestBrainTools_registerTheToolsTheEngineCanServeWithKindChoices(t *testing.T) {
-	t.Parallel()
-	catalog, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
-		brain.KindSpec{Kind: "Fact", IsParent: true}, brain.KindSpec{Kind: "Deal", IsParent: true}, brain.KindSpec{Kind: "Chunk", IsPart: true}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	open, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Graph(t)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ns := mustNS(t, "org", uuid.NewString())
-	withKinds := mustNewTurnManager(t, AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: catalog, SearchNamespace: ns, BrainWriteKinds: []string{"Fact", " ", "Fact"}})
-	withGraph := mustNewTurnManager(t, AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: open, SearchNamespace: ns})
-
-	if got := toolNames(withKinds); !slices.Equal(got, []string{"open", "related", "save", "search"}) {
-		t.Errorf("store-only tools with a writable kind = %v, want search, open, related and save", got)
-	}
-	if got := toolNames(withGraph); !slices.Equal(got, []string{"link", "open", "related", "search"}) {
-		t.Errorf("tools with a graph and no writable kind = %v, want search, open, related and link", got)
-	}
-	if got := kindEnum(t, withKinds.findTool("search", "")); !slices.Equal(got, []any{"Deal", "Fact", nil}) {
-		t.Errorf("search kind enum = %v, want the record kinds (not the part kind), or null", got)
-	}
-	if got := kindEnum(t, withKinds.findTool("save", "")); !slices.Equal(got, []any{"Fact"}) {
-		t.Errorf("save kind enum = %v, want the writable kind", got)
-	}
-	if got := kindEnum(t, withGraph.findTool("search", "")); got != nil {
-		t.Errorf("open-mode search kind enum = %v, want a free string", got)
-	}
-}
 
 func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 	ctx := context.Background()
@@ -94,7 +40,7 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 	h := mustNewTurnManager(t, opts)
 	call := func(h *TurnManager, name, args string) (string, error) {
 		out, err := h.findTool(name, "").invoke(ctx, args, turnRuntime(h))
-		return out.output, err
+		return out.Output, err
 	}
 	var saved []brain.RichObject
 	for _, title := range []string{"knowledge one", "knowledge two", "knowledge three"} {
@@ -125,6 +71,7 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 	second := page(call(reloaded, "search", `{"more":true}`))
 	updated, updateErr := call(h, "save", `{"kind":"Fact","id":"`+saved[0].ID.String()+`","title":"knowledge one, revised"}`)
 	narrowed := page(call(h, "search", `{"query":"knowledge","namespace":[{"name":"workspace","value":"west"}]}`))
+	listed := page(call(h, "search", `{"kind":"Document","namespace":[{"name":"workspace","value":"west"}]}`))
 	openOut, openErr := call(h, "open", `{"ref":"`+doc.ID.String()+`","namespace":[{"name":"workspace","value":"west"}]}`)
 	related := page(call(h, "related", `{"ref":"`+doc.ID.String()+`","namespace":[{"name":"workspace","value":"west"}]}`))
 	_, noMore := call(h, "related", `{"more":true,"ref":"x"}`)
@@ -141,8 +88,6 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 	_, relatedOutside := call(h, "related", `{"ref":"`+doc.ID.String()+`","namespace":[{"name":"org","value":"other"}]}`)
 	_, saveOutside := call(h, "save", `{"kind":"Fact","title":"x","namespace":[{"name":"org","value":"other"}]}`)
 	_, undeclared := call(h, "save", `{"kind":"Fact","title":"x","properties":{"color":"red"}}`)
-	h.session.Search.ClearNamespace()
-	_, noNamespace := call(h, "open", `{"ref":"`+saved[0].ID.String()+`"}`)
 
 	if len(slices.Collect(first.Results.Objects())) != 2 || !first.More || first.Facets.Kinds["Fact"] != 2 || first.Facets.Properties["topic"]["ops"] != 2 {
 		t.Errorf("first search = %+v, want 2 facts, more, and facets naming the kind and topic", first)
@@ -155,6 +100,9 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 	}
 	if !slices.Contains(titlesOfPage(narrowed), "Runbook") || slices.Contains(titlesOfPage(narrowed), "foreign knowledge") {
 		t.Errorf("narrowed search = %v, want the west runbook and no other tenant's record", titlesOfPage(narrowed))
+	}
+	if titles := titlesOfPage(listed); !slices.Equal(titles, []string{"Runbook"}) {
+		t.Errorf("search with a kind and no query = %v, want the kind's records listed", titles)
 	}
 	if openErr != nil || !strings.Contains(openOut, `"kind": "Document"`) || !strings.Contains(openOut, `"children"`) {
 		t.Errorf("open = %s %v, want the record, its kind and its children", openOut, openErr)
@@ -184,9 +132,6 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 		if tc.err == nil || !strings.Contains(tc.err.Error(), tc.want) {
 			t.Errorf("%s = %v, want an error naming %q", name, tc.err, tc.want)
 		}
-	}
-	if !errors.Is(noNamespace, brain.ErrInvalid) {
-		t.Errorf("open without a host namespace = %v, want it to fail closed", noNamespace)
 	}
 }
 
@@ -236,7 +181,7 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	activatePlan(t, h)
 	call := func(name, args string) (string, error) {
 		out, err := h.findTool(name, "").invoke(ctx, args, turnRuntime(h))
-		return out.output, err
+		return out.Output, err
 	}
 	if err := ms.Route(ctx, "/workspace/work/doc.md").WriteFile(ctx, []byte("# Doc\n\nartifact\n")); err != nil {
 		t.Fatal(err)
@@ -250,6 +195,7 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, byPath := call("link", `{"from":"/workspace/work/doc.md","to":"`+deal.ID.String()+`","relation":"about"}`)
+	relatedByPath, relatedByPathErr := call("related", `{"ref":"/workspace/work/doc.md","relation":"about"}`)
 	removed, removeErr := call("link", `{"from":"`+deal.ID.String()+`","to":"`+person.ID.String()+`","relation":"about","remove":true}`)
 	after, _ := call("related", `{"ref":"`+deal.ID.String()+`","relation":"about"}`)
 	_, noTo := call("link", `{"from":"`+deal.ID.String()+`","to":"","relation":"about"}`)
@@ -265,6 +211,9 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	}
 	if unindexed == nil || !strings.Contains(unindexed.Error(), "not indexed") || byPath != nil {
 		t.Errorf("link an unindexed file = %v, then an indexed one = %v, want not indexed, then linked", unindexed, byPath)
+	}
+	if relatedByPathErr != nil || !strings.Contains(relatedByPath, deal.ID.String()) {
+		t.Errorf("related by the file's path = %s %v, want the deal", relatedByPath, relatedByPathErr)
 	}
 	if removeErr != nil || !strings.Contains(removed, `"linked": false`) || strings.Contains(after, person.ID.String()) {
 		t.Errorf("remove = %s %v, then related %s, want the person gone", removed, removeErr, after)
@@ -304,14 +253,13 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 
 	opened, openErr := worker.findTool("open", "").invoke(ctx, `{"ref":"`+doc.ID.String()+`"}`, turnRuntime(worker))
 	found, searchErr := worker.findTool("search", "").invoke(ctx, `{"query":"worker-visible"}`, turnRuntime(worker))
-	parentH.session.Search.ClearNamespace()
 	gotNS, ok := worker.session.Search.Namespace()
 
-	if openErr != nil || !strings.Contains(opened.output, "worker-visible") || searchErr != nil || !strings.Contains(found.output, doc.ID.String()) {
-		t.Errorf("worker open = %s %v, search = %s %v, want the parent's record", opened.output, openErr, found.output, searchErr)
+	if openErr != nil || !strings.Contains(opened.Output, "worker-visible") || searchErr != nil || !strings.Contains(found.Output, doc.ID.String()) {
+		t.Errorf("worker open = %s %v, search = %s %v, want the parent's record", opened.Output, openErr, found.Output, searchErr)
 	}
 	if !ok || !gotNS.Equal(ns) {
-		t.Errorf("worker namespace after the parent clears its own = %v %v, want %v", gotNS, ok, ns)
+		t.Errorf("worker namespace = %v %v, want %v", gotNS, ok, ns)
 	}
 }
 

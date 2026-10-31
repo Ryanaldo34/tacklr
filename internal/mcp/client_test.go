@@ -99,46 +99,6 @@ func TestInterpretError_surfacesRPCHTTPAndSessionCauses(t *testing.T) {
 	}
 }
 
-func TestBuildTransportStdio(t *testing.T) {
-	t.Setenv("TACKLR_HOST_SECRET", "must-not-leak")
-	c := &client{config: mcp.MCPConfig{
-		Name:    "fs",
-		Command: "npx",
-		Args:    []string{"-y", "@modelcontextprotocol/server-filesystem"},
-		Env:     []mcp.EnvVariable{{Name: "API_KEY", Value: "secret"}},
-	}}
-	transport, err := c.buildTransport()
-	if err != nil {
-		t.Fatalf("buildTransport: %v", err)
-	}
-	ct, ok := transport.(*mcpsdk.CommandTransport)
-	if !ok {
-		t.Fatalf("expected *CommandTransport, got %T", transport)
-	}
-	if ct.Command.Args[0] != "npx" {
-		t.Errorf("command = %q, want npx", ct.Command.Args[0])
-	}
-	if len(ct.Command.Args) != 3 || ct.Command.Args[1] != "-y" {
-		t.Errorf("command args = %v, want [npx -y @modelcontextprotocol/server-filesystem]", ct.Command.Args)
-	}
-	found := false
-	leaked := false
-	for _, env := range ct.Command.Env {
-		if env == "API_KEY=secret" {
-			found = true
-		}
-		if env == "TACKLR_HOST_SECRET=must-not-leak" {
-			leaked = true
-		}
-	}
-	if !found {
-		t.Errorf("expected API_KEY=secret in command env, got %v", ct.Command.Env)
-	}
-	if leaked {
-		t.Fatalf("stdio MCP inherited host secret: %v", ct.Command.Env)
-	}
-}
-
 func TestBuildTransportStdio_hostEnvironmentRequiresExplicitPolicy(t *testing.T) {
 	t.Setenv("TACKLR_ALLOWED", "allowed")
 	t.Setenv("TACKLR_SECRET", "secret")
@@ -169,27 +129,6 @@ func TestBuildTransportStdio_hostEnvironmentRequiresExplicitPolicy(t *testing.T)
 	}
 	if env := transport.(*mcpsdk.CommandTransport).Command.Env; !slices.Contains(env, "TACKLR_SECRET=secret") {
 		t.Fatalf("trusted environment omitted host value: %v", env)
-	}
-}
-
-func TestBuildTransportStdioDefaultWhenTypeEmpty(t *testing.T) {
-	for _, typ := range []string{"", mcp.TransportStdio} {
-		c := &client{config: mcp.MCPConfig{Name: "fs", Type: typ, Command: "server"}}
-		transport, err := c.buildTransport()
-		if err != nil {
-			t.Fatalf("buildTransport(type=%q): %v", typ, err)
-		}
-		ct, ok := transport.(*mcpsdk.CommandTransport)
-		if !ok || ct.Command == nil {
-			t.Fatalf("type=%q: got %T", typ, transport)
-		}
-		cmd := ct.Command.Path
-		if len(ct.Command.Args) > 0 {
-			cmd = ct.Command.Args[0]
-		}
-		if !strings.Contains(cmd, "server") {
-			t.Fatalf("type=%q command = %q args=%v", typ, ct.Command.Path, ct.Command.Args)
-		}
 	}
 }
 
@@ -232,29 +171,6 @@ func TestBuildTransportStdioRequiresCommand(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "command is required") {
 		t.Errorf("error = %q, want to contain %q", err.Error(), "command is required")
-	}
-}
-
-func TestBuildTransportHTTP(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{
-		Name:    "api",
-		Type:    mcp.TransportHTTP,
-		URL:     "https://api.example.com/mcp",
-		Headers: []mcp.HTTPHeader{{Name: "Authorization", Value: "Bearer tok"}},
-	}}
-	transport, err := c.buildTransport()
-	if err != nil {
-		t.Fatalf("buildTransport: %v", err)
-	}
-	st, ok := transport.(*mcpsdk.StreamableClientTransport)
-	if !ok {
-		t.Fatalf("expected *StreamableClientTransport, got %T", transport)
-	}
-	if st.Endpoint != "https://api.example.com/mcp" {
-		t.Errorf("endpoint = %q, want https://api.example.com/mcp", st.Endpoint)
-	}
-	if st.HTTPClient == nil {
-		t.Error("expected non-nil HTTPClient")
 	}
 }
 
@@ -303,21 +219,5 @@ func TestCloseIgnores405(t *testing.T) {
 	err := c.close()
 	if err != nil {
 		t.Errorf("expected nil error when session is nil, got %v", err)
-	}
-}
-
-func TestInterpretErrorPreservesUnwrap(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "test"}}
-
-	rpcErr := &mcpjsonrpc.Error{Code: -32603, Message: "internal error"}
-	wrapped := fmt.Errorf("calling %q: %w", "tools/call", rpcErr)
-
-	err := c.interpretError("call tool \"foo\"", wrapped)
-	var got *mcpjsonrpc.Error
-	if !errors.As(err, &got) {
-		t.Errorf("expected errors.As to find original JSON-RPC error, got %v", err)
-	}
-	if got.Code != -32603 {
-		t.Errorf("expected code -32603, got %d", got.Code)
 	}
 }

@@ -3,15 +3,8 @@ package tacklr
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/vfs"
-	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
 func TestNewTurnManager_rejectsInvalidSpecialists(t *testing.T) {
@@ -71,101 +64,37 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 	}
 	rt := turnRuntime(h)
 	res, err := h.findTool("list_children", "").invoke(t.Context(), `{}`, rt)
-	if err != nil || !strings.Contains(strings.ToLower(res.output), "no jobs") {
-		t.Fatalf("list_children: %q %v", res.output, err)
+	if err != nil || !strings.Contains(strings.ToLower(res.Output), "no jobs") {
+		t.Fatalf("list_children: %q %v", res.Output, err)
 	}
 }
 
-func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
-	parent, ms, eng, ns := vfsIndexHarness(t, nil)
-	_ = parent
-	worker := mustNewTurnManager(t, AgentOptions{
-		mountSession:    ms,
-		Model:           &scriptedModel{},
-		Brain:           eng,
-		SearchNamespace: ns,
-		UnattendedWrite: true,
-	}.WithSpecialist(&Specialist{Name: "researcher", Model: &scriptedModel{}}))
-	t.Cleanup(worker.Close)
-	ctx := context.Background()
-	scope := brain.Scope{Namespace: ns}
+// TestJobTools_correctAndFailClosed: spawn_specialist and cancel_child name
+// a missing argument for the model to correct, and fail closed in a turn
+// whose runtime offers no jobs.
+func TestJobTools_correctAndFailClosed(t *testing.T) {
+	h := mustNewTurnManager(t, AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{},
+		Specialists: []*Specialist{{Name: "researcher", Model: &scriptedModel{}}}})
+	t.Cleanup(h.Close)
+	call := func(name, args string) error {
+		_, err := h.findTool(name, "").invoke(t.Context(), args, turnRuntime(h))
+		return err
+	}
 
-	for _, name := range []string{"read", "write", "run_command", "open", "search", "related", "index_file"} {
-		if worker.findTool(name, "") == nil {
-			t.Fatalf("worker catalog missing %s", name)
+	for name, tc := range map[string]struct {
+		err        error
+		correction bool
+		want       string
+	}{
+		"spawn with no task":       {call("spawn_specialist", `{"specialist":"researcher","task_description_and_context":" "}`), true, "task_description_and_context is required"},
+		"spawn with no specialist": {call("spawn_specialist", `{"specialist":"","task_description_and_context":"x"}`), true, "specialist is required"},
+		"cancel with no id":        {call("cancel_child", `{"child_id":""}`), true, "child_id is required"},
+		"a blocking spawn":         {call("spawn_specialist", `{"specialist":"researcher","task_description_and_context":"x"}`), false, "jobs are not available"},
+		"a background spawn":       {call("spawn_specialist", `{"specialist":"researcher","task_description_and_context":"x","block":false}`), false, "jobs are not available"},
+		"a cancel":                 {call("cancel_child", `{"child_id":"job-1"}`), false, "jobs are not available"},
+	} {
+		if tc.err == nil || !strings.Contains(tc.err.Error(), tc.want) || errors.Is(tc.err, ErrCorrection) != tc.correction {
+			t.Errorf("%s = %v, want %q (correction %v)", name, tc.err, tc.want, tc.correction)
 		}
-	}
-
-	const body = "from-worker-body\n"
-	if _, err := runWriteTool(t, worker, worker.findTool("write", ""), `{"path":"/workspace/work/from-worker.txt","content":`+jsonString(body)+`}`); err != nil {
-		t.Fatal(err)
-	}
-
-	if got, err := ms.Route(ctx, "/workspace/work/from-worker.txt").
-		ReadText(ctx); err != nil || got.Text() != body {
-		text := ""
-		if got != nil {
-			text = got.Text()
-		}
-		t.Fatalf("parent ReadText after worker write: %q err=%v", text, err)
-	}
-
-	if _, err := worker.findTool("run_command", "").invoke(ctx, `{"command":"ls workspace/work"}`, turnRuntime(worker)); !errors.Is(err, vfs.ErrFuseNotMounted) {
-		t.Fatalf("run_command without HostDir: %v", err)
-	}
-
-	const phraseA = "worker-index-share-aaa"
-
-	if err := ms.Route(ctx, "/workspace/work/tracked.txt").
-		WriteFile(ctx, []byte(phraseA+"\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := runWriteTool(t, worker, worker.findTool("index_file", ""), `{"path":"/workspace/work/tracked.txt"}`); err != nil {
-		t.Fatal(err)
-	}
-	if hit := waitSearchHit(t, eng, scope, phraseA, 3*time.Second); hit.Properties[vfsindex.PropVFSPath] != "/workspace/work/tracked.txt" {
-		t.Fatalf("index vfs_path: %+v", hit.Properties)
-	}
-}
-
-func TestWithSpecialist_inheritsParentSkills(t *testing.T) {
-	ctx := context.Background()
-	pack := t.TempDir()
-	d := filepath.Join(pack, "research")
-	if err := os.MkdirAll(d, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body := "---\nname: research\ndescription: Research carefully\n---\n\nAlways verify claims.\n"
-	if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	work := t.TempDir()
-	ms := mustMountTree(t, t.Name(), vfs.At("work", vfs.Local(work)), vfs.At("skills", vfs.Local(pack)))
-
-	opts := AgentOptions{
-		MaxWindowSize: 8192, MaxTurnRequests: 4,
-		Model:        &scriptedModel{},
-		mountSession: ms,
-	}
-	parent := mustNewTurnManager(t, opts)
-	t.Cleanup(parent.Close)
-	if parent.findTool("read_skill", "") == nil {
-		t.Fatal("parent missing read_skill")
-	}
-	inherited := opts.WithSpecialist(&Specialist{Name: "researcher", Model: &scriptedModel{}})
-	if inherited.MaxTurnRequests != 4 || inherited.mountSession != ms {
-		t.Fatalf("WithSpecialist max=%d mount=%v", inherited.MaxTurnRequests, inherited.mountSession != nil)
-	}
-
-	worker := mustNewTurnManager(t, inherited)
-	t.Cleanup(worker.Close)
-	skill := worker.findTool("read_skill", "")
-	if skill == nil {
-		t.Fatal("worker missing read_skill")
-	}
-	res, err := skill.invoke(ctx, `{"name":"research"}`, turnRuntime(worker))
-	if err != nil || !strings.Contains(res.output, "Always verify claims") {
-		t.Fatalf("worker read_skill: %v %s", err, res.output)
 	}
 }

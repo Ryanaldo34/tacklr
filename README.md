@@ -10,6 +10,8 @@ Tacklr is an opinionated Go SDK for building agent harnesses. It is a framework:
 
 You bring a model, tools, and the storage you already use. Tacklr sits in the middle of that stack and keeps the run deterministic from the harness’s point of view — even though the model is not.
 
+**Tacklr supports Linux only.** It builds, runs, and is tested on Linux. Other operating systems are not supported, and the module does not build for them.
+
 ```bash
 go get github.com/ryanaldo34/tacklr
 ```
@@ -40,7 +42,7 @@ One `Prompt` or `Resume` is a turn: infer, run tools, maybe park for the user, t
 create_plan → tools → complete_todo → handoff → next work
 ```
 
-A model round may emit several tool calls. The harness does not infer again until every call in that batch has a result, or a call is parked. Planning builtins (`create_plan`, `list_plan`, `edit_plan`, `complete_todo`) are harness-owned. Your tools cannot rewrite the plan store.
+A model reply may make several tool calls; they run at once. The context window holds complete rounds only (a reply and a result for each of its calls), and the harness does not infer again until the round is complete. Over the window's pressure the window collapses into one summary, and the messages it replaced are saved for `search`; a result too large even then is cut, and with `AgentOptions.OverflowPath` its full text is kept for `read`. Planning builtins (`create_plan`, `list_plan`, `edit_plan`, `complete_todo`) are harness-owned. Your tools cannot rewrite the plan store.
 
 ---
 
@@ -52,8 +54,8 @@ Session data is three frozen planes. Do not mix them:
 
 | Plane | You pass | Holds |
 |-------|----------|--------|
-| **SnapshotStore** | `Config.Snapshots` (zero: memory, kept on the runtime) | Window, plan, parked interrupt, `userState`, VFS recipes, session identity |
-| **Wait loop** | `temporal.Open` then `StartWorker` | Scheduler: leftover tool calls, child workflows, Status |
+| **SnapshotStore** | `Config.Snapshots` (zero: memory, kept on the runtime) | `tacklr.SessionCheckpoint`: window, open round, plan, parked interrupt, `userState`, permission decisions, search rests |
+| **Wait loop** | `temporal.Open` then `StartWorker` | Scheduler: child workflows, Status |
 | **SecretStorage** | `temporal.Config.Secrets` (zero: memory, kept on the runtime) | VFS tokens. Not in snapshots. Not in Temporal history |
 
 Temporal puts work-item tokens in `Secrets` before signaling. `Prompt.Auth` / `Resume.Auth` is how the host hands tokens in.
@@ -264,11 +266,12 @@ Put optional tools on `AgentOptions.Tools`. Swap the fake the same way: `Tools: 
 
 | Plane | Canonical store |
 |-------|-----------------|
-| Conversation, plan, parked interrupt, `userState`, VFS recipes, identity | `session.SnapshotStore` (`tacklr.SessionCheckpoint` plus `Snapshot.Mounts`) |
-| Leftover unstarted tool calls, MCP config, child futures, Status | Session wait loop (Temporal workflow replay) |
+| Conversation, open round, plan, parked interrupt, `userState` | `session.SnapshotStore` (`tacklr.SessionCheckpoint`) |
+| Identity (specialist, parent, VFS recipes) | Session wait loop (`session.Identity`) |
+| MCP config, child futures, Status | Session wait loop (Temporal workflow replay) |
 | VFS tokens | `session.SecretStorage` |
 
-`CreateSession.State` / `Prompt.State` / `Resume.State` merge into checkpoint `userState`. They are not a second Temporal copy of that map. File bytes are never snapshotted; VFS writes persist as they happen. Close deletes the snapshot and the secret bag. Details: [docs/session.md](docs/session.md).
+`CreateSession.State` / `Prompt.State` / `Resume.State` are sent once, to the next step, which writes them into the checkpoint's `userState`. File bytes are never snapshotted; VFS writes persist as they happen. Close deletes the snapshot and the secret bag. Details: [docs/session.md](docs/session.md).
 
 ### Specialists
 
@@ -337,14 +340,14 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 
 ## Contributing
 
-This repo is a Go module. It requires **Go 1.27**. Start with [`AGENTS.md`](AGENTS.md) for goals and coding standards. Short version:
+This repo is a Go module. It requires **Go 1.27** and **Linux**: build, lint, and test on a Linux host or VM. Start with [`AGENTS.md`](AGENTS.md) for goals and coding standards. Short version:
 
 - Prefer the standard library. Third-party packages are a last resort.
 - Prefer small, explicit pieces over hidden abstractions.
 - Tests are outcome-oriented integration tests. Assert what should happen, not that a private helper ran. Avoid duplicate coverage of the same return path.
 
 ```bash
-make test         # includes brain Postgres + Helix (Docker)
+make test         # go test ./...: needs Linux, FUSE and Docker (Testcontainers)
 make vet
 make lint
 ```

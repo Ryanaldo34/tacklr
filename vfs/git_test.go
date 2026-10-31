@@ -2,7 +2,6 @@ package vfs_test
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -29,43 +28,6 @@ func mountGit(t *testing.T, sessionID string, repo vfs.GitRepo) *vfs.MountSessio
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 	return ms
-}
-
-func TestGit_tokenCloneIsAWorkingTreeTheAgentCommitsAndPushesWithGit(t *testing.T) {
-	// Arrange
-	ctx := t.Context()
-	srv := testgit.Start(t, map[string]string{"README.md": "# hi\n"})
-	repo := gitTokenRepo(t, srv)
-	ms := mountGit(t, "s1", repo)
-	checkout := filepath.Join(repo.Dir, "s1", "code")
-	pushAuth := "http.extraHeader=Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("agent:"+srv.Token))
-
-	// Act
-	readme, readErr := ms.Route(ctx, "/workspace/code/README.md").ReadFile(ctx)
-	writeErr := errors.Join(
-		ms.Route(ctx, "/workspace/code/src").MkdirAll(ctx),
-		ms.Route(ctx, "/workspace/code/src/app.go").WriteFile(ctx, []byte("package app\n")),
-	)
-	testgit.Run(t, checkout, "add", "--all")
-	testgit.Run(t, checkout, "commit", "--quiet", "-m", "add app")
-	testgit.Run(t, checkout, "-c", pushAuth, "push", "--quiet", "origin", "HEAD:refs/heads/agent")
-	next := mountGit(t, "s1", repo)
-	reopened, reopenErr := next.Route(ctx, "/workspace/code/src/app.go").ReadFile(ctx)
-
-	// Assert
-	if readErr != nil || string(readme) != "# hi\n" || writeErr != nil {
-		t.Fatalf("read %q %v, write %v", readme, readErr, writeErr)
-	}
-	if got := srv.Show(t, "agent", "src/app.go"); got != "package app" {
-		t.Fatalf("pushed app.go = %q", got)
-	}
-	if got := testgit.Run(t, checkout, "remote", "get-url", "origin"); got != srv.HTTPURL {
-		t.Fatalf("origin = %q", got)
-	}
-	if reopenErr != nil || string(reopened) != "package app\n" ||
-		testgit.Run(t, checkout, "log", "-1", "--format=%s") != "add app" {
-		t.Fatalf("next activity lost the checkout: %q %v", reopened, reopenErr)
-	}
 }
 
 func TestGit_sshKeyClonesRefAtDepth(t *testing.T) {

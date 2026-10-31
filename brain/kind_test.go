@@ -127,35 +127,6 @@ func TestFilterValidateAgainst_catalogRules(t *testing.T) {
 	}
 }
 
-func TestEmptyCatalog_openFiltersAndTheStoresKinds(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	if err := store.PutKind(ctx, brain.ObjectKind{
-		Kind: "Document", Description: "from store", IsParent: true,
-		FilterableFields: json.RawMessage(`[{"name":"stage","type":"string"}]`),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := brain.NewEngine(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !eng.Catalog().Empty() {
-		t.Fatal("catalog should be empty")
-	}
-	doc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "d", Namespace: tenant(t)}
-	if err := putFixture(store, doc); err != nil {
-		t.Fatal(err)
-	}
-	res, err := eng.Open(ctx, brain.Scope{Namespace: doc.Namespace}, doc.ID)
-	if err != nil || res.Kind == nil || res.Kind.Description != "from store" {
-		t.Fatalf("open's kind from the store: %+v err=%v", res.Kind, err)
-	}
-	if err := mustFilter(t, map[string]any{"stage": "open"}).ValidateAgainst(eng.Catalog()); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestOpen_takesTheKindFromTheCatalogOverTheStore(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
@@ -245,8 +216,8 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 		t.Fatalf("want no hits for orphan-only content under catalog, got %+v", slices.Collect(page.Results.Objects()))
 	}
 
-	// Successful search freezes the catalog; further RegisterKinds fails.
-	if err := eng.RegisterKinds(ctx, brain.KindSpec{Kind: "Deal", IsParent: true}); err == nil {
+	// Successful search freezes the catalog; further ApplyKinds fails.
+	if err := eng.ApplyKinds(ctx, brain.KindSpec{Kind: "Deal", IsParent: true}); err == nil {
 		t.Fatal("want freeze after first successful search")
 	}
 }
@@ -348,9 +319,9 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 		t.Fatalf("sync: %+v err=%v", row, err)
 	}
 
-	eng2.FreezeCatalog()
-	if err := eng2.ApplyKinds(ctx, brain.KindSpec{Kind: "X", IsParent: true}); err == nil {
-		t.Fatal("want frozen apply error")
+	// A search freezes the catalog: loading kinds again fails.
+	if _, err := eng2.Search(ctx, brain.Scope{Namespace: mustNS(t, "org", "freeze")}, brain.SearchRequest{Query: "x"}); err != nil {
+		t.Fatal(err)
 	}
 	if err := eng2.LoadKindsFromStore(ctx); err == nil {
 		t.Fatal("want frozen load error")
@@ -376,13 +347,6 @@ func TestApplyKinds_invalidBatchFailsClosed(t *testing.T) {
 	}
 	if _, err := kindNamed(ctx, store, "Document"); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("no partial durable write on batch validate fail: %v", err)
-	}
-}
-
-func TestWithKinds_invalidFailsNewEngine(t *testing.T) {
-	_, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{}))
-	if err == nil {
-		t.Fatal("want error")
 	}
 }
 

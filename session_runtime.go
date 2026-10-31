@@ -66,11 +66,11 @@ func (rt sessionRuntime) StateDelete(key string) {
 	rt.session.StateDelete(key)
 }
 
-// Park writes pending for this tool call and returns the interrupt as error.
-// After Resume, re-entry returns the resolved interrupt with a nil error.
+// Park parks this tool call and returns the interrupt as the error. The
+// call's run after resume gets the answered interrupt and a nil error.
 func (rt sessionRuntime) Park(kind string, payload []byte) (Interrupt, error) {
-	if resolved, ok := rt.session.TakeResolved(rt.toolCallID); ok {
-		return resolved, nil
+	if answered, ok := rt.session.TakeAnswer(rt.toolCallID, kind); ok {
+		return answered, nil
 	}
 	intr, ok := NewInterrupt(kind)
 	if !ok {

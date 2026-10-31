@@ -24,11 +24,10 @@ type Open func(ctx context.Context, sessionID string, b Binding) (Provider, erro
 
 // Member is one /workspace/<name> backend.
 type Member struct {
-	name        string
-	open        Open
-	indexPolicy string
-	readOnly    bool
-	profile     string
+	name       string
+	open       Open
+	notIndexed bool
+	readOnly   bool
 }
 
 // At names a backend under /workspace. name is the first path segment
@@ -44,15 +43,9 @@ func (m Member) ReadOnly() Member {
 	return m
 }
 
-// Indexed sets MountSpec.IndexPolicy on this member (none|selective|prefix|watch).
-func (m Member) Indexed(policy string) Member {
-	m.indexPolicy = strings.TrimSpace(policy)
-	return m
-}
-
-// Profile sets MountSpec.Profile. Empty keeps the At name.
-func (m Member) Profile(profile string) Member {
-	m.profile = strings.TrimSpace(profile)
+// NotIndexed makes index_file refuse this member's files.
+func (m Member) NotIndexed() Member {
+	m.notIndexed = true
 	return m
 }
 
@@ -93,16 +86,12 @@ func Tree(members ...Member) OpenVFS {
 				params = map[string]string{}
 			}
 			params[ParamName] = m.name
-			profile := m.name
-			if m.profile != "" {
-				profile = m.profile
-			}
 			spec := MountSpec{
-				Point:       WorkspacePoint + "/" + m.name,
-				Params:      params,
-				ReadOnly:    !writable,
-				Profile:     profile,
-				IndexPolicy: m.indexPolicy,
+				Point:      WorkspacePoint + "/" + m.name,
+				Params:     params,
+				ReadOnly:   !writable,
+				Profile:    m.name,
+				NotIndexed: m.notIndexed,
 			}
 			if err := ms.mount(ctx, spec, p); err != nil {
 				return nil, err

@@ -8,7 +8,7 @@ import (
 
 // Runtime is the host session API. One backend runs one session per id.
 // That backend implements Step, Mailbox, and Ledger. Package session owns
-// the session loop. Leftover-tool and HITL rules live in tacklr.Next.
+// the session loop. Open-round and HITL rules live in tacklr.Next.
 //
 // Prompt and Resume deliver work to the session. They do not return a harness.
 // Subscribe yields StreamEvent values (message, tool, yield, error, complete).

@@ -82,13 +82,7 @@ func (r Route) WriteFile(ctx context.Context, data []byte) error {
 	if r.Spec.ReadOnly {
 		return ErrReadOnly
 	}
-	if err := writeProvider(ctx, r.Provider, r.Rel, bytes.NewReader(data), int64(len(data))); err != nil {
-		return err
-	}
-	if r.sess == nil {
-		return nil
-	}
-	return r.sess.fireAfterPersist(ctx, r.virtual())
+	return writeProvider(ctx, r.Provider, r.Rel, bytes.NewReader(data), int64(len(data)))
 }
 
 func writeProvider(ctx context.Context, p Provider, name string, rd io.Reader, size int64) error {
@@ -215,11 +209,5 @@ func (r Route) WriteDocument(ctx context.Context, doc Document) error {
 	if !ok {
 		return ErrNotSupported
 	}
-	if err := db.WriteDocument(ctx, r.Rel, doc); err != nil {
-		return err
-	}
-	if r.sess == nil {
-		return nil
-	}
-	return r.sess.fireAfterPersist(ctx, r.virtual())
+	return db.WriteDocument(ctx, r.Rel, doc)
 }

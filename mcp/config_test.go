@@ -2,7 +2,6 @@ package mcp_test
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -90,36 +89,6 @@ func TestMCPConfig_validateRejectsUnsupportedTransport(t *testing.T) {
 	// Assert
 	if err == nil || !strings.Contains(err.Error(), "unsupported transport") {
 		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestMCPConfig_resolveReportsResolverFailure(t *testing.T) {
-	// Arrange
-	resolver := credentialResolverFunc(func(context.Context, string) (mcp.Credentials, error) {
-		return mcp.Credentials{}, fmt.Errorf("vault unavailable")
-	})
-
-	// Act
-	_, err := (mcp.MCPConfig{
-		Name:          "remote",
-		Type:          mcp.TransportHTTP,
-		URL:           "https://example.test",
-		CredentialRef: "vault://remote",
-	}).Resolve(t.Context(), resolver)
-
-	// Assert
-	if err == nil || !strings.Contains(err.Error(), "vault unavailable") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestDurableConfigs_emptyReturnsNil(t *testing.T) {
-	// Act
-	durable := mcp.DurableConfigs(nil)
-
-	// Assert
-	if durable != nil {
-		t.Fatalf("durable = %#v", durable)
 	}
 }
 

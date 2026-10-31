@@ -30,13 +30,6 @@ type Interrupt interface {
 	Error() string
 }
 
-// PayloadValidator is an optional capability Interrupt types may implement
-// for standalone payload checks. Session Resume calls Return only; types that
-// still need field-presence checks do that inside Return.
-type PayloadValidator interface {
-	ValidatePayload([]byte) error
-}
-
 type UserChoice struct {
 	Title         string `json:"title"`
 	Description   string `json:"description"`
@@ -62,7 +55,7 @@ func (c *UserSelectionInterrupt) Serialize() ([]byte, error) {
 	return json.Marshal(c)
 }
 
-func (c *UserSelectionInterrupt) ValidatePayload(payload []byte) error {
+func (c *UserSelectionInterrupt) validatePayload(payload []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return fmt.Errorf("%w: invalid JSON: %w", ErrInvalidPayload, err)
@@ -81,7 +74,7 @@ func (c *UserSelectionInterrupt) ValidatePayload(payload []byte) error {
 }
 
 func (c *UserSelectionInterrupt) Return(payload []byte) error {
-	if err := c.ValidatePayload(payload); err != nil {
+	if err := c.validatePayload(payload); err != nil {
 		return err
 	}
 	var selection UserSelectionPayload
@@ -118,8 +111,6 @@ func (p *ChildWaiting) Serialize() ([]byte, error) {
 	return json.Marshal(p)
 }
 
-func (p *ChildWaiting) ValidatePayload([]byte) error { return nil }
-
 func (p *ChildWaiting) Return([]byte) error { return nil }
 
 func (p *ChildWaiting) Error() string {
@@ -144,8 +135,6 @@ func (p *AuthExpired) TypeName() string { return TypeAuthExpired }
 func (p *AuthExpired) Serialize() ([]byte, error) {
 	return json.Marshal(p)
 }
-
-func (p *AuthExpired) ValidatePayload([]byte) error { return nil }
 
 func (p *AuthExpired) Return([]byte) error { return nil }
 
@@ -194,9 +183,10 @@ type ToolPermissionInterrupt struct {
 	Title    string             `json:"title,omitempty"` // human-readable invocation label
 	Options  []PermissionOption `json:"options"`
 
-	// Set by Return after the consumer selects an option. Checkpointed so a
-	// later activity can TakeResolved and see the decision. Serialize omits
-	// these so the client park payload stays unresolved.
+	// Set by Return after the consumer selects an option. The checkpoint
+	// keeps them on the call's park, so the call's run after resume sees the
+	// decision. Serialize omits them so the client park payload stays
+	// unanswered.
 	SelectedOptionID string `json:"selectedOptionId,omitempty"`
 	SelectedKind     string `json:"selectedKind,omitempty"`
 	Allowed          bool   `json:"allowed,omitempty"`
@@ -235,7 +225,7 @@ func (p *ToolPermissionInterrupt) InitFromPayload(payload []byte) error {
 	return nil
 }
 
-func (p *ToolPermissionInterrupt) ValidatePayload(payload []byte) error {
+func (p *ToolPermissionInterrupt) validatePayload(payload []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return fmt.Errorf("%w: invalid JSON: %w", ErrInvalidPayload, err)
@@ -256,7 +246,7 @@ func (p *ToolPermissionInterrupt) ValidatePayload(payload []byte) error {
 }
 
 func (p *ToolPermissionInterrupt) Return(payload []byte) error {
-	if err := p.ValidatePayload(payload); err != nil {
+	if err := p.validatePayload(payload); err != nil {
 		return err
 	}
 	var res ToolPermissionPayload
@@ -323,25 +313,6 @@ func NewInterrupt(typeName string) (Interrupt, bool) {
 		return nil, false
 	}
 	return f(), true
-}
-
-// Clone returns a deep copy via JSON for checkpoint snapshots.
-func CloneInterrupt(intr Interrupt) (Interrupt, error) {
-	if intr == nil {
-		return nil, nil
-	}
-	cp, ok := NewInterrupt(intr.TypeName())
-	if !ok {
-		return nil, fmt.Errorf("interrupt: unknown type %q", intr.TypeName())
-	}
-	data, err := json.Marshal(intr)
-	if err != nil {
-		return nil, fmt.Errorf("interrupt: clone %s: %w", intr.TypeName(), err)
-	}
-	if err := json.Unmarshal(data, cp); err != nil {
-		return nil, fmt.Errorf("interrupt: clone %s: %w", intr.TypeName(), err)
-	}
-	return cp, nil
 }
 
 // PayloadInitializer is an optional capability Interrupt types implement

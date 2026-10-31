@@ -1,7 +1,7 @@
 package tacklr
 
 import (
-	"strings"
+	"slices"
 	"sync"
 )
 
@@ -9,11 +9,10 @@ import (
 // It is a sessionManager module — not exposed on HarnessRuntime.
 // After newPlanStore / newSessionManager the receiver is never nil.
 type planStore struct {
-	mu              sync.RWMutex
-	todos           []Todo
-	document        string
-	documentUpdated bool
-	todosUpdated    bool
+	mu           sync.RWMutex
+	todos        []Todo
+	document     string
+	todosUpdated bool
 }
 
 // newPlanStore returns an empty plan store.
@@ -41,19 +40,20 @@ func (p *planStore) Get() []Todo {
 	return cp
 }
 
-// Set replaces the todo list. The harness emits plan_update after ConsumeTodosUpdated.
-// Pass nil to clear the plan entirely; pass a non-nil empty slice for an empty plan.
-func (p *planStore) Set(todos []Todo) {
+// Change applies fn to the plan atomically. fn gets a copy of the todos
+// (nil when no plan exists) and the document, and returns the new ones; when
+// it fails the plan stays as it was. Tool calls of one reply run at once and
+// change the plan only through Change, so no change is lost. The harness
+// emits plan_update after ConsumeTodosUpdated.
+func (p *planStore) Change(fn func(todos []Todo, doc string) ([]Todo, string, error)) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.todosUpdated = true
-	if todos == nil {
-		p.todos = nil
-		return
+	todos, doc, err := fn(slices.Clone(p.todos), p.document)
+	if err != nil {
+		return err
 	}
-	cp := make([]Todo, len(todos))
-	copy(cp, todos)
-	p.todos = cp
+	p.todos, p.document, p.todosUpdated = todos, doc, true
+	return nil
 }
 
 // ConsumeTodosUpdated returns the current todos when Set ran since the last
@@ -80,27 +80,16 @@ func (p *planStore) Document() string {
 	return p.document
 }
 
-// SetDocument stores the plaintext project plan draft.
-// Marks the document updated only when replacing an existing draft with different
-// text (edits), not on the initial install from create_plan.
-func (p *planStore) SetDocument(plan string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	prev := p.document
-	p.document = plan
-	if prev != "" && strings.TrimSpace(prev) != strings.TrimSpace(plan) {
-		p.documentUpdated = true
-	}
+// snapshot is the todos and the document, for the checkpoint.
+func (p *planStore) snapshot() ([]Todo, string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return slices.Clone(p.todos), p.document
 }
 
-// ConsumeDocumentUpdated returns whether the plan document was updated since the
-// last consume, and clears the flag.
-func (p *planStore) ConsumeDocumentUpdated() bool {
+// restore replaces the plan with a checkpoint's.
+func (p *planStore) restore(todos []Todo, document string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.documentUpdated {
-		return false
-	}
-	p.documentUpdated = false
-	return true
+	p.todos, p.document, p.todosUpdated = todos, document, false
 }

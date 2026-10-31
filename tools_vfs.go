@@ -15,12 +15,11 @@ const smallFormatCells = 32
 
 // vfsTools is the thin tool adapter over MountSession.Apply / ReadLines / ReadText.
 type vfsTools struct {
-	ms                 *vfs.MountSession
-	permissionRequired bool
+	ms *vfs.MountSession
 }
 
-func newVFSTools(ms *vfs.MountSession, permissionRequired bool) []*Tool {
-	v := vfsTools{ms: ms, permissionRequired: permissionRequired}
+func newVFSTools(ms *vfs.MountSession) []*Tool {
+	v := vfsTools{ms: ms}
 	return []*Tool{v.newRead(), v.newWrite(), v.newWriteDocument(), v.newWriteSpreadsheet()}
 }
 
@@ -439,10 +438,10 @@ May pause for write permission. On success returns path and line_count. Fails if
 	return v.withWritePermission(cfg)
 }
 
+// withWritePermission gates a write tool on the user's permission
+// (AgentOptions.AllowTools grants it).
 func (v vfsTools) withWritePermission(cfg ToolConfig) *Tool {
-	if v.permissionRequired {
-		cfg.OnCall = []OnCallFunc{ToolPermissionOnCall}
-	}
+	cfg.OnCall = []OnCallFunc{ToolPermissionOnCall}
 	return NewTool(cfg)
 }
 
@@ -582,20 +581,21 @@ func growLineWindow(b *strings.Builder, extra int, lines []string) {
 const runCommandTimeout = 60 * time.Second
 
 type runCommandArgs struct {
-	Command string `json:"command" desc:"Host shell command. Runs as /bin/sh -c. cwd is the VFS root. Use relative paths (workspace/work/foo). On Linux the shell is jailed to this mount."`
+	Command string `json:"command" desc:"Host shell command. Runs as /bin/sh -c. cwd is the VFS root. Use relative paths (workspace/work/foo). The shell is jailed to this mount."`
 }
 
-func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
+func newRunCommand(ms *vfs.MountSession) *Tool {
 	command.RequireJail()
 	cfg := ToolConfig{
 		Name:        "run_command",
 		DisplayName: "Run {command}",
-		Description: `Run a host shell command as /bin/sh -c with cwd at this session's workspace root. Call for directory listings, grep, and other shell work. On Linux the shell cannot see other session mounts, system directories are read-only, and each command starts with only PATH, HOME=/tmp and TMPDIR=/tmp (HOME is not kept between commands).
+		Description: `Run a host shell command as /bin/sh -c with cwd at this session's workspace root. Call for directory listings, grep, and other shell work. The shell cannot see other session mounts, system directories are read-only, and each command starts with only PATH, HOME=/tmp and TMPDIR=/tmp (HOME is not kept between commands).
 
 May pause for execute permission. Returns stdout/stderr. A non-zero process exit is still a successful tool result (exit=N in the output). Fails if no command is given or the workspace is not mounted.`,
 		Category: ToolCategoryExecute,
 		Access:   ToolExecuteAccess,
 		Timeout:  runCommandTimeout,
+		OnCall:   []OnCallFunc{ToolPermissionOnCall},
 		Handler: func(ctx context.Context, args runCommandArgs, rt HarnessRuntime) (string, error) {
 			dir := ms.HostDir()
 			if dir == "" {
@@ -608,9 +608,6 @@ May pause for execute permission. Returns stdout/stderr. A non-zero process exit
 			rt.EmitUpdate("Running " + cmdStr)
 			return command.Run(ctx, dir, cmdStr)
 		},
-	}
-	if permissionRequired {
-		cfg.OnCall = []OnCallFunc{ToolPermissionOnCall}
 	}
 	return NewTool(cfg)
 }

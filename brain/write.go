@@ -242,14 +242,6 @@ func (obj Object) IndexText() string {
 	return joinNonEmpty("\n", obj.Title, obj.Summary, obj.Content)
 }
 
-// EntityIndexText builds text for first-class graph nodes and parent embeddings:
-// title, summary, scalar properties (sorted keys), and full content.
-// Reserved store props (slug, vfs_path) are omitted. Callers with a kind catalog
-// should prefer Engine.Save, which also honors FieldSpec.SkipIndex.
-func (obj Object) EntityIndexText() string {
-	return obj.entityIndexText(KindSpec{}, false)
-}
-
 func (obj Object) entityIndexText(spec KindSpec, haveSpec bool) string {
 	parts := make([]string, 0, 8)
 	if t := strings.TrimSpace(obj.Title); t != "" {

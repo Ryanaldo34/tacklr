@@ -11,17 +11,16 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/pgtest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/server"
 )
 
-const wirePgImage = "tacklr-pg-brain:test"
-
 var (
-	wireOnce sync.Once
-	wirePool *pgxpool.Pool
-	wireErr  error
-	wireSkip string
+	wireOnce     sync.Once
+	wirePool     *pgxpool.Pool
+	wireErr      error
+	wireStartErr string
 )
 
 // TestPostgresWireStore_putGetDelete is the real-Postgres outcome for protocol
@@ -124,7 +123,7 @@ func wireConn(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
 	wireOnce.Do(func() {
-		ctr, err := postgres.Run(ctx, wirePgImage,
+		ctr, err := postgres.Run(ctx, pgtest.Image,
 			postgres.WithDatabase("wire"),
 			postgres.WithUsername("wire"),
 			postgres.WithPassword("wire"),
@@ -132,7 +131,7 @@ func wireConn(t *testing.T) *pgxpool.Pool {
 			postgres.WithSQLDriver("pgx"),
 		)
 		if err != nil {
-			wireSkip = err.Error() + " (make brain-pg-image)"
+			wireStartErr = err.Error()
 			return
 		}
 		url, err := ctr.ConnectionString(ctx, "sslmode=disable")
@@ -150,8 +149,8 @@ func wireConn(t *testing.T) *pgxpool.Pool {
 			wirePool = pool
 		}
 	})
-	if wireSkip != "" {
-		t.Skipf("postgres unavailable: %s", wireSkip)
+	if wireStartErr != "" {
+		t.Fatalf("postgres: %s", wireStartErr)
 	}
 	if wireErr != nil {
 		t.Fatal(wireErr)

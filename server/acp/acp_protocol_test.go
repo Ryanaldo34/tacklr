@@ -261,40 +261,6 @@ func TestACP_prompt_stopReason_maxTokens(t *testing.T) {
 	assertACPStopReason(t, strategy, nil, "max_tokens")
 }
 
-func TestACP_prompt_stopReason_maxTurnRequests(t *testing.T) {
-	// Always request a tool so the harness would loop; MaxTurnRequests=1 ends before 2nd invoke.
-	ping := tacklr.NewTool(tacklr.ToolConfig{
-		Name: "ping",
-		Handler: func(ctx context.Context) (string, error) {
-			return "pong", nil
-		},
-	})
-	var n int
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		n++
-		ch <- tacklr.LLMResponseChunk{
-			Type: tacklr.StreamEventFunctionCall,
-			ToolCalls: []tacklr.ToolCall{
-				{ID: "c1", CallID: "c1", Name: "ping", Arguments: `{}`},
-			},
-			IsComplete: true,
-		}
-		ch <- tacklr.LLMResponseChunk{IsComplete: true}
-	})
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{MaxTurnRequests: 1,
-		Tools: []*tacklr.Tool{ping}})
-	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sessionID := acpSessionID(t, recNew)
-	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"go"}]}}`)
-	reason := promptStopReason(t, rec)
-	if reason != "max_turn_requests" {
-		t.Fatalf("stopReason = %q, want max_turn_requests (invokes=%d frames=%v)", reason, n, parseACPFrames(t, rec.Body))
-	}
-	if n != 1 {
-		t.Errorf("model invokes = %d, want 1", n)
-	}
-}
-
 func assertACPStopReason(t *testing.T, strategy tacklr.InferenceStrategy, tools []*tacklr.Tool, want string) {
 	t.Helper()
 	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: tools})

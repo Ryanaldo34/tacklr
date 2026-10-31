@@ -62,7 +62,7 @@ func TestInvoke(t *testing.T) {
 	t.Run("returns raw string", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "zero", Handler: zeroArgsStringHandler})
 		res, err := tool.invoke(context.Background(), "", nil)
-		got := res.output
+		got := res.Output
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -74,7 +74,7 @@ func TestInvoke(t *testing.T) {
 	t.Run("marshals non-string return", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "zero_int", Handler: zeroArgsIntHandler})
 		res, err := tool.invoke(context.Background(), "", nil)
-		got := res.output
+		got := res.Output
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -92,12 +92,34 @@ func TestInvoke(t *testing.T) {
 		}
 		tool := NewTool(ToolConfig{Name: "handler", Handler: h})
 		res, err := tool.invoke(context.Background(), `{"name":"test","age":10}`, nil)
-		got := res.output
+		got := res.Output
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got != "result" {
 			t.Errorf("got %q, want %q", got, "result")
+		}
+	})
+
+	t.Run("unmarshals pointer args", func(t *testing.T) {
+		tool := NewTool(ToolConfig{Name: "ptr_args", Handler: func(ctx context.Context, a *BasicArgs) (string, error) { return a.Name, nil }})
+		res, err := tool.invoke(context.Background(), `{"name":"x"}`, nil)
+		if err != nil || res.Output != "x" {
+			t.Fatalf("got %q %v", res.Output, err)
+		}
+	})
+
+	t.Run("an arg of the wrong type errors", func(t *testing.T) {
+		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
+		if _, err := tool.invoke(context.Background(), `{"name":123}`, nil); err == nil || !strings.Contains(err.Error(), "unmarshal args") {
+			t.Fatalf("got %v, want an unmarshal error", err)
+		}
+	})
+
+	t.Run("a result that cannot be marshaled errors", func(t *testing.T) {
+		tool := NewTool(ToolConfig{Name: "bad_out", Handler: func(ctx context.Context) (chan int, error) { return make(chan int), nil }})
+		if _, err := tool.invoke(context.Background(), "", nil); err == nil {
+			t.Fatal("want marshal result error")
 		}
 	})
 
@@ -250,32 +272,6 @@ func TestSchema(t *testing.T) {
 	})
 }
 
-func TestNewTool_exposesConfig(t *testing.T) {
-	tool := NewTool(ToolConfig{
-		Name:        "search_records",
-		DisplayName: "Search",
-		Description: "Search operational records.",
-		Namespace:   "ops",
-		Category:    ToolCategorySearch,
-		Access:      ToolReadAccess,
-		Timeout:     5 * time.Second,
-		OnCall:      []OnCallFunc{nil},
-		Handler:     zeroArgsStringHandler,
-	})
-	if tool.Name() != "search_records" || tool.DisplayName() != "Search" {
-		t.Fatalf("name=%q display=%q", tool.Name(), tool.DisplayName())
-	}
-	if tool.Description() != "Search operational records." || tool.Namespace() != "ops" {
-		t.Fatalf("desc=%q ns=%q", tool.Description(), tool.Namespace())
-	}
-	if tool.Category() != ToolCategorySearch || tool.Access() != ToolReadAccess {
-		t.Fatalf("category=%q access=%v", tool.Category(), tool.Access())
-	}
-	if tool.Timeout() != 5*time.Second {
-		t.Fatalf("timeout=%v", tool.Timeout())
-	}
-}
-
 func TestAsJson(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:        "get_weather",
@@ -307,8 +303,6 @@ func TestAsJson(t *testing.T) {
 	}
 }
 
-// TestMakeSchemaNullable_outcomes covers each rewrite branch of makeSchemaNullable
-// (used for strict optional fields). Cheap pure paths that lift library total cover.
 // TestTypeToJSONSchema_structuredOutput is the public structured-output
 // helper: omitempty fields stay optional (non-strict).
 func TestTypeToJSONSchema_structuredOutput(t *testing.T) {
@@ -403,60 +397,6 @@ func TestNewTool_validation(t *testing.T) {
 	}
 }
 
-func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
-	type args struct {
-		Name string `json:"name"`
-	}
-	tool := NewTool(ToolConfig{
-		Name: "ptr_args",
-		Handler: func(ctx context.Context, a *args) (string, error) {
-			if a == nil || a.Name == "" {
-				return "empty", nil
-			}
-			return a.Name, nil
-		},
-	})
-	res, err := tool.invoke(context.Background(), `{"name":"x"}`, nil)
-	got := res.output
-	if err != nil || got != "x" {
-		t.Fatalf("got %q %v", got, err)
-	}
-	// Type mismatch in JSON → invoke error.
-	_, err = tool.invoke(context.Background(), `{"name":123}`, nil)
-	if err == nil {
-		t.Fatal("want unmarshal error")
-	}
-
-	// Non-string result marshaled to JSON.
-	tool2 := NewTool(ToolConfig{
-		Name: "struct_out",
-		Handler: func(ctx context.Context) (struct {
-			N int `json:"n"`
-		}, error) {
-			return struct {
-				N int `json:"n"`
-			}{N: 7}, nil
-		},
-	})
-	res, err = tool2.invoke(context.Background(), "", nil)
-	got = res.output
-	if err != nil || !strings.Contains(got, "7") {
-		t.Fatalf("got %q %v", got, err)
-	}
-
-	// Unmarshallable result type → error.
-	tool3 := NewTool(ToolConfig{
-		Name: "bad_out",
-		Handler: func(ctx context.Context) (chan int, error) {
-			return make(chan int), nil
-		},
-	})
-	_, err = tool3.invoke(context.Background(), "", nil)
-	if err == nil {
-		t.Fatal("want marshal result error")
-	}
-}
-
 func assertObject(t *testing.T, s map[string]any) {
 	t.Helper()
 	if s["type"] != "object" || s["additionalProperties"] != false {
@@ -486,36 +426,6 @@ func contains(slice []string, val string) bool {
 func asParams(t *testing.T, tool *Tool) map[string]any {
 	t.Helper()
 	return tool.AsJson()["parameters"].(map[string]any)
-}
-
-func TestResolveToolTitle_invalidJSONKeepsTemplate(t *testing.T) {
-	got := ResolveToolTitle("read {path}", "read", `{not-json`)
-	if got != "read {path}" {
-		t.Fatalf("got %q, want template unchanged", got)
-	}
-	got = ResolveToolTitle("read {path}", "read", `{"path":"/work/a.txt"}`)
-	if got != "read /work/a.txt" {
-		t.Fatalf("got %q", got)
-	}
-}
-
-func TestCorrection_isAgentAndCause(t *testing.T) {
-	err := Correction(vfs.ErrNotExist, "read: that path does not exist. List the parent with run_command (ls)")
-	if !errors.Is(err, ErrCorrection) {
-		t.Fatal("Is ErrCorrection")
-	}
-	if !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatal("Is cause")
-	}
-	if errors.Is(err, ErrFailed) {
-		t.Fatal("must not be harness ErrFailed")
-	}
-	if strings.Contains(err.Error(), "vfs:") || err.Error() == ErrCorrection.Error() {
-		t.Fatalf("model text: %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), "does not exist") || !strings.Contains(err.Error(), "ls") {
-		t.Fatalf("correction: %q", err.Error())
-	}
 }
 
 func TestCorrection_emptyMsgAndAlreadyWrapped(t *testing.T) {

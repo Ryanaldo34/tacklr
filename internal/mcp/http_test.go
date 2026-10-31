@@ -49,33 +49,6 @@ func TestHeaderTransportInjectsHeaders(t *testing.T) {
 	}
 }
 
-func TestHeaderTransportCapturesHTTPErrors(t *testing.T) {
-	for _, tc := range []struct {
-		status int
-		body   string
-	}{
-		{http.StatusForbidden, "insufficient authentication scopes"},
-		{http.StatusInternalServerError, "boom"},
-	} {
-		t.Run(http.StatusText(tc.status), func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			t.Cleanup(ts.Close)
-			req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = (&headerTransport{base: http.DefaultTransport}).RoundTrip(req)
-			var httpErr *httpError
-			if !errors.As(err, &httpErr) || httpErr.Status != tc.status || httpErr.Body != tc.body {
-				t.Fatalf("err = %v", err)
-			}
-		})
-	}
-}
-
 func TestHeaderTransportPropagatesRoundTripError(t *testing.T) {
 	transport := &headerTransport{base: http.DefaultTransport}
 

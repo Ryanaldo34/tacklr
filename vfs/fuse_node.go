@@ -14,17 +14,6 @@ import (
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// FuseProbe mounts an empty session at dir and unmounts it.
-// Callers use the error to learn that this process cannot mount FUSE.
-func FuseProbe(dir string) error {
-	ms, err := NewMountSession("fuse-probe")
-	if err != nil {
-		return err
-	}
-	defer ms.Close()
-	return ms.FuseMount(dir)
-}
-
 // FuseMount projects the session as a host tree at dir.
 // If ReadText succeeds (Textual), the kernel sees that plaintext: size and
 // Read use the projection. Kernel writes stay EROFS unless kernelWritable

@@ -49,11 +49,10 @@ const (
 	ContentTypeInputText  = "input_text"
 	ContentTypeInputImage = "input_image"
 	ContentTypeInputFile  = "input_file"
-	ContentTypeRefusal    = "refusal"
 )
 
 // ContentPart is a single content block within a message.
-// Discriminated by Type — oneOf{output_text, input_text, input_image, input_file, refusal}.
+// Discriminated by Type — oneOf{output_text, input_text, input_image, input_file}.
 type ContentPart struct {
 	Type        string       `json:"type"`
 	Text        string       `json:"text,omitempty"`

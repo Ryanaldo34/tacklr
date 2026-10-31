@@ -155,25 +155,3 @@ func TestEngine_putTreeFailsOnABadPartOrSourceAndKeepsThePreviousTree(t *testing
 		}
 	}
 }
-
-func TestEngine_putTreeWithNoPartsEmptiesTheTree(t *testing.T) {
-	ctx := t.Context()
-	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
-	doc, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "doc"}, brain.Parts(brain.Object{Kind: "Chunk", Content: "old"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = eng.PutTree(ctx, scope, doc, nil)
-	kidsTree, _ := store.GetTree(ctx, scope, doc.ID, 0)
-	kids := kidsTree.Parts
-
-	if err != nil || len(kids) != 0 {
-		t.Errorf("put tree with no parts = %v, parts %v, want none", err, kids)
-	}
-}

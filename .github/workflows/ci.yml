@@ -101,44 +101,17 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      # Integration tests use Testcontainers (no mocks for graph/DB):
-      #   - Postgres (pgvector + pg_textsearch BM25)
-      #   - Helix server v0.0.12 (in-memory graph, /v2/query)
-      - name: Prepare Testcontainers (Postgres + Helix)
-        run: |
-          docker version
-          docker pull pgvector/pgvector:pg17
-          attempt=0
-          until docker build \
-            -f brain/testdata/Dockerfile.postgres \
-            -t tacklr-pg-brain:test \
-            brain/testdata; do
-            attempt=$((attempt + 1))
-            if [ "$attempt" -ge 3 ]; then
-              echo "docker build of tacklr-pg-brain:test failed after ${attempt} attempts" >&2
-              exit 1
-            fi
-            echo "docker build failed (attempt ${attempt}), retrying..." >&2
-            sleep $((attempt * 5))
-          done
-          docker pull ghcr.io/helixdb/helixdb:v0.0.12
+      # FUSE tests mount the session tree; go-fuse needs fusermount3.
+      - name: Install FUSE
+        run: sudo apt-get update && sudo apt-get install -y fuse3
 
-      # Race detector and coverage profiles are separate: -race can flake under
-      # heavy concurrency in integration-style harness tests; coverage still uses
-      # atomic mode for correct multi-goroutine counts.
-      - name: Test (race)
-        run: scripts/with-helix.sh go test -race -count=1 ./...
-        env:
-          TESTCONTAINERS_RYUK_DISABLED: "false"
-
-      - name: Test with coverage
+      # One run: race detector and coverage. Testcontainers starts Postgres
+      # (pgvector), Helix and Temporal; nothing is pulled or built beforehand.
+      - name: Test (race + coverage)
         run: |
-          scripts/with-helix.sh go test -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+          go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out | tail -1
-          go tool cover -func=coverage.out | grep helixgraph || true
           go tool cover -html=coverage.out -o coverage.html
-        env:
-          TESTCONTAINERS_RYUK_DISABLED: "false"
 
       - name: Coverage summary (markdown)
         id: cov_summary

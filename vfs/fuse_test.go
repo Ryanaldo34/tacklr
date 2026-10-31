@@ -12,9 +12,6 @@ import (
 )
 
 func TestFuseMount_hostSeesDirtyText(t *testing.T) {
-	if err := FuseProbe(t.TempDir()); err != nil {
-		t.Skip(err.Error())
-	}
 	ctx := t.Context()
 	ms := mustTree(t, At("work", Local(t.TempDir())))
 
@@ -112,9 +109,6 @@ func TestFuseMount_hostSeesDirtyText(t *testing.T) {
 }
 
 func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
-	if err := FuseProbe(t.TempDir()); err != nil {
-		t.Skip(err.Error())
-	}
 	ctx := t.Context()
 	ms := mustTree(t, At("work", Local(t.TempDir())))
 
@@ -288,10 +282,6 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 // TestFuseMount_projectedTextualReadOnly: a non-identity codec still projects
 // ReadText to the kernel (cat/rg); kernel writes stay EROFS.
 func TestFuseMount_projectedTextualReadOnly(t *testing.T) {
-	if err := FuseProbe(t.TempDir()); err != nil {
-		t.Skip(err.Error())
-	}
-
 	ctx := t.Context()
 	ms := mustTree(t, At("work", Local(t.TempDir())))
 
@@ -380,7 +370,7 @@ func TestFuseMount_requiresDir(t *testing.T) {
 	}
 	dir := t.TempDir()
 	if err := empty.FuseMount(dir); err != nil {
-		t.Skip(err.Error())
+		t.Fatal(err)
 	}
 	_ = empty.Close()
 }

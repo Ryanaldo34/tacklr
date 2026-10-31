@@ -532,57 +532,6 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 	}
 }
 
-func TestGraph_xlsxCodecCellOverlayPersists(t *testing.T) {
-	if err := adapters.RegisterCommon(vfs.DefaultContentRegistry()); err != nil {
-		t.Fatal(err)
-	}
-	ctx := t.Context()
-	raw, err := (adapters.XLSX{}).EncodeSheets(ctx, []vfs.Sheet{{
-		ID: "1", Title: "Budget", Rows: 2, Cols: 2,
-		Cells: [][]vfs.Cell{
-			{{Input: "A", Value: "A"}, {Input: "B", Value: "B"}},
-			{{Input: "1", Value: "1"}, {Input: "42", Value: "42"}},
-		},
-	}}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fx := newGraphFX().legalTree()
-	fx.nodes["xlsx1"].body = raw
-	fx.nodes["xlsx1"].size = int64(len(raw))
-	srv := testhttp.New(t, fx)
-	fx.base = srv.URL
-	ms, _ := mountGraphHTTP(t, srv, true)
-
-	doc, err := ms.Route(ctx, "/workspace/legal/Budget.xlsx").
-		ReadText(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := vfs.AsGrid(doc); !ok {
-		t.Fatalf("type %T", doc)
-	}
-	body := "99"
-	if _, err := ms.Apply(ctx, "/workspace/legal/Budget.xlsx", vfs.Mutation{
-		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2", Body: &body,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := ms.Route(ctx, "/workspace/legal/Budget.xlsx").
-		ReadText(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	grid, ok := vfs.AsGrid(got)
-	if !ok {
-		t.Fatalf("reload type %T", got)
-	}
-	if grid.Sheets()[0].Cells[1][1].Input != "99" && grid.Sheets()[0].Cells[1][1].Value != "99" {
-		t.Fatalf("cell = %+v", grid.Sheets()[0].Cells[1][1])
-	}
-}
-
 func TestGraphAndDrive_writesStayOnMatchingProviders(t *testing.T) {
 	ctx := t.Context()
 	fx := newGraphFX().legalTree()

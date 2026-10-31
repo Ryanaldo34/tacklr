@@ -36,8 +36,16 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 	life, cancelLife := context.WithCancel(context.Background())
 	srv := testhttp.New(tb, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/input_tokens") {
+			// A message's content length is its token count, so a test sets
+			// the window in characters.
+			body, _ := io.ReadAll(r.Body)
+			msgs, _ := messagesFromResponses(body)
+			n := 0
+			for _, m := range msgs {
+				n += len(m.Content)
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"input_tokens":1}`)
+			_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": n})
 			return
 		}
 		if r.URL.Path != "/responses" {
@@ -47,6 +55,13 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Every request must pair each call with its result: a provider
+		// rejects one that does not.
+		if bad := unpairedCalls(body); bad != "" {
+			tb.Errorf("model request is not paired: %s", bad)
+			writeProviderError(w, errors.New(bad))
 			return
 		}
 		msgs, tools := messagesFromResponses(body)
@@ -178,6 +193,40 @@ func writeChunk(w http.ResponseWriter, c tacklr.LLMResponseChunk) {
 		})
 		_, _ = io.WriteString(w, "data: "+string(payload)+"\n\n")
 	}
+}
+
+// unpairedCalls names the first call in a Responses request without its
+// result, or result without its call; "" when each call has its result.
+func unpairedCalls(body []byte) string {
+	var req struct {
+		Input []struct {
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+		} `json:"input"`
+	}
+	if json.Unmarshal(body, &req) != nil {
+		return ""
+	}
+	open := map[string]bool{}
+	var order []string
+	for _, item := range req.Input {
+		switch item.Type {
+		case "function_call":
+			open[item.CallID] = true
+			order = append(order, item.CallID)
+		case "function_call_output":
+			if !open[item.CallID] {
+				return "result " + item.CallID + " has no call"
+			}
+			delete(open, item.CallID)
+		}
+	}
+	for _, id := range order {
+		if open[id] {
+			return "call " + id + " has no result"
+		}
+	}
+	return ""
 }
 
 func messagesFromResponses(body []byte) ([]*tacklr.Message, []*tacklr.Tool) {

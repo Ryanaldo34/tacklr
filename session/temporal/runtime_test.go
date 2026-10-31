@@ -421,7 +421,7 @@ func TestRuntime_closeDeletesSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	snaps := session.NewMemorySnapshot()
-	if _, err := snaps.Save(t.Context(), "s", session.Snapshot{}, ""); err != nil {
+	if _, err := snaps.Save(t.Context(), "s", tacklr.SessionCheckpoint{}, ""); err != nil {
 		t.Fatal(err)
 	}
 	rt := Open(nopWorkflowClient{}, Config{

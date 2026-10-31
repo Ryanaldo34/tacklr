@@ -352,7 +352,6 @@ func failFromWire(s string) error {
 	for _, sent := range []error{
 		tacklr.ErrModelRefused,
 		tacklr.ErrMaxTokens,
-		tacklr.ErrMaxTurnRequests,
 		context.Canceled,
 	} {
 		if strings.Contains(s, sent.Error()) {

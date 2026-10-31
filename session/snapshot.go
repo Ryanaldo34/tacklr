@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+
+	"github.com/ryanaldo34/tacklr"
 )
 
 // MemorySnapshot is an in-memory SnapshotStore.
@@ -14,8 +16,8 @@ type MemorySnapshot struct {
 }
 
 type snapRecord struct {
-	snap Snapshot
-	gen  uint64
+	cp  tacklr.SessionCheckpoint
+	gen uint64
 }
 
 // NewMemorySnapshot returns an empty SnapshotStore.
@@ -29,7 +31,7 @@ func revisionOf(gen uint64) Revision {
 
 // Save implements SnapshotStore. expected must equal the revision
 // from the last Load (zero if the row does not exist).
-func (s *MemorySnapshot) Save(_ context.Context, sessionID SessionID, snap Snapshot, expected Revision) (Revision, error) {
+func (s *MemorySnapshot) Save(_ context.Context, sessionID SessionID, cp tacklr.SessionCheckpoint, expected Revision) (Revision, error) {
 	if sessionID == "" {
 		return "", fmt.Errorf("snapshot: session id is required")
 	}
@@ -44,20 +46,20 @@ func (s *MemorySnapshot) Save(_ context.Context, sessionID SessionID, snap Snaps
 		return "", ErrStaleCheckpoint
 	}
 	cur.gen++
-	cur.snap = snap
+	cur.cp = cp
 	s.records[sessionID] = cur
 	return revisionOf(cur.gen), nil
 }
 
 // Load implements SnapshotStore.
-func (s *MemorySnapshot) Load(_ context.Context, sessionID SessionID) (Snapshot, Revision, error) {
+func (s *MemorySnapshot) Load(_ context.Context, sessionID SessionID) (tacklr.SessionCheckpoint, Revision, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, ok := s.records[sessionID]
 	if !ok {
-		return Snapshot{}, "", fmt.Errorf("load snapshot %q: %w", sessionID, ErrSessionNotFound)
+		return tacklr.SessionCheckpoint{}, "", fmt.Errorf("load snapshot %q: %w", sessionID, ErrSessionNotFound)
 	}
-	return cur.snap, revisionOf(cur.gen), nil
+	return cur.cp, revisionOf(cur.gen), nil
 }
 
 // Delete implements SnapshotStore.

@@ -88,25 +88,6 @@ func (m *scriptedModel) LastSystemPrompt() string {
 	return ""
 }
 
-type recordingWatchdog struct {
-	mu          sync.Mutex
-	outputs     []*Message
-	toolResults []*Message
-}
-
-func (w *recordingWatchdog) RecordOutput(msg *Message) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.outputs = append(w.outputs, msg)
-	return nil
-}
-func (w *recordingWatchdog) RecordToolResult(msg *Message) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.toolResults = append(w.toolResults, msg)
-	return nil
-}
-
 func reloadHarness(t *testing.T, h *TurnManager, opts AgentOptions) *TurnManager {
 	t.Helper()
 	cp, err := h.Checkpoint()
@@ -118,7 +99,7 @@ func reloadHarness(t *testing.T, h *TurnManager, opts AgentOptions) *TurnManager
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := n.RestoreCheckpoint(*cp); err != nil {
+	if err := n.RestoreCheckpoint(cp); err != nil {
 		t.Fatal(err)
 	}
 	return n
@@ -165,4 +146,13 @@ func mustMountTreeReq(t testing.TB, sessionID string, req vfs.Request, members .
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 	return ms
+}
+
+// set and setDocument seed a plan; tools change it through planStore.Change.
+func (p *planStore) set(todos []Todo) {
+	_ = p.Change(func(_ []Todo, doc string) ([]Todo, string, error) { return todos, doc, nil })
+}
+
+func (p *planStore) setDocument(doc string) {
+	_ = p.Change(func(todos []Todo, _ string) ([]Todo, string, error) { return todos, doc, nil })
 }

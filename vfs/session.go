@@ -3,11 +3,9 @@ package vfs
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -30,44 +28,22 @@ type filePutter interface {
 	PutFile(ctx context.Context, name string, r io.Reader, size int64) error
 }
 
-// AfterPersistFunc is called after content is successfully written to a backend
-// (WriteFile or WriteDocument). Used by optional bridges (e.g. vfsindex) without
-// importing them. Errors from the hook are ignored so persist never rolls back.
-type AfterPersistFunc func(ctx context.Context, virtualPath string) error
-
 // MountSession groups providers for one session. Route returns the provider
 // for a path. The provider reads, writes, and returns the error.
 // Tree creates the session, mounts /workspace, optionally FuseMounts, and
 // Closes it. The agent harness only borrows the pointer.
 type MountSession struct {
-	mu           sync.Mutex
-	id           string
-	mounts       map[string]mountEntry
-	afterPersist AfterPersistFunc
-	fuse         *gofuse.Server
-	hostDir      string
-	lastRev      map[string]string
+	mu      sync.Mutex
+	id      string
+	mounts  map[string]mountEntry
+	fuse    *gofuse.Server
+	hostDir string
+	lastRev map[string]string
 }
 
 type mountEntry struct {
 	provider Provider
 	spec     MountSpec
-}
-
-// SetAfterPersist registers a hook after successful backend writes.
-// Pass nil to clear. Safe to call at any time; concurrent with I/O.
-// Compose with GetAfterPersist when layering (e.g. host hook + vfsindex).
-func (m *MountSession) SetAfterPersist(fn AfterPersistFunc) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.afterPersist = fn
-}
-
-// GetAfterPersist returns the current AfterPersist hook, or nil.
-func (m *MountSession) GetAfterPersist() AfterPersistFunc {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.afterPersist
 }
 
 func (m *MountSession) rememberRev(virtualPath, hash string) {
@@ -86,16 +62,6 @@ func (m *MountSession) storedRev(virtualPath string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastRev[virtualPath]
-}
-
-func (m *MountSession) fireAfterPersist(ctx context.Context, virtualPath string) error {
-	m.mu.Lock()
-	fn := m.afterPersist
-	m.mu.Unlock()
-	if fn != nil {
-		return fn(ctx, virtualPath)
-	}
-	return nil
 }
 
 // NewMountSession binds a session id. Hosts use Tree; FuseMount is optional.
@@ -142,27 +108,6 @@ func (m *MountSession) HostDir() string {
 	return m.hostDir
 }
 
-// Unmount detaches the mount at point and every mount under it.
-func (m *MountSession) Unmount(point string) error {
-	cleaned, err := CleanPath(point)
-	if err != nil {
-		return err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	removed := false
-	for mp := range m.mounts {
-		if mp == cleaned || strings.HasPrefix(mp, cleaned+"/") {
-			delete(m.mounts, mp)
-			removed = true
-		}
-	}
-	if !removed {
-		return ErrNotMounted
-	}
-	return nil
-}
-
 // Specs returns the durable mount records (checkpoint-safe; no host paths or secrets).
 func (m *MountSession) Specs() []MountSpec {
 	m.mu.Lock()
@@ -206,21 +151,6 @@ func (m *MountSession) memberEntries() []DirEntry {
 	}
 	slices.SortFunc(out, func(a, b DirEntry) int { return cmp.Compare(a.Name, b.Name) })
 	return out
-}
-
-// Classify returns the media type for virtualPath.
-// Existing files use Stat.MediaType. New names use DetectMediaType.
-func (m *MountSession) Classify(ctx context.Context, virtualPath string, sample []byte) (string, error) {
-	cleaned, err := CleanPath(virtualPath)
-	if err != nil {
-		return "", err
-	}
-	if fi, err := m.Route(ctx, cleaned).Stat(ctx); err == nil && !fi.IsDir && fi.MediaType != "" {
-		return fi.MediaType, nil
-	} else if err != nil && !errors.Is(err, ErrNotExist) {
-		return "", err
-	}
-	return DetectMediaType(path.Base(cleaned), sample), nil
 }
 
 // Route is the provider for one virtual path. MountSession only chooses it.

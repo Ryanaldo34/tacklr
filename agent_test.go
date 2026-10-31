@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -10,24 +11,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 )
-
-func TestSystemPrompt_knowledgeGuidanceWhenBrainSet(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize:   8192,
-		Model:           &scriptedModel{},
-		Brain:           eng,
-		SearchNamespace: mustNS(t, "org", "acme"),
-	})
-	t.Cleanup(h.Close)
-	prompt := h.constructSystemPrompt()
-	if !strings.Contains(prompt, "knowledge store") || !strings.Contains(prompt, "earlier messages from this session") {
-		t.Fatalf("want knowledge-store guidance when Brain is set:\n%s", prompt)
-	}
-}
 
 func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
@@ -69,20 +52,20 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 			t.Fatalf("search text %q missing %q", text, want)
 		}
 	}
-	if err := h.applyBatchToolResultEffect(t.Context(), EffectHandoff); err == nil || !strings.Contains(err.Error(), "empty window") {
+	if err := h.applyEffect(t.Context(), EffectHandoff); err == nil || !strings.Contains(err.Error(), "empty window") {
 		t.Fatalf("empty window = %v", err)
 	}
 	h.context.Restore([]*Message{
 		{Role: RoleUser, Content: "do the work"},
 		{Role: RoleTool, ToolCallID: callID, Content: token},
 	})
-	h.session.Plan.SetDocument("plan body")
-	h.session.Plan.Set([]Todo{
+	h.session.Plan.setDocument("plan body")
+	h.session.Plan.set([]Todo{
 		{Title: "A", Status: TodoStatusCompleted, Description: "done"},
 		{Title: "B", Status: TodoStatusPending, Description: "next"},
 	})
 
-	if err := h.applyBatchToolResultEffect(t.Context(), EffectHandoff); err != nil {
+	if err := h.applyEffect(t.Context(), EffectHandoff); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,41 +82,68 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 	}
 }
 
-func TestAbsorb_retainsCompressedEpisode(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
+// TestCommitRound_aCollapseSavesTheWindowForSearch: the messages a collapse
+// takes out of the window are this session's saved messages: the search
+// tool finds them and open reads one exactly. The summary says so. A save
+// that fails stops the collapse.
+func TestCommitRound_aCollapseSavesTheWindowForSearch(t *testing.T) {
+	const token = "unique-collapsed-token"
+	store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: vectorEmbedder{}}))
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.ApplyKinds(t.Context(), EpisodeKinds()...); err != nil {
-		t.Fatal(err)
-	}
-	ns := mustNS(t, "org", "acme")
-	const token = "unique-retain-compress-token"
+	// The first commit's context is cancelled once it counts tokens, so the
+	// save (the store embeds each message) fails.
+	saving, cancel := context.WithCancel(t.Context())
 	h := mustNewTurnManager(t, AgentOptions{
-		sessionID:       "sess-compress",
-		MaxWindowSize:   40,
-		ContextPolicy:   ContextPolicy{PressureRatio: 0.5, CompressFraction: 0.5},
-		SearchNamespace: ns,
+		sessionID:       "sess-collapse",
+		MaxWindowSize:   235,
+		SearchNamespace: mustNS(t, "org", "acme"),
 		Brain:           eng,
 		Model: &scriptedModel{
-			InvokeFn: func(_ context.Context, _ []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-				if tools == nil {
-					ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "summary of " + token, IsComplete: true}
-					return
-				}
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "turn", IsComplete: true}
+			CountTokensFn: func(ctx context.Context, msgs []*Message, tools []*Tool) (int, error) {
+				cancel()
+				return contentTokens(ctx, msgs, tools)
+			},
+			InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "summary", IsComplete: true}
 			},
 		},
 	})
 	t.Cleanup(h.Close)
-	h.context.Restore([]*Message{
-		{Role: RoleUser, Content: "goal"},
-		{Role: RoleAssistant, Content: strings.Repeat("a", 30) + " " + token},
-	})
-	if err := h.addToContext(t.Context(), &Message{Role: RoleUser, Content: "follow-up"}, nil); err != nil {
+	collapsed := &Message{Role: RoleAssistant, Content: strings.Repeat("a", 300) + " " + token}
+	h.context.Restore([]*Message{{Role: RoleUser, Content: "goal"}, collapsed})
+	call := func(name, args string) string {
+		res, err := h.findTool(name, "").invoke(t.Context(), args, turnRuntime(h))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Output
+	}
+
+	saveErr := h.commitRound(saving, []*Message{{Role: RoleUser, Content: "follow-up"}}, EffectNone)
+	kept := len(h.context.Messages())
+	commitErr := h.commitRound(t.Context(), []*Message{{Role: RoleUser, Content: "follow-up"}}, EffectNone)
+	var found brain.Page
+	if err := json.Unmarshal([]byte(call("search", `{"query":"`+token+`"}`)), &found); err != nil {
 		t.Fatal(err)
 	}
-	mustSearchKind(t, eng, ns, token, KindEpisode)
+	hits := slices.Collect(found.Results.Objects())
+
+	if !errors.Is(saveErr, context.Canceled) || kept != 2 {
+		t.Fatalf("collapse with a failing save = %v, window %d, want the save's error and the window kept", saveErr, kept)
+	}
+	window := h.context.Messages()
+	if commitErr != nil || len(window) != 3 || !strings.Contains(window[1].Content, searchableHistoryNote) || window[2].Content != "follow-up" {
+		t.Fatalf("window = %+v %v, want the goal, a summary that points at search, and the round", window, commitErr)
+	}
+	if len(hits) != 1 || hits[0].Kind != brain.KindSessionMessage {
+		t.Fatalf("search the collapsed history = %+v, want its saved message", hits)
+	}
+	if opened := call("open", `{"ref":"`+hits[0].ID.String()+`"}`); !strings.Contains(opened, token) {
+		t.Fatalf("open the saved message = %s, want it exactly", opened)
+	}
 }
 
 func TestHandoff_sessionMessageSaveErrorKeepsWindow(t *testing.T) {
@@ -155,43 +165,21 @@ func TestHandoff_sessionMessageSaveErrorKeepsWindow(t *testing.T) {
 		{Role: RoleUser, Content: "do the work"},
 		{Role: RoleAssistant, Content: "kept-detail"},
 	})
-	h.session.Plan.SetDocument("plan body")
-	h.session.Plan.Set([]Todo{
+	h.session.Plan.setDocument("plan body")
+	h.session.Plan.set([]Todo{
 		{Title: "A", Status: TodoStatusCompleted, Description: "done"},
 		{Title: "B", Status: TodoStatusPending, Description: "next"},
 	})
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	err = h.applyBatchToolResultEffect(cancelled, EffectHandoff)
+	err = h.applyEffect(cancelled, EffectHandoff)
 
 	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "save session messages") {
 		t.Fatalf("handoff with a failing save = %v, want the save's error", err)
 	}
 	window := h.context.Messages()
 	if len(window) != 2 || window[1].Content != "kept-detail" {
-		t.Fatalf("window = %+v", window)
-	}
-}
-
-func TestHandoff_nilBrainReplacesWindow(t *testing.T) {
-	h := mustNewTurnManager(t, AgentOptions{
-		sessionID:     "sess-no-brain",
-		MaxWindowSize: 8192,
-		Model:         &scriptedModel{},
-	})
-	t.Cleanup(h.Close)
-	h.context.Restore([]*Message{{Role: RoleUser, Content: "do the work"}})
-	h.session.Plan.SetDocument("plan body")
-	h.session.Plan.Set([]Todo{
-		{Title: "A", Status: TodoStatusCompleted, Description: "done"},
-		{Title: "B", Status: TodoStatusPending, Description: "next"},
-	})
-	if err := h.applyBatchToolResultEffect(t.Context(), EffectHandoff); err != nil {
-		t.Fatal(err)
-	}
-	window := h.context.Messages()
-	if len(window) < 3 || window[0].Content != "do the work" {
 		t.Fatalf("window = %+v", window)
 	}
 }
@@ -209,47 +197,6 @@ func (vectorEmbedder) Embed(_ context.Context, texts []string) ([][]float32, err
 
 func (vectorEmbedder) Model() string { return "vector-model" }
 
-func TestSpecialist_retainsResultEpisode(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := eng.ApplyKinds(t.Context(), EpisodeKinds()...); err != nil {
-		t.Fatal(err)
-	}
-	ns := mustNS(t, "org", "acme")
-	const token = "unique-retain-specialist-token"
-	h := mustNewTurnManager(t, AgentOptions{
-		sessionID:       "sess-spec",
-		MaxWindowSize:   8192,
-		SearchNamespace: ns,
-		Brain:           eng,
-		Model:           &scriptedModel{},
-		Specialists: []*Specialist{
-			{Name: "researcher", Model: &scriptedModel{
-				InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-					ch <- LLMResponseChunk{Type: StreamEventMessage, Content: token, IsComplete: true}
-				},
-			}},
-		},
-	})
-	t.Cleanup(h.Close)
-	h.BindJobHost(stubJobHost{result: token})
-	activatePlan(t, h)
-	tool := h.findTool("spawn_specialist", "")
-	if tool == nil {
-		t.Fatal("spawn_specialist missing")
-	}
-	out, err := runWriteTool(t, h, tool, `{"specialist":"researcher","task_description_and_context":"look it up"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out, token) {
-		t.Fatalf("spawn output = %q", out)
-	}
-	mustSearchKind(t, eng, ns, token, KindEpisode)
-}
-
 func mustSearch(t *testing.T, eng *brain.Engine, scope brain.Scope, query string) brain.Page {
 	t.Helper()
 	page, err := eng.Search(t.Context(), scope, brain.SearchRequest{Query: query})
@@ -258,31 +205,6 @@ func mustSearch(t *testing.T, eng *brain.Engine, scope brain.Scope, query string
 	}
 	return page
 }
-
-func mustSearchKind(t *testing.T, eng *brain.Engine, ns brain.Namespace, query, kind string) brain.RichObject {
-	t.Helper()
-	page := mustSearch(t, eng, brain.Scope{Namespace: ns}, query)
-	if len(slices.Collect(page.Results.Objects())) == 0 {
-		t.Fatalf("search %q: no hits", query)
-	}
-	if slices.Collect(page.Results.Objects())[0].Kind != kind {
-		t.Fatalf("kind = %q, want %s", slices.Collect(page.Results.Objects())[0].Kind, kind)
-	}
-	return slices.Collect(page.Results.Objects())[0]
-}
-
-type stubJobHost struct {
-	result string
-}
-
-func (s stubJobHost) RunSpecialist(context.Context, string, string, string) (SpecialistResult, error) {
-	return SpecialistResult{Output: s.result}, nil
-}
-func (stubJobHost) Schedule(context.Context, JobRequest, string) (Job, error) {
-	return Job{}, nil
-}
-func (stubJobHost) Jobs() []Job                             { return nil }
-func (stubJobHost) CancelJob(context.Context, string) error { return nil }
 
 func toolCall(id, name, args string) ToolCall {
 	return ToolCall{ID: id, CallID: id, Name: name, Arguments: args}

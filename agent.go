@@ -8,10 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
+	"path"
 	"slices"
 	"strings"
-	"sync"
 
 	"github.com/google/uuid"
 
@@ -23,8 +22,9 @@ import (
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-// TurnManager runs one turn slice: infer, tool batch, checkpoint.
-// Durable runtimes construct it; hosts use session.Runtime.
+// TurnManager is one session's harness for one step: the model call, the
+// open round's tools, and the window they commit to. Durable runtimes
+// construct it for each step; hosts use session.Runtime.
 type TurnManager struct {
 	model                 InferenceStrategy
 	sessionId             string
@@ -32,40 +32,26 @@ type TurnManager struct {
 	mcpConfigs            []mcp.MCPConfig
 	mcpCredentialResolver mcp.CredentialResolver
 	instructions          string
-	watchDog              AgentWatchDog
 	maxWindowSize         int
-	maxTurnRequests       int // 0 = unlimited; from Config.MaxTurnRequests
 	session               *sessionManager
 	specialists           map[string]*Specialist
-	// pendingToolCalls is keyed by tool call id, which is also the wire interrupt id.
-	pendingToolCalls map[string]PendingToolCall
-	pendingMu        sync.Mutex
 	// jobHost, when set, is nested sessions and named workers. Nil: job methods fail.
-	jobHost      JobHost
-	skillByName  map[string]skills.Skill
-	skillsLoader skills.SkillLoader
-	// hostInterceptors and hostResultHooks are the host-supplied session
-	// world copied to workers. Planning lock and OnCall are reinstalled.
-	hostInterceptors     []ToolInterceptor
-	hostResultHooks      map[string]ToolResultHook
-	brain                *brain.Engine
-	brainWriteKinds      []string
-	indexReaders         vfsindex.ReadersFunc
-	runCommandUnattended bool
-	writeUnattended      bool
-	// vfsBridge indexes files only when index_file or unindex is called.
-	// ownsVFSBridge is set when this turn started it.
-	vfsBridge        *vfsindex.Bridge
-	ownsVFSBridge    bool
-	mcpCleanup       func()
-	builtinsInjected bool
-	context          contextManager
-	tasks            modelTasks
-	contextPolicy    ContextPolicy
-	toolRunner       *toolRunner
-	toolResultHooks  *toolResultHookRegistry
-	// runMu serializes ApplyResume / Restore against in-flight tool writes.
-	runMu sync.Mutex
+	jobHost         JobHost
+	skillByName     map[string]skills.Skill
+	skillsLoader    skills.SkillLoader
+	brain           *brain.Engine
+	brainWriteKinds []string
+	// indexer backs index_file and unindex; nil without a Brain and a
+	// workspace.
+	indexer *vfsindex.MountIndexer
+	// overflowPath is AgentOptions.OverflowPath: where a trimmed result's
+	// full text goes. Empty: it is not kept.
+	overflowPath string
+	mcpCleanup   func()
+	context      *modelContextManager
+	toolRunner   *toolRunner
+	// modelSeq counts model requests, for model span sequence numbers.
+	modelSeq int
 }
 
 // BindJobHost installs job operations. Durable runtimes call this after
@@ -74,19 +60,76 @@ func (a *TurnManager) BindJobHost(host JobHost) {
 	a.jobHost = host
 }
 
-func (a *TurnManager) pendingSnapshot() map[string]PendingToolCall {
-	a.pendingMu.Lock()
-	defer a.pendingMu.Unlock()
-	return maps.Clone(a.pendingToolCalls)
+// recordToolResult gives an awaited specialist's output to tc as its
+// result, with status error when the specialist failed, and commits the
+// round when that was its last result. A successful result is kept as an
+// episode. A retry after the result committed finds no open call and does
+// nothing.
+func (a *TurnManager) recordToolResult(ctx context.Context, tc ToolCall, output string, failed bool, out chan StreamEvent) error {
+	status := "success"
+	if failed {
+		status = "error"
+	}
+	sm := a.session
+	sm.mu.Lock()
+	c := sm.round.call(tc.Key())
+	if c == nil || c.Result != nil {
+		sm.mu.Unlock()
+		return nil
+	}
+	c.Result, c.AwaitID = a.emitToolResult(out, tc, output, status), ""
+	sm.mu.Unlock()
+	if !failed {
+		a.keepSpecialistResult(ctx, output)
+	}
+	return a.commitOpenRound(ctx)
 }
 
-func (a *TurnManager) recordToolResult(tc ToolCall, output string) {
-	a.session.DropInterrupt(tc.Key())
-	msg, _ := a.toolResultMessage(tc, output, "success")
-	a.context.Add(msg)
-	a.pendingMu.Lock()
-	delete(a.pendingToolCalls, tc.Key())
-	a.pendingMu.Unlock()
+// commitOpenRound commits the open round when each of its calls has a
+// result. A failed commit keeps the round open: the window has none of it.
+func (a *TurnManager) commitOpenRound(ctx context.Context) error {
+	sm := a.session
+	sm.mu.RLock()
+	r := sm.round
+	sm.mu.RUnlock()
+	if r == nil || !r.complete() {
+		return nil
+	}
+	if err := a.commitRound(ctx, r.messages(), r.Effect); err != nil {
+		return err
+	}
+	sm.mu.Lock()
+	sm.round = nil
+	sm.mu.Unlock()
+	return nil
+}
+
+// commitRound appends one complete round to the window. A round with a
+// window effect goes in as it is, and the effect then replaces the window.
+// Any other round is fitted.
+func (a *TurnManager) commitRound(ctx context.Context, round []*Message, effect ToolResultEffect) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if effect == EffectNone {
+		return a.fit(ctx, round)
+	}
+	a.context.Add(round...)
+	return a.applyEffect(ctx, effect)
+}
+
+// stageOverflow writes a result's full text under OverflowPath and returns
+// its virtual path, so the agent can read what a trim cut.
+func (a *TurnManager) stageOverflow(ctx context.Context, callID, content string) (string, error) {
+	dir := path.Join(a.overflowPath, a.sessionId)
+	if err := a.session.VFS.Route(ctx, dir).MkdirAll(ctx); err != nil {
+		return "", err
+	}
+	p := path.Join(dir, callID+".txt")
+	if err := a.session.VFS.Route(ctx, p).WriteFile(ctx, []byte(content)); err != nil {
+		return "", err
+	}
+	return p, nil
 }
 
 func (a *TurnManager) constructSystemPrompt() string {
@@ -245,53 +288,30 @@ These instructions describe how the user generally wants you to behave, not what
 	return b.String()
 }
 
-// addToContext absorbs newMsg (may compress under pressure) and streams summary chunks.
-func (a *TurnManager) addToContext(ctx context.Context, newMsg *Message, out chan StreamEvent) error {
-	if err := ctx.Err(); err != nil {
-		return err
+// applyEffect applies a round's window effect: install the plan document,
+// or hand off the remaining todos.
+func (a *TurnManager) applyEffect(ctx context.Context, effect ToolResultEffect) error {
+	if effect == EffectHandoff {
+		return a.handoff(ctx)
 	}
-	res, err := a.tasks.Absorb(ctx, newMsg, a.tools, a.constructSystemPrompt())
-	if err != nil {
-		return err
-	}
-	if res.Compressed {
-		a.retainCollapse(ctx, collapseEvent{
-			Trigger:   triggerCompress,
-			Body:      res.Summary,
-			Discarded: res.Discarded,
-		})
-	}
-	return nil
+	_, span := telemetry.StartPlanInstallSpan(ctx, a.sessionId)
+	err := a.context.InstallPlanDocument(a.session.Plan.Document())
+	span.End(err)
+	return err
 }
 
-func (a *TurnManager) applyBatchToolResultEffect(ctx context.Context, effect ToolResultEffect) error {
-	if effect == EffectInstallPlanDocument {
-		doc := a.session.Plan.Document()
-		_, span := telemetry.StartPlanInstallSpan(ctx, a.sessionId)
-		err := a.context.InstallPlanDocument(doc)
-		span.End(err)
-		return err
-	}
-	if err := a.saveSessionMessages(ctx); err != nil {
-		return err
-	}
-	todos := a.session.Plan.Get()
-	doc := a.session.Plan.Document()
-	return a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
+// keepsHistory reports whether messages that leave the window are saved
+// for search: the session has a Brain and an id.
+func (a *TurnManager) keepsHistory() bool {
+	return a.brain != nil && strings.TrimSpace(a.sessionId) != ""
 }
 
-// saveSessionMessages stores the live window before a plan handoff replaces it.
-// A nil brain or empty session id skips the save. A store error stops the handoff.
-func (a *TurnManager) saveSessionMessages(ctx context.Context) error {
-	if a == nil || a.brain == nil || strings.TrimSpace(a.sessionId) == "" {
+// saveSessionMessages saves messages that leave the window (a collapse or
+// a handoff) as this session's messages, so search finds them and open
+// reads one exactly. A store error stops the collapse or handoff.
+func (a *TurnManager) saveSessionMessages(ctx context.Context, window []*Message) error {
+	if !a.keepsHistory() || len(window) == 0 {
 		return nil
-	}
-	window := a.context.Messages()
-	if len(window) == 0 {
-		return fmt.Errorf("save session messages: empty window")
-	}
-	if err := ValidateMessages(window); err != nil {
-		return fmt.Errorf("save session messages: %w", err)
 	}
 	msgs := make([]brain.SessionMessage, 0, len(window))
 	hash := sha256.New()
@@ -359,8 +379,8 @@ func (a *TurnManager) findTool(name, namespace string) *Tool {
 	return a.tools[idx]
 }
 
-// CancelledToolResultContent is written into the context window for tool calls
-// aborted by session cancel.
+// CancelledToolResultContent is the result of a call that a new user
+// message cancelled before it had one.
 const CancelledToolResultContent = "cancelled: user interrupted the agent"
 
 // streamChunk maps a model chunk to a harness StreamEvent.
@@ -404,17 +424,6 @@ func (a *TurnManager) withToolPresentation(tc ToolCall) ToolCall {
 	return tc
 }
 
-// toolOutputIDs returns RoleTool call ids present in the window.
-func toolOutputIDs(window []*Message) map[string]struct{} {
-	hasOutput := make(map[string]struct{}, len(window))
-	for _, m := range window {
-		if m != nil && m.Role == RoleTool && m.ToolCallID != "" {
-			hasOutput[m.ToolCallID] = struct{}{}
-		}
-	}
-	return hasOutput
-}
-
 // toolResultMessage builds a tool Message (presented tc for wire/stream).
 func (a *TurnManager) toolResultMessage(tc ToolCall, content, status string) (msg *Message, presented ToolCall) {
 	if status != "" {
@@ -426,14 +435,11 @@ func (a *TurnManager) toolResultMessage(tc ToolCall, content, status string) (ms
 		ToolCallID: presented.WireID(),
 		Content:    content,
 	}
-	if a.watchDog != nil {
-		_ = a.watchDog.RecordToolResult(msg)
-	}
 	return msg, presented
 }
 
-// emitToolResult streams a tool result and returns the window Message.
-// Caller decides whether to append to the context window. out is never nil.
+// emitToolResult streams a tool result and returns its message for the
+// round.
 func (a *TurnManager) emitToolResult(out chan<- StreamEvent, tc ToolCall, content, status string) *Message {
 	msg, presented := a.toolResultMessage(tc, content, status)
 	out <- StreamEvent{
@@ -445,8 +451,7 @@ func (a *TurnManager) emitToolResult(out chan<- StreamEvent, tc ToolCall, conten
 	return msg
 }
 
-// emitPlanUpdate streams plan_update when create_plan / complete_todo / edit_plan
-// called Plan.Set during this tool.
+// emitPlanUpdate streams plan_update when a plan tool changed the todos.
 func (a *TurnManager) emitPlanUpdate(out chan<- StreamEvent) {
 	todos, ok := a.session.Plan.ConsumeTodosUpdated()
 	if !ok {
@@ -455,47 +460,6 @@ func (a *TurnManager) emitPlanUpdate(out chan<- StreamEvent) {
 	data, _ := json.Marshal(todos)
 	out <- StreamEvent{Type: StreamEventPlanUpdate, Data: data}
 }
-
-// openToolCalls returns assistant/pending tool_calls that have no RoleTool result yet.
-func (a *TurnManager) openToolCalls() []ToolCall {
-	window := a.context.Messages()
-	hasOutput := toolOutputIDs(window)
-	seen := make(map[string]struct{})
-	var open []ToolCall
-	add := func(tc ToolCall) {
-		id := tc.WireID()
-		if id == "" {
-			return
-		}
-		if _, ok := hasOutput[id]; ok {
-			return
-		}
-		if _, ok := seen[id]; ok {
-			return
-		}
-		seen[id] = struct{}{}
-		open = append(open, tc)
-	}
-	for _, m := range window {
-		if m == nil || m.Role != RoleAssistant {
-			continue
-		}
-		for _, tc := range m.ToolCalls {
-			add(tc)
-		}
-	}
-	a.pendingMu.Lock()
-	for _, p := range a.pendingToolCalls {
-		if p.ToolCall != nil {
-			add(*p.ToolCall)
-		}
-	}
-	a.pendingMu.Unlock()
-	return open
-}
-
-// discoverAllTools is the MCP discovery entry. Tests may replace it.
-var discoverAllTools = mcpruntime.DiscoverAllTools
 
 // initMCP discovers MCP tools and appends them. Skips unreachable servers.
 func (a *TurnManager) initMCP(ctx context.Context) {
@@ -516,7 +480,7 @@ func (a *TurnManager) initMCP(ctx context.Context) {
 		}
 		configs = append(configs, resolved)
 	}
-	a.mcpCleanup = discoverAllTools(ctx, configs, func(name, description, namespace string, schema map[string]any, handler mcpruntime.ToolHandler) {
+	a.mcpCleanup = mcpruntime.DiscoverAllTools(ctx, configs, func(name, description, namespace string, schema map[string]any, handler mcpruntime.ToolHandler) {
 		tool := newMCPTool(mcpToolConfig{
 			Name:        name,
 			Description: description,
@@ -530,191 +494,53 @@ func (a *TurnManager) initMCP(ctx context.Context) {
 	})
 }
 
-// Close releases turn resources (MCP and the indexer this turn started).
-// The MountSession is closed by the session runtime. Call after the Run
-// events channel is drained, or when construct fails.
+// Close releases the turn's MCP connections. The session runtime closes the
+// MountSession. Call after the events channel is drained, or when construct
+// fails.
 func (a *TurnManager) Close() {
 	if a.mcpCleanup != nil {
 		a.mcpCleanup()
 		a.mcpCleanup = nil
 	}
-	if a.ownsVFSBridge && a.vfsBridge != nil {
-		_ = a.vfsBridge.Close()
-		a.vfsBridge = nil
-	}
 }
 
-const (
-	KindEpisode      = "Episode"
-	KindEpisodeChunk = "EpisodeChunk"
+// KindEpisode is the kind a blocking specialist's result is kept as, so
+// later sessions in the namespace can find it.
+const KindEpisode = "Episode"
 
-	triggerCompress   = "compress"
-	triggerSpecialist = "specialist"
-	maxDiscardedMsgs  = 20
-	maxDiscardedBytes = 32 << 10
-)
-
-// EpisodeKinds are SDK-owned kinds for collapse residue. Hosts with a non-empty
-// catalog should pass these to store.Setup / ApplyKinds (same pattern as
-// vfsindex.MountIndexKinds).
+// EpisodeKinds are SDK-owned kinds. Hosts with a non-empty catalog pass
+// them to ApplyKinds (as with vfsindex.MountIndexKinds).
 func EpisodeKinds() []brain.KindSpec {
-	return []brain.KindSpec{
-		{
-			Kind:        KindEpisode,
-			Description: "Notes kept from earlier work in this session. Not a curated durable record.",
-			IsParent:    true,
-			Fields: []brain.FieldSpec{
-				{Name: "trigger", Type: brain.FieldTypeString},
-				{Name: "session_id", Type: brain.FieldTypeString},
-			},
-		},
-		{
-			Kind:        KindEpisodeChunk,
-			Description: "Searchable part of an Episode",
-			IsPart:      true,
-		},
-	}
+	return []brain.KindSpec{{
+		Kind:        KindEpisode,
+		Description: "A specialist's result from earlier work. Not a curated durable record.",
+		IsParent:    true,
+		Fields:      []brain.FieldSpec{{Name: "session_id", Type: brain.FieldTypeString}},
+	}}
 }
 
-type collapseEvent struct {
-	Trigger   string
-	Body      string
-	Discarded []*Message
-}
-
-func (a *TurnManager) retainCollapse(ctx context.Context, ev collapseEvent) {
-	if a == nil || a.brain == nil {
-		return
-	}
-	body := strings.TrimSpace(ev.Body)
-	if body == "" && len(ev.Discarded) == 0 {
+// keepSpecialistResult saves a blocking specialist's result as an Episode
+// under the session's namespace. The id comes from the namespace and the
+// result, so a retried step saves it once. A failed save is logged: the
+// result is already the call's result.
+func (a *TurnManager) keepSpecialistResult(ctx context.Context, output string) {
+	output = strings.TrimSpace(output)
+	if a.brain == nil || output == "" {
 		return
 	}
 	scope := a.session.Search.Scope()
-	ns := scope.Namespace
 	if sid := a.sessionId; sid != "" && !strings.Contains(sid, ".") {
-		ns = append(ns, brain.Attr{Name: brain.SessionTailName, Value: sid})
+		scope.Namespace = append(scope.Namespace, brain.Attr{Name: brain.SessionTailName, Value: sid})
 	}
-	scope.Namespace = ns
-	id := episodeID(ns, ev.Trigger, body)
 	obj := brain.Object{
-		ID:        id,
-		Kind:      KindEpisode,
-		Title:     ev.Trigger,
-		Summary:   ev.Trigger,
-		Content:   body,
-		Namespace: ns,
-		Properties: map[string]any{
-			"trigger":    ev.Trigger,
-			"session_id": a.sessionId,
-		},
+		ID:         uuid.NewSHA1(uuid.NameSpaceURL, []byte("tacklr.episode:"+scope.Namespace.Key()+":"+output)),
+		Kind:       KindEpisode,
+		Title:      "specialist",
+		Content:    output,
+		Namespace:  scope.Namespace,
+		Properties: map[string]any{"session_id": a.sessionId},
 	}
-	if _, err := a.brain.PutTree(ctx, scope, obj, brain.Parts(episodeParts(ns, body, ev.Discarded)...)); err != nil {
-		slog.ErrorContext(ctx, "collapse retain put failed", "area", telemetry.AreaModelTasks, "error", err)
+	if _, err := a.brain.Save(ctx, scope, obj); err != nil {
+		slog.ErrorContext(ctx, "keep specialist result", "area", telemetry.AreaModelTasks, "error", err)
 	}
-}
-
-func episodeID(ns brain.Namespace, trigger, body string) uuid.UUID {
-	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("tacklr.episode:"+ns.Key()+":"+trigger+":"+body))
-}
-
-func episodeParts(ns brain.Namespace, body string, discarded []*Message) []brain.Object {
-	out := make([]brain.Object, 0, 8)
-	for _, chunk := range splitEpisodeBody(body) {
-		out = append(out, brain.Object{
-			Kind:      KindEpisodeChunk,
-			Title:     chunk.title,
-			Content:   chunk.body,
-			Namespace: ns,
-		})
-	}
-	n, nbytes := 0, 0
-	for _, m := range discarded {
-		if m == nil {
-			continue
-		}
-		c := strings.TrimSpace(m.Content)
-		if c == "" {
-			continue
-		}
-		if n >= maxDiscardedMsgs {
-			break
-		}
-		if nbytes+len(c) > maxDiscardedBytes {
-			remain := maxDiscardedBytes - nbytes
-			if remain <= 0 {
-				break
-			}
-			c = c[:remain]
-		}
-		out = append(out, brain.Object{
-			Kind:      KindEpisodeChunk,
-			Title:     string(m.Role),
-			Content:   c,
-			Namespace: ns,
-		})
-		n++
-		nbytes += len(c)
-		if nbytes >= maxDiscardedBytes {
-			break
-		}
-	}
-	return out
-}
-
-type episodeChunk struct {
-	title, body string
-}
-
-var episodeHeads = []string{
-	"Objective:",
-	"Completed Work:",
-	"Key Decisions:",
-	"State Changes:",
-	"Discoveries:",
-	"Constraints:",
-	"Remaining Work:",
-	"Validation:",
-	"Relevant Context for Remaining Todos:",
-}
-
-func splitEpisodeBody(body string) []episodeChunk {
-	body = strings.TrimSpace(body)
-	if body == "" {
-		return nil
-	}
-	type cut struct {
-		i    int
-		name string
-		head string
-	}
-	cuts := make([]cut, 0, len(episodeHeads))
-	for _, h := range episodeHeads {
-		i := strings.Index(body, h)
-		if i < 0 {
-			continue
-		}
-		cuts = append(cuts, cut{i: i, name: strings.TrimSuffix(h, ":"), head: h})
-	}
-	if len(cuts) == 0 {
-		return []episodeChunk{{title: "episode", body: body}}
-	}
-	slices.SortFunc(cuts, func(a, b cut) int { return a.i - b.i })
-	out := make([]episodeChunk, 0, len(cuts))
-	for i, c := range cuts {
-		start := c.i + len(c.head)
-		end := len(body)
-		if i+1 < len(cuts) {
-			end = cuts[i+1].i
-		}
-		text := strings.TrimSpace(body[start:end])
-		if text == "" {
-			continue
-		}
-		out = append(out, episodeChunk{title: c.name, body: text})
-	}
-	if len(out) == 0 {
-		return []episodeChunk{{title: "episode", body: body}}
-	}
-	return out
 }

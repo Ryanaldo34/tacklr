@@ -10,16 +10,16 @@ import (
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-// maxIndexFilePaths caps paths per index_file call (selective, not bulk).
+// maxIndexFilePaths caps paths per index_file call: key files, not a bulk walk.
 const maxIndexFilePaths = 8
 
-// vfsIndexTools closes over the vfsindex.Bridge (indexer + policy/track).
+// vfsIndexTools are index_file and unindex over the turn's indexer.
 type vfsIndexTools struct {
-	br *vfsindex.Bridge
+	idx *vfsindex.MountIndexer
 }
 
-func newVFSIndexTools(br *vfsindex.Bridge) []*Tool {
-	v := vfsIndexTools{br: br}
+func newVFSIndexTools(idx *vfsindex.MountIndexer) []*Tool {
+	v := vfsIndexTools{idx: idx}
 	return []*Tool{
 		v.newIndexFile(),
 		v.newUnindex(),
@@ -50,30 +50,26 @@ Requires an active plan. Returns one status line per path: indexed, skipped (unc
 			if err != nil {
 				return "", err
 			}
-			// Validate all paths before any index write so directory / missing
-			// rejects do not partially index earlier paths in the batch.
-			// One policy lookup + Stat per path; IndexFile reuses Stat.
+			// Check every path before any index write, so a rejected path
+			// does not leave earlier paths of the batch indexed. IndexFile
+			// reuses the Stat.
 			type job struct {
-				path   string
-				st     vfs.FileInfo
-				policy string
+				path string
+				st   vfs.FileInfo
 			}
 			jobs := make([]job, 0, len(paths))
 			for _, p := range paths {
-				policy := v.br.PolicyAt(p)
-				if policy == vfsindex.PolicyNone {
-					return "", fmt.Errorf("index_file: indexing disabled for mount of %s (IndexPolicy=none)", p)
+				if spec, err := v.idx.VFS.SpecAt(p); err == nil && spec.NotIndexed {
+					return "", fmt.Errorf("index_file: indexing is off for the mount of %s", p)
 				}
-
-				st, err := v.br.Indexer.VFS.Route(ctx, p).
-					Stat(ctx)
+				st, err := v.idx.VFS.Route(ctx, p).Stat(ctx)
 				if err != nil {
 					return "", fmt.Errorf("index_file: %s: %w", p, err)
 				}
 				if st.IsDir {
 					return "", fmt.Errorf("index_file: path must be a file, not a directory: %s", p)
 				}
-				jobs = append(jobs, job{path: p, st: st, policy: policy})
+				jobs = append(jobs, job{path: p, st: st})
 			}
 			runtime.EmitUpdate(fmt.Sprintf("Indexing %d path(s)…", len(jobs)))
 			var b strings.Builder
@@ -82,14 +78,10 @@ Requires an active plan. Returns one status line per path: indexed, skipped (unc
 				if i > 0 {
 					b.WriteByte('\n')
 				}
-				res, err := v.br.Indexer.IndexFile(ctx, j.path, j.st)
+				res, err := v.idx.IndexFile(ctx, j.path, j.st)
 				if err != nil {
 					fmt.Fprintf(&b, "error path=%s: %v", j.path, err)
 					continue
-				}
-				if j.policy == vfsindex.PolicySelective &&
-					(res == vfsindex.PathIndexed || res == vfsindex.PathSkipped) {
-					v.br.Track(j.path)
 				}
 				fmt.Fprintf(&b, "%s path=%s", res, j.path)
 			}
@@ -112,11 +104,10 @@ func (v vfsIndexTools) newUnindex() *Tool {
 				return "", err
 			}
 			runtime.EmitUpdate("Unindexing " + p)
-			removed, err := v.br.Indexer.UnindexPath(ctx, p)
+			removed, err := v.idx.UnindexPath(ctx, p)
 			if err != nil {
 				return "", fmt.Errorf("unindex: %w", err)
 			}
-			v.br.Untrack(p)
 			if !removed {
 				return "noop path=" + p, nil
 			}

@@ -5,46 +5,43 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
+// absorbUser commits user as a round of its own, after the open round, if
+// any, ends with its calls cancelled.
 func (a *TurnManager) absorbUser(ctx context.Context, user *Message, out chan StreamEvent) error {
-	if user != nil {
-		if bad := UnsupportedMIMEs(a.model, user.MIMETypes()); len(bad) > 0 {
-			return fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
-		}
+	if bad := UnsupportedMIMEs(a.model, user.MIMETypes()); len(bad) > 0 {
+		return fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
 	}
-	if open := a.openToolCalls(); len(open) > 0 || a.session.HasPendingInterrupt() {
-		for _, tc := range open {
-			msg, _ := a.toolResultMessage(tc, CancelledToolResultContent, "error")
-			a.context.Add(msg)
-		}
-		a.pendingMu.Lock()
-		clear(a.pendingToolCalls)
-		a.pendingMu.Unlock()
-		a.session.ClearInterrupts()
+	if err := a.cancelOpenRound(ctx); err != nil {
+		return err
 	}
-	a.pairOpenToolCalls("unpaired tool call")
-	return a.addToContext(ctx, user, out)
+	return a.commitRound(ctx, []*Message{user}, EffectNone)
 }
 
-func (a *TurnManager) runnableToolCalls() []ToolCall {
-	pending := a.pendingSnapshot()
-	out := make([]ToolCall, 0, len(pending))
-	for _, p := range pending {
-		if !p.InterruptActive && !p.AwaitJob && p.ToolCall != nil {
-			out = append(out, *p.ToolCall)
+// cancelOpenRound ends a round the user moved past with a new message: each
+// call without a result gets CancelledToolResultContent, the round commits,
+// and parks are dropped.
+func (a *TurnManager) cancelOpenRound(ctx context.Context) error {
+	sm := a.session
+	sm.mu.Lock()
+	if r := sm.round; r != nil {
+		for i := range r.Calls {
+			if c := &r.Calls[i]; c.Result == nil {
+				c.Result, _ = a.toolResultMessage(c.Call, CancelledToolResultContent, "error")
+				c.Park, c.AwaitID = nil, ""
+			}
 		}
 	}
-	return out
-}
-
-// Checkpoint captures the session blob for SnapshotStore.
-func (a *TurnManager) Checkpoint() (*SessionCheckpoint, error) {
-	return captureCheckpoint(a.context.Messages(), a.session, a.pendingSnapshot())
+	sm.mu.Unlock()
+	return a.commitOpenRound(ctx)
 }
 
 // ApplySessionState upserts host-owned userState after construct/restore.
@@ -59,47 +56,25 @@ func (a *TurnManager) ApplySessionState(state map[string]any) error {
 	return nil
 }
 
-// RestoreCheckpoint applies a SnapshotStore blob onto this harness.
-func (a *TurnManager) RestoreCheckpoint(cp SessionCheckpoint) error {
-	a.runMu.Lock()
-	defer a.runMu.Unlock()
-	applied, err := applyCheckpoint(cp, a.session)
-	if err != nil {
-		return err
-	}
-	a.context.Restore(applied.Window)
-	a.pendingMu.Lock()
-	a.pendingToolCalls = applied.PendingToolCalls
-	a.pendingMu.Unlock()
-	return nil
-}
-
-func (a *TurnManager) runInference(ctx context.Context, st *TurnState, out chan StreamEvent) (InferenceStep, error) {
-	// Pair any function_call still missing a tool message before the provider
-	// round. Durable HITL used to drop the rest of a parallel batch; Azure then
-	// 400s "No tool output found for function call".
-	a.pairOpenToolCalls("unpaired tool call")
-
-	if a.maxTurnRequests > 0 && st.ModelRequests >= a.maxTurnRequests {
-		err := fmt.Errorf("%w: limit %d", ErrMaxTurnRequests, a.maxTurnRequests)
-		out <- StreamEvent{Type: StreamEventError, Error: err}
-		return InferenceStep{}, err
-	}
+// runInference calls the model on the committed window. A reply with no
+// calls commits as a round; a reply with calls opens one.
+func (a *TurnManager) runInference(ctx context.Context, out chan StreamEvent) (InferenceStep, error) {
+	afterTools := a.afterTools()
 	turnCtx := ctx
-	if st.HadToolRound {
+	if afterTools {
 		turnCtx = telemetry.ContextWithAfterTools(ctx)
 	}
-	events, err := a.tasks.Turn(turnCtx, a.tools, a.constructSystemPrompt())
+	events, err := a.invokeTurn(turnCtx)
 	if err != nil {
 		outErr := fmt.Errorf("model request failed: %w", err)
-		if st.HadToolRound {
+		if afterTools {
 			outErr = fmt.Errorf("%w: %w", ErrModelAfterTools, err)
 		}
 		out <- StreamEvent{Type: StreamEventError, Error: outErr}
 		return InferenceStep{}, outErr
 	}
-	st.ModelRequests++
 	asm := newStreamAssembler()
+	var reply []*Message
 	var toolCalls []ToolCall
 	for {
 		var chunk LLMResponseChunk
@@ -112,7 +87,7 @@ func (a *TurnManager) runInference(ctx context.Context, st *TurnState, out chan 
 		if !ok {
 			break
 		}
-		if st.HadToolRound && (chunk.Type == StreamEventError || chunk.Error != nil) {
+		if afterTools && (chunk.Type == StreamEventError || chunk.Error != nil) {
 			chunk = tagModelAfterToolsError(chunk)
 		}
 		a.streamChunk(chunk, out)
@@ -127,48 +102,150 @@ func (a *TurnManager) runInference(ctx context.Context, st *TurnState, out chan 
 			toolCalls = append(toolCalls, chunk.ToolCalls...)
 			if chunk.Type == StreamEventMessage || chunk.Type == StreamEventReasoning {
 				msg := asm.MessageFromComplete(chunk)
-				a.context.Add(msg)
-				if a.watchDog != nil {
-					_ = a.watchDog.RecordOutput(msg)
-				}
+				reply = append(reply, msg)
 			}
 		}
 	}
 	if len(toolCalls) == 0 {
+		if err := a.commitRound(ctx, reply, EffectNone); err != nil {
+			return InferenceStep{}, err
+		}
 		out <- StreamEvent{Type: StreamEventComplete}
-		return InferenceStep{Complete: true}, nil
+		step := InferenceStep{Complete: true}
+		for _, m := range reply {
+			if m.Role == RoleAssistant && m.Content != "" {
+				step.Result = m.Content
+			}
+		}
+		return step, nil
 	}
-	a.context.Add(&Message{
-		Role:      RoleAssistant,
-		ToolCalls: append([]ToolCall(nil), toolCalls...),
-	})
-	a.pendingMu.Lock()
-	for i := range toolCalls {
-		key := toolCalls[i].Key()
-		cp := toolCalls[i]
-		a.pendingToolCalls[key] = PendingToolCall{ToolCall: &cp, InterruptActive: false}
-	}
-	a.pendingMu.Unlock()
-	return InferenceStep{ToolCalls: toolCalls}, nil
+	reply = append(reply, &Message{Role: RoleAssistant, ToolCalls: slices.Clone(toolCalls)})
+	a.session.mu.Lock()
+	a.session.round = newOpenRound(reply, toolCalls)
+	a.session.mu.Unlock()
+	return InferenceStep{}, nil
 }
 
-func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (ToolStep, error) {
+// afterTools reports whether the model is answering tool results: the
+// window's last committed round is a tool round.
+func (a *TurnManager) afterTools() bool {
+	window := a.context.Messages()
+	return len(window) > 0 && window[len(window)-1].Role == RoleTool
+}
+
+// maxParallelToolCalls bounds how many calls of one reply run at once, so a
+// reply with very many calls cannot start them all on one worker.
+const maxParallelToolCalls = 8
+
+// toolRun is one executed call before its result is recorded. A call that
+// neither parked nor awaits a child has a result.
+type toolRun struct {
+	step    ToolStep
+	jobs    *callJobs
+	content string // the model-visible result
+	status  string // "success" or "error"
+	// effect is the window effect the call's outcome asked for.
+	effect ToolResultEffect
+	err    error // a failure that is not the model's to correct; logged
+}
+
+// runTools is Tools step seq. It applies resume, then runs the open round's
+// runnable calls concurrently, at most maxParallelToolCalls at a time, and
+// records them in call order: results and their client events, parks, and
+// awaits on the round, and the children each call starts or cancels in the
+// step's report. A tool sees the session's shared state (user state,
+// permissions, interrupts, search cursors) as it runs. The round commits
+// once each call has a result; until then the window does not change. A
+// tool's failure is its result, so the error is the step's: an unknown
+// resume id, or a failed commit. A retry of a step whose first attempt
+// saved runs no tool: it returns the saved report and only commits.
+func (a *TurnManager) runTools(ctx context.Context, seq int, resume map[string][]byte, state map[string]any, out chan StreamEvent) ([]ToolStep, error) {
+	sm := a.session
+	sm.mu.RLock()
+	retried := sm.report.Seq == seq
+	steps := sm.report.Steps
+	sm.mu.RUnlock()
+	if retried {
+		// The first attempt applied the host state and ran the tools, which
+		// may have changed it since; applying it again would undo that.
+		return steps, a.commitOpenRound(ctx)
+	}
+	if err := a.ApplySessionState(state); err != nil {
+		return nil, err
+	}
+	for id, payload := range resume {
+		if err := sm.Resume(id, payload); err != nil {
+			return nil, fmt.Errorf("return from interrupt %q: %w", id, err)
+		}
+	}
+	sm.mu.RLock()
+	idx := sm.round.runnable()
+	calls := make([]ToolCall, len(idx))
+	for k, i := range idx {
+		calls[k] = sm.round.Calls[i].Call
+	}
+	sm.mu.RUnlock()
+
+	runs := make([]toolRun, len(calls))
+	slots := make(chan struct{}, maxParallelToolCalls)
+	var wg sync.WaitGroup
+	for k, tc := range calls {
+		slots <- struct{}{}
+		wg.Go(func() {
+			defer func() { <-slots }()
+			runs[k] = a.executeToolCall(ctx, tc, out)
+		})
+	}
+	wg.Wait()
+
+	steps = make([]ToolStep, len(runs))
+	parked := false
+	sm.mu.Lock()
+	for k, r := range runs {
+		c := &sm.round.Calls[idx[k]]
+		steps[k] = r.step
+		steps[k].Starts, steps[k].Cancels = r.jobs.starts, r.jobs.cancels
+		switch {
+		case r.step.Interrupted && parked:
+			// The turn parks on one interrupt. This call did not finish, so
+			// it drops its park and runs again after resume.
+			c.Park = nil
+			steps[k].Interrupted, steps[k].InterruptID, steps[k].InterruptData = false, "", nil
+		case r.step.Interrupted:
+			parked = true
+			out <- StreamEvent{Type: StreamEventInterrupt, MessageID: r.step.InterruptID, Data: r.step.InterruptData}
+		case r.jobs.await != "":
+			c.AwaitID, steps[k].AwaitJobID = r.jobs.await, r.jobs.await
+		default:
+			a.emitPlanUpdate(out)
+			c.Result = a.emitToolResult(out, c.Call, r.content, r.status)
+			sm.round.Effect = sm.round.Effect.merge(r.effect)
+			if r.err != nil {
+				slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", c.Call.Name, "error", r.err)
+			}
+		}
+	}
+	sm.report = stepReport{Seq: seq, Steps: steps}
+	sm.mu.Unlock()
+	return steps, a.commitOpenRound(ctx)
+}
+
+// executeToolCall runs one call. It may park or wait on a child, but it
+// records nothing: runTools records every call in call order.
+func (a *TurnManager) executeToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) toolRun {
 	turnRT := newToolRuntime(out, a.session, a.jobHost)
 	tcKey := tc.Key()
+	run := toolRun{step: ToolStep{Call: tc}, jobs: turnRT.jobs}
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
-		a.pendingMu.Lock()
-		delete(a.pendingToolCalls, tcKey)
-		a.pendingMu.Unlock()
 		toolErr := Correctionf(ErrNotFound, "%s: not found. That is not a registered tool. Use a name from the available tools", tc.Name)
 		toolSpan.Finish("error", toolErr)
-		msg := a.emitToolResult(out, tc, toolErr.Error(), "error")
-		_ = a.addToContext(ctx, msg, out)
-		return ToolStep{}, nil
+		run.content, run.status = toolErr.Error(), "error"
+		return run
 	}
 	runtimeCopy := turnRT.WithToolCallID(tcKey)
-	output, toolDisp, err := a.toolRunner.Run(toolCtx, ToolInvocation{
+	outcome, err := a.toolRunner.Run(toolCtx, ToolInvocation{
 		Tool:     tool,
 		ArgsJSON: tc.Arguments,
 		Runtime:  runtimeCopy,
@@ -188,108 +265,24 @@ func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan Str
 			toolCtx, telemetry.AgentIDFromContext(ctx), parked.TypeName(),
 		)
 		toolSpan.Finish("interrupt", nil)
-		a.pendingMu.Lock()
-		a.pendingToolCalls[tcKey] = PendingToolCall{ToolCall: &tc, InterruptActive: true}
-		a.pendingMu.Unlock()
-		out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
-		return ToolStep{Interrupted: true, InterruptID: tcKey, InterruptData: data}, nil
+		run.step.Interrupted, run.step.InterruptID, run.step.InterruptData = true, tcKey, data
+		return run
 	}
-	a.pendingMu.Lock()
-	delete(a.pendingToolCalls, tcKey)
-	a.pendingMu.Unlock()
 	if err != nil {
 		toolSpan.Finish("error", err)
-		msg := a.emitToolResult(out, tc, err.Error(), "error")
-		_ = a.addToContext(ctx, msg, out)
-		if errors.Is(err, ErrCorrection) || errors.Is(err, context.Canceled) {
-			return ToolStep{}, nil
+		run.content, run.status = err.Error(), "error"
+		if !errors.Is(err, ErrCorrection) && !errors.Is(err, context.Canceled) {
+			run.err = err
 		}
-		return ToolStep{}, err
+		return run
 	}
-	if turnRT.wait != nil && *turnRT.wait != "" {
-		a.pendingMu.Lock()
-		a.pendingToolCalls[tcKey] = PendingToolCall{ToolCall: &tc, AwaitJob: true}
-		a.pendingMu.Unlock()
+	if turnRT.jobs.await != "" {
 		toolSpan.Finish("success", nil)
-		return ToolStep{AwaitJobID: *turnRT.wait}, nil
+		return run
 	}
-	var effects batchToolResultEffects
-	effects.merge(toolDisp)
-	hookDisp := a.toolResultHooks.observe(toolCtx, ToolResultObservation{
-		Name:     tc.Name,
-		ArgsJSON: tc.Arguments,
-		Output:   output,
-		Runtime:  runtimeCopy,
-	})
-	effects.merge(hookDisp)
-	visible := hookOutput(output, hookDisp)
 	toolSpan.Finish("success", nil)
-	a.emitPlanUpdate(out)
-	msg := a.emitToolResult(out, tc, visible, "success")
-	if !toolDisp.SuppressWindowMessage && !hookDisp.SuppressWindowMessage {
-		_ = a.addToContext(ctx, msg, out)
-	}
-	if effect := effects.resolved(); effect != EffectNone {
-		if err := a.applyBatchToolResultEffect(ctx, effect); err != nil {
-			return ToolStep{}, err
-		}
-	}
-	return ToolStep{}, nil
-}
-
-// SpawnSpecialistName is the built-in that calls HarnessRuntime.Schedule.
-const SpawnSpecialistName = "spawn_specialist"
-
-// ListChildrenName and CancelChildName are built-ins on HarnessRuntime.Jobs / CancelJob.
-const (
-	ListChildrenName = "list_children"
-	CancelChildName  = "cancel_child"
-)
-
-func (a *TurnManager) applyResume(finishedInterrupts map[string][]byte) error {
-	a.pendingMu.Lock()
-	defer a.pendingMu.Unlock()
-	for id, payload := range finishedInterrupts {
-		tc, ok := a.pendingToolCalls[id]
-		if !ok {
-			return fmt.Errorf("no tool call id found for interrupt %s: %w", id, ErrInterruptNotFound)
-		}
-		if _, err := a.session.Resume(id, payload); err != nil {
-			return fmt.Errorf("return from interrupt %q: %w", id, err)
-		}
-		a.pendingToolCalls[id] = PendingToolCall{ToolCall: tc.ToolCall, InterruptActive: false}
-	}
-	return nil
-}
-
-// pairOpenToolCalls appends error tool results for assistant tool_calls that
-// have no matching tool message. Restored dirty windows become valid before
-// the next model turn; new turns never commit unpaired calls.
-//
-// Pair on WireID (Responses call_id), matching toolResultMessage. Do not
-// invent a result for a still-pending call — Resume re-runs those, and a
-// Key()-keyed phantom (fc_ item id) is rejected by Azure as
-// "No tool call found for function call output".
-func (a *TurnManager) pairOpenToolCalls(reason string) {
-	window := a.context.Messages()
-	hasOutput := toolOutputIDs(window)
-	pending := a.pendingSnapshot()
-	for _, m := range window {
-		if m == nil || m.Role != RoleAssistant {
-			continue
-		}
-		for _, tc := range m.ToolCalls {
-			if _, ok := hasOutput[tc.WireID()]; ok {
-				continue
-			}
-			if _, ok := pending[tc.Key()]; ok {
-				continue
-			}
-			msg, _ := a.toolResultMessage(tc, reason, "error")
-			a.context.Add(msg)
-			hasOutput[msg.ToolCallID] = struct{}{}
-		}
-	}
+	run.content, run.status, run.effect = outcome.Output, "success", outcome.Effect
+	return run
 }
 
 func tagModelAfterToolsError(chunk LLMResponseChunk) LLMResponseChunk {

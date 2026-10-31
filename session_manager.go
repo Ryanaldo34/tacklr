@@ -1,7 +1,6 @@
 package tacklr
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -9,24 +8,22 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// sessionManager owns durable and live data for one agent harness thread
-// (checkpoint id), not an ACP client session id: plan, user tool state,
-// permission memory, on-call stages, search context, interrupts, and the
-// optional virtual filesystem mount table.
-//
-// VFS is host-owned and attached by assigning sessionManager.VFS. Knowledge
-// namespace + ResultSet live on Search. Builtins close over the manager; user
-// tools use sessionRuntime.
+// sessionManager is one session's state: plan, user tool state, permission
+// memory, search context, the open round (with each call's park and OnCall
+// layers), the last Tools step's report, and the workspace mount table.
+// Builtins close over it; user tools reach it through sessionRuntime.
 type sessionManager struct {
 	mu          sync.RWMutex
 	Plan        *planStore
 	userState   map[string]any
-	pending     interruptMap
-	resolved    interruptMap
 	Permissions permissions
-	OnCall      onCallStore
 	Search      *brain.SearchContext
 	VFS         *vfs.MountSession
+	// round is the reply whose calls do not all have results yet; nil when
+	// none is open. The window gets it whole when it commits.
+	round *openRound
+	// report is the last Tools step's report, for a retry of that step.
+	report stepReport
 }
 
 // newSessionManager returns an empty manager ready for use.
@@ -34,8 +31,6 @@ func newSessionManager() *sessionManager {
 	return &sessionManager{
 		Plan:        newPlanStore(),
 		userState:   map[string]any{},
-		pending:     interruptMap{},
-		resolved:    interruptMap{},
 		Permissions: newPermissions(),
 		Search:      brain.NewSearchContext(),
 	}
@@ -64,93 +59,69 @@ func (s *sessionManager) StateDelete(key string) {
 	delete(s.userState, key)
 }
 
-// HasPendingInterrupt reports whether any interrupt is still awaiting a client payload.
-func (s *sessionManager) HasPendingInterrupt() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.pending) > 0
-}
-
-// ClearInterrupts drops pending and resolved interrupt maps (steer / cancel finalize).
-func (s *sessionManager) ClearInterrupts() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pending = interruptMap{}
-	s.resolved = interruptMap{}
-}
-
-// DropInterrupt removes one interrupt after a durability failure prevents it
-// from being safely exposed to a client.
-func (s *sessionManager) DropInterrupt(id string) {
-	s.mu.Lock()
-	delete(s.pending, id)
-	delete(s.resolved, id)
-	s.mu.Unlock()
-}
-
-// Park is the only writer of pending. It stores intr under callID and returns
-// that interrupt as the error tools propagate (`return "", err`).
+// Park makes intr the park of the open round's call callID and returns it
+// as the error tools propagate (`return "", err`).
 func (s *sessionManager) Park(callID string, intr Interrupt) error {
 	if intr == nil {
 		return fmt.Errorf("park: interrupt is nil")
 	}
-	if callID == "" {
-		return fmt.Errorf("park: CurrentToolCallID is empty")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.pending[callID] = intr
+	c := s.round.call(callID)
+	if c == nil {
+		return fmt.Errorf("park: tool call %q is not in the open round", callID)
+	}
+	c.Park = &callPark{Interrupt: intr}
 	return intr
 }
 
-// Resume validates via Interrupt.Return, then moves pending → resolved.
-// An invalid payload leaves the park in place.
-func (s *sessionManager) Resume(callID string, payload []byte) (Interrupt, error) {
+// Resume answers callID's park through Interrupt.Return. An invalid payload
+// leaves the park unanswered.
+func (s *sessionManager) Resume(callID string, payload []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	intr, ok := s.pending[callID]
-	if !ok {
-		return nil, fmt.Errorf("interrupt %q: %w", callID, ErrInterruptNotFound)
+	c := s.round.call(callID)
+	if c == nil || c.Park == nil || c.Park.Answered {
+		return fmt.Errorf("interrupt %q: %w", callID, ErrInterruptNotFound)
 	}
-	if err := intr.Return(payload); err != nil {
-		return nil, err
+	if err := c.Park.Interrupt.Return(payload); err != nil {
+		return err
 	}
-	delete(s.pending, callID)
-	s.resolved[callID] = intr
-	return intr, nil
+	c.Park.Answered = true
+	return nil
 }
 
-// TakeResolved removes and returns a resolved interrupt if present (re-entry after Resume).
-func (s *sessionManager) TakeResolved(id string) (Interrupt, bool) {
+// TakeAnswer removes and returns callID's answered park of typeName, for
+// the call's run after resume.
+func (s *sessionManager) TakeAnswer(callID, typeName string) (Interrupt, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	intr, ok := s.resolved[id]
-	if !ok {
+	c := s.round.call(callID)
+	if c == nil || c.Park == nil || !c.Park.Answered || c.Park.Interrupt.TypeName() != typeName {
 		return nil, false
 	}
-	delete(s.resolved, id)
+	intr := c.Park.Interrupt
+	c.Park = nil
 	return intr, true
 }
 
-func decodeInterruptMaps(pendingJSON, resolvedJSON []byte) (interruptMap, interruptMap, error) {
-	pending := interruptMap{}
-	resolved := interruptMap{}
-	if len(pendingJSON) > 0 {
-		if err := json.Unmarshal(pendingJSON, &pending); err != nil {
-			return nil, nil, fmt.Errorf("unmarshal pending interrupts: %w", err)
-		}
+// Layer is callID's completed OnCall layer of typeName.
+func (s *sessionManager) Layer(callID, typeName string) (onCallLayer, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	c := s.round.call(callID)
+	if c == nil {
+		return onCallLayer{}, false
 	}
-	if len(resolvedJSON) > 0 {
-		if err := json.Unmarshal(resolvedJSON, &resolved); err != nil {
-			return nil, nil, fmt.Errorf("unmarshal resolved interrupts: %w", err)
-		}
-	}
-	return pending, resolved, nil
+	return c.layer(typeName)
 }
 
-func (s *sessionManager) replaceInterrupts(pending, resolved interruptMap) {
+// RecordLayer stores a completed OnCall layer on callID, so its next run
+// skips it.
+func (s *sessionManager) RecordLayer(callID string, layer onCallLayer) {
 	s.mu.Lock()
-	s.pending = pending
-	s.resolved = resolved
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	if c := s.round.call(callID); c != nil {
+		c.Layers = append(c.Layers, layer)
+	}
 }

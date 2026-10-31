@@ -5,22 +5,6 @@ import (
 	"testing"
 )
 
-func TestNamespace_stringMapValidate(t *testing.T) {
-	ns := mustNS(t, "org", "acme", "workspace", "west")
-	if ns.String() != "acme.west" {
-		t.Fatalf("String = %q", ns.String())
-	}
-	if err := ns.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	if ns.Empty() {
-		t.Fatal("non-empty")
-	}
-	if !ns.Equal(ns.Clone()) {
-		t.Fatal("clone")
-	}
-}
-
 func TestNamespace_coversHierarchicalRLS(t *testing.T) {
 	obj := mustNS(t, "org", "acme", "workspace", "west", "project", "alpha")
 	org := mustNS(t, "org", "acme")

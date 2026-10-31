@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"time"
 
@@ -13,7 +14,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
-	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -32,13 +32,15 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 	sess := &session.Session{
 		Task: in.Prompt,
 		Turn: session.Turn{
-			SessionID:  in.SessionID,
-			Specialist: in.Specialist,
-			Worker:     in.Worker,
-			Parent:     in.Parent,
-			Mounts:     session.ApplyAuth(in.Mounts, session.AuthContext{}),
-			MCP:        in.MCPServers,
-			Seed:       in.State,
+			SessionID: in.SessionID,
+			Identity: session.Identity{
+				Specialist: in.Specialist,
+				Worker:     in.Worker,
+				Parent:     in.Parent,
+				Mounts:     session.ApplyAuth(in.Mounts, session.AuthContext{}),
+			},
+			MCP:   in.MCPServers,
+			State: maps.Clone(in.State),
 		},
 	}
 	ex := &wfExec{
@@ -52,18 +54,19 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		spawned:     &spawned,
 	}
 	_ = workflow.SetQueryHandler(ctx, queryStatus, func() (session.SessionStatus, error) {
+		id := sess.Turn.Identity
 		st := session.SessionStatus{
-			ID:         in.SessionID,
-			Parent:     in.Parent,
-			Specialist: in.Specialist,
+			ID:         sess.Turn.SessionID,
+			Parent:     id.Parent,
+			Specialist: id.Specialist,
 			State:      session.SessionRunning,
 			Waiting:    sess.Turn.Yielded,
 			Result:     sess.Turn.Result,
 		}
-		if in.Worker != "" {
+		if id.Worker != "" {
 			st.Kind = session.SessionKindWorker
-			st.Specialist = in.Worker
-		} else if in.Specialist != "" {
+			st.Specialist = id.Worker
+		} else if id.Specialist != "" {
 			st.Kind = session.SessionKindSpecialist
 		}
 		if sess.Turn.Terminal != "" {
@@ -156,8 +159,8 @@ func (w *wfExec) End() {
 	}
 	w.sessionCtx = w.ctx
 	w.open = false
-	if w.turn.Yielded && w.in.Parent != "" {
-		_ = workflow.SignalExternalWorkflow(w.ctx, string(w.in.Parent), "", signalChildWaiting, w.in.SessionID).Get(w.ctx, nil)
+	if w.turn.Yielded && w.turn.Parent != "" {
+		_ = workflow.SignalExternalWorkflow(w.ctx, string(w.turn.Parent), "", signalChildWaiting, w.turn.SessionID).Get(w.ctx, nil)
 	}
 }
 
@@ -168,10 +171,12 @@ func (w *wfExec) Infer(in session.InferenceInput) (session.InferenceOutput, erro
 	return out, err
 }
 
-func (w *wfExec) Tool(in session.ToolInput) (session.ToolOutput, error) {
+// Tools runs the open round's calls as one activity: one turn world and
+// one snapshot save for every call, which the harness runs concurrently.
+func (w *wfExec) Tools(in session.ToolsInput) ([]session.ToolOutput, error) {
 	var act *activities
-	var out session.ToolOutput
-	err := w.waitActivity(act.Tool, in, &out)
+	var out []session.ToolOutput
+	err := w.waitActivity(act.Tools, in, &out)
 	return out, err
 }
 
@@ -277,7 +282,7 @@ func (w *wfExec) Ready() []*tacklr.Message {
 			return inbox
 		}
 		if msg := markChildDone(w.spawned, gotID, gotResult, gotErr); msg != nil {
-			inbox = adapter.AppendMessages(inbox, msg)
+			inbox = append(inbox, msg)
 		}
 	}
 }
@@ -347,33 +352,33 @@ func (w *wfExec) IDs() []session.SessionID {
 	return out
 }
 
+// Start cancels and starts the children one call asked for. The harness
+// asks to start only a child that is not running.
 func (w *wfExec) Start(tout session.ToolOutput) error {
-	if tout.CancelID != "" {
-		cancelOne(w.ctx, w.spawned, tout.CancelID)
+	for _, id := range tout.Cancels {
+		cancelOne(w.ctx, w.spawned, session.SessionID(id))
 	}
-	if tout.JobID == "" || tout.JobName == "" || findChild(*w.spawned, tout.JobID) >= 0 {
-		return nil
+	for _, s := range tout.Starts {
+		id := session.SessionID(s.ID)
+		spec, worker := "", s.Name
+		if s.Specialist {
+			spec, worker = s.Name, ""
+		}
+		c, err := startChild(w.ctx, w.sessionCtx, w.in.SessionID, spec, worker, s.Task, id, w.turn.Mounts, w.in)
+		if err != nil {
+			return err
+		}
+		*w.spawned = append(*w.spawned, c)
 	}
-	spec, worker := "", ""
-	if tout.Child {
-		spec = tout.JobName
-	} else {
-		worker = tout.JobName
-	}
-	c, err := startChild(w.ctx, w.sessionCtx, w.in.SessionID, spec, worker, tout.JobTask, tout.JobID, w.turn.Mounts, w.in)
-	if err != nil {
-		return err
-	}
-	*w.spawned = append(*w.spawned, c)
 	return nil
 }
 
-func (w *wfExec) Await(id session.SessionID) (string, error) {
+func (w *wfExec) Await(id session.SessionID) (string, bool, error) {
 	ctx := w.ctx
 	for {
 		i := findChild(*w.spawned, id)
 		if i < 0 {
-			return "", session.ErrSessionNotFound
+			return "", false, session.ErrSessionNotFound
 		}
 		if (*w.spawned)[i].done {
 			break
@@ -382,7 +387,7 @@ func (w *wfExec) Await(id session.SessionID) (string, error) {
 		cancelled := w.takeCancel()
 		if cancelled {
 			w.CancelAll()
-			return "", context.Canceled
+			return "", false, context.Canceled
 		}
 		sel := workflow.NewSelector(ctx)
 		sel.AddFuture((*w.spawned)[i].fut, func(f workflow.Future) {
@@ -405,19 +410,19 @@ func (w *wfExec) Await(id session.SessionID) (string, error) {
 		sel.Select(ctx)
 		if cancelled {
 			w.CancelAll()
-			return "", context.Canceled
+			return "", false, context.Canceled
 		}
 	}
 	i := findChild(*w.spawned, id)
 	if i < 0 {
-		return "", session.ErrSessionNotFound
+		return "", false, session.ErrSessionNotFound
 	}
 	c := (*w.spawned)[i]
 	dropChild(w.spawned, id)
 	if c.err != "" {
-		return c.err, nil
+		return c.err, true, nil
 	}
-	return c.result, nil
+	return c.result, false, nil
 }
 
 func (w *wfExec) CancelAll() {

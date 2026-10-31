@@ -1,7 +1,7 @@
 // Package vfsindex bridges a vfs.MountSession into brain knowledge objects.
 //
 // Canonical architecture: docs/knowledge.md. This package is only the artifact
-// ingest path (IndexPath / policy / schedulers).
+// ingest path (IndexPath, IndexFile, UnindexPath).
 //
 // VFS and brain work alone or together. This package is the optional
 // composition layer: it imports both, while vfs and brain never import each other.
@@ -28,22 +28,18 @@
 // embeds and writes only chunks whose text changed. Live file bytes stay the
 // source of truth.
 //
-// # Index policy (MountSpec.IndexPolicy)
+// # Mounts that are not indexed
 //
-//	none       — index_file errors
-//	selective  — index_file / host IndexPath
-//	prefix     — host may walk the mount with IndexPrefix
-//	watch      — same host hint as prefix
-//
-// Empty policy normalizes to selective (NormalizePolicy / AutoIndex helpers).
-// AutoIndex is for a pipeline the host builds. The turn does not walk mounts,
-// subscribe to remote changes, or re-index after WriteFile.
+// A member mounted with vfs.Member.NotIndexed (MountSpec.NotIndexed) is not
+// indexed: index_file refuses its files, and IndexPath skips
+// them. The turn does not walk mounts, subscribe to remote changes, or
+// re-index after WriteFile.
 //
 // # Single pipeline
 //
 // File bytes become brain chunks only through IndexPath (or UnindexPath).
 // The turn calls that from index_file and unindex. A host calls IndexPath
-// or IndexPrefix from its own system. A version match returns PathSkipped
+// from its own system. A version match returns PathSkipped
 // without reading the file.
 //
 // # Session-visible body
@@ -51,17 +47,11 @@
 // IndexPath uses MountSession.ReadText (structured types) and MountSession.Open
 // (other text). Writes are write-through, so a later index_file sees the last persist.
 //
-// # Schedulers
+// # In a turn
 //
-// SyncScheduler runs IndexPath inline. AsyncScheduler enqueues with coalesce
-// (last reason wins), a bounded pending set, and a background worker. Notify
-// never blocks on re-chunk. Start creates an AsyncScheduler and does not
-// call Notify.
-//
-// A turn with a brain, a workspace, and a search namespace starts a Bridge
-// and registers index_file / unindex. Mounts with IndexPolicy=none are skipped
-// by index_file. Keeping those chunks current after the sandbox exits is the
-// host's storage pipeline, not this package.
+// A turn with a brain and a workspace builds one MountIndexer and registers
+// index_file / unindex over it. Keeping chunks current after the sandbox
+// exits is the host's storage pipeline: it calls IndexPath itself.
 //
 // # Kinds
 //

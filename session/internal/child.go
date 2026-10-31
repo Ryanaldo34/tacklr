@@ -34,11 +34,6 @@ func HasSpecialist(agent tacklr.AgentOptions, name string) bool {
 	return tacklr.FindSpecialist(agent.Specialists, name) != nil
 }
 
-// UnknownChild is cancel/wait with an id that is not this session's job.
-func UnknownChild(id string) error {
-	return fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", id, tacklr.ErrNotFound)
-}
-
 // JobSteer is the RoleUser inbox text when a non-blocking job reaches
 // complete or failed. It is a new message, not a second RoleTool for the
 // schedule call_id.

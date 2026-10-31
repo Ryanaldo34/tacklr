@@ -46,9 +46,6 @@ func TestMountSession_localSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if mt, err := ms.Classify(ctx, "/workspace/work/hello.go", nil); err != nil || mt != "text/x-go" {
-		t.Fatalf("Classify: %q err=%v", mt, err)
-	}
 	if spec, err := ms.SpecAt("/workspace/work/hello.go"); err != nil || spec.Point != "/workspace/work" {
 		t.Fatalf("SpecAt: %+v err=%v", spec, err)
 	}
@@ -171,15 +168,6 @@ func TestMountSession_localSession(t *testing.T) {
 		t.Fatalf("canceled: %v", err)
 	}
 
-	if err := ms.Unmount("/workspace"); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/ab/c.txt").
-		ReadFile(ctx); !errors.Is(err, vfs.ErrNotMounted) {
-		t.Fatalf("after unmount: %v", err)
-	}
-
 	ms2, err := vfs.Tree(vfs.At("work", vfs.Local(base)))(ctx, "sess-2", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
@@ -189,12 +177,6 @@ func TestMountSession_localSession(t *testing.T) {
 	if b, err := ms2.Route(ctx, "/workspace/work/hello.go").
 		ReadFile(ctx); err != nil || string(b) != "package main\n" {
 		t.Fatalf("remount ReadFile = %q err=%v", b, err)
-	}
-	if err := ms2.Unmount("/workspace"); err != nil {
-		t.Fatal(err)
-	}
-	if n := len(ms2.Specs()); n != 0 {
-		t.Fatalf("unmount specs = %d", n)
 	}
 }
 
@@ -237,9 +219,6 @@ func TestMountSession_writeLimits(t *testing.T) {
 
 	if _, err := ms.ContentRev(ctx, "rel"); err == nil {
 		t.Fatal("ContentRev relative")
-	}
-	if _, err := ms.Classify(ctx, "/nomount/x.txt", nil); err == nil {
-		t.Fatal("Classify unmounted")
 	}
 	for _, p := range []string{"", "rel", "/has\x00x"} {
 		if _, err := ms.Route(ctx, p).
@@ -604,23 +583,11 @@ func TestDocument_session(t *testing.T) {
 		t.Fatalf("oversize encode: %v", err)
 	}
 
-	if mt, err := ms.Classify(ctx, "/workspace/work/note.txt", nil); err != nil || mt != "text/plain" {
-		t.Fatalf("Classify: %q err=%v", mt, err)
-	}
-	if mt, err := ms.Classify(ctx, "/workspace/work/new.json", []byte(`{"a":1}`)); err != nil || mt != "application/json" {
-		t.Fatalf("Classify new json: %q err=%v", mt, err)
-	}
-	if mt, err := ms.Classify(ctx, "/workspace/work/sniff", []byte("a\x00b")); err != nil || mt != "application/octet-stream" {
-		t.Fatalf("Classify nul: %q err=%v", mt, err)
-	}
 	if spec, err := ms.SpecAt("/workspace/work/note.txt"); err != nil || spec.Point != "/workspace/work" {
 		t.Fatalf("SpecAt: %+v err=%v", spec, err)
 	}
 	if _, err := ms.SpecAt("/nope/x"); err == nil {
 		t.Fatal("SpecAt unmounted")
-	}
-	if _, err := ms.Classify(ctx, "rel", nil); err == nil {
-		t.Fatal("Classify relative")
 	}
 
 	if _, err := ms.Route(ctx, "/workspace/work/note.txt").
@@ -708,9 +675,6 @@ func TestMountSession_configErrors(t *testing.T) {
 	if _, err := ms.SpecAt("/has\x00x"); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("nul path: %v", err)
 	}
-	if err := ms.Unmount("/missing"); !errors.Is(err, vfs.ErrNotMounted) {
-		t.Fatalf("unmount missing: %v", err)
-	}
 	if _, err := vfs.NewMountSession(""); err == nil {
 		t.Fatal("empty session id construct")
 	}
@@ -785,7 +749,7 @@ func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(root, "leak")); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
+		t.Fatal(err)
 	}
 	p, err := vfs.NewLocalProvider(root)
 	if err != nil {

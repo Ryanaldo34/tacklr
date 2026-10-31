@@ -178,18 +178,6 @@ func NewEngine(store Store, opts ...EngineOption) (*Engine, error) {
 // the link tool.
 func (e *Engine) HasGraph() bool { return e.graph != nil }
 
-// RegisterKinds merges host kind definitions into the process catalog.
-// Re-registering an existing kind name replaces that kind. Fails if the catalog is frozen.
-func (e *Engine) RegisterKinds(_ context.Context, specs ...KindSpec) error {
-	return e.catalog.register(specs...)
-}
-
-// FreezeCatalog rejects further RegisterKinds / LoadKindsFromStore.
-// Also auto-frozen on the first search when the catalog is non-empty.
-func (e *Engine) FreezeCatalog() {
-	e.catalog.Freeze()
-}
-
 // Catalog returns the process kind catalog for inspection. Empty means open
 // mode. Prefer store.Setup plus LoadKindsFromStore, or ApplyKinds; do not
 // mutate catalog fields directly.

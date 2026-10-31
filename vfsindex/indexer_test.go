@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io/fs"
 	"slices"
 	"strings"
 	"testing"
@@ -56,13 +55,8 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// IndexPrefix
-	stats, err := idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.Indexed != 1 {
-		t.Fatalf("stats: %+v", stats)
+	if res, err := idx.IndexPath(ctx, "/workspace/work/note.txt"); err != nil || res != vfsindex.PathIndexed {
+		t.Fatalf("index = %v %v", res, err)
 	}
 
 	parentID := idx.DocumentID("/workspace/work/note.txt")
@@ -99,19 +93,16 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	}
 
 	// Version skip
-	stats, err = idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{})
-	if err != nil || stats.Skipped != 1 || stats.Indexed != 0 {
-		t.Fatalf("version skip stats: %+v err=%v", stats, err)
+	if res, err := idx.IndexPath(ctx, "/workspace/work/note.txt"); err != nil || res != vfsindex.PathSkipped {
+		t.Fatalf("version skip = %v %v", res, err)
 	}
 
-	// AfterPersist + SyncScheduler re-index on write
-	sched := vfsindex.NewSyncScheduler(idx)
-	ms.SetAfterPersist(func(ctx context.Context, path string) error {
-		return sched.Notify(ctx, path, vfsindex.ReasonSync)
-	})
-
+	// A rewrite re-indexes with IndexPath.
 	if err := ms.Route(ctx, "/workspace/work/note.txt").
 		WriteFile(ctx, []byte("rewritten uniquephrase\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.IndexPath(ctx, "/workspace/work/note.txt"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -120,7 +111,7 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(slices.Collect(page.Results.Objects())) == 0 {
-		t.Fatal("expected re-index after WriteFile hook")
+		t.Fatal("expected the rewrite indexed")
 	}
 	// old content should shrink to one chunk
 	children, err = listChildren(ctx, eng, scope, parentID)
@@ -152,21 +143,8 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stats, err = idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{})
-	if err != nil || stats.Indexed != 0 {
-		t.Fatalf("png skip: %+v err=%v", stats, err)
-	}
-
-	// MaxFiles
-
-	if err := ms.Route(ctx, "/workspace/work/c.txt").
-		WriteFile(ctx, []byte("c\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	stats, err = idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{MaxFiles: 1})
-	if err != nil || stats.Indexed+stats.Skipped < 1 {
-		t.Fatalf("max files: %+v err=%v", stats, err)
+	if res, err := idx.IndexPath(ctx, "/workspace/work/pic.png"); err != nil || res != vfsindex.PathSkipped {
+		t.Fatalf("png = %v %v, want skipped", res, err)
 	}
 
 	// IndexPath on directory is a no-op
@@ -235,7 +213,7 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{}); err != nil {
+	if _, err := idx.IndexPath(ctx, "/workspace/work/guide.md"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -444,7 +422,7 @@ func TestMountIndexer_IndexFileAndDefaults(t *testing.T) {
 	ctx := context.Background()
 	ms := treeLocal(t,
 		vfs.At("work", vfs.Local(t.TempDir())),
-		vfs.At("off", vfs.Local(t.TempDir())).Indexed("none"),
+		vfs.At("off", vfs.Local(t.TempDir())).NotIndexed(),
 	)
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
@@ -540,30 +518,7 @@ func TestMountIndexer_IndexFileAndDefaults(t *testing.T) {
 	if _, err := idx.UnindexPath(ctx, "relative"); err == nil {
 		t.Fatal("UnindexPath relative")
 	}
-	if _, err := idx.IndexPrefix(ctx, "relative", vfsindex.IndexOpts{}); err == nil {
-		t.Fatal("IndexPrefix relative")
-	}
-
-	// Nested walk under prefix
-
-	if err := ms.Route(ctx, "/workspace/work/sub").
-		MkdirAll(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/sub/nested.txt").
-		WriteFile(ctx, []byte("nested-unique-token\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	stats, err := idx.IndexPrefix(ctx, "/workspace/work/sub", vfsindex.IndexOpts{})
-	if err != nil || stats.Indexed < 1 {
-		t.Fatalf("nested prefix: %+v err=%v", stats, err)
-	}
-	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "nested-unique-token"})
-	if err != nil || len(slices.Collect(page.Results.Objects())) == 0 {
-		t.Fatalf("nested search: %+v err=%v", slices.Collect(page.Results.Objects()), err)
-	}
+	var page brain.Page
 
 	if err := ms.Route(ctx, "/workspace/work/binlike.txt").
 		WriteFile(ctx, []byte("ok\x00null")); err != nil {
@@ -604,7 +559,7 @@ func TestMountIndexer_IndexFileAndDefaults(t *testing.T) {
 		t.Fatalf("truncated file should still index the prefix: %+v err=%v", slices.Collect(page.Results.Objects()), err)
 	}
 
-	// PolicyNone member: IndexPath / IndexPrefix report skipped (no Document written).
+	// A NotIndexed member: IndexPath reports skipped (no Document written).
 
 	if err := ms.Route(ctx, "/workspace/off/hidden.txt").
 		WriteFile(ctx, []byte("hidden-none-token\n")); err != nil {
@@ -614,10 +569,6 @@ func TestMountIndexer_IndexFileAndDefaults(t *testing.T) {
 	res, err = idx.IndexPath(ctx, "/workspace/off/hidden.txt")
 	if err != nil || res != vfsindex.PathSkipped {
 		t.Fatalf("policy none: res=%q err=%v", res, err)
-	}
-	stats, err = idx.IndexPrefix(ctx, "/workspace/off", vfsindex.IndexOpts{})
-	if err != nil || stats.Indexed != 0 {
-		t.Fatalf("prefix none: %+v err=%v", stats, err)
 	}
 
 	// Byte-only provider has no Document IR — indexer streams the UTF-8 body.
@@ -642,150 +593,6 @@ func keys(m map[string]brain.Object) []string {
 		out = append(out, k)
 	}
 	return out
-}
-
-func TestMountIndexer_docsBlockText(t *testing.T) {
-	ctx := context.Background()
-	doc := vfs.NewRichDocument("/workspace/docs/Spec", "application/vnd.google-apps.document", []vfs.Block{
-		{Kind: vfs.BlockKindHeading, Text: "Spec", Style: vfs.StyleMeta{Level: 1}},
-		{Kind: vfs.BlockKindParagraph, Text: "unique-doc-phrase"},
-	})
-	ms := treeLocal(t, vfs.At("docs", richFactory{doc: doc}.Open))
-	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
-		t.Fatal(err)
-	}
-	ns := mustNS(t, "id", uuid.NewString())
-	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: ns})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	st, err := ms.Route(ctx, "/workspace/docs/Spec").
-		Stat(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := idx.IndexFile(ctx, "/workspace/docs/Spec", st)
-	if err != nil || res != vfsindex.PathIndexed {
-		t.Fatalf("index: %q err=%v", res, err)
-	}
-	parent := idx.DocumentID("/workspace/docs/Spec")
-	children, err := listChildren(ctx, eng, brain.Scope{Namespace: ns}, parent)
-	if err != nil || len(children) != 2 {
-		t.Fatalf("chunks=%d err=%v", len(children), err)
-	}
-	var sawPhrase bool
-	for _, c := range children {
-		obj, err := eng.Get(ctx, brain.Scope{Namespace: ns}, c.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(obj.Content, "unique-doc-phrase") && !strings.Contains(obj.Content, "<html") {
-			sawPhrase = true
-		}
-	}
-	if !sawPhrase {
-		t.Fatal("expected Block.Text chunk, not projected HTML")
-	}
-	res, err = idx.IndexFile(ctx, "/workspace/docs/Spec", st)
-	if err != nil || res != vfsindex.PathSkipped {
-		t.Fatalf("version skip: %q err=%v", res, err)
-	}
-}
-
-func TestMountIndexer_unindexLeavesFileThenReindexRecovers(t *testing.T) {
-	ctx := t.Context()
-	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
-		t.Fatal(err)
-	}
-	scope := brain.Scope{Namespace: mustNS(t, "id", uuid.NewString())}
-	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/a.txt").
-		WriteFile(ctx, []byte("recoverable-phrase\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := idx.IndexPath(ctx, "/workspace/work/a.txt"); err != nil {
-		t.Fatal(err)
-	}
-	removed, err := idx.UnindexPath(ctx, "/workspace/work/a.txt")
-	if err != nil || !removed {
-		t.Fatalf("unindex: removed=%v err=%v", removed, err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/work/a.txt").
-		ReadFile(ctx); err != nil {
-		t.Fatalf("vfs file must remain: %v", err)
-	}
-
-	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "recoverable-phrase"})
-	if err != nil || len(slices.Collect(page.Results.Objects())) != 0 {
-		t.Fatalf("search after unindex: %+v err=%v", page, err)
-	}
-	if _, err := idx.IndexPath(ctx, "/workspace/work/a.txt"); err != nil {
-		t.Fatal(err)
-	}
-	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "recoverable-phrase"})
-	if err != nil || len(slices.Collect(page.Results.Objects())) == 0 {
-		t.Fatalf("reindex recovery: %+v err=%v", page, err)
-	}
-}
-
-func TestMountIndexer_nonePolicySkippedAndMaxFilesStops(t *testing.T) {
-	ctx := t.Context()
-	ms := treeLocal(t,
-		vfs.At("work", vfs.Local(t.TempDir())),
-		vfs.At("off", vfs.Local(t.TempDir())).Indexed("none"),
-	)
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
-		t.Fatal(err)
-	}
-	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: mustNS(t, "id", uuid.NewString())})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/a.txt").
-		WriteFile(ctx, []byte("one\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/b.txt").
-		WriteFile(ctx, []byte("two\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/off/x.txt").
-		WriteFile(ctx, []byte("hidden\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	stats, err := idx.IndexPrefix(ctx, "/workspace/off", vfsindex.IndexOpts{})
-	if err != nil || stats.Indexed != 0 {
-		t.Fatalf("none prefix: %+v err=%v", stats, err)
-	}
-	stats, err = idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{MaxFiles: 1})
-	if err != nil || stats.Indexed != 1 {
-		t.Fatalf("max files: %+v err=%v", stats, err)
-	}
 }
 
 // cancelOnEmbed cancels the index's ctx on its first Embed call (the parent).
@@ -846,39 +653,6 @@ func TestMountIndexer_aMarkdownIndexStopsAtTheFirstRejectedOrCancelledSection(t 
 			t.Errorf("%s: index = %v, want %q", name, err, tc.want)
 		}
 	}
-}
-
-type richFactory struct{ doc vfs.Document }
-
-func (f richFactory) Open(context.Context, string, vfs.Binding) (vfs.Provider, error) {
-	return richProvider(f), nil
-}
-
-type richProvider struct{ doc vfs.Document }
-
-func (richProvider) Validate(context.Context) error { return nil }
-func (p richProvider) Stat(_ context.Context, name string) (vfs.FileInfo, error) {
-	if name == "" {
-		return vfs.FileInfo{Name: ".", IsDir: true}, nil
-	}
-	return vfs.FileInfo{Name: "Spec", MediaType: "application/vnd.google-apps.document", Version: "v1"}, nil
-}
-func (richProvider) OpenFile(context.Context, string, int, fs.FileMode) (vfs.File, error) {
-	return nil, vfs.ErrNotSupported
-}
-func (p richProvider) ReadDir(_ context.Context, name string) ([]vfs.DirEntry, error) {
-	if name != "" {
-		return nil, vfs.ErrNotExist
-	}
-	return []vfs.DirEntry{{Name: "Spec"}}, nil
-}
-func (richProvider) Remove(context.Context, string) error                { return vfs.ErrNotSupported }
-func (richProvider) MkdirAll(context.Context, string, fs.FileMode) error { return vfs.ErrNotSupported }
-func (p richProvider) OpenDocument(_ context.Context, _ string, _ *vfs.ContentRegistry) (vfs.Document, error) {
-	return p.doc, nil
-}
-func (richProvider) WriteDocument(context.Context, string, vfs.Document) error {
-	return vfs.ErrNotSupported
 }
 
 func mustNS(t testing.TB, nv ...string) brain.Namespace {

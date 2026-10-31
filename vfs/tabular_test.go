@@ -256,29 +256,7 @@ func TestCreator_liftsGridAndRich(t *testing.T) {
 	}
 }
 
-func TestParseCellFormat_stringRoundTrip(t *testing.T) {
-	src := CellFormat{
-		Number: "$#,##0.00", Bold: true, Italic: true, Strike: true, Underline: true,
-		Fill: "#ffcc00", Color: "#003366", Align: "right", VAlign: "middle", Wrap: "wrap",
-		Border: &CellBorder{Style: "thin", Edges: "bottom", Color: "#ff0000"},
-	}
-	got, err := ParseCellFormat(src.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Number != src.Number || !got.Bold || !got.Italic || !got.Strike || !got.Underline ||
-		got.Fill != src.Fill || got.Color != src.Color || got.Align != src.Align ||
-		got.VAlign != src.VAlign || got.Wrap != src.Wrap ||
-		got.Border == nil || got.Border.Style != "thin" || got.Border.Edges != "bottom" ||
-		got.Border.Color != "#ff0000" {
-		t.Fatalf("parse = %+v border=%+v from %q", got, got.Border, src.String())
-	}
-	bag, err := ParseCellFormat("number=#,##0.00,bold=false,italic=false,strike=false,underline=false,border=medium:top:#00ff00")
-	if err != nil || bag.Bold || !bag.has(fmtBold) || bag.Number != "#,##0.00" ||
-		bag.Border == nil || bag.Border.Style != "medium" || bag.Border.Edges != "top" ||
-		bag.Border.Color != "#00ff00" {
-		t.Fatalf("flags = %+v border=%+v err=%v", bag, bag.Border, err)
-	}
+func TestCellFormat_colorsAndPatches(t *testing.T) {
 	if HexColor("nope") != "" || ExcelARGB("nope") != "FF000000" {
 		t.Fatalf("invalid color: %q %q", HexColor("nope"), ExcelARGB("nope"))
 	}
@@ -295,32 +273,6 @@ func TestParseCellFormat_stringRoundTrip(t *testing.T) {
 	}
 	if s := cleared.String(); !strings.Contains(s, "bold=false") || !strings.Contains(s, "border=dotted:left") {
 		t.Fatalf("string = %q", s)
-	}
-}
-
-func TestParseTableText_pipeMarkdownBecomesGrid(t *testing.T) {
-	raw := strings.TrimSpace(`
-| Option | Description | Planning run-rate | Pros | Cons |
-| --- | --- | --- | --- | --- |
-| A. Public-only | Census/BLS/DOT | $1,000–$15,000/month | Lowest licensing risk | Lagged |
-| B. Marketplace | Snowflake listings | $3,000–$25,000/month | Faster coverage | License cost |
-`)
-	grid, err := parseTableText(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(grid) != 3 || len(grid[0]) != 5 {
-		t.Fatalf("shape %dx%d, want 3x5: %+v", len(grid), len(grid[0]), grid)
-	}
-	if grid[0][0] != "Option" || grid[1][0] != "A. Public-only" || grid[2][1] != "Snowflake listings" {
-		t.Fatalf("cells = %+v", grid)
-	}
-	for _, row := range grid {
-		for _, cell := range row {
-			if strings.HasPrefix(cell, "|") || strings.Contains(cell, " | ") {
-				t.Fatalf("pipe leftover in cell %q", cell)
-			}
-		}
 	}
 }
 

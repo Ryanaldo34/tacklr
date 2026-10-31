@@ -30,7 +30,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
     → session.Runtime
          Prompt/Resume.Auth    work-item tokens + bindings (next turn)
          SecretStorage         Temporal: those tokens (not history, not snapshot)
-         Snapshot.Mounts       secret-free recipes (source ids, no bytes)
+         Identity.Mounts       secret-free recipes (source ids, no bytes)
          VFSProjection         FuseProjection | DirectProjection
          turn end              Close harness + MountSession + HostDir
 ```
@@ -186,7 +186,7 @@ Update `docs/vfs.md`, `docs/knowledge.md`, `README.md`, `vfs/doc.go` so they mat
 | FUSE methods on `TurnManager` | Host owns projection |
 | Path rewrite | Kernel tree is the identity |
 | Worker / subagent FUSE | `workerOptsFromSpec` still omits `MountSession` |
-| Windows / WinFsp | Unix `/bin/sh` + `/dev/fuse` only |
+| Non-Linux hosts | Tacklr runs on Linux: `/bin/sh`, `/dev/fuse`, user namespaces |
 | Restore `vfs/cache.go` | Write-through is the contract |
 | Live harness cache across turns | Turn-scoped Close is the contract |
 
@@ -195,12 +195,12 @@ Update `docs/vfs.md`, `docs/knowledge.md`, `README.md`, `vfs/doc.go` so they mat
 ## Decisions that still hold
 
 1. FUSE root is virtual `/`. Single-segment points only.
-2. Harness tools, `MountInfo`, `Specs`, and checkpoints never print `HostDir`. Linux child `pwd` is `/session`; macOS/Windows child `pwd` is HostDir.
-3. `run_command` is `/bin/sh -c` with cwd at the FUSE root. On Linux the child is jailed there (user+mount+pid namespace + chroot). Missing user namespaces panic when `run_command` is registered, not when the model first calls it. macOS/Windows stay cwd-only.
-4. Registry `run_command` is `PermissionRequired: true` by default.
+2. Harness tools, `MountInfo`, `Specs`, and checkpoints never print `HostDir`. The child's `pwd` is `/session`.
+3. `run_command` is `/bin/sh -c` with cwd at the FUSE root. The child is jailed there (user+mount+pid namespace + chroot). Tacklr runs on Linux; missing user namespaces panic when `run_command` is registered, not when the model first calls it.
+4. `run_command` asks for execute permission unless the host lists it in `AgentOptions.AllowTools`.
 5. `list` / `stat` stay whenever a `MountSession` exists. Do not gate them on whether `FuseMount` succeeded.
 6. `write` modes are counted by field presence. IR body field is `ir_text`.
-7. Tests assert positive outcomes. Kernel and host-exec tests `Skip` without a FUSE device.
+7. Tests assert positive outcomes. Kernel and host-exec tests require `/dev/fuse` and user namespaces.
 8. stdlib plus existing go-fuse. No new module.
 
 ---
@@ -209,10 +209,9 @@ Update `docs/vfs.md`, `docs/knowledge.md`, `README.md`, `vfs/doc.go` so they mat
 
 | Risk | Notes |
 |------|--------|
-| `run_command` is a full host shell as the process user | Linux: jailed to this session’s HostDir. macOS/Windows: cwd-only |
-| Child `pwd` on Linux is `/session`, not HostDir | Do not redact stdout |
-| macOS/Windows `ls ..` can leave the tree | No user namespaces |
-| Linux without user namespaces panics on `run_command` | Fail closed. Ubuntu 24.04 AppArmor may block unprivileged user ns. |
+| `run_command` is a host shell as the process user | Jailed to this session’s HostDir |
+| Child `pwd` is `/session`, not HostDir | Do not redact stdout |
+| A host without user namespaces panics on `run_command` | Fail closed. Ubuntu 24.04 AppArmor may block unprivileged user ns. |
 | Production without `/dev/fuse` has no VFS tools | Use `DirectProjection` in tests; embedders pass a session |
 
 ---
@@ -262,7 +261,7 @@ Each PR is independently reviewable. Do not combine Phase 3 removal with the `wr
 ## References
 
 - `vfs/session.go` — host-owned path I/O; no dirty cache
-- `vfs/fuse_node.go` — `FuseMount`, `FuseProbe`, `Close`, `HostDir`
+- `vfs/fuse_node.go` — `FuseMount`, `Close`, `HostDir`
 - `vfs/fuse_test.go` — kernel identity smoke
 - `vfs/document_session.go` — write-through `WriteDocument`
 - `server/projection.go` — `VFSProjection`

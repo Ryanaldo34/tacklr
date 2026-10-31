@@ -31,10 +31,10 @@ func ConstructTurn(ctx context.Context, agent tacklr.AgentOptions, threadID stri
 
 // RestoreTurn reloads a snapshot (if any) and applies host session state.
 func RestoreTurn(ctx context.Context, store session.SnapshotStore, id session.SessionID, h *tacklr.TurnManager, state map[string]any) (session.Revision, error) {
-	snap, rev, err := store.Load(ctx, id)
+	cp, rev, err := store.Load(ctx, id)
 	switch {
 	case err == nil:
-		if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
+		if err := h.RestoreCheckpoint(cp); err != nil {
 			return "", err
 		}
 	case errors.Is(err, session.ErrSessionNotFound):

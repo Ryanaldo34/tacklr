@@ -4,40 +4,47 @@ import (
 	"context"
 )
 
-// InferenceStep is the result of one model invocation for the session driver.
+// InferenceStep is one model reply. Complete is a reply with no tool calls,
+// and Result is its text. Otherwise the reply opened a round.
 type InferenceStep struct {
-	ToolCalls []ToolCall
-	Complete  bool
+	Complete bool
+	Result   string
 }
 
-// ToolStep is the result of one tool invocation for the session driver.
-// Interrupted means the tool parked; the driver must persist, publish yield,
-// and wait for Resume. AwaitJobID means the tool is still open: the session
-// loop waits for that child session, then RecordToolResult.
+// ToolStep is one call RunTools ran. Interrupted means the call parked:
+// the runtime yields the turn and waits for Resume. AwaitJobID means the
+// call waits on that child session; RecordToolResult gives it its result.
+// Starts and Cancels are the children the runtime starts and cancels.
 type ToolStep struct {
+	Call          ToolCall
 	Interrupted   bool
 	InterruptID   string
 	InterruptData []byte
 	AwaitJobID    string
-}
-
-// TurnState is per-slice counters for the session inference loop.
-type TurnState struct {
-	ModelRequests int
-	HadToolRound  bool
+	Starts        []JobStart
+	Cancels       []string
 }
 
 // Engine is the session-runtime view of a TurnManager.
 type Engine interface {
+	// AbsorbUser commits a user message as a round. Calls of an open round
+	// without a result are cancelled first.
 	AbsorbUser(ctx context.Context, user *Message, out chan StreamEvent) error
-	PendingToolCalls() []ToolCall
-	RunInference(ctx context.Context, st *TurnState, out chan StreamEvent) (InferenceStep, error)
-	RunToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (ToolStep, error)
-	ApplyResume(finishedInterrupts map[string][]byte) error
-	// RecordToolResult appends a RoleTool message for a tool call that already
-	// ran. A waited child session uses this once its result is known.
-	RecordToolResult(tc ToolCall, output string)
-	Messages() []*Message
+	// RunInference calls the model once. A reply with tool calls opens a
+	// round.
+	RunInference(ctx context.Context, out chan StreamEvent) (InferenceStep, error)
+	// RunTools is Tools step seq: it applies resume (the answers to a park),
+	// runs the open round's runnable calls concurrently, and records them in
+	// call order. It returns one step per call that step seq ran, from the
+	// round, so a retried step reports what the first attempt did. The
+	// first call in call order that parks parks the turn; any other parked
+	// call stays runnable and runs after resume. The round commits when each
+	// call has a result.
+	RunTools(ctx context.Context, seq int, resume map[string][]byte, state map[string]any, out chan StreamEvent) ([]ToolStep, error)
+	// RecordToolResult gives an awaited child's output to tc as its result,
+	// with status error when the child failed, and commits the round when
+	// that was its last result.
+	RecordToolResult(ctx context.Context, tc ToolCall, output string, failed bool, out chan StreamEvent) error
 }
 
 const streamEventBuffer = 64
@@ -61,8 +68,7 @@ func PipeStreamEvents(emit func(StreamEvent)) (chan StreamEvent, func()) {
 	}
 }
 
-// Action is the wait-loop leftover/HITL decision. In-process and Temporal
-// adapters interpret this; they do not fork leftover-tool rules.
+// Action is the turn loop's next step.
 type Action int
 
 const (
@@ -73,10 +79,11 @@ const (
 	ActionWait
 )
 
-// Next chooses the next wait-loop step from leftover tools, park, inference
-// completion, and remaining jobs.
-func Next(runnable int, parked bool, inferComplete bool, jobsRemain bool) Action {
-	if runnable > 0 {
+// Next chooses the turn loop's next step: run an open round's calls, yield
+// on a park, wait for jobs or complete once the model is done, else call the
+// model.
+func Next(runnable, parked, inferComplete, jobsRemain bool) Action {
+	if runnable {
 		return ActionRunTools
 	}
 	if parked {

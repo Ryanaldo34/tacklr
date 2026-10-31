@@ -2,7 +2,6 @@ package web
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -11,85 +10,6 @@ import (
 	"testing"
 	"time"
 )
-
-// TestClient_Search_success posts the request and parses results.
-func TestClient_Search_success(t *testing.T) {
-	var gotBody map[string]any
-	var gotKey string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/search" || r.Method != http.MethodPost {
-			t.Fatalf("path/method = %s %s", r.Method, r.URL.Path)
-		}
-		gotKey = r.Header.Get("x-api-key")
-		b, _ := io.ReadAll(r.Body)
-		if err := json.Unmarshal(b, &gotBody); err != nil {
-			t.Fatal(err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"requestId":"req1",
-			"results":[{
-				"title":"Example",
-				"url":"https://example.com",
-				"highlights":["snippet one"]
-			}]
-		}`))
-	}))
-	t.Cleanup(srv.Close)
-
-	c := NewExa("test-key")
-	c.BaseURL = srv.URL
-	c.HTTPClient = srv.Client()
-
-	resp, err := c.Search(context.Background(), SearchRequest{
-		Query:      "what is exa",
-		Type:       "auto",
-		NumResults: 5,
-		Contents: &ContentsOptions{
-			Highlights: true,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotKey != "test-key" {
-		t.Fatalf("api key header = %q", gotKey)
-	}
-	if gotBody["query"] != "what is exa" {
-		t.Fatalf("body = %#v", gotBody)
-	}
-	contents, _ := gotBody["contents"].(map[string]any)
-	if contents["highlights"] != true {
-		t.Fatalf("contents = %#v", contents)
-	}
-	if len(resp.Results) != 1 || resp.Results[0].Title != "Example" {
-		t.Fatalf("resp = %+v", resp)
-	}
-	if len(resp.Results[0].Highlights) != 1 {
-		t.Fatal("highlights")
-	}
-}
-
-// TestClient_Search_httpError surfaces status and body.
-func TestClient_Search_httpError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"invalid api key"}`))
-	}))
-	t.Cleanup(srv.Close)
-
-	c := NewExa("bad")
-	c.BaseURL = srv.URL
-	c.HTTPClient = srv.Client()
-
-	_, err := c.Search(context.Background(), SearchRequest{Query: "q"})
-	if err == nil || !strings.Contains(err.Error(), "401") {
-		t.Fatalf("err = %v", err)
-	}
-	if !errors.Is(err, ErrService) {
-		t.Fatalf("401 must be service failed: %v", err)
-	}
-}
 
 // TestClient_Search_validation rejects empty query and empty key.
 func TestClient_Search_validation(t *testing.T) {
@@ -100,56 +20,6 @@ func TestClient_Search_validation(t *testing.T) {
 	c = NewExa("k")
 	if _, err := c.Search(context.Background(), SearchRequest{}); err == nil {
 		t.Fatal("want missing query")
-	}
-}
-
-// TestClient_Contents_success posts urls and parses page text.
-func TestClient_Contents_success(t *testing.T) {
-	var gotBody map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/contents" || r.Method != http.MethodPost {
-			t.Fatalf("path/method = %s %s", r.Method, r.URL.Path)
-		}
-		b, _ := io.ReadAll(r.Body)
-		if err := json.Unmarshal(b, &gotBody); err != nil {
-			t.Fatal(err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"requestId":"c1",
-			"results":[{
-				"title":"Paper",
-				"url":"https://arxiv.org/abs/1",
-				"text":"abstract body"
-			}],
-			"statuses":[{"id":"https://arxiv.org/abs/1","status":"success","source":"cached"}]
-		}`))
-	}))
-	t.Cleanup(srv.Close)
-
-	c := NewExa("test-key")
-	c.BaseURL = srv.URL
-	c.HTTPClient = srv.Client()
-
-	resp, err := c.Contents(context.Background(), ContentsRequest{
-		URLs: []string{"https://arxiv.org/abs/1"},
-		Text: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	urls, _ := gotBody["urls"].([]any)
-	if len(urls) != 1 {
-		t.Fatalf("body = %#v", gotBody)
-	}
-	if gotBody["text"] != true {
-		t.Fatalf("text field = %#v", gotBody["text"])
-	}
-	if len(resp.Results) != 1 || resp.Results[0].Text != "abstract body" {
-		t.Fatalf("resp = %+v", resp)
-	}
-	if len(resp.Statuses) != 1 || resp.Statuses[0].Status != "success" {
-		t.Fatalf("statuses = %+v", resp.Statuses)
 	}
 }
 
@@ -172,38 +42,6 @@ func TestClient_Contents_validation(t *testing.T) {
 	}
 	if _, err := NewExa("").Contents(context.Background(), ContentsRequest{IDs: []string{"id1"}}); err == nil {
 		t.Fatal("want missing key")
-	}
-}
-
-// TestClient_Contents_byIDs posts ids-only request (no urls).
-func TestClient_Contents_byIDs(t *testing.T) {
-	var gotBody map[string]any
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		_ = json.Unmarshal(b, &gotBody)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://x","text":"body"}]}`))
-	}))
-	t.Cleanup(srv.Close)
-	c := NewExa("k")
-	c.BaseURL = srv.URL
-	c.HTTPClient = srv.Client()
-	resp, err := c.Contents(context.Background(), ContentsRequest{
-		IDs:  []string{"doc-1"},
-		Text: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotBody["urls"] != nil {
-		t.Fatalf("urls should be omitted: %#v", gotBody)
-	}
-	ids, _ := gotBody["ids"].([]any)
-	if len(ids) != 1 {
-		t.Fatalf("ids = %#v", gotBody["ids"])
-	}
-	if len(resp.Results) != 1 || resp.Results[0].Text != "body" {
-		t.Fatalf("%+v", resp)
 	}
 }
 

@@ -2,6 +2,8 @@
 
 Tacklr is an opinionated Go agent harness SDK. It is a framework, not a bag of helpers. It defines how a turn should run and how the harness is structured.
 
+**Tacklr supports Linux only.** Do not add code, build tags, skips, fallbacks, docs, or workarounds for any other operating system. Build, vet, lint, and run tests on Linux (a Linux VM on a Mac); a local non-Linux problem is not a Tacklr problem.
+
 ## Goals of the Project
 
 Design decisions should follow these four ideas.

@@ -18,11 +18,10 @@ import (
 
 // ACP stop reasons for session/prompt PromptResponse (spec Prompt Turn).
 const (
-	stopReasonEndTurn         = "end_turn"
-	stopReasonMaxTokens       = "max_tokens"
-	stopReasonMaxTurnRequests = "max_turn_requests"
-	stopReasonRefusal         = "refusal"
-	stopReasonCancelled       = "cancelled"
+	stopReasonEndTurn   = "end_turn"
+	stopReasonMaxTokens = "max_tokens"
+	stopReasonRefusal   = "refusal"
+	stopReasonCancelled = "cancelled"
 )
 
 // stopReasonFromError maps harness terminal errors to ACP stopReason values.
@@ -35,8 +34,6 @@ func stopReasonFromError(err error) (reason string, ok bool) {
 		return stopReasonRefusal, true
 	case errors.Is(err, tacklr.ErrMaxTokens):
 		return stopReasonMaxTokens, true
-	case errors.Is(err, tacklr.ErrMaxTurnRequests):
-		return stopReasonMaxTurnRequests, true
 	default:
 		return "", false
 	}
@@ -458,25 +455,6 @@ func presentStreamEvent(event tacklr.StreamEvent) presentationEvent {
 		presented.ErrorText = event.Fail
 	}
 	return presented
-}
-
-// ConfigOption describes a selectable session configuration option returned by
-// session/new and session/load.
-type ConfigOption struct {
-	ID           string              `json:"id"`
-	Name         string              `json:"name"`
-	Description  string              `json:"description,omitempty"`
-	Category     string              `json:"category"`
-	Type         string              `json:"type"`
-	CurrentValue string              `json:"currentValue"`
-	Options      []ConfigOptionValue `json:"options"`
-}
-
-// ConfigOptionValue is one choice within a select-type ConfigOption.
-type ConfigOptionValue struct {
-	Value       string `json:"value"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
 }
 
 // parsedRequest is retained for ACP parse helpers and tests that assert on

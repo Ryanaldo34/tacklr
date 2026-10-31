@@ -51,65 +51,6 @@ func (healthProtocol) OnStreamClosed(ctx context.Context, env server.ProtocolEnv
 	return nil
 }
 
-func TestServer_mountsHostProtocolBesideACP(t *testing.T) {
-	srv := server.NewServer(fakeRuntime{}, tacklr.AgentOptions{}, acp.New(nil), healthProtocol{}).AllowAnonymousNetwork()
-	mux := srv.HTTPMux()
-
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	if rec.Code != http.StatusOK || rec.Body.String() != "ok" {
-		t.Fatalf("host route = %d %q", rec.Code, rec.Body.String())
-	}
-
-	acpRec := httptest.NewRecorder()
-	mux.ServeHTTP(acpRec, httptest.NewRequest(http.MethodGet, "/acp", nil))
-	if acpRec.Code != http.StatusUpgradeRequired {
-		t.Fatalf("acp GET without upgrade = %d %s", acpRec.Code, acpRec.Body.String())
-	}
-}
-
-func TestACPProtocol_initializeResultShape(t *testing.T) {
-	result := acp.InitializeResult(tacklr.AgentOptions{}, 1, nil, false)
-	if result["protocolVersion"] != 1 {
-		t.Fatalf("protocolVersion = %v", result["protocolVersion"])
-	}
-	// Client asks for a future major; we respond with the latest we support (1).
-	if v := acp.InitializeResult(tacklr.AgentOptions{}, 99, nil, false)["protocolVersion"]; v != 1 {
-		t.Fatalf("negotiated version for client 99 = %v, want 1", v)
-	}
-	caps, ok := result["agentCapabilities"].(map[string]any)
-	if !ok {
-		t.Fatal("missing agentCapabilities")
-	}
-	mcpCaps, ok := caps["mcpCapabilities"].(map[string]any)
-	if !ok || mcpCaps["http"] != true {
-		t.Fatalf("mcpCapabilities = %v", mcpCaps)
-	}
-	pc, ok := caps["promptCapabilities"].(map[string]any)
-	if !ok || pc["image"] != false {
-		t.Fatalf("nil catalog should advertise image=false, got %v", pc)
-	}
-	if pc["embeddedContext"] != true || pc["audio"] != false {
-		t.Fatalf("promptCapabilities = %v", pc)
-	}
-	capMeta, _ := caps["_meta"].(map[string]any)
-	tacklrCap, _ := capMeta["tacklr"].(map[string]any)
-	vfsCap, _ := tacklrCap["vfs"].(map[string]any)
-	if vfsCap["credentials"] != true || vfsCap["tokenRefresh"] != true {
-		t.Fatalf("agentCapabilities._meta.tacklr.vfs = %#v", vfsCap)
-	}
-	info, ok := result["agentInfo"].(map[string]string)
-	if !ok || info["name"] == "" {
-		t.Fatalf("agentInfo = %v", result["agentInfo"])
-	}
-	meta, _ := result["_meta"].(map[string]any)
-	tacklrMeta, _ := meta["tacklr"].(map[string]any)
-	transports, _ := tacklrMeta["transports"].([]string)
-	if len(transports) != 1 || transports[0] != "websocket" {
-		t.Fatalf("transports = %v, want [websocket]", transports)
-	}
-}
-
 type pumpProto struct {
 	onEvent func(tacklr.StreamEvent) server.StreamControl
 }

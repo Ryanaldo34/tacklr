@@ -1,14 +1,15 @@
 package tacklr
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
@@ -63,60 +64,17 @@ type modelIdentityProvider interface {
 	ModelTelemetryIdentity() telemetry.ModelIdentity
 }
 
-// AbsorbResult is returned by Absorb after incorporating a message.
-type AbsorbResult struct {
-	// SummaryChunks are compress summaries to stream when StreamFitSummary is true.
-	SummaryChunks []LLMResponseChunk
-	Compressed    bool
-	Summary       string
-	Discarded     []*Message
-}
-
-// modelTasks is Turn, Absorb, and Handoff against InferenceStrategy and contextManager.
-type modelTasks interface {
-	Turn(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error)
-	Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error)
-	Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error
-}
-
-// defaultModelTasks is the product modelTasks implementation.
-type defaultModelTasks struct {
-	mu sync.Mutex // Absorb/Handoff/Turn snapshot; parallel tool results serialize here
-
-	model    InferenceStrategy
-	context  contextManager
-	policy   ContextPolicy
-	maxSize  int
-	modelSeq int // 1-based Invoke count for model span seq
-
-	countScratch []*Message // reused for progressive token counts
-}
-
-func newDefaultModelTasks(model InferenceStrategy, ctx contextManager, policy ContextPolicy, maxSize int) *defaultModelTasks {
-	return &defaultModelTasks{
-		model:   model,
-		context: ctx,
-		policy:  policy,
-		maxSize: maxSize,
-	}
-}
-
-func (t *defaultModelTasks) Turn(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error) {
+// invokeTurn calls the model on the committed window. The window changes
+// only when a round commits or a window effect applies, never here.
+func (a *TurnManager) invokeTurn(ctx context.Context) (<-chan LLMResponseChunk, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	// Context is only reshaped on Absorb pressure (token threshold) or Handoff
-	// after complete_todo / plan revision — never by dropping tool history here.
-	t.mu.Lock()
-	msgs := t.context.Messages()
-	t.modelSeq++
-	seq := t.modelSeq
-	t.mu.Unlock()
-	if src, ok := t.model.(modelIdentityProvider); ok {
-		ctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
-	}
-	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, seq, windowShape(msgs))
-	ch, err := t.model.Invoke(ctx, msgs, tools, systemPrompt)
+	msgs := a.context.Messages()
+	a.modelSeq++
+	ctx = a.modelIdentity(ctx)
+	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, a.modelSeq, windowShape(msgs))
+	ch, err := a.model.Invoke(ctx, msgs, a.tools, a.constructSystemPrompt())
 	if err != nil {
 		span.End(err, telemetry.TokenUsage{})
 		return nil, err
@@ -124,23 +82,23 @@ func (t *defaultModelTasks) Turn(ctx context.Context, tools []*Tool, systemPromp
 	return watchModelStream(ctx, span, ch), nil
 }
 
-func (t *defaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error) {
-	if err := ctx.Err(); err != nil {
-		return AbsorbResult{}, err
+// modelIdentity adds the model's static GenAI identity to ctx for spans.
+func (a *TurnManager) modelIdentity(ctx context.Context) context.Context {
+	if src, ok := a.model.(modelIdentityProvider); ok {
+		return telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	window, chunks, compressed, discarded, summary, err := t.absorbFit(ctx, t.context.Messages(), msg, tools, systemPrompt)
-	if err != nil {
-		return AbsorbResult{}, err
-	}
-	t.context.Replace(window)
-	return AbsorbResult{SummaryChunks: chunks, Compressed: compressed, Summary: summary, Discarded: discarded}, nil
+	return ctx
 }
 
-func (t *defaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+// handoff replaces the window with the plan document and a handoff the
+// model writes for the remaining todos. The messages it replaces are saved
+// for search first.
+func (a *TurnManager) handoff(ctx context.Context) error {
+	window := a.context.Messages()
+	if err := a.saveSessionMessages(ctx, window[min(len(window), 1):]); err != nil {
+		return err
+	}
+	plan, planDoc := a.session.Plan.Get(), a.session.Plan.Document()
 	open := 0
 	for i := range plan {
 		if plan[i].Status != TodoStatusCompleted {
@@ -148,13 +106,12 @@ func (t *defaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc st
 		}
 	}
 	ctx, span := telemetry.StartHandoffSpan(ctx, open)
-
-	window, usedFallback, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools, systemPrompt)
+	next, usedFallback, err := handoffGenerate(a.modelIdentity(ctx), window, plan, planDoc, a.model, a.tools, a.constructSystemPrompt())
 	if err != nil {
 		span.End(telemetry.HandoffOutcomeError, err)
 		return err
 	}
-	t.context.Replace(window)
+	a.context.Replace(next)
 	outcome := telemetry.HandoffOutcomeOK
 	if usedFallback {
 		outcome = telemetry.HandoffOutcomeFallback
@@ -163,155 +120,151 @@ func (t *defaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc st
 	return nil
 }
 
-// absorbFit collapses under pressure then appends newMsg.
-// Uses InferenceStrategy.CountTokens (provider-specific) and Invoke for summary.
-func (t *defaultModelTasks) absorbFit(
-	ctx context.Context,
-	window []*Message,
-	newMsg *Message,
-	tools []*Tool,
-	systemPrompt string,
-) (out []*Message, chunks []LLMResponseChunk, compressed bool, discarded []*Message, summary string, err error) {
-	model := t.model
-	policy := t.policy
-	maxSize := t.maxSize
-
-	// countView = window + newMsg in reusable scratch (not retained as the stored window).
-	fullN := len(window) + 1
-	countView := t.stageMessages(fullN)
-	copy(countView, window)
-	countView[len(window)] = newMsg
-
-	currSize, err := model.CountTokens(ctx, countView, tools)
+// fit appends round to the window. Over MaxWindowSize × pressureRatio the
+// window first collapses: everything after the protected prefix (an
+// earlier summary too) is saved for search and replaced by one summary.
+// The window is then small, so the next rounds append without collapsing.
+// A round still over MaxWindowSize has its largest results trimmed.
+func (a *TurnManager) fit(ctx context.Context, round []*Message) error {
+	window := a.context.Messages()
+	n, err := a.count(ctx, window, round)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to count tokens while absorbing message", "area", telemetry.AreaModelTasks, "error", err)
-		return nil, nil, false, nil, "", fmt.Errorf("count tokens: %w", err)
+		return err
 	}
-	if len(window) == 0 || float64(currSize) <= float64(maxSize)*policy.PressureRatio {
-		return slices.Clone(countView), nil, false, nil, "", nil
+	keep := protectedPrefixLen(window)
+	if n > int(float64(a.maxWindowSize)*pressureRatio) && len(window) > keep {
+		if err := a.saveSessionMessages(ctx, window[keep:]); err != nil {
+			return err
+		}
+		summary, err := a.summarize(ctx, window)
+		if err != nil {
+			return err
+		}
+		window = append(window[:keep:keep], summary)
+		if n, err = a.count(ctx, window, round); err != nil {
+			return err
+		}
 	}
+	if n > a.maxWindowSize {
+		if round, err = a.trim(ctx, window, round, n); err != nil {
+			return err
+		}
+	}
+	a.context.Replace(slices.Concat(window, round))
+	return nil
+}
 
-	slog.InfoContext(ctx, "max context window size exceeded or approaching, compressing context window",
-		"area", telemetry.AreaModelTasks, "max_size", maxSize, "current_size", currSize)
+func (a *TurnManager) count(ctx context.Context, window, round []*Message) (int, error) {
+	n, err := a.model.CountTokens(ctx, slices.Concat(window, round), a.tools)
+	if err != nil {
+		return 0, fmt.Errorf("count tokens: %w", err)
+	}
+	return n, nil
+}
+
+// summarize asks the model for one summary of window. Tools and the live
+// system prompt stay so the request prefix matches a normal turn;
+// tool_choice=none prevents calls. When the collapsed messages are saved,
+// the summary tells the agent that search finds them.
+func (a *TurnManager) summarize(ctx context.Context, window []*Message) (*Message, error) {
+	slog.InfoContext(ctx, "context window over pressure, collapsing it into a summary",
+		"area", telemetry.AreaModelTasks, "max_size", a.maxWindowSize, "messages", len(window))
 	telemetry.InstrumentsFromContext(ctx).RecordCompress(ctx, telemetry.AgentIDFromContext(ctx))
-
-	var sumPrompt strings.Builder
-	sumPrompt.Grow(360 + len(newMsg.Content))
-	sumPrompt.WriteString("<instructions>\nSummarize the entire message history into a single, concise summary including key items for your current and past tasks with a primary focus on your current task.\n</instructions>\n<current_task>\n")
-	sumPrompt.WriteString(newMsg.Content)
-	sumPrompt.WriteString("\n</current_task>")
-	anchorLen := protectedPrefixLen(window)
-	anchors := window[:anchorLen]
-	unprotected := window[anchorLen:]
-	if len(unprotected) == 0 {
-		return slices.Clone(countView), nil, false, nil, "", nil
-	}
-
-	// Progressive CountTokens probes reuse countScratch (no alloc per step).
-	stageCount := func(from int) []*Message {
-		n := anchorLen + (len(unprotected) - from) + 1
-		buf := t.stageMessages(n)
-		copy(buf, anchors)
-		copy(buf[anchorLen:], unprotected[from:])
-		buf[n-1] = newMsg
-		return buf
-	}
-
-	numMessagesToCompress := int(math.Round(float64(len(unprotected)) * policy.CompressFraction))
-	if currSize > maxSize {
-		diff := currSize - maxSize
-		start := int(math.Round(float64(diff) * policy.CompressFraction))
-		if start < 1 {
-			start = 1
-		}
-		if start > len(unprotected) {
-			start = len(unprotected)
-		}
-		for start < len(unprotected) {
-			count, err := model.CountTokens(ctx, stageCount(start), tools)
-			if err != nil {
-				return nil, nil, true, nil, "", fmt.Errorf("count tokens: %w", err)
-			}
-			if float64(count) <= float64(maxSize)*policy.PressureRatio {
-				break
-			}
-			start++
-		}
-		numMessagesToCompress = start
-	}
-	if numMessagesToCompress < 1 {
-		numMessagesToCompress = 1
-	}
-	if numMessagesToCompress > len(unprotected) {
-		numMessagesToCompress = len(unprotected)
-	}
-
-	// Compress unprotected history. Keep tools and the live system prompt so
-	// the request prefix matches a normal turn; tool_choice=none prevents calls.
-	compressSrc := unprotected[:numMessagesToCompress]
-	t.modelSeq++
-	mctx := ctx
-	if src, ok := model.(modelIdentityProvider); ok {
-		mctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
-	}
-	task := &Message{Role: RoleDeveloper, Content: sumPrompt.String()}
-	invokeMsgs := make([]*Message, 0, len(anchors)+len(compressSrc)+1)
-	invokeMsgs = append(invokeMsgs, anchors...)
-	invokeMsgs = append(invokeMsgs, compressSrc...)
-	invokeMsgs = append(invokeMsgs, task)
-	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseCompress, t.modelSeq, windowShape(invokeMsgs))
-	events, err := model.Invoke(ContextWithToolChoiceNone(mctx), invokeMsgs, tools, systemPrompt)
+	a.modelSeq++
+	invokeMsgs := slices.Concat(window, []*Message{{Role: RoleDeveloper, Content: summaryInstruction}})
+	mctx, mspan := telemetry.StartModelSpan(a.modelIdentity(ctx), telemetry.ModelPhaseCompress, a.modelSeq, windowShape(invokeMsgs))
+	events, err := a.model.Invoke(ContextWithToolChoiceNone(mctx), invokeMsgs, a.tools, a.constructSystemPrompt())
 	if err != nil {
 		mspan.End(err, telemetry.TokenUsage{})
-		return nil, nil, true, nil, "", fmt.Errorf("context compress invoke failed: %w", err)
+		return nil, fmt.Errorf("context compress invoke failed: %w", err)
 	}
-
-	summaryMsg := &Message{Role: RoleAssistant}
 	var body strings.Builder
-	var outChunks []LLMResponseChunk
 	var streamErr error
 	var usage telemetry.TokenUsage
 	for chunk := range events {
 		mergeTokenUsage(&usage, chunk)
 		if chunk.Type == StreamEventError {
-			if chunk.Error != nil {
-				streamErr = fmt.Errorf("context compress stream failed: %w", chunk.Error)
-			} else {
-				streamErr = fmt.Errorf("context compress stream failed: %s", chunk.Content)
-			}
+			streamErr = fmt.Errorf("context compress stream failed: %w", cmp.Or(chunk.Error, errors.New(chunk.Content)))
 			break
-		}
-		if policy.StreamFitSummary {
-			outChunks = append(outChunks, chunk)
 		}
 		body.WriteString(chunk.Content)
 	}
 	mspan.End(streamErr, usage)
 	if streamErr != nil {
-		return nil, nil, true, nil, "", streamErr
+		return nil, streamErr
 	}
-	summaryText := body.String()
-	summaryMsg.Content = summaryText
-
-	// Single final allocation: anchors + summary + remaining unprotected + newMsg.
-	rest := unprotected[numMessagesToCompress:]
-	out = make([]*Message, 0, anchorLen+1+len(rest)+1)
-	out = append(out, anchors...)
-	out = append(out, summaryMsg)
-	out = append(out, rest...)
-	out = append(out, newMsg)
-
-	return out, outChunks, true, slices.Clone(compressSrc), summaryText, nil
+	content := contextSummaryPrefix + body.String()
+	if a.keepsHistory() {
+		content += "\n\n" + searchableHistoryNote
+	}
+	return &Message{Role: RoleDeveloper, Content: content}, nil
 }
 
-// stageMessages returns t.countScratch resized to n (grows capacity when needed).
-func (t *defaultModelTasks) stageMessages(n int) []*Message {
-	if cap(t.countScratch) < n {
-		t.countScratch = make([]*Message, n)
-	} else {
-		t.countScratch = t.countScratch[:n]
+// summaryInstruction asks for the summary that replaces a collapsed window.
+const summaryInstruction = "<instructions>\nSummarize the entire message history into a single, concise summary including key items for your current and past tasks, with a primary focus on the most recent user request.\n</instructions>"
+
+// searchableHistoryNote ends a summary when the collapsed messages are saved.
+const searchableHistoryNote = "The full earlier conversation is saved. Use the search tool to find its exact messages, and open to read one."
+
+// trim cuts the round's largest results until the window and round fit
+// MaxWindowSize. Before a result's first cut, its full text is staged
+// under OverflowPath when that is set, and the cut result says where.
+func (a *TurnManager) trim(ctx context.Context, window, round []*Message, n int) ([]*Message, error) {
+	round = slices.Clone(round)
+	full := map[int]string{}
+	kept := map[int]int{}
+	where := map[int]string{}
+	size := func(i int) int {
+		if k, ok := kept[i]; ok {
+			return k
+		}
+		return len(round[i].Content)
 	}
-	return t.countScratch
+	for n > a.maxWindowSize {
+		i := -1
+		for j, m := range round {
+			if m.Role == RoleTool && size(j) > 0 && (i < 0 || size(j) > size(i)) {
+				i = j
+			}
+		}
+		if i < 0 {
+			return nil, fmt.Errorf("%w: the round needs %d tokens and the context window holds %d", ErrFailed, n, a.maxWindowSize)
+		}
+		if _, ok := full[i]; !ok {
+			full[i] = round[i].Content
+			if a.overflowPath != "" {
+				path, err := a.stageOverflow(ctx, round[i].ToolCallID, full[i])
+				if err != nil {
+					return nil, fmt.Errorf("stage full tool result: %w", err)
+				}
+				where[i] = path
+			}
+		}
+		// Scale the result by how far over the window is; n > maxWindowSize,
+		// so each pass keeps less.
+		keep := int(int64(size(i)) * int64(a.maxWindowSize) / int64(n))
+		for keep > 0 && !utf8.RuneStart(full[i][keep]) {
+			keep--
+		}
+		kept[i] = keep
+		cut := *round[i]
+		cut.Content = full[i][:keep] + truncationNote(keep, len(full[i]), where[i])
+		round[i] = &cut
+		var err error
+		if n, err = a.count(ctx, window, round); err != nil {
+			return nil, err
+		}
+	}
+	return round, nil
+}
+
+// truncationNote ends a cut result: how much of it is left, and where the
+// full output is when it was kept.
+func truncationNote(kept, total int, path string) string {
+	if path == "" {
+		return fmt.Sprintf("\n\n[Output truncated to fit the context window: kept the first %d of %d bytes. The full output was not kept.]", kept, total)
+	}
+	return fmt.Sprintf("\n\n[Output truncated to fit the context window: kept the first %d of %d bytes. The full output is at %s; read it with start and end.]", kept, total, path)
 }
 
 func handoffGenerate(
@@ -362,12 +315,8 @@ Relevant Context for Remaining Todos: Only information the next todos are likely
 	// Keep tools and the live system prompt so the cached prefix matches a
 	// normal turn. The handoff task is an extra developer message; tool_choice
 	// none prevents calls. On model failure, install a plan-derived handoff.
-	mctx := ctx
-	if src, ok := model.(modelIdentityProvider); ok {
-		mctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
-	}
 	invokeWindow := append(slices.Clone(window), &Message{Role: RoleDeveloper, Content: prompt.String()})
-	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseHandoff, 0, windowShape(invokeWindow))
+	mctx, mspan := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseHandoff, 0, windowShape(invokeWindow))
 	events, err := model.Invoke(ContextWithToolChoiceNone(mctx), invokeWindow, tools, systemPrompt)
 	var lastCompletedMessage string
 	usedFallback := false
@@ -384,11 +333,7 @@ Relevant Context for Remaining Todos: Only information the next todos are likely
 		for chunk := range events {
 			mergeTokenUsage(&usage, chunk)
 			if chunk.Type == StreamEventError {
-				if chunk.Error != nil {
-					streamErr = fmt.Errorf("handoff model stream failed: %w", chunk.Error)
-				} else {
-					streamErr = fmt.Errorf("handoff model stream failed: %s", chunk.Content)
-				}
+				streamErr = fmt.Errorf("handoff model stream failed: %w", cmp.Or(chunk.Error, errors.New(chunk.Content)))
 				break
 			}
 			asm.AddDelta(chunk)

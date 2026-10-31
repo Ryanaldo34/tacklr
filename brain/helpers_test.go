@@ -74,19 +74,6 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
-// stubEmbedder embeds every text as v.
-type stubEmbedder struct{ v []float32 }
-
-func (s stubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	out := make([][]float32, len(texts))
-	for i := range out {
-		out[i] = s.v
-	}
-	return out, nil
-}
-
-func (stubEmbedder) Model() string { return "stub-model" }
-
 // failEmbedder fails every embed.
 type failEmbedder struct{}
 

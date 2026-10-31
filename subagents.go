@@ -1,7 +1,6 @@
 package tacklr
 
 import (
-	"context"
 	"fmt"
 	"maps"
 	"slices"
@@ -75,13 +74,7 @@ func (a *TurnManager) spawnTool() *Tool {
 		DisplayName: "Spawn {specialist}",
 		Description: "Run a named specialist on a focused subtask when work can proceed in parallel or needs substantial research or analysis and you only need the final output. When block is true (the default), waits and returns the specialist's result. When block is false, schedules a job and returns a job id; the result arrives later as a message and the current turn can continue. Fails if the specialist is unknown or the task is empty.",
 		Category:    ToolCategoryExecute,
-		Handler: func(ctx context.Context, args spawnSpecialistArgs, runtime HarnessRuntime) (string, error) {
-			out, err := spawnSpecialist(ctx, args, runtime)
-			if err == nil {
-				a.retainCollapse(ctx, collapseEvent{Trigger: triggerSpecialist, Body: out})
-			}
-			return out, err
-		},
+		Handler:     spawnSpecialist,
 	})
 }
 

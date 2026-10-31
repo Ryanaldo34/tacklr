@@ -27,7 +27,6 @@ var (
 var (
 	ErrModelRefused         = errors.New("model refused")
 	ErrMaxTokens            = errors.New("max tokens reached")
-	ErrMaxTurnRequests      = errors.New("max turn model requests exceeded")
 	ErrModelAfterTools      = errors.New("model request failed after tools completed")
 	ErrApiKeyNotSet         = errors.New("api key not set")
 	ErrModelNotSet          = errors.New("model not set")
@@ -111,13 +110,6 @@ func UnsupportedMIMEs(s InferenceStrategy, mimes []string) []string {
 	return bad
 }
 
-// AgentWatchDog records assistant output and tool results for a turn.
-// Nil on AgentOptions means no watchdog.
-type AgentWatchDog interface {
-	RecordOutput(*Message) error
-	RecordToolResult(*Message) error
-}
-
 // Job is one background job of the current session as tools may see it.
 // State is running, completed, or failed. A specialist child waiting for
 // input stays running. Name is the specialist or registered worker.
@@ -134,20 +126,15 @@ type JobRequest struct {
 	Task string
 }
 
-// Parent-facing job states. A specialist child waiting for input stays running.
-const (
-	JobRunning     = "running"
-	JobCompleted   = "completed"
-	JobFailed      = "failed"
-	ChildRunning   = JobRunning
-	ChildCompleted = JobCompleted
-	ChildFailed    = JobFailed
-)
+// JobRunning is a listed job's state. Jobs lists only running jobs: a
+// finished one leaves the list when its result arrives. A specialist child
+// waiting for input stays running.
+const JobRunning = "running"
 
 // HarnessRuntime is the tool-facing hook for one harness turn.
 // Tools emit progress, read/write user session state, Park, and
-// run specialists or schedule jobs of this session. Session modules (plan,
-// permissions, on-call) are not on this interface.
+// run specialists or schedule jobs of this session. The plan and permission
+// memory are not on this interface.
 //
 // Built-in spawn_specialist / list_children / cancel_child call these.
 // Host tools may call them too. The loop never matches those tool names.
@@ -156,16 +143,16 @@ type HarnessRuntime interface {
 	StateGet(key string) (any, bool)
 	StateSet(key string, value any) error
 	StateDelete(key string)
-	// Park writes pending for this tool call and returns the interrupt as
-	// error. After Resume it returns the resolved interrupt and a nil error.
+	// Park parks this tool call on an interrupt of kind and returns it as
+	// the error. The call's run after Resume gets the answered interrupt and
+	// a nil error.
 	Park(kind string, payload []byte) (Interrupt, error)
 	CurrentToolCallID() string
 
-	// RunSpecialist queues a blocking specialist session.
-	// WaitFor is the child session the caller must wait on. Output is the
-	// child's text when the host already finished that session. A host sets
-	// one of them. This is not a background job: no inbox message.
-	RunSpecialist(ctx context.Context, name, task string) (SpecialistResult, error)
+	// RunSpecialist queues a blocking specialist session. The session loop
+	// waits for it, and its result becomes this tool call's result. This is
+	// not a background job: no inbox message.
+	RunSpecialist(ctx context.Context, name, task string) error
 	// Schedule starts a job of this session. It does not wait.
 	// Name is a registered specialist or Runtime job worker. The result
 	// arrives later as an inbox message. Pass the id to Jobs or CancelJob.
@@ -174,15 +161,6 @@ type HarnessRuntime interface {
 	Jobs() []Job
 	// CancelJob stops one job of this session and drops it from Jobs.
 	CancelJob(ctx context.Context, id string) error
-}
-
-// SpecialistResult is the outcome of a blocking specialist request.
-// WaitFor means the child session is not finished. The session loop waits
-// for that id, then records the tool result. Output is set when the child
-// already finished inside the call.
-type SpecialistResult struct {
-	Output  string
-	WaitFor string
 }
 
 // RegisterInterrupt registers a custom interrupt factory for session rehydrate.

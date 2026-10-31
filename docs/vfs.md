@@ -91,10 +91,10 @@ Tests point the official SDKs at httptest: `NewGoogleDriveHTTP` and `NewGraph(ho
 | `At(name, open)` | One `/workspace/<name>` backend |
 | `Tree(...)` | One `/workspace` mount whose members are the At list |
 | `Union(...)` | Read-only merge of Opens (`At("skills", Union(Local(a), Local(b)))` on the workspace) |
-| `MountSpec` | Durable description (point `/workspace`, members, **indexPolicy**). Checkpoint-safe; no secrets. |
-| `IndexPolicy` | `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
+| `MountSpec` | Durable description (point `/workspace`, members, `notIndexed`). Checkpoint-safe; no secrets. |
+| `Member.NotIndexed()` | `index_file` refuses this member's files (`MountSpec.NotIndexed`) |
 
-`MountSession.SpecAt` returns the **member** spec for a `/workspace/<alias>/…` path (so IndexPolicy is per backend).
+`MountSession.SpecAt` returns the **member** spec for a `/workspace/<alias>/…` path (so `NotIndexed` is per backend).
 
 ### Skills
 
@@ -190,7 +190,7 @@ virtual path → Provider (bytes) → Codec → Document IR
 
 Create uses the codec registry (`Creator`). Path extension wins over a requested media type (`Foo.md` is never a Doc). Extensionless HTML infers native rich media from the mount (Drive Doc, Graph docx, local `text/html`).
 
-**Grid format:** stored `CellFormat` is an absolute bag (number, bold/italic/strike/underline, fill/color, align/valign/wrap, border). Writes use `FormatPatch` so `bold=false` clears. `ParseCellFormat` reads the `String()` bag. Sheets persist uses `ColorStyle.RgbColor` and classifies number patterns (`CURRENCY`, `PERCENT`, `SCIENTIFIC`, `TIME`, `DATE`, `DATE_TIME`, `NUMBER`). Writes to a merge master are allowed; slave cells are refused. Theme colors stay empty (lossy). Native Google persist is a Drive concern; `.xlsx` uses the Excel codec. A native Sheet never round-trips through xlsx.
+**Grid format:** stored `CellFormat` is an absolute bag (number, bold/italic/strike/underline, fill/color, align/valign/wrap, border). Writes use `FormatPatch` so `bold=false` clears. Sheets persist uses `ColorStyle.RgbColor` and classifies number patterns (`CURRENCY`, `PERCENT`, `SCIENTIFIC`, `TIME`, `DATE`, `DATE_TIME`, `NUMBER`). Writes to a merge master are allowed; slave cells are refused. Theme colors stay empty (lossy). Native Google persist is a Drive concern; `.xlsx` uses the Excel codec. A native Sheet never round-trips through xlsx.
 
 **Block schema** (Markdown headings plus Docs paragraph / list_item / table / image):
 
@@ -225,7 +225,6 @@ Raw `ReadFile` / `WriteFile` stay byte-only and do not build IR.
 | **MaxLinesPerWindow** | Max lines returned per `ReadLines` call (500) |
 | **WriteDocument** | Provider translates IR and persists now |
 | **WriteFile** | Byte write-through to the provider |
-| **AfterPersist** | Optional host hook after successful backend write (`WriteFile` / `WriteDocument`) |
 | **ContentRev** | Session-visible content identity (`Path` + SHA-256 hex of body); `LineWindow.Rev` when known |
 | **Open (read)** | Streams on every backend, with no size cap. Local and Git return the file. S3, Azure Blob, Drive and Graph return a remote handle: `Read` streams one download; `ReadAt` uses HTTP range requests through a 1 MiB read-ahead window, so sequential offset reads (FUSE) cost one request per window |
 | **FileInfo.Version** | Changes when the content changes; equal values mean unchanged content. Read it from `Stat` to skip unchanged files without opening them (see below) |
@@ -467,36 +466,29 @@ Full model, search, and graph: **[docs/knowledge.md](knowledge.md)**.
 [`vfsindex`](../vfsindex) copies mounted files into brain Documents and Chunks.
 
 `link`, `open` and `related` accept an indexed file path or an object id.
-There are no `.links` directories. A workspace path must be indexed (`index_file` or a prefix/watch policy) before it can be linked. Knowledge records are written with `save` and read with `search`, `open` and `related`.
+There are no `.links` directories. A workspace path must be indexed (`index_file`, or a host `IndexPath`) before it can be linked. Knowledge records are written with `save` and read with `search`, `open` and `related`.
 
-### Index policy
+### Indexing a mount
 
-| Policy | Pipeline triggers |
-|--------|-------------------|
-| `none` | No auto jobs; `index_file` **errors** |
-| `selective` | `index_file` or a host `IndexPath` |
-| `prefix` | Host may call `IndexPrefix`. The turn does not walk or re-index writes |
-| `watch` | Same as `prefix`. The turn does not subscribe to the provider |
-
-Empty → **selective**.
+A file is indexed when the agent calls `index_file` or the host calls `IndexPath`. The turn does not walk mounts, re-index writes, or subscribe to the provider. A member mounted with `.NotIndexed()` is never indexed: `index_file` **errors** on it.
 
 ### Single fan-in
 
 ```text
   index_file ──┐
-  host IndexPath ┼──► IndexPath ──► brain Document+Chunks (hash skip)
-  IndexPrefix ──┘
+               ├──► IndexPath ──► brain Document+Chunks (hash skip)
+  host IndexPath ┘
 ```
 
-A mount with `IndexPolicy=none` is not indexed. Knowledge records are not files, so they are not indexed here.
+A `NotIndexed` mount is not indexed. Knowledge records are not files, so they are not indexed here.
 
 ### Decoupling
 
 | Package | May know |
 |---------|----------|
-| `vfs` | Specs (incl. IndexPolicy string), `AfterPersist` hook only |
+| `vfs` | Specs (incl. `NotIndexed`) only |
 | `brain` | Objects/props only; no VFS |
-| `vfsindex` | Both; owns `IndexPath` / `IndexPrefix` / schedulers / policy helpers |
+| `vfsindex` | Both; owns `IndexPath` / `IndexFile` / `UnindexPath` |
 | harness (`tacklr`) | file tools and knowledge tools |
 
 ### Host wiring
@@ -504,19 +496,8 @@ A mount with `IndexPolicy=none` is not indexed. Knowledge records are not files,
 ```go
 idx, _ := vfsindex.NewMountIndexer(ms, eng, scope)
 _ = eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...) // non-empty kind catalogs only
-_ = idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{})
-
-// Prefer AsyncScheduler so writes are not blocked on re-chunk
-sched := vfsindex.NewAsyncScheduler(idx)
-prev := ms.GetAfterPersist()
-ms.SetAfterPersist(func(ctx context.Context, path string) error {
-    if prev != nil {
-        _ = prev(ctx, path)
-    }
-    // Gate with vfsindex.AutoIndex(spec.IndexPolicy) or selective track
-    return sched.Notify(ctx, path, vfsindex.ReasonSync)
-})
-defer sched.Close()
+// Keep a file current from the host's own pipeline:
+_, _ = idx.IndexPath(ctx, "/workspace/work/notes.md")
 ```
 
 ### Agent tools
@@ -530,8 +511,8 @@ the namespace to leave `index_file` off.
 
 | Tool | Role |
 |------|------|
-| `index_file` | Selective ingest of key virtual **files** (max 8); errors under `none` |
-| `unindex` | Soft-delete the brain mirror; drops selective track |
+| `index_file` | Ingest key virtual **files** (max 8); errors on a `NotIndexed` mount |
+| `unindex` | Soft-delete the brain mirror |
 | `run_command` | `/bin/sh -c` with cwd = FUSE root; relative paths (`work/foo`); `PermissionRequired` by default |
 | `read` / `write` | File window / first page / block read; one mutation mode. Knowledge objects: `open`. |
 | `save` | Write a knowledge record of a host-allowed kind (`Engine.Save`) |
@@ -539,7 +520,7 @@ the namespace to leave `index_file` off.
 
 Omit the workspace or the search namespace to leave `index_file` off. Omit Brain to leave knowledge tools off.
 
-### Session-visible body vs AfterPersist
+### Session-visible body
 
 `IndexPath` uses `MountSession.ReadText` / `Open`. Writes are write-through, so
 `index_file` after `write` indexes the last persist. A write by itself does not

@@ -48,7 +48,8 @@ graph-aware when a graph is attached, and scoped to a namespace. The agent
 queries when it needs a fact; the harness does not dump a static result list
 into every prompt.
 
-A plan handoff saves the exact context window as **session messages** in
+A collapse (the window over its pressure) and a plan handoff save the exact
+messages that leave the window as **session messages** in
 `session_messages` before the window is replaced. Each row's namespace is the
 host `SearchNamespace` with the session id appended as the last attribute
 (`session`). `search` returns those messages together with
@@ -58,14 +59,15 @@ deletes its session messages.
 
 Session messages are not the harness checkpoint. The checkpoint
 (`SessionCheckpoint`) is the live window the runtime saves and restores.
-Session messages are earlier windows kept for search.
+Session messages are what left the window, kept for search: `search` finds
+them and `open` reads one exactly.
 
-Compress and a specialist result may still write **Episode** objects (a summary
-and capped discarded text) into the knowledge store. Those are not product kinds
-(Fact, Memory, Discovery). Hosts with a non-empty catalog should register
-`EpisodeKinds()` alongside `vfsindex.MountIndexKinds()`. A failed Episode write
-does not block the window rebuild. A failed session-message save does stop the
-handoff, and the live window stays.
+A blocking specialist's result is also kept as an **Episode** record, so later
+sessions in the namespace can find it. It is not a product kind (Fact, Memory,
+Discovery). Hosts with a non-empty catalog register `EpisodeKinds()` alongside
+`vfsindex.MountIndexKinds()`. A failed Episode write is logged; the result is
+already the call's result. A failed session-message save stops the collapse
+or handoff, and the live window stays.
 
 ---
 
@@ -227,7 +229,7 @@ flowchart LR
 
 | Package | Owns | Must not |
 |---------|------|----------|
-| `vfs` | Mounts, bytes, document IR, `IndexPolicy` as a string | Import `brain` |
+| `vfs` | Mounts, bytes, document IR, `NotIndexed` on a mount spec | Import `brain` |
 | `brain` | Objects, search, graph ports | Import the harness or `vfs` |
 | `vfsindex` | Artifact → Document/Chunk pipeline, schedulers, policy helpers | Be required to use VFS or Brain alone |
 | `brain/helixgraph` | Helix client behind graph interfaces | Leak Helix types into tools |
@@ -310,7 +312,7 @@ Parent row (`Engine.Save`):
 | `properties.mtime` | UTC `time.RFC3339` from `FileInfo.ModTime`. Omitted when the mod time is zero. |
 | `properties.media_type` | Same string as `content_type` |
 
-`vfs_path` is omitted from the parent's graph search text (`EntityIndexText`). `MountIndexKinds` also marks `source_version`, `size` and `mtime` `SkipIndex`, so they do not change the parent's embedding.
+`vfs_path` is omitted from the parent's graph search text. `MountIndexKinds` also marks `source_version`, `size` and `mtime` `SkipIndex`, so they do not change the parent's embedding.
 
 Chunk row, one per chunk or block, in order:
 
@@ -339,7 +341,7 @@ A missing file soft-deletes the parent and its chunks (`PathRemoved`). A binary 
 ```mermaid
 flowchart TD
     A[index_file] --> IP[IndexPath]
-    B[host IndexPath or IndexPrefix] --> IP
+    B[host IndexPath] --> IP
     IP --> Skip{same version and readers, or binary?}
     Skip -->|yes| Out[PathSkipped]
     Skip -->|no| Read[stream chunks]
@@ -352,14 +354,7 @@ flowchart TD
 
 The parent holds metadata and `source_version`, not a second copy of the file. After search, the agent opens the live path with `read` using `vfs_path` plus `start_line` or `block_id`.
 
-**Index policies** (set on the mount; empty means `selective`):
-
-| Policy | When indexing runs |
-|--------|--------------------|
-| `none` | `index_file` returns an error. |
-| `selective` | `index_file` or a host `IndexPath`. A later write does not re-index the file. |
-| `prefix` | Hint for a host pipeline that walks the mount. The turn does not. |
-| `watch` | Same hint as `prefix`. The turn does not subscribe to the remote system. |
+**When indexing runs:** when the agent calls `index_file` or the host calls `IndexPath`. A later write does not re-index the file. A member mounted with `.NotIndexed()` is never indexed; `index_file` returns an error for it.
 
 Knowledge records are not this schema. The host registers their kinds. `save` calls `Engine.Save` with the title required and the host's properties. `search` matches a parent by its own text, so a record with no chunks is found too. A pipeline for those records follows the host `KindSpec` and `Engine.Save`, not `Document` / `Chunk`.
 
@@ -491,7 +486,7 @@ option):
 
 | Object | Text |
 |--------|------|
-| Parent / Engram | `EntityIndexText`: title, summary, indexed scalar properties, full body |
+| Parent / Engram | Title, summary, indexed scalar properties, full body |
 | Part / Chunk | `IndexText` (title + summary + content), prefixed with the parent title |
 
 `WithIndexText` can rewrite that text at Save (prefix, replace, or drop fields)
@@ -505,10 +500,10 @@ So a search for `open renewal` can match a Deal whose `stage` property is
 object search is on as soon as it returns. Opens that race on one server, and
 writers that conflict, are replayed until they land or the context ends.
 
-Tests run against live Helix (`internal/helixtest`). `make test` and CI start one
-server for every package through `scripts/with-helix.sh`, which sets
-`TACKLR_HELIX_URL`; a package run alone starts its own container. A fresh server
-builds each index once, which is most of the graph tests' time.
+Tests run against live Helix (`internal/helixtest`). Every package of one
+`go test` run shares one server, a reusable Testcontainers container that Ryuk
+removes when the run ends. A fresh server builds each index once, which is most
+of the graph tests' time.
 
 ---
 
@@ -639,7 +634,7 @@ flowchart TD
 `link` requires both ends to exist in the namespace, not be soft-deleted, and
 **not** be parts, and refuses the containment relations. `remove: true` drops
 the edge. Paths resolve through `vfs_path`. An unindexed `/work/doc.md` cannot
-be linked until `index_file` (or a prefix policy) has created a Document id.
+be linked until `index_file` (or a host `IndexPath`) has created a Document id.
 
 The optional `note` is indexed by the graph (text and, with an embedder,
 vector), so `search` finds the link by what it says. With Helix, a relation

@@ -14,12 +14,6 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-type stubSkills struct{}
-
-func (stubSkills) Load(context.Context) ([]skills.Skill, error) {
-	return []skills.Skill{{Name: "pack", Description: "research", Instructions: "read first"}}, nil
-}
-
 type failMCP struct{}
 
 func (failMCP) ResolveMCP(context.Context, string) (mcp.Credentials, error) {
@@ -52,48 +46,10 @@ func TestNewTurnManager_constructFailClosed(t *testing.T) {
 	}
 }
 
-func TestNewTurnManager_skillsPathOnWorkspace(t *testing.T) {
-	ctx := t.Context()
-	pack := t.TempDir()
-	d := filepath.Join(pack, "research")
-	if err := os.MkdirAll(d, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body := "---\nname: research\ndescription: Research carefully\n---\n\nAlways verify claims.\n"
-	if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ms := mustMountTree(t, t.Name(), vfs.At("work", vfs.Local(t.TempDir())), vfs.At("skills", vfs.Local(pack)))
-
-	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize: 8192,
-		Model:         &scriptedModel{},
-		mountSession:  ms,
-	})
-	t.Cleanup(h.Close)
-
-	skill := h.findTool("read_skill", "")
-	if skill == nil {
-		t.Fatal("read_skill missing")
-	}
-	res, err := skill.invoke(ctx, `{"name":"research"}`, turnRuntime(h))
-	if err != nil || !strings.Contains(res.output, "Always verify claims") {
-		t.Fatalf("read_skill: %v %s", err, res.output)
-	}
-
-	read := h.findTool("read", "")
-	if read == nil {
-		t.Fatal("read missing")
-	}
-	res, err = read.invoke(ctx, `{"path":"/workspace/skills/research/SKILL.md"}`, turnRuntime(h))
-	if err != nil || !strings.Contains(res.output, "Always verify claims") {
-		t.Fatalf("skill file on the workspace: %v %s", err, res.output)
-	}
-}
-
 func TestNewTurnManager_configurationInvariants(t *testing.T) {
 	// Arrange
 	validModel := &scriptedModel{}
+	ms := mustMountTree(t, "overflow-config", vfs.At("work", vfs.Local(t.TempDir())), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
 	cases := []struct {
 		name string
 		opts AgentOptions
@@ -111,8 +67,8 @@ func TestNewTurnManager_configurationInvariants(t *testing.T) {
 			opts: AgentOptions{Model: &errWindowStrategy{}},
 		},
 		{
-			name: "invalid pressure ratio",
-			opts: AgentOptions{Model: validModel, ContextPolicy: ContextPolicy{PressureRatio: 2}},
+			name: "an allowed tool that is not registered",
+			opts: AgentOptions{Model: validModel, AllowTools: []string{"nope"}},
 		},
 		{
 			name: "nil tool",
@@ -134,6 +90,18 @@ func TestNewTurnManager_configurationInvariants(t *testing.T) {
 					{Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test/b"},
 				},
 			},
+		},
+		{
+			name: "overflow path without a workspace",
+			opts: AgentOptions{Model: validModel, OverflowPath: "/workspace/work/overflow"},
+		},
+		{
+			name: "overflow path outside the mounts",
+			opts: AgentOptions{Model: validModel, mountSession: ms, OverflowPath: "/elsewhere"},
+		},
+		{
+			name: "overflow path on a read-only mount",
+			opts: AgentOptions{Model: validModel, mountSession: ms, OverflowPath: "/workspace/ro/overflow"},
 		},
 		{
 			name: "credential ref without resolver",
@@ -165,50 +133,47 @@ func TestNewTurnManager_configurationInvariants(t *testing.T) {
 	}
 }
 
-func TestRestoreCheckpoint_rejectsCorruptModules(t *testing.T) {
-	sm := newSessionManager()
-	valid, err := captureCheckpoint(
-		[]*Message{{Role: RoleUser, Content: "go"}},
-		sm,
-		nil,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := json.Marshal(valid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wire map[string]any
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		t.Fatal(err)
-	}
-	state := wire["state"].(map[string]any)
-	modules := state["modules"].(map[string]any)
-	modules["plan"] = `{"todos":`
-	raw, err = json.Marshal(wire)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var checkpoint SessionCheckpoint
-	if err := json.Unmarshal(raw, &checkpoint); err != nil {
-		t.Fatal(err)
-	}
+func TestRestoreCheckpoint_rejectsACorruptOrOtherVersionCheckpoint(t *testing.T) {
 	h := mustNewTurnManager(t, AgentOptions{Model: &scriptedModel{}})
-	if err := h.RestoreCheckpoint(checkpoint); err == nil {
-		t.Fatal("corrupt checkpoint was accepted")
+	for name, raw := range map[string]string{
+		"corrupt":                      `{"version":4,"window":"x"}`,
+		"other version":                `{"version":3,"window":[]}`,
+		"an invalid window":            `{"version":4,"window":[{"role":"tool","content":"x"}]}`,
+		"a park that is not an object": `{"version":4,"window":[],"round":{"reply":[],"calls":[{"call":{},"park":"x"}]}}`,
+		"a park of an unknown type":    `{"version":4,"window":[],"round":{"reply":[],"calls":[{"call":{},"park":{"type":"nope","data":{}}}]}}`,
+		"a park whose data is bad":     `{"version":4,"window":[],"round":{"reply":[],"calls":[{"call":{},"park":{"type":"tool_permission","data":"x"}}]}}`,
+	} {
+		var cp SessionCheckpoint
+		if err := json.Unmarshal([]byte(raw), &cp); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.RestoreCheckpoint(cp); err == nil {
+			t.Errorf("%s checkpoint was accepted", name)
+		}
 	}
 }
 
+// skillPack is a local skills directory with one skill.
+func skillPack(t *testing.T, name, description, instructions string) skills.Loader {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: " + name + "\ndescription: " + description + "\n---\n\n" + instructions + "\n"
+	if err := os.WriteFile(filepath.Join(root, name, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return skills.Loader{Root: root}
+}
+
 func TestTurnManager_checkpointAfterRun(t *testing.T) {
-	wd := &recordingWatchdog{}
 	mock := &scriptedModel{SupportsMIMEFn: IsTextMIME}
 	h, err := NewTurnManager(t.Context(), AgentOptions{
 		sessionID:     "sess",
 		Model:         mock,
-		WatchDog:      wd,
 		MaxWindowSize: 8192, SystemPrompt: "be brief",
-		SkillsLoader: stubSkills{},
+		SkillsLoader: skillPack(t, "pack", "research", "read first"),
 		Specialists: []*Specialist{{
 			Name:        "researcher",
 			Description: "Looks things up.",
@@ -223,7 +188,6 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(h.Close)
-	h.injectBuiltinTools() // already injected at construct
 	out := make(chan StreamEvent, 16)
 	go func() {
 		for range out {
@@ -243,8 +207,8 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 		Name: "mutate", Access: ToolWriteAccess,
 		Handler: func(context.Context) (string, error) { return "ok", nil },
 	})
-	_, err = h.planningWriteLock(t.Context(), ToolInvocation{Tool: write}, func(context.Context, ToolInvocation) (string, error) {
-		return "ran", nil
+	_, err = h.planningWriteLock(t.Context(), ToolInvocation{Tool: write}, func(context.Context, ToolInvocation) (ToolOutcome, error) {
+		return ToolOutcome{Output: "ran"}, nil
 	})
 	if !errors.Is(err, ErrToolPermissionDenied) {
 		t.Fatalf("write locked until create_plan: %v", err)
@@ -256,66 +220,41 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := h.addToContext(ctx, &Message{Role: RoleUser, Content: "x"}, out); err == nil {
+	if err := h.absorbUser(ctx, &Message{Role: RoleUser, Content: "x"}, out); err == nil {
 		t.Fatal("cancelled absorb")
 	}
 
-	pendingID := "call_pending"
-	h.pendingToolCalls[pendingID] = PendingToolCall{
-		ToolCall: &ToolCall{ID: pendingID, CallID: pendingID, Name: "x", Arguments: "{}"},
-	}
-	h.context.Add(&Message{Role: RoleAssistant, ToolCalls: []ToolCall{
-		{ID: pendingID, CallID: pendingID, Name: "x", Arguments: "{}"},
-		{ID: "fc_open", CallID: "call_open", Name: "y", Arguments: "{}"},
-	}})
-	h.pairOpenToolCalls("unpaired tool call")
-	openPaired := false
-	for _, m := range h.context.Messages() {
-		if m != nil && m.Role == RoleTool && m.ToolCallID == "call_open" {
-			openPaired = true
-		}
-		if m != nil && m.Role == RoleTool && m.ToolCallID == pendingID {
-			t.Fatal("pending call must not be paired")
-		}
-	}
-	if !openPaired {
-		t.Fatal("unpaired tool call must get a result before the next model turn")
-	}
-
-	if err := h.applyResume(map[string][]byte{"missing": []byte(`{}`)}); err == nil {
-		t.Fatal("unknown interrupt id")
+	if _, err := h.runTools(t.Context(), 1, map[string][]byte{"missing": []byte(`{}`)}, nil, out); !errors.Is(err, ErrInterruptNotFound) {
+		t.Fatalf("resume of an unknown interrupt = %v", err)
 	}
 	parkID := "ask1"
-	_ = h.session.Park(parkID, &UserSelectionInterrupt{
-		Options: []UserChoice{{Title: "a"}, {Title: "b"}},
-	})
-	h.pendingToolCalls[parkID] = PendingToolCall{
-		ToolCall: &ToolCall{ID: parkID, CallID: parkID, Name: "ask_user_choice"}, InterruptActive: true,
-	}
-	if err := h.applyResume(map[string][]byte{parkID: []byte(`{"selectionIdx":9}`)}); err == nil {
+	h.session.round = newOpenRound(nil, []ToolCall{{ID: parkID, CallID: parkID, Name: "ask_user_choice"}})
+	_ = h.session.Park(parkID, &UserSelectionInterrupt{Options: []UserChoice{{Title: "a"}, {Title: "b"}}})
+	if _, err := h.runTools(t.Context(), 2, map[string][]byte{parkID: []byte(`{"selectionIdx":9}`)}, nil, out); err == nil {
 		t.Fatal("invalid selection")
 	}
+	h.session.round = nil
 
-	h.toolResultMessage(ToolCall{ID: "wd", CallID: "wd", Name: "x"}, "ok", "success")
 	mock.InvokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "hi", IsComplete: true}
 	}
-	if _, err := h.runInference(t.Context(), &TurnState{}, out); err != nil {
+	if _, err := h.runInference(t.Context(), out); err != nil {
 		t.Fatal(err)
 	}
-	if len(wd.toolResults) == 0 || len(wd.outputs) == 0 {
-		t.Fatalf("watchdog tool=%d out=%d", len(wd.toolResults), len(wd.outputs))
-	}
+	// The window ends on a tool round: the next request answers tools.
+	call := ToolCall{ID: "c1", CallID: "c1", Name: "x", Arguments: "{}"}
+	result, _ := h.toolResultMessage(call, "ok", "success")
+	h.context.Add(&Message{Role: RoleAssistant, ToolCalls: []ToolCall{call}}, result)
 	mock.InvokeErr = errors.New("upstream")
-	if _, err := h.runInference(t.Context(), &TurnState{HadToolRound: true}, out); err == nil || !errors.Is(err, ErrModelAfterTools) {
+	if _, err := h.runInference(t.Context(), out); !errors.Is(err, ErrModelAfterTools) {
 		t.Fatalf("want ErrModelAfterTools, got %v", err)
 	}
 	mock.InvokeErr = nil
 	mock.InvokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 		ch <- LLMResponseChunk{Type: StreamEventError, Error: errors.New("provider"), IsComplete: true}
 	}
-	if _, err := h.runInference(t.Context(), &TurnState{HadToolRound: true}, out); err == nil {
-		t.Fatal("want after-tools stream error")
+	if _, err := h.runInference(t.Context(), out); !errors.Is(err, ErrModelAfterTools) {
+		t.Fatalf("want an after-tools stream error, got %v", err)
 	}
 	prompt := strings.Join(mock.SystemPrompts, "\n")
 	if !strings.Contains(prompt, "pack") {
@@ -329,7 +268,8 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cp.ContextWindow) == 0 {
-		t.Fatal("absorbUser must leave a conversation on Checkpoint")
+	restored := mustNewTurnManager(t, AgentOptions{Model: &scriptedModel{}})
+	if err := restored.RestoreCheckpoint(cp); err != nil || len(restored.context.Messages()) != len(h.context.Messages()) {
+		t.Fatalf("restore = %v with %d messages, want the window back", err, len(restored.context.Messages()))
 	}
 }

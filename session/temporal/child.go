@@ -1,7 +1,6 @@
 package temporal
 
 import (
-	"context"
 	"fmt"
 	"slices"
 
@@ -96,85 +95,40 @@ func cancelOne(ctx workflow.Context, spawned *[]childRun, id session.SessionID) 
 	dropChild(spawned, id)
 }
 
-// activityChildren is the Tool-activity JobHost. It records this call's
-// schedule/cancel/wait; the workflow starts, cancels, or waits via Runtime.
+// activityChildren is the Tools activity's JobHost: it resolves a job to
+// the child the workflow starts, with an id from the call id.
 type activityChildren struct {
-	parent   session.SessionID
-	agent    tacklr.AgentOptions
-	jobs     map[string]session.JobHandler
-	known    []session.SessionID
-	jobID    session.SessionID
-	jobName  string
-	jobTask  string
-	child    bool
-	cancelID session.SessionID
-	awaitID  session.SessionID
+	parent session.SessionID
+	agent  tacklr.AgentOptions
+	jobs   map[string]session.JobHandler
+	known  []session.SessionID
 }
 
-func (a *activityChildren) Schedule(ctx context.Context, job tacklr.JobRequest, callID string) (tacklr.Job, error) {
-	if err := ctx.Err(); err != nil {
-		return tacklr.Job{}, err
-	}
+func (a activityChildren) Resolve(job tacklr.JobRequest, callID string) (tacklr.JobStart, error) {
 	name, task, err := adapter.NormalizeSpawn(job.Name, job.Task)
 	if err != nil {
-		return tacklr.Job{}, err
+		return tacklr.JobStart{}, err
 	}
 	specialist := adapter.HasSpecialist(a.agent, name)
-	var id session.SessionID
-	if specialist {
-		id = session.ChildSessionID(a.parent, name, callID)
-	} else {
+	if !specialist {
 		if _, ok := a.jobs[name]; !ok {
-			return tacklr.Job{}, fmt.Errorf("%w: %s", tacklr.ErrNotFound, name)
+			return tacklr.JobStart{}, fmt.Errorf("%w: %s", tacklr.ErrNotFound, name)
 		}
-		id = session.JobID(a.parent, name, callID)
-	}
-	if slices.Contains(a.known, id) || a.jobID == id {
-		return tacklr.Job{ID: string(id), Name: name, State: tacklr.JobRunning}, nil
 	}
 	if task == "" {
-		if specialist {
-			return tacklr.Job{}, fmt.Errorf("task_description_and_context is required: %w", tacklr.ErrInvalid)
-		}
-		return tacklr.Job{}, fmt.Errorf("task is required: %w", tacklr.ErrInvalid)
+		return tacklr.JobStart{}, fmt.Errorf("task is required: %w", tacklr.ErrInvalid)
 	}
-	a.jobID, a.jobName, a.jobTask, a.child = id, name, task, specialist
-	return tacklr.Job{ID: string(id), Name: name, State: tacklr.JobRunning}, nil
+	id := session.JobID(a.parent, name, callID)
+	if specialist {
+		id = session.ChildSessionID(a.parent, name, callID)
+	}
+	return tacklr.JobStart{ID: string(id), Name: name, Task: task, Specialist: specialist}, nil
 }
 
-func (a *activityChildren) Jobs() []tacklr.Job {
-	out := make([]tacklr.Job, 0, len(a.known)+1)
-	seen := map[session.SessionID]bool{}
-	for _, id := range a.known {
-		seen[id] = true
-		out = append(out, tacklr.Job{ID: string(id), State: tacklr.JobRunning})
-	}
-	if a.jobID != "" && !seen[a.jobID] {
-		out = append(out, tacklr.Job{ID: string(a.jobID), Name: a.jobName, State: tacklr.JobRunning})
+func (a activityChildren) Jobs() []tacklr.Job {
+	out := make([]tacklr.Job, len(a.known))
+	for i, id := range a.known {
+		out[i] = tacklr.Job{ID: string(id), State: tacklr.JobRunning}
 	}
 	return out
-}
-
-func (a *activityChildren) CancelJob(ctx context.Context, id string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	sid := session.SessionID(id)
-	if sid != a.jobID && !slices.Contains(a.known, sid) {
-		return adapter.UnknownChild(id)
-	}
-	a.cancelID = sid
-	return nil
-}
-
-func (a *activityChildren) RunSpecialist(ctx context.Context, name, task, callID string) (tacklr.SpecialistResult, error) {
-	if !adapter.HasSpecialist(a.agent, name) {
-		return tacklr.SpecialistResult{}, fmt.Errorf("%w: %s", tacklr.ErrNotFound, name)
-	}
-	job, err := a.Schedule(ctx, tacklr.JobRequest{Name: name, Task: task}, callID)
-	if err != nil {
-		return tacklr.SpecialistResult{}, err
-	}
-	a.awaitID = session.SessionID(job.ID)
-	return tacklr.SpecialistResult{WaitFor: job.ID}, nil
 }
