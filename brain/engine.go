@@ -11,82 +11,56 @@ import (
 	"github.com/google/uuid"
 )
 
-// QueryEmbedder embeds text for the dense search channel and for stored
-// objects. NewEngine requires WithEmbedder or WithLexicalOnly.
-type QueryEmbedder interface {
-	// Embed returns one vector per text, in order. A search passes one
-	// text; PutTree passes up to EngineConfig.EmbedBatchSize texts.
-	Embed(ctx context.Context, texts []string) ([][]float32, error)
-	// Model names the model and version (for example
-	// "text-embedding-3-small"). It is stored on every embedded row, and
-	// vector search only compares rows from the same model, so changing
-	// models never mixes incompatible vectors.
-	Model() string
-}
-
 // Reranker optionally reorders/filters hydrated rich objects after search or find_objects.
 // Host-owned product scoring; default nil leaves engine ranking unchanged.
 type Reranker interface {
 	Rerank(ctx context.Context, objects []RichObject) ([]RichObject, error)
 }
 
-// EngineConfig holds engine-owned ranking knobs (not tool arguments).
-// Lambda nil → 0, so age does not change rank. A positive value decays each
-// channel before fusion. Explicit 0 stays 0.
+// EngineConfig holds engine-owned knobs (not tool arguments). Ranking,
+// fusion, recency decay and embedding are each backend's own options.
 // SnippetCap is the evidence quote length in runes. 0 selects 240.
-// FailOn* false (default) soft-degrades embedder/graph failures; true surfaces errors.
-// EmbedBatchSize is the most texts per Embed call (default 128).
-// EmbedConcurrency is the most Embed calls PutTree runs at once (default 2);
-// together they bound how many new parts a tree write holds in memory.
+// CandidateK is how many hits Engine asks a backend for before it promotes,
+// reranks and pages them. FailOnGraphError false (default) lets expand fall
+// back to containment when the graph fails; true surfaces the error.
 type EngineConfig struct {
-	CandidateK          int
-	RRFk                int
-	Lambda              *float64
-	EvidenceN           int
-	SnippetCap          int
-	DefaultLimit        int
-	MaxLimit            int
-	ExpandInlineMax     int
-	SiblingRadius       int
-	GraphNeighborK      int
-	MaxExpandHops       int // max MaxHops on expand (default 4)
-	MaxGraphExpandRPCs  int // cap Neighbors calls per multi-hop expand (default 64)
-	MaxResultSetSize    int
-	EmbedBatchSize      int
-	EmbedConcurrency    int
-	FailOnEmbedderError bool
-	FailOnGraphError    bool
-	Now                 func() time.Time
+	CandidateK       int
+	EvidenceN        int
+	SnippetCap       int
+	DefaultLimit     int
+	MaxLimit         int
+	ExpandInlineMax  int
+	SiblingRadius    int
+	GraphNeighborK   int // max neighbors one expand walk returns (default 50)
+	MaxExpandHops    int // max MaxHops on expand (default 4)
+	MaxPathDepth     int // max MaxDepth on shortest path (default 6)
+	MaxResultSetSize int
+	FailOnGraphError bool
+	Now              func() time.Time
 }
 
-// DefaultEngineConfig returns the engine defaults. A zero count on EngineConfig
-// takes the matching field from here. Lambda stays a pointer because 0 is a real setting.
+// DefaultEngineConfig returns the engine defaults. A zero count on
+// EngineConfig takes the matching field from here.
 func DefaultEngineConfig() EngineConfig {
-	lam := 0.0
 	return EngineConfig{
-		CandidateK:         40,
-		RRFk:               60,
-		Lambda:             &lam,
-		EvidenceN:          3,
-		SnippetCap:         defaultSnippetCap,
-		DefaultLimit:       10,
-		MaxLimit:           50,
-		ExpandInlineMax:    20,
-		SiblingRadius:      5,
-		GraphNeighborK:     50,
-		MaxExpandHops:      4,
-		MaxGraphExpandRPCs: 64,
-		MaxResultSetSize:   1000,
-		EmbedBatchSize:     128,
-		EmbedConcurrency:   2,
-		Now:                func() time.Time { return time.Now().UTC() },
+		CandidateK:       40,
+		EvidenceN:        3,
+		SnippetCap:       defaultSnippetCap,
+		DefaultLimit:     10,
+		MaxLimit:         50,
+		ExpandInlineMax:  20,
+		SiblingRadius:    5,
+		GraphNeighborK:   50,
+		MaxExpandHops:    4,
+		MaxPathDepth:     6,
+		MaxResultSetSize: 1000,
+		Now:              func() time.Time { return time.Now().UTC() },
 	}
 }
 
 func (c EngineConfig) withDefaults() EngineConfig {
 	d := DefaultEngineConfig()
 	c.CandidateK = cmp.Or(c.CandidateK, d.CandidateK)
-	c.RRFk = cmp.Or(c.RRFk, d.RRFk)
 	c.EvidenceN = cmp.Or(c.EvidenceN, d.EvidenceN)
 	c.SnippetCap = cmp.Or(c.SnippetCap, d.SnippetCap)
 	c.DefaultLimit = cmp.Or(c.DefaultLimit, d.DefaultLimit)
@@ -95,66 +69,40 @@ func (c EngineConfig) withDefaults() EngineConfig {
 	c.SiblingRadius = cmp.Or(c.SiblingRadius, d.SiblingRadius)
 	c.GraphNeighborK = cmp.Or(c.GraphNeighborK, d.GraphNeighborK)
 	c.MaxExpandHops = cmp.Or(c.MaxExpandHops, d.MaxExpandHops)
-	c.MaxGraphExpandRPCs = cmp.Or(c.MaxGraphExpandRPCs, d.MaxGraphExpandRPCs)
+	c.MaxPathDepth = cmp.Or(c.MaxPathDepth, d.MaxPathDepth)
 	c.MaxResultSetSize = cmp.Or(c.MaxResultSetSize, d.MaxResultSetSize)
-	c.EmbedBatchSize = cmp.Or(c.EmbedBatchSize, d.EmbedBatchSize)
-	c.EmbedConcurrency = cmp.Or(c.EmbedConcurrency, d.EmbedConcurrency)
-	if c.Lambda == nil {
-		c.Lambda = d.Lambda
-	}
 	if c.Now == nil {
 		c.Now = d.Now
 	}
 	return c
 }
 
-func (c EngineConfig) allowEmbedderDegrade() bool { return !c.FailOnEmbedderError }
-
-func (c EngineConfig) lambdaValue() float64 {
-	return *c.Lambda
-}
-
 // EngineOption configures NewEngine.
 type EngineOption func(*Engine)
 
-// WithEmbedder sets the query embedder for hybrid search and Put embeddings.
-func WithEmbedder(e QueryEmbedder) EngineOption {
-	return func(eng *Engine) { eng.embedder = e }
-}
-
-// WithLexicalOnly opts out of embeddings: Search is lexical-only and Put stores
-// no vector. Required when the host does not pass WithEmbedder.
-func WithLexicalOnly() EngineOption {
-	return func(eng *Engine) { eng.lexicalOnly = true }
-}
-
-// IndexTextFunc returns the document to embed and to write as graph search_text.
+// IndexTextFunc returns the text that represents obj in the store and the
+// graph (Indexed.Text), which each backend indexes and embeds its own way.
 // defaultText is Engine's index text for this object (SkipIndex already applied).
 // Return defaultText to keep it, or any rewrite that should occupy the vector
 // space (prefix, replace, drop the body, join related titles, …). Empty means
-// do not embed. Title, Summary, Content, and Properties on the stored object
+// do not index. Title, Summary, Content, and Properties on the stored object
 // are not modified.
 type IndexTextFunc func(obj Object, defaultText string) string
 
-// WithIndexText sets how Put builds embedding / graph search text.
+// WithIndexText sets how Put builds an object's index text.
 func WithIndexText(fn IndexTextFunc) EngineOption {
 	return func(eng *Engine) { eng.indexTextFn = fn }
 }
 
-// WithConfig sets ranking configuration (normalized by NewEngine).
+// WithConfig sets the engine configuration (normalized by NewEngine).
 func WithConfig(cfg EngineConfig) EngineOption {
 	return func(eng *Engine) { eng.cfg = cfg }
 }
 
-// WithGraph sets the optional non-containment graph backend (helixgraph or MemoryGraph).
-// Writer and object-search capabilities are resolved once here (not re-asserted per call).
-func WithGraph(g GraphReader) EngineOption {
-	return func(eng *Engine) {
-		eng.graph = g
-		eng.graphW, _ = g.(GraphWriter)
-		eng.graphS, _ = g.(GraphObjectSearcher)
-		eng.graphE, _ = g.(GraphEdgeSearcher)
-	}
+// WithIndex adds an index that receives every committed write of a
+// first-class object. NewKnowledgeGraph adds its graph the same way.
+func WithIndex(ix Index) EngineOption {
+	return func(eng *Engine) { eng.indexes = append(eng.indexes, ix) }
 }
 
 // WithReranker sets an optional post-hydrate reranker for search and find_objects.
@@ -186,14 +134,13 @@ func WithKinds(specs ...KindSpec) EngineOption {
 	}
 }
 
-// Engine is the retrieval facade over a Store.
+// Engine is the boundary over a Store and its indexes: it validates
+// requests, shapes index text from the kind catalog, writes the store and
+// then every index, promotes and pages results, and audits. The backends own
+// retrieval. Graph features are on KnowledgeGraph.
 type Engine struct {
 	store       Store
-	embedder    QueryEmbedder
-	graph       GraphReader         // optional expand Neighbors
-	graphW      GraphWriter         // optional dual-write / Link (resolved in WithGraph)
-	graphS      GraphObjectSearcher // optional find_objects (resolved in WithGraph)
-	graphE      GraphEdgeSearcher   // optional edge text search (resolved in WithGraph)
+	indexes     []Index
 	reranker    Reranker
 	audit       AuditFunc
 	recipeMu    sync.RWMutex
@@ -201,7 +148,6 @@ type Engine struct {
 	cfg         EngineConfig
 	catalog     *KindCatalog // always non-nil; empty ⇒ open mode
 	bootErr     error        // set by WithKinds when registration fails
-	lexicalOnly bool
 	indexTextFn IndexTextFunc
 }
 
@@ -222,15 +168,6 @@ func NewEngine(store Store, opts ...EngineOption) (*Engine, error) {
 	}
 	if e.bootErr != nil {
 		return nil, e.bootErr
-	}
-	if e.embedder != nil && e.lexicalOnly {
-		return nil, fmt.Errorf("%w: WithEmbedder and WithLexicalOnly are mutually exclusive", ErrInvalid)
-	}
-	if e.embedder == nil && !e.lexicalOnly {
-		return nil, fmt.Errorf("%w: WithEmbedder is required (or WithLexicalOnly to opt out)", ErrInvalid)
-	}
-	if e.embedder != nil && strings.TrimSpace(e.embedder.Model()) == "" {
-		return nil, fmt.Errorf("%w: embedder Model is required", ErrInvalid)
 	}
 	e.cfg = e.cfg.withDefaults()
 	return e, nil
@@ -292,7 +229,7 @@ func schemaFromCatalog(cat *KindCatalog, kind string) (SchemaResult, error) {
 	return SchemaResult{Kinds: out, FilterUsage: fu}, nil
 }
 
-func schemaFromStore(ctx context.Context, store KindReader, kind string) (SchemaResult, error) {
+func schemaFromStore(ctx context.Context, store Store, kind string) (SchemaResult, error) {
 	fu := DefaultFilterUsage()
 	if kind != "" {
 		k, err := store.GetKind(ctx, kind)
@@ -349,14 +286,13 @@ const maxListByKind = 500
 
 // ListByKind returns first-class objects of kind (parent_id unset), newest-title order left to the store.
 func (e *Engine) ListByKind(ctx context.Context, scope Scope, kind string, limit int) ([]Object, error) {
-	l, err := capability[ObjectLister](ctx, e, scope.Namespace, "object listing")
-	if err != nil {
+	if err := checkScope(ctx, scope.Namespace); err != nil {
 		return nil, err
 	}
 	if limit <= 0 || limit > maxListByKind {
 		limit = maxListByKind
 	}
-	objs, err := l.ListByKind(ctx, scope, kind, limit)
+	objs, err := e.store.ListByKind(ctx, scope, kind, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -368,11 +304,10 @@ func (e *Engine) ListByKind(ctx context.Context, scope Scope, kind string, limit
 
 // GetByProperty returns the first live object whose properties[key] equals value.
 func (e *Engine) GetByProperty(ctx context.Context, scope Scope, key, value string) (Object, error) {
-	l, err := capability[ObjectLister](ctx, e, scope.Namespace, "object listing")
-	if err != nil {
+	if err := checkScope(ctx, scope.Namespace); err != nil {
 		return Object{}, err
 	}
-	obj, err := l.GetByProperty(ctx, scope, key, value)
+	obj, err := e.store.GetByProperty(ctx, scope, key, value)
 	if err != nil {
 		return Object{}, err
 	}
@@ -384,11 +319,10 @@ func (e *Engine) GetByProperty(ctx context.Context, scope Scope, key, value stri
 
 // KindsWithObjects lists distinct parent-kind names that already have objects under scope.
 func (e *Engine) KindsWithObjects(ctx context.Context, scope Scope) ([]string, error) {
-	l, err := capability[ObjectLister](ctx, e, scope.Namespace, "object listing")
-	if err != nil {
+	if err := checkScope(ctx, scope.Namespace); err != nil {
 		return nil, err
 	}
-	return l.KindsWithObjects(ctx, scope)
+	return e.store.KindsWithObjects(ctx, scope)
 }
 
 // Get returns the stored object (including Content) under scope.

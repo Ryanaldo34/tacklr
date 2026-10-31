@@ -10,7 +10,7 @@ import (
 
 func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 	store := NewMemoryStore()
-	eng, err := NewEngine(store, WithLexicalOnly())
+	eng, err := NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,18 +143,7 @@ func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 		}
 	}
 
-	// A store with reads only: the struct hides MemoryStore's session writes.
-	reader, err := NewEngine(struct{ Store }{NewMemoryStore()}, WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := reader.SaveSessionMessages(ctx, ns, sessionID, "k", msg); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("reader save = %v", err)
-	}
-	if err := reader.DeleteSessionMessages(ctx, ns, sessionID); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("reader delete = %v", err)
-	}
-	embedFail, err := NewEngine(NewMemoryStore(), WithEmbedder(errEmbed{}))
+	embedFail, err := NewEngine(NewMemoryStore(WithMemoryEmbedding(Embedding{Embedder: errEmbed{}})))
 	if err != nil {
 		t.Fatal(err)
 	}

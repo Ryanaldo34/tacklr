@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 )
 
 // FindObjectsRequest is entity retrieval (graph parent nodes).
 // Query matches entity index text (title, summary, indexed properties, body).
-// Filters apply to the hydrated parent row (same keys as schema filterable_fields).
+// Filters (same keys as schema filterable_fields) apply in the graph before
+// it ranks, and again to the hydrated parent row.
 // Corpus retrieval is SearchRequest (store parts).
 type FindObjectsRequest struct {
 	Query   string
@@ -20,16 +20,14 @@ type FindObjectsRequest struct {
 	Limit   int
 }
 
-// FindObjects ranks first-class objects via GraphObjectSearcher (Helix or
-// MemoryGraph), then hydrates under Scope from the store and applies Filters
-// on parent rows. Requires a graph. Not corpus Search: no part evidence path.
+// FindObjects ranks first-class objects in the graph (Graph.FindObjects),
+// then hydrates them under Scope from the store and checks Filters on the
+// stored rows. Requires a graph. Not corpus Search: no part evidence path.
 // A parent with no parts is visible here and invisible to Search.
-func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRequest, results ResultSetStore) (page SearchPage, err error) {
+func (k *KnowledgeGraph) FindObjects(ctx context.Context, scope Scope, req FindObjectsRequest, results ResultSetStore) (page SearchPage, err error) {
+	e := k.eng
 	if err := scope.Namespace.Validate(); err != nil {
 		return page, err
-	}
-	if e.graphS == nil {
-		return page, fmt.Errorf("%w: graph object search is not available", ErrUnsupported)
 	}
 	if results == nil {
 		return page, fmt.Errorf("%w: result set store is required", ErrUnsupported)
@@ -38,55 +36,28 @@ func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRe
 	if query == "" {
 		return page, fmt.Errorf("%w: query is required", ErrInvalid)
 	}
-	filters, err := e.prepareFindObjectFilters(req)
+	filters, err := e.prepareFindObjectFilters(req.Filters, trimmedKinds(req.Kinds))
 	if err != nil {
 		return page, err
 	}
-	plan, err := compileFilters(filters)
+	plan, err := CompileFilter(filters)
 	if err != nil {
 		return page, err
 	}
 	limit := e.normalizeLimit(req.Limit)
-	k := max(limit*3, e.cfg.CandidateK)
-	ns := scope.Namespace
-
-	var lists [][]ScoredID
-	textHits, err := e.graphS.SearchText(ctx, query, k, ns)
+	ranked, err := k.graph.FindObjects(ctx, ObjectSearch{
+		Namespace:  scope.Namespace,
+		Principals: scope.Principals,
+		Query:      query,
+		Filters:    filters,
+		Limit:      max(limit*3, e.cfg.CandidateK),
+	})
 	if err != nil {
-		return page, err
+		return page, fmt.Errorf("brain: object search: %w", err)
 	}
-	if len(textHits) > 0 {
-		lists = append(lists, textHits)
-	}
-	if e.embedder != nil {
-		emb, embErr := e.embedOne(ctx, query)
-		if embErr != nil {
-			if !e.cfg.allowEmbedderDegrade() {
-				return page, fmt.Errorf("brain: embed query: %w", embErr)
-			}
-		} else if len(emb) > 0 {
-			vecHits, vErr := e.graphS.SearchVector(ctx, emb, k, ns)
-			if vErr != nil {
-				if !e.cfg.allowEmbedderDegrade() {
-					return page, fmt.Errorf("brain: vector search: %w", vErr)
-				}
-			} else if len(vecHits) > 0 {
-				lists = append(lists, vecHits)
-			}
-		}
-	}
-	if len(lists) == 0 {
+	if len(ranked) == 0 {
 		return page, nil
 	}
-	if e.cfg.lambdaValue() > 0 {
-		if err := e.stampUpdatedAt(ctx, scope, lists); err != nil {
-			return page, fmt.Errorf("brain: hydrate objects: %w", err)
-		}
-		e.decayChannels(lists)
-	}
-	ranked := FuseRanks(lists, e.cfg.RRFk)
-	sortScored(ranked)
-
 	ids := make([]uuid.UUID, len(ranked))
 	scoreByID := make(map[uuid.UUID]float64, len(ranked))
 	for i, s := range ranked {
@@ -102,24 +73,17 @@ func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRe
 	for _, o := range objs {
 		byID[o.ID] = o
 	}
-	kinds := kindSet(req.Kinds)
 	rich := make([]RichObject, 0, len(ids))
 	for _, id := range ids {
 		o, ok := byID[id]
 		if !ok || o.ParentID != nil {
 			continue
 		}
-		if kinds != nil {
-			if _, want := kinds[o.Kind]; !want {
-				continue
-			}
-		}
-		if !plan.match(o) {
+		if !plan.Match(o) {
 			continue
 		}
 		r := RichFromObject(o, false)
 		if sc, ok := scoreByID[id]; ok {
-			sc := sc
 			r.Score = &sc
 		}
 		rich = append(rich, r)
@@ -157,42 +121,6 @@ func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRe
 	}, nil
 }
 
-// stampUpdatedAt copies store updated_at onto channel hits so decay can see age.
-// Graph hits often carry only a distance. A missing store row keeps a zero time.
-func (e *Engine) stampUpdatedAt(ctx context.Context, scope Scope, lists [][]ScoredID) error {
-	n := 0
-	for _, list := range lists {
-		n += len(list)
-	}
-	ids := make([]uuid.UUID, 0, n)
-	seen := make(map[uuid.UUID]struct{}, n)
-	for _, list := range lists {
-		for _, hit := range list {
-			if _, ok := seen[hit.ID]; ok {
-				continue
-			}
-			seen[hit.ID] = struct{}{}
-			ids = append(ids, hit.ID)
-		}
-	}
-	objs, err := e.store.GetMany(ctx, scope, ids)
-	if err != nil {
-		return err
-	}
-	byID := make(map[uuid.UUID]time.Time, len(objs))
-	for _, o := range objs {
-		byID[o.ID] = o.UpdatedAt
-	}
-	for i := range lists {
-		for j := range lists[i] {
-			if ts, ok := byID[lists[i][j].ID]; ok {
-				lists[i][j].UpdatedAt = ts
-			}
-		}
-	}
-	return nil
-}
-
 func (e *Engine) applyRerank(ctx context.Context, objects []RichObject) ([]RichObject, error) {
 	if e.reranker == nil || len(objects) == 0 {
 		return objects, nil
@@ -207,21 +135,15 @@ func (e *Engine) applyRerank(ctx context.Context, objects []RichObject) ([]RichO
 	return out, nil
 }
 
-// prepareFindObjectFilters merges request kinds into filters and validates against catalog.
-func (e *Engine) prepareFindObjectFilters(req FindObjectsRequest) (Filter, error) {
-	f := cloneFilter(req.Filters)
-	if len(req.Kinds) > 0 {
-		names := make([]string, 0, len(req.Kinds))
-		for _, k := range req.Kinds {
-			if k = strings.TrimSpace(k); k != "" {
-				names = append(names, k)
-			}
-		}
-		if len(names) == 1 {
-			f.Kind = StringMatch{Eq: names[0]}
-		} else if len(names) > 1 {
-			f.Kind = StringMatch{In: names}
-		}
+// prepareFindObjectFilters merges kinds into filters and validates against catalog.
+func (e *Engine) prepareFindObjectFilters(filters Filter, kinds []string) (Filter, error) {
+	f := cloneFilter(filters)
+	switch len(kinds) {
+	case 0:
+	case 1:
+		f.Kind = StringMatch{Eq: kinds[0]}
+	default:
+		f.Kind = StringMatch{In: kinds}
 	}
 	if f.empty() {
 		return Filter{}, nil
@@ -235,34 +157,13 @@ func (e *Engine) prepareFindObjectFilters(req FindObjectsRequest) (Filter, error
 	return f, nil
 }
 
-func kindSet(kinds []string) map[string]struct{} {
-	if len(kinds) == 0 {
-		return nil
-	}
-	out := make(map[string]struct{}, len(kinds))
+// trimmedKinds drops blank kind names.
+func trimmedKinds(kinds []string) []string {
+	out := make([]string, 0, len(kinds))
 	for _, k := range kinds {
 		if k = strings.TrimSpace(k); k != "" {
-			out[k] = struct{}{}
+			out = append(out, k)
 		}
 	}
-	if len(out) == 0 {
-		return nil
-	}
 	return out
-}
-
-// objectSearchReady is optional: Helix sets false until Bootstrap; MemoryGraph omits it (always ready).
-type objectSearchReady interface {
-	ObjectSearchReady() bool
-}
-
-// HasObjectSearch reports whether FindObjects / find_objects is available.
-func (e *Engine) HasObjectSearch() bool {
-	if e.graphS == nil {
-		return false
-	}
-	if r, ok := e.graphS.(objectSearchReady); ok {
-		return r.ObjectSearchReady()
-	}
-	return true
 }

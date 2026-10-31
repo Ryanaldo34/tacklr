@@ -23,7 +23,7 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestIndexPath_andUnindex(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}

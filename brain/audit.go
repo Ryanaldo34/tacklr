@@ -94,19 +94,10 @@ func richIDs(objs []RichObject) []uuid.UUID {
 	return ids
 }
 
-// capability checks ctx and ns, then returns the store as T: the optional
-// store port an Engine method needs (ObjectWriter, Purger, …).
-func capability[T any](ctx context.Context, e *Engine, ns Namespace, what string) (T, error) {
-	var none T
+// checkScope fails when ctx is done or ns is invalid.
+func checkScope(ctx context.Context, ns Namespace) error {
 	if err := ctx.Err(); err != nil {
-		return none, err
+		return err
 	}
-	if err := ns.Validate(); err != nil {
-		return none, err
-	}
-	c, ok := e.store.(T)
-	if !ok {
-		return none, fmt.Errorf("%w: store does not support %s", ErrUnsupported, what)
-	}
-	return c, nil
+	return ns.Validate()
 }

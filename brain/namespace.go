@@ -16,9 +16,10 @@ type Attr struct {
 	Value string `json:"value" desc:"Attribute value. Must not contain '.'."`
 }
 
-// Namespace is ordered named isolation attrs. Every Scope needs one: an empty
-// namespace covers nothing.
-// Covers: every scope attr is present on the object with the same value.
+// Namespace is ordered named isolation attrs. The first attr is the tenant:
+// the boundary every store filters on by equality, so no scope ever reaches
+// another tenant's rows. Every Scope needs a namespace; an empty one covers
+// nothing.
 type Namespace []Attr
 
 // Empty reports whether n has no attributes.
@@ -55,22 +56,24 @@ func (n Namespace) Clone() Namespace { return slices.Clone(n) }
 // Equal reports whether n and o have the same attrs in the same order.
 func (n Namespace) Equal(o Namespace) bool { return slices.Equal(n, o) }
 
-// Covers reports whether obj is visible under this scope.
-// An empty scope covers nothing.
+// Covers reports whether obj is visible under this scope: both have the same
+// tenant (first attr), and every other scope attr is on obj with the same
+// value. An empty scope covers nothing.
 func (scope Namespace) Covers(obj Namespace) bool {
-	if len(scope) == 0 {
+	if len(scope) == 0 || len(obj) == 0 || scope[0] != obj[0] {
 		return false
 	}
-	om := make(map[string]string, len(obj))
-	for _, a := range obj {
-		om[a.Name] = a.Value
-	}
-	for _, a := range scope {
-		if om[a.Name] != a.Value {
+	for _, a := range scope[1:] {
+		if !slices.Contains(obj, a) {
 			return false
 		}
 	}
 	return true
+}
+
+// Tenant is n's first attr as a namespace of its own (nil for an empty n).
+func (n Namespace) Tenant() Namespace {
+	return n[:min(len(n), 1)]
 }
 
 // Bind merges a per-call namespace onto this host ceiling: the widest

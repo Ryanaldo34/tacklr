@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/internal/helixtest"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -19,7 +20,7 @@ import (
 func vfsIndexHarness(t *testing.T, edit func(*AgentOptions)) (*TurnManager, *vfs.MountSession, *brain.Engine, brain.Namespace) {
 	t.Helper()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,14 +251,15 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 // rewrites that record. search and read_object return it.
 func TestKnowledgeSaveSearchRead(t *testing.T) {
 	ctx := context.Background()
-	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
+	g := helixtest.Graph(t)
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
 		brain.KindSpec{Kind: "Fact", IsParent: true},
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
+	kg := brain.NewKnowledgeGraph(eng, g)
 	if err := eng.ApplyKinds(ctx, append(vfsindex.MountIndexKinds(),
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
 		brain.KindSpec{Kind: "Fact", IsParent: true},
@@ -268,7 +270,8 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	h := mustNewTurnManager(t, AgentOptions{
 		sessionID: "save-mem",
 		Model:     &scriptedModel{},
-		Brain:     eng, SearchNamespace: ns,
+		Brain:     eng,
+		Graph:     kg, SearchNamespace: ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery", Fact: "Fact"},
 	})
 	t.Cleanup(h.Close)
@@ -354,8 +357,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 // VFS, brain, namespace) plus a model that decides the next tool from the window.
 func TestRun_workspaceResearchTurn(t *testing.T) {
 	ctx := context.Background()
-	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
 	))
 	if err != nil {
@@ -504,11 +506,12 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	ctx := context.Background()
 	ms := mustMountTree(t, "path-graph", vfs.At("work", vfs.Local(t.TempDir())))
 	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
+	g := helixtest.Graph(t)
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
+	kg := brain.NewKnowledgeGraph(eng, g)
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +519,8 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	h := mustNewTurnManager(t, AgentOptions{
 		sessionID:    "path-graph",
 		mountSession: ms, Model: &scriptedModel{},
-		Brain: eng, SearchNamespace: ns,
+		Brain: eng,
+		Graph: kg, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
@@ -542,7 +546,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	}
 	lout, err := link.invoke(ctx, `{
 		"from":"/workspace/work/a.md","to":"/workspace/work/b.md",
-		"relation_type":"references","note":"JWT section"
+		"relation_type":"about","note":"JWT section"
 	}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
@@ -552,7 +556,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	}
 
 	expand := h.findTool("expand", "")
-	eout, err := expand.invoke(ctx, `{"path":"/workspace/work/a.md","relation_types":["references"]}`, turnRuntime(h))
+	eout, err := expand.invoke(ctx, `{"path":"/workspace/work/a.md","relation_types":["about"]}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,9 +566,9 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 
 	fl := h.findTool("find_links", "")
 	if fl == nil {
-		t.Fatal("find_links required with MemoryGraph")
+		t.Fatal("find_links required with a graph")
 	}
-	fout, err := fl.invoke(ctx, `{"relation_type":"references","query":"JWT"}`, turnRuntime(h))
+	fout, err := fl.invoke(ctx, `{"relation_type":"about","query":"JWT"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +581,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	if _, err := fl.invoke(ctx, `{"relation_type":"","query":"JWT"}`, turnRuntime(h)); err == nil {
 		t.Fatal("find_links requires relation_type")
 	}
-	if _, err := fl.invoke(ctx, `{"relation_type":"references","query":""}`, turnRuntime(h)); err == nil {
+	if _, err := fl.invoke(ctx, `{"relation_type":"about","query":""}`, turnRuntime(h)); err == nil {
 		t.Fatal("find_links requires query")
 	}
 }
@@ -612,7 +616,7 @@ func TestVFSIndexTools_indexedFileACLFollowsSearchPrincipals(t *testing.T) {
 }
 
 func TestAgentOptions_brainRequiresASearchNamespace(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,5 +626,24 @@ func TestAgentOptions_brainRequiresASearchNamespace(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "SearchNamespace is required") {
 		t.Fatalf("validate = %v", err)
+	}
+}
+
+func TestAgentOptions_graphMustWrapBrain(t *testing.T) {
+	brainEng, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: brainEng, SearchNamespace: mustNS(t, "org", "a"),
+		Graph: brain.NewKnowledgeGraph(other, helixtest.Graph(t))}
+
+	err = opts.Validate()
+
+	if err == nil || !strings.Contains(err.Error(), "must wrap") {
+		t.Fatalf("validate with a graph over another engine = %v, want it rejected", err)
 	}
 }

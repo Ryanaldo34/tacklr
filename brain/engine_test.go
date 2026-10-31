@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 
@@ -23,7 +23,7 @@ func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestEngine_SchemaAndOrderedChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestEngine_SchemaAndOrderedChildren(t *testing.T) {
 }
 
 func TestEngine_SchemaUnknownKind(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestEngine_ListChildrenRequiresVisibleParent(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,46 +247,14 @@ func (nopRerank) Rerank(context.Context, []brain.RichObject) ([]brain.RichObject
 	return nil, nil
 }
 
-func TestNewEngine_embedderOrLexicalOnly(t *testing.T) {
-	store := brain.NewMemoryStore()
-	_, err := brain.NewEngine(store)
-	if err == nil || !errors.Is(err, brain.ErrInvalid) || !strings.Contains(err.Error(), "WithEmbedder") || !strings.Contains(err.Error(), "WithLexicalOnly") {
-		t.Fatalf("neither option: %v", err)
-	}
-	_, err = brain.NewEngine(store, brain.WithEmbedder(nopEmbed{}), brain.WithLexicalOnly())
-	if err == nil || !errors.Is(err, brain.ErrInvalid) || !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Fatalf("both options: %v", err)
-	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
-	}
-	ns := mustNS(t, "id", uuid.NewString())
-	got, err := eng.Put(context.Background(), brain.Scope{Namespace: ns}, brain.Object{
-		Kind: "Note", Title: "hello", Content: "body",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Embedding) != 0 {
-		t.Fatalf("lexical-only put must not embed: %+v", got.Embedding)
-	}
-}
-
-type nopEmbed struct{}
-
-func (nopEmbed) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	return repeatVector([]float32{1}, len(texts)), nil
-}
-
 // TestNewEngine_options: WithReranker/ExpandRecipes/Kinds construct path.
 func TestNewEngine_options(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	if _, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithExpandRecipes(brain.ExpandRecipe{Name: ""})); err == nil || !errors.Is(err, brain.ErrInvalid) {
+	if _, err := brain.NewEngine(store, brain.WithExpandRecipes(brain.ExpandRecipe{Name: ""})); err == nil || !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("empty expand recipe name must fail construct: %v", err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(),
+	eng, err := brain.NewEngine(store,
 		brain.WithReranker(nopRerank{}),
 		brain.WithExpandRecipes(
 			brain.ExpandRecipe{Name: "kids", MaxHops: 1, WantContainment: true},
@@ -318,6 +286,10 @@ func TestNewEngine_options(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	many, err := eng.ExpandMany(ctx, scope, brain.ExpandManyRequest{ObjectIDs: []uuid.UUID{parent}, WantContainment: true})
+	if err != nil || len(many.Objects) != 1 || many.Objects[0].ID != child {
+		t.Fatalf("engine expand many over containment = %+v %v, want the child", many.Objects, err)
+	}
 	if len(res.Objects) < 1 {
 		t.Fatalf("kids expand: %+v", res.Objects)
 	}
@@ -327,25 +299,33 @@ func TestNewEngine_options(t *testing.T) {
 	if err := eng.RegisterExpandRecipe(brain.ExpandRecipe{Name: " extra ", WantContainment: true}); err != nil {
 		t.Fatal(err)
 	}
-	if eng.HasEdgeSearch() {
-		t.Fatal("memory store has no edge search")
-	}
-	if _, err := eng.FindLinks(ctx, brain.Scope{Namespace: mustNS(t, "org", "a")}, brain.FindLinksRequest{
-		RelationType: "about", Query: "x",
-	}); !errors.Is(err, brain.ErrUnsupported) {
-		t.Fatalf("FindLinks without graph: %v", err)
-	}
-	if _, err := eng.FindObjects(ctx, brain.Scope{Namespace: mustNS(t, "org", "a")}, brain.FindObjectsRequest{Query: "x"}, brain.NewSearchContext()); !errors.Is(err, brain.ErrUnsupported) {
-		t.Fatalf("FindObjects without graph: %v", err)
-	}
-	if eng.HasObjectSearch() {
-		// optional — only when graph object searcher is set
+	if _, err := eng.Expand(ctx, brain.Scope{Namespace: mustNS(t, "org", "a")}, brain.ExpandRequest{ObjectID: parent, RelationTypes: []string{"about"}}, brain.NewSearchContext()); !errors.Is(err, brain.ErrUnsupported) {
+		t.Fatalf("expand over a relation on an engine = %v, want ErrUnsupported (relations need a KnowledgeGraph)", err)
 	}
 }
 
-func (nopEmbed) Model() string { return "test-model" }
-
 // putFixture writes obj straight to the store under its own namespace.
-func putFixture(w brain.ObjectWriter, obj brain.Object) error {
-	return w.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, obj)
+func putFixture(s brain.Store, obj brain.Object) error {
+	_, err := s.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, brain.Indexed{Object: obj, Text: brain.IndexText(obj)})
+	return err
+}
+
+func TestEngine_kindsWithObjectsListsTheKindsWritten(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := brain.Scope{Namespace: mustNS(t, "org", uuid.NewString())}
+	for _, kind := range []string{"Note", "Deal", "Note"} {
+		if _, err := eng.Put(ctx, scope, brain.Object{Kind: kind, Title: "x"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	kinds, err := eng.KindsWithObjects(ctx, scope)
+
+	if err != nil || !slices.Equal(kinds, []string{"Deal", "Note"}) {
+		t.Fatalf("kinds with objects = %v %v, want Deal and Note", kinds, err)
+	}
 }

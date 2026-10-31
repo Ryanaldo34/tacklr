@@ -28,24 +28,25 @@ func TestStore_sqlSpansParentUnderTheCallersSpan(t *testing.T) {
 	if err := store.Setup(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	ctx, parent := tp.Tracer("test").Start(t.Context(), "tacklr.tool")
+	ctx, span := tp.Tracer("test").Start(t.Context(), "tacklr.tool")
 	scope := brain.Scope{Namespace: brain.Namespace{{Name: "org", Value: "acme"}}}
 	doc := uuid.New()
-	part := brain.TreePart{Object: brain.Object{ID: uuid.New(), Kind: "Chunk", ParentID: &doc, Namespace: scope.Namespace}}
+	parent := brain.Indexed{Object: brain.Object{ID: doc, Kind: "Document", Namespace: scope.Namespace}}
+	part := brain.Indexed{Object: brain.Object{ID: uuid.New(), Kind: "Chunk", ParentID: &doc, Namespace: scope.Namespace, Position: new(0)}}
 
 	_, _ = store.Get(ctx, scope, uuid.New())
 	_, _ = store.GetMany(ctx, scope, []uuid.UUID{uuid.New()})
 	putErr := store.PutKind(ctx, brain.ObjectKind{Kind: "Document"})
-	stageErr := store.StageParts(ctx, scope, uuid.New(), []brain.TreePart{part})
-	parent.End()
+	_, treeErr := store.PutTree(ctx, scope, parent, indexedParts(part))
+	span.End()
 
 	var children int
 	for _, sp := range sr.Ended() {
-		if sp.Parent().SpanID() == parent.SpanContext().SpanID() {
+		if sp.Parent().SpanID() == span.SpanContext().SpanID() {
 			children++
 		}
 	}
-	if putErr != nil || stageErr != nil || children < 4 {
-		t.Fatalf("got %d postgres spans under tacklr.tool (put %v, stage %v), want QueryRow+Query+Exec+CopyFrom", children, putErr, stageErr)
+	if putErr != nil || treeErr != nil || children < 4 {
+		t.Fatalf("got %d postgres spans under tacklr.tool (put %v, put tree %v), want QueryRow+Query+Exec+CopyFrom", children, putErr, treeErr)
 	}
 }

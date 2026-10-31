@@ -40,8 +40,10 @@ func TestNamespace_coversHierarchicalRLS(t *testing.T) {
 	if otherOrg.Covers(obj) || otherWS.Covers(obj) {
 		t.Fatal("wrong attr value must not cover")
 	}
-	if !wsOnly.Covers(obj) {
-		t.Fatal("named subset (workspace only) must cover")
+	// The first attr is the tenant: a scope without the object's tenant
+	// covers nothing, even when its other attrs match.
+	if wsOnly.Covers(obj) || mustNS(t, "workspace", "west", "org", "acme").Covers(obj) {
+		t.Fatal("a scope on another tenant must not cover")
 	}
 	if org.Covers(mustNS(t, "org", "acme2")) {
 		t.Fatal("acme must not cover acme2")

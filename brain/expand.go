@@ -57,8 +57,37 @@ type ExpandRecipe struct {
 	WantContainment bool
 }
 
-// Expand returns the structural neighborhood of object_id under scope.
-func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (res ExpandResult, err error) {
+// walker walks the graph from id over labels. KnowledgeGraph passes its
+// graph's walk; Engine allows containment only, so it passes none.
+type walker func(ctx context.Context, scope Scope, id uuid.UUID, labels []string, maxHops int, direction string) ([]GraphNeighbor, error)
+
+// Expand returns the children of object_id, or its parent and siblings when
+// it is a part. Relation types other than containment need a
+// KnowledgeGraph (ErrUnsupported).
+func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (ExpandResult, error) {
+	if err := containmentOnly(req.RelationTypes); err != nil {
+		return ExpandResult{}, err
+	}
+	return e.expand(ctx, scope, req, results, nil)
+}
+
+// Expand returns the structural neighborhood of object_id under scope:
+// children (or parent and siblings) and the objects its relations reach.
+func (k *KnowledgeGraph) Expand(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (ExpandResult, error) {
+	return k.eng.expand(ctx, scope, req, results, k.neighbors)
+}
+
+// containmentOnly rejects relation types other than containment.
+func containmentOnly(rels []string) error {
+	if _, labels := SplitRelationTypes(rels); len(labels) > 0 {
+		return fmt.Errorf("%w: relation types %v need a KnowledgeGraph", ErrUnsupported, labels)
+	}
+	return nil
+}
+
+// expand walks containment, and relations with walk when the request names
+// any.
+func (e *Engine) expand(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore, walk walker) (res ExpandResult, err error) {
 	if e := ctx.Err(); e != nil {
 		err = e
 		return res, err
@@ -75,9 +104,6 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 	}
 
 	wantContainment, graphLabels := resolveExpandRelations(req.RelationTypes, req.WantContainment)
-	if len(graphLabels) > 0 && e.graph == nil {
-		return res, fmt.Errorf("%w: graph backend is required for relation types %v", ErrUnsupported, graphLabels)
-	}
 
 	var (
 		ids             []uuid.UUID
@@ -95,7 +121,7 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 		usedContainment = true
 	}
 	if len(graphLabels) > 0 {
-		hits, gErr := e.graphNeighborsMulti(ctx, scope, obj.ID, graphLabels, req.MaxHops, req.Direction)
+		hits, gErr := walk(ctx, scope, obj.ID, graphLabels, req.MaxHops, req.Direction)
 		if gErr != nil {
 			if e.cfg.FailOnGraphError || !usedContainment {
 				return res, gErr
@@ -106,18 +132,13 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 				seen[id] = struct{}{}
 			}
 			relByID = make(map[uuid.UUID]Relation, len(hits))
-			for _, h := range hits {
-				if h.n.ObjectID == uuid.Nil {
+			for _, n := range hits {
+				if _, ok := seen[n.ObjectID]; ok {
 					continue
 				}
-				if _, ok := seen[h.n.ObjectID]; ok {
-					continue
-				}
-				seen[h.n.ObjectID] = struct{}{}
-				ids = append(ids, h.n.ObjectID)
-				rel := RelationFromNeighbor(h.n)
-				rel.Depth = h.depth
-				relByID[h.n.ObjectID] = rel
+				seen[n.ObjectID] = struct{}{}
+				ids = append(ids, n.ObjectID)
+				relByID[n.ObjectID] = RelationFromNeighbor(n)
 			}
 			usedGraph = true
 		}
@@ -148,9 +169,22 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 	}, nil
 }
 
-// ExpandMany walks the graph from many landing ids without paging / SearchContext.
-// First seed to claim a neighbor wins Relation.SourceID. Out-of-scope seeds are skipped.
-func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequest) (res ExpandManyResult, err error) {
+// ExpandMany expands many landing ids without paging / SearchContext, over
+// containment only (relations need a KnowledgeGraph). First seed to claim a
+// neighbor wins Relation.SourceID. Out-of-scope seeds are skipped.
+func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequest) (ExpandManyResult, error) {
+	if err := containmentOnly(req.RelationTypes); err != nil {
+		return ExpandManyResult{}, err
+	}
+	return e.expandMany(ctx, scope, req, nil)
+}
+
+// ExpandMany is Engine.ExpandMany over children and relations.
+func (k *KnowledgeGraph) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequest) (ExpandManyResult, error) {
+	return k.eng.expandMany(ctx, scope, req, k.neighbors)
+}
+
+func (e *Engine) expandMany(ctx context.Context, scope Scope, req ExpandManyRequest, walk walker) (res ExpandManyResult, err error) {
 	if e := ctx.Err(); e != nil {
 		err = e
 		return res, err
@@ -167,9 +201,6 @@ func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequ
 	}
 
 	wantContainment, graphLabels := resolveExpandRelations(req.RelationTypes, req.WantContainment)
-	if len(graphLabels) > 0 && e.graph == nil {
-		return res, fmt.Errorf("%w: graph backend is required for relation types %v", ErrUnsupported, graphLabels)
-	}
 
 	seen := make(map[uuid.UUID]struct{}, budget)
 	out := make([]RichObject, 0, min(budget, 32))
@@ -200,15 +231,13 @@ func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequ
 			ids = append(ids, cIDs...)
 		}
 		if len(graphLabels) > 0 {
-			hits, nErr := e.graphNeighborsMulti(ctx, scope, seed, graphLabels, req.MaxHops, req.Direction)
+			hits, nErr := walk(ctx, scope, seed, graphLabels, req.MaxHops, req.Direction)
 			if nErr != nil {
 				return res, nErr
 			}
-			for _, h := range hits {
-				ids = append(ids, h.n.ObjectID)
-				rel := RelationFromNeighbor(h.n)
-				rel.Depth = h.depth
-				relByID[h.n.ObjectID] = rel
+			for _, n := range hits {
+				ids = append(ids, n.ObjectID)
+				relByID[n.ObjectID] = RelationFromNeighbor(n)
 			}
 		}
 		if len(ids) == 0 {
@@ -243,17 +272,35 @@ func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequ
 
 // ExpandByRecipe looks up a host-registered ExpandRecipe and runs Expand with it.
 func (e *Engine) ExpandByRecipe(ctx context.Context, scope Scope, objectID uuid.UUID, recipeName string, results ResultSetStore) (ExpandResult, error) {
+	req, err := e.recipeRequest(objectID, recipeName)
+	if err != nil {
+		return ExpandResult{}, err
+	}
+	return e.Expand(ctx, scope, req, results)
+}
+
+// ExpandByRecipe is Engine.ExpandByRecipe over children and relations.
+func (k *KnowledgeGraph) ExpandByRecipe(ctx context.Context, scope Scope, objectID uuid.UUID, recipeName string, results ResultSetStore) (ExpandResult, error) {
+	req, err := k.eng.recipeRequest(objectID, recipeName)
+	if err != nil {
+		return ExpandResult{}, err
+	}
+	return k.Expand(ctx, scope, req, results)
+}
+
+// recipeRequest is the ExpandRequest of the recipe named recipeName.
+func (e *Engine) recipeRequest(objectID uuid.UUID, recipeName string) (ExpandRequest, error) {
 	r, ok := e.recipe(recipeName)
 	if !ok {
-		return ExpandResult{}, fmt.Errorf("%w: expand recipe %q", ErrNotFound, strings.TrimSpace(recipeName))
+		return ExpandRequest{}, fmt.Errorf("%w: expand recipe %q", ErrNotFound, strings.TrimSpace(recipeName))
 	}
-	return e.Expand(ctx, scope, ExpandRequest{
+	return ExpandRequest{
 		ObjectID:        objectID,
 		RelationTypes:   r.RelationTypes,
 		MaxHops:         r.MaxHops,
 		Direction:       r.Direction,
 		WantContainment: r.WantContainment,
-	}, results)
+	}, nil
 }
 
 // RegisterExpandRecipe adds or replaces a named expand view.
@@ -365,129 +412,24 @@ func (e *Engine) siblingWindowIDs(ctx context.Context, scope Scope, parentID, pa
 	return ids, nil
 }
 
-type graphNeighborHit struct {
-	n     GraphNeighbor
-	depth int
-}
-
-// graphNeighborsMulti BFS-walks relation labels up to maxHops.
-// Scope is applied each hop: out-of-scope nodes are dropped and never used as
-// frontier seeds for deeper hops. Neighbors RPC count is capped by MaxGraphExpandRPCs.
-func (e *Engine) graphNeighborsMulti(ctx context.Context, scope Scope, id uuid.UUID, labels []string, maxHops int, direction string) ([]graphNeighborHit, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if maxHops <= 0 {
-		maxHops = 1
-	}
-	if maxHops > e.cfg.MaxExpandHops {
-		maxHops = e.cfg.MaxExpandHops
-	}
-	rpcBudget := e.cfg.MaxGraphExpandRPCs
-	dir := normalizeExpandDirection(direction)
-
-	frontier := []uuid.UUID{id}
-	visited := map[uuid.UUID]struct{}{id: {}}
-	var hits []graphNeighborHit
-	rpcCount := 0
-
-	for hop := 1; hop <= maxHops && len(frontier) > 0; hop++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		// Collect candidates for this hop (may include out-of-scope ids).
-		var hopHits []graphNeighborHit
-		candSeen := make(map[uuid.UUID]struct{})
-		stopRPCs := false
-		for _, fid := range frontier {
-			if rpcCount >= rpcBudget {
-				stopRPCs = true
-				break
-			}
-			rpcCount++
-			ns, err := e.graph.Neighbors(ctx, fid, labels, e.cfg.GraphNeighborK)
-			if err != nil {
-				return nil, err
-			}
-			for _, n := range ns {
-				if n.ObjectID == uuid.Nil {
-					continue
-				}
-				if !directionAllows(dir, n.Direction) {
-					continue
-				}
-				if _, ok := visited[n.ObjectID]; ok {
-					continue
-				}
-				if _, ok := candSeen[n.ObjectID]; ok {
-					continue
-				}
-				candSeen[n.ObjectID] = struct{}{}
-				hopHits = append(hopHits, graphNeighborHit{n: n, depth: hop})
-			}
-		}
-
-		if len(hopHits) == 0 {
-			if stopRPCs {
-				break
-			}
-			frontier = nil
-			continue
-		}
-
-		// Scope filter before promoting to result / next frontier.
-		ids := make([]uuid.UUID, len(hopHits))
-		for i, h := range hopHits {
-			ids[i] = h.n.ObjectID
-		}
-		objs, err := e.store.GetMany(ctx, scope, ids)
-		if err != nil {
-			return nil, fmt.Errorf("brain: graph neighbors hydrate: %w", err)
-		}
-		visible := make(map[uuid.UUID]struct{}, len(objs))
-		for _, o := range objs {
-			visible[o.ID] = struct{}{}
-		}
-
-		var next []uuid.UUID
-		for _, h := range hopHits {
-			if _, ok := visible[h.n.ObjectID]; !ok {
-				// Mark visited so we do not re-query this out-of-scope id.
-				visited[h.n.ObjectID] = struct{}{}
-				continue
-			}
-			if _, ok := visited[h.n.ObjectID]; ok {
-				continue
-			}
-			visited[h.n.ObjectID] = struct{}{}
-			hits = append(hits, h)
-			// Only in-scope nodes seed the next hop.
-			if hop < maxHops {
-				next = append(next, h.n.ObjectID)
-			}
-		}
-		frontier = next
-		if stopRPCs {
-			break
-		}
+// neighbors walks labels up to maxHops (capped by MaxExpandHops) in one
+// backend call. The backend walks only nodes scope covers; Engine still
+// hydrates every id under scope.
+func (k *KnowledgeGraph) neighbors(ctx context.Context, scope Scope, id uuid.UUID, labels []string, maxHops int, direction string) ([]GraphNeighbor, error) {
+	e := k.eng
+	hits, err := k.graph.Neighborhood(ctx, NeighborhoodQuery{
+		Namespace:  scope.Namespace,
+		Principals: scope.Principals,
+		ObjectID:   id,
+		Relations:  labels,
+		Direction:  normalizeDirection(direction),
+		MaxHops:    min(max(maxHops, 1), e.cfg.MaxExpandHops),
+		Limit:      e.cfg.GraphNeighborK,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("brain: graph neighborhood: %w", err)
 	}
 	return hits, nil
-}
-
-func normalizeExpandDirection(d string) string {
-	switch d = strings.ToLower(strings.TrimSpace(d)); d {
-	case "out", "in":
-		return d
-	default:
-		return "both"
-	}
-}
-
-func directionAllows(want, got string) bool {
-	if want == "both" || want == "" {
-		return true
-	}
-	return want == got
 }
 
 func uniqueUUIDs(ids []uuid.UUID) []uuid.UUID {

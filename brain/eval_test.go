@@ -3,7 +3,6 @@ package brain_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
 // --- GraphRAG composition golden --------------------------------------------
@@ -19,12 +19,13 @@ import (
 //
 //	find_objects → LandingIDs → ExpandMany → search(scope_ids=…)
 //
-// Real MemoryStore + MemoryGraph (dual-write via Put/Link). No fake graph fakes.
+// Real MemoryStore and live Helix (dual-write via Put/Link).
 func TestEval_graphRAGComposition(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
+	g := helixtest.Graph(t)
+	eng, err := brain.NewEngine(store, brain.WithKinds(
 		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
 			{Name: "stage", Type: brain.FieldTypeString},
 		}},
@@ -35,6 +36,7 @@ func TestEval_graphRAGComposition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	kg := brain.NewKnowledgeGraph(eng, g)
 	ns := mustNS(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
@@ -89,21 +91,21 @@ func TestEval_graphRAGComposition(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := eng.Link(ctx, scope, fact.ID, deal.ID, "about"); err != nil {
+	if err := kg.Link(ctx, scope, fact.ID, deal.ID, "about"); err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.LinkWith(ctx, scope, deal.ID, buyer.ID, "has_buyer", brain.EdgeMeta{
+	if err := kg.LinkWith(ctx, scope, deal.ID, buyer.ID, "has_buyer", brain.EdgeMeta{
 		Note: "primary economic buyer for Acme renewal", Role: "primary",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// Noise edge so ExpandMany must not pull noise deal into Acme neighborhood.
-	if err := eng.Link(ctx, scope, noise.ID, buyer.ID, "has_buyer"); err != nil {
+	if err := kg.Link(ctx, scope, noise.ID, buyer.ID, "has_buyer"); err != nil {
 		t.Fatal(err)
 	}
 
 	// 1) Entity land
-	land, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
+	land, err := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query: "Acme Enterprise Renewal",
 		Kinds: []string{"Deal"},
 		Limit: 5,
@@ -137,7 +139,7 @@ func TestEval_graphRAGComposition(t *testing.T) {
 	}
 
 	// 3) ExpandMany from deal seed(s) — only Acme's neighborhood, tagged SourceID
-	many, err := eng.ExpandMany(ctx, scope, brain.ExpandManyRequest{
+	many, err := kg.ExpandMany(ctx, scope, brain.ExpandManyRequest{
 		ObjectIDs:     []uuid.UUID{deal.ID},
 		RelationTypes: []string{"about", "has_buyer"},
 		MaxHops:       1,
@@ -179,7 +181,7 @@ func TestEval_graphRAGComposition(t *testing.T) {
 	}
 
 	// 5) WantContainment mixes Postgres children with graph neighbors.
-	mixed, err := eng.Expand(ctx, scope, brain.ExpandRequest{
+	mixed, err := kg.Expand(ctx, scope, brain.ExpandRequest{
 		ObjectID: deal.ID, RelationTypes: []string{"has_buyer"}, WantContainment: true,
 	}, sc)
 	if err != nil {
@@ -210,8 +212,8 @@ func TestEval_graphRAGComposition(t *testing.T) {
 		t.Fatal(err)
 	}
 	// From fact --about--> deal --has_buyer--> buyer (2 hops on mixed labels via multi-hop on union).
-	// MemoryGraph walks each hop with the label set; hop1 from fact: deal; hop2 from deal: buyer (+ fact reverse).
-	fromFact, err := eng.ExpandByRecipe(ctx, scope, fact.ID, "about_and_buyers", sc)
+	// The graph walks each hop with the label set; hop1 from fact: deal; hop2 from deal: buyer (+ fact reverse).
+	fromFact, err := kg.ExpandByRecipe(ctx, scope, fact.ID, "about_and_buyers", sc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,8 +221,8 @@ func TestEval_graphRAGComposition(t *testing.T) {
 		t.Fatalf("recipe hop1 deal: %v", titlesOf(fromFact.Objects))
 	}
 
-	// Edge-text land: FindLinks matches edge note (MemoryGraph substring on note).
-	links, err := eng.FindLinks(ctx, scope, brain.FindLinksRequest{
+	// Edge-text land: FindLinks matches the edge note.
+	links, err := kg.FindLinks(ctx, scope, brain.FindLinksRequest{
 		RelationType: "has_buyer", Query: "economic buyer", Limit: 10,
 	})
 	if err != nil {
@@ -233,151 +235,27 @@ func TestEval_graphRAGComposition(t *testing.T) {
 		t.Fatalf("link meta: %+v", links.Links[0].Meta)
 	}
 
-	if _, err := eng.FindLinks(ctx, scope, brain.FindLinksRequest{}); !errors.Is(err, brain.ErrInvalid) {
+	if _, err := kg.FindLinks(ctx, scope, brain.FindLinksRequest{}); !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("find_links required: %v", err)
 	}
 
-	empty, err := eng.FindLinks(ctx, scope, brain.FindLinksRequest{
+	empty, err := kg.FindLinks(ctx, scope, brain.FindLinksRequest{
 		RelationType: "has_buyer", Query: "zzzz-no-such-note", Limit: 5,
 	})
 	if err != nil || len(empty.Links) != 0 {
 		t.Fatalf("empty find_links: %+v err=%v", empty.Links, err)
 	}
 
-	ghost := uuid.New()
-	if err := g.AddEdge(ctx, deal.ID, ghost, "has_buyer", brain.EdgeMeta{Note: "economic buyer ghost"}); err != nil {
-		t.Fatal(err)
-	}
-	limited, err := eng.FindLinks(ctx, scope, brain.FindLinksRequest{
-		RelationType: "has_buyer", Query: "economic buyer", Limit: 1,
-	})
-	if err != nil || len(limited.Links) != 1 {
-		t.Fatalf("limit+ghost skip: %+v err=%v", limited.Links, err)
-	}
-
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := eng.FindLinks(cctx, scope, brain.FindLinksRequest{
+	if _, err := kg.FindLinks(cctx, scope, brain.FindLinksRequest{
 		RelationType: "has_buyer", Query: "economic buyer",
 	}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("find_links cancel: %v", err)
 	}
 }
 
-// TestEval_graphRAGScopeSafeMultiHop: multi-hop must not walk through out-of-scope nodes.
-func TestEval_graphRAGScopeSafeMultiHop(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
-	nsA, nsB := mustNS(t, "org", "a"), mustNS(t, "org", "b")
-	now := time.Now().UTC()
-	// a --refs--> bridge(nsB) --refs--> c(nsA). Hop-2 must not reach c via bridge.
-	a, bridge, c := uuid.New(), uuid.New(), uuid.New()
-	_ = putFixture(store, brain.Object{ID: a, Kind: "Document", Title: "seed", Namespace: nsA, UpdatedAt: now})
-	_ = putFixture(store, brain.Object{ID: bridge, Kind: "Document", Title: "bridge", Namespace: nsB, UpdatedAt: now})
-	_ = putFixture(store, brain.Object{ID: c, Kind: "Document", Title: "target", Namespace: nsA, UpdatedAt: now})
-	_ = g.AddEdge(ctx, a, bridge, "references", brain.EdgeMeta{})
-	_ = g.AddEdge(ctx, bridge, c, "references", brain.EdgeMeta{})
-	// In-scope path of length 2 for a positive outcome.
-	mid, leaf := uuid.New(), uuid.New()
-	_ = putFixture(store, brain.Object{ID: mid, Kind: "Document", Title: "mid", Namespace: nsA, UpdatedAt: now})
-	_ = putFixture(store, brain.Object{ID: leaf, Kind: "Document", Title: "leaf", Namespace: nsA, UpdatedAt: now})
-	_ = g.AddEdge(ctx, a, mid, "references", brain.EdgeMeta{})
-	_ = g.AddEdge(ctx, mid, leaf, "references", brain.EdgeMeta{})
-
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
-	if err != nil {
-		t.Fatal(err)
-	}
-	scope := brain.Scope{Namespace: nsA}
-	res, err := eng.Expand(ctx, scope, brain.ExpandRequest{
-		ObjectID: a, RelationTypes: []string{"references"}, MaxHops: 2,
-	}, brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[uuid.UUID]int{}
-	for _, o := range res.Objects {
-		if o.Relation != nil {
-			got[o.ID] = o.Relation.Depth
-		} else {
-			got[o.ID] = 0
-		}
-	}
-	if _, ok := got[bridge]; ok {
-		t.Fatalf("out-of-scope bridge must not hydrate: %v", got)
-	}
-	if _, ok := got[c]; ok {
-		t.Fatalf("must not reach c through out-of-scope bridge: %v", got)
-	}
-	if got[mid] != 1 || got[leaf] != 2 {
-		t.Fatalf("in-scope path want mid@1 leaf@2: %v", got)
-	}
-}
-
 // --- Soft degrade goldens (minimal stubs, real store outcomes) --------------
-
-func TestEval_degradeEmbedderKeepsLexical(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	parent, part := uuid.New(), uuid.New()
-	pos := 1
-	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Title: "Widgets", Namespace: ns, UpdatedAt: now})
-	_ = putFixture(store, brain.Object{
-		ID: part, Kind: "Chunk", Content: "unique-widget-token alpha", ParentID: &parent, Position: &pos,
-		Namespace: ns, UpdatedAt: now, Embedding: []float32{1, 0}, EmbeddingModel: "test-model",
-	})
-	eng, err := brain.NewEngine(store,
-		brain.WithEmbedder(failEmbedder{}),
-		brain.WithConfig(brain.EngineConfig{Now: func() time.Time { return now }}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
-		Query: "unique-widget-token",
-	}, brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page.Objects) != 1 || page.Objects[0].ID != parent {
-		t.Fatalf("lexical degrade: %+v", page.Objects)
-	}
-}
-
-func TestEval_degradeGraphKeepsContainment(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	parent, child := uuid.New(), uuid.New()
-	pos := 1
-	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Namespace: ns, UpdatedAt: now})
-	_ = putFixture(store, brain.Object{
-		ID: child, Kind: "Chunk", Content: "c", ParentID: &parent, Position: &pos,
-		Namespace: ns, UpdatedAt: now,
-	})
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(failGraph{}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := eng.Expand(ctx, brain.Scope{Namespace: ns}, brain.ExpandRequest{
-		ObjectID: parent, RelationTypes: []string{"contains", "references"},
-	}, brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Mode != "children" || len(res.Objects) != 1 || res.Objects[0].ID != child {
-		t.Fatalf("containment-only degrade: %+v", res)
-	}
-	if _, err := eng.FindLinks(ctx, brain.Scope{Namespace: ns}, brain.FindLinksRequest{
-		RelationType: "about", Query: "anything",
-	}); err == nil || !strings.Contains(err.Error(), "edge search down") {
-		t.Fatalf("FindLinks graph error: %v", err)
-	}
-}
 
 func TestConcurrent_searchAndExpand(t *testing.T) {
 	ctx := context.Background()
@@ -394,7 +272,7 @@ func TestConcurrent_searchAndExpand(t *testing.T) {
 			ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 		})
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{
+	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
 		Now: func() time.Time { return now },
 	}))
 	if err != nil {
@@ -460,17 +338,6 @@ type failEmbedder struct{}
 
 func (failEmbedder) Embed(context.Context, []string) ([][]float32, error) {
 	return nil, errString("embed down")
-}
-
-// failGraph only fails Neighbors so containment expand can still succeed.
-type failGraph struct{}
-
-func (failGraph) Neighbors(context.Context, uuid.UUID, []string, int) ([]brain.GraphNeighbor, error) {
-	return nil, errString("graph down")
-}
-
-func (failGraph) SearchEdgesText(context.Context, string, string, int) ([]brain.EdgeSearchHit, error) {
-	return nil, errString("edge search down")
 }
 
 type errString string

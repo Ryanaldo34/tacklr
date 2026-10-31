@@ -9,8 +9,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// Search is corpus retrieval: hybrid lexical + optional vector over store parts,
-// RRF, temporal decay, parent promotion, then a ResultSet page.
+// Search is corpus retrieval: the store's ranked parts (Store.Search, its
+// own channels, fusion and decay), parent promotion, then a ResultSet page.
 // Query text matches part title, summary, and content. Structured fields on
 // the parent belong in FindObjects filters (or here only if the part row
 // carries them). A parent with no parts does not appear. Entity search is
@@ -27,8 +27,8 @@ func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, res
 	return e.materialize(ctx, scope, ranked, req.Query, req.Limit, results)
 }
 
-// FindExact is corpus retrieval without the dense channel: UUID Get, else
-// lexical + trigram fusion, promotion, and ResultSet materialization.
+// FindExact is corpus retrieval by literal match: UUID Get, else the store's
+// exact search (PartSearch.Exact), promotion, and ResultSet materialization.
 // Same part-only candidate rule as Search. UUID lookup may return a parent.
 func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
 	if err := scope.Namespace.Validate(); err != nil {
@@ -180,20 +180,6 @@ func (e *Engine) rerankPromoted(ctx context.Context, scope Scope, ids []uuid.UUI
 	return out, nil
 }
 
-// decayChannels multiplies each channel by age, then re-sorts, before fusion.
-// λ <= 0 leaves the lists in the store's order so RRF still sees that rank.
-func (e *Engine) decayChannels(lists [][]ScoredID) {
-	lam := e.cfg.lambdaValue()
-	if lam <= 0 {
-		return
-	}
-	now := e.cfg.Now()
-	for i := range lists {
-		applyTemporal(lists[i], lam, now)
-		sortScored(lists[i])
-	}
-}
-
 // prepareSearch validates the query/filters and returns effective filters for the store.
 // When the catalog is non-empty, property filters require kind, unregistered kinds are
 // rejected, and missing kind filters are expanded to all registered kinds.
@@ -220,35 +206,7 @@ func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRe
 	if err != nil {
 		return nil, err
 	}
-	query := strings.TrimSpace(req.Query)
-	k := e.cfg.CandidateK
-	scope.SessionID = sessionSearchID(scope, req.Filters)
-	lex, err := e.store.SearchLexical(ctx, scope, query, filters, k)
-	if err != nil {
-		return nil, err
-	}
-	lists := [][]ScoredID{lex}
-	var emb []float32
-	if e.embedder != nil {
-		var embErr error
-		emb, embErr = e.embedOne(ctx, query)
-		if embErr != nil {
-			if !e.cfg.allowEmbedderDegrade() {
-				return nil, fmt.Errorf("brain: embed query: %w", embErr)
-			}
-		} else if len(emb) > 0 {
-			vec, err := e.store.SearchVector(ctx, scope, e.embedder.Model(), emb, filters, k)
-			if err != nil {
-				if !e.cfg.allowEmbedderDegrade() {
-					return nil, err
-				}
-			} else if len(vec) > 0 {
-				lists = append(lists, vec)
-			}
-		}
-	}
-	e.decayChannels(lists)
-	return FuseRanks(lists, e.cfg.RRFk), nil
+	return e.searchParts(ctx, scope, req, filters, false)
 }
 
 func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, error) {
@@ -256,9 +214,7 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 	if err != nil {
 		return nil, err
 	}
-	query := strings.TrimSpace(req.Query)
-
-	if id, err := uuid.Parse(query); err == nil && id != uuid.Nil {
+	if id, err := uuid.Parse(strings.TrimSpace(req.Query)); err == nil && id != uuid.Nil {
 		obj, err := e.store.Get(ctx, scope, id)
 		if err != nil {
 			return nil, err
@@ -274,36 +230,13 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 			Properties: obj.Properties,
 		}}, nil
 	}
+	return e.searchParts(ctx, scope, req, filters, true)
+}
 
-	k := e.cfg.CandidateK
+// searchParts asks the store for its ranked parts.
+func (e *Engine) searchParts(ctx context.Context, scope Scope, req SearchRequest, filters Filter, exact bool) ([]ScoredID, error) {
 	scope.SessionID = sessionSearchID(scope, req.Filters)
-	lex, err := e.store.SearchLexical(ctx, scope, query, filters, k)
-	if err != nil {
-		return nil, err
-	}
-	tri, err := e.store.SearchTrigram(ctx, scope, query, filters, k)
-	if err != nil {
-		return nil, err
-	}
-	lists := [][]ScoredID{lex, tri}
-	e.decayChannels(lists)
-	fused := FuseRanks(lists, e.cfg.RRFk)
-	q := strings.ToLower(query)
-	// Prefer exact title matches (boost), then remaining fused candidates.
-	boosted := make([]ScoredID, 0)
-	rest := make([]ScoredID, 0, len(fused))
-	for _, item := range fused {
-		if strings.ToLower(strings.TrimSpace(item.Title)) == q {
-			item.Score += 10
-			boosted = append(boosted, item)
-			continue
-		}
-		rest = append(rest, item)
-	}
-	if len(boosted) == 0 {
-		return fused, nil
-	}
-	return append(boosted, rest...), nil
+	return e.store.Search(ctx, scope, PartSearch{Query: strings.TrimSpace(req.Query), Filters: filters, Exact: exact, Limit: e.cfg.CandidateK})
 }
 
 // hydrateIDs loads objects for ids in request order, skipping missing/out-of-scope.

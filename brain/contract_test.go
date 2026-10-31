@@ -7,16 +7,18 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
 // TestSearch_parentWithoutPartsIsFoundByFindObjects: search looks at chunks;
 // find_objects looks at parent records. An Engram with no parts is missing from
 // search and present in find_objects.
 func TestSearch_parentWithoutPartsIsFoundByFindObjects(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
+	g := helixtest.Graph(t)
+	eng, err := brain.NewEngine(store, brain.WithKinds(
 		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
 			{Name: "stage", Type: brain.FieldTypeString},
 		}},
@@ -25,6 +27,7 @@ func TestSearch_parentWithoutPartsIsFoundByFindObjects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	kg := brain.NewKnowledgeGraph(eng, g)
 	ns := mustNS(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
@@ -46,11 +49,11 @@ func TestSearch_parentWithoutPartsIsFoundByFindObjects(t *testing.T) {
 		t.Fatalf("search must miss parent-only object: %+v", page.Objects)
 	}
 
-	found, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "Acme renewal"}, sc)
+	found, err := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "Acme renewal"}, sc)
 	if err != nil || len(found.Objects) != 1 || found.Objects[0].ID != deal.ID {
 		t.Fatalf("find_objects title: %+v err=%v", found.Objects, err)
 	}
-	byStage, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
+	byStage, err := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query:   "Acme",
 		Filters: mustFilter(t, map[string]any{"kind": "Deal", "stage": "negotiation"}),
 	}, sc)

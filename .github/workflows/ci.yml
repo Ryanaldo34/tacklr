@@ -103,9 +103,7 @@ jobs:
 
       # Integration tests use Testcontainers (no mocks for graph/DB):
       #   - Postgres (pgvector + pg_textsearch BM25)
-      #   - Helix enterprise-dev (in-memory graph, dynamic /v1/query)
-      # Never pass -short here: helixgraph live tests skip under -short and would
-      # drop package/total coverage under the 90% gates in .testcoverage.yml.
+      #   - Helix server v0.0.12 (in-memory graph, /v2/query)
       - name: Prepare Testcontainers (Postgres + Helix)
         run: |
           docker version
@@ -123,19 +121,19 @@ jobs:
             echo "docker build failed (attempt ${attempt}), retrying..." >&2
             sleep $((attempt * 5))
           done
-          docker pull ghcr.io/helixdb/enterprise-dev:latest
+          docker pull ghcr.io/helixdb/helixdb:v0.0.12
 
       # Race detector and coverage profiles are separate: -race can flake under
       # heavy concurrency in integration-style harness tests; coverage still uses
       # atomic mode for correct multi-goroutine counts.
       - name: Test (race)
-        run: go test -race -count=1 ./...
+        run: scripts/with-helix.sh go test -race -count=1 ./...
         env:
           TESTCONTAINERS_RYUK_DISABLED: "false"
 
       - name: Test with coverage
         run: |
-          go test -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+          scripts/with-helix.sh go test -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out | tail -1
           go tool cover -func=coverage.out | grep helixgraph || true
           go tool cover -html=coverage.out -o coverage.html

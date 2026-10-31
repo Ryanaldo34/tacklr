@@ -8,7 +8,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// FindLinksRequest searches graph edges by text (Helix edge text index or MemoryGraph).
+// FindLinksRequest searches graph edges by their notes; the graph ranks them
+// its own way (text, and vectors when it embeds).
 type FindLinksRequest struct {
 	RelationType string // required edge label (e.g. about, references)
 	Query        string
@@ -29,8 +30,10 @@ type FindLinksResult struct {
 	Links []LinkHit `json:"links"`
 }
 
-// FindLinks lands on relationships via GraphEdgeSearcher, then hydrates endpoints under Scope.
-func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksRequest) (res FindLinksResult, err error) {
+// FindLinks lands on relationships (Graph.FindLinks), then hydrates both
+// endpoints under Scope and drops an edge with an end it cannot read.
+func (k *KnowledgeGraph) FindLinks(ctx context.Context, scope Scope, req FindLinksRequest) (res FindLinksResult, err error) {
+	e := k.eng
 	if e := ctx.Err(); e != nil {
 		err = e
 		return res, err
@@ -38,18 +41,21 @@ func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksReques
 	if err := scope.Namespace.Validate(); err != nil {
 		return res, err
 	}
-	if e.graphE == nil {
-		return res, fmt.Errorf("%w: graph edge search is not available", ErrUnsupported)
-	}
 	rel := strings.TrimSpace(req.RelationType)
 	query := strings.TrimSpace(req.Query)
 	if rel == "" || query == "" {
 		return res, fmt.Errorf("%w: relation type and query are required", ErrInvalid)
 	}
 	limit := e.normalizeLimit(req.Limit)
-	hits, err := e.graphE.SearchEdgesText(ctx, rel, query, max(limit*2, e.cfg.CandidateK))
+	hits, err := k.graph.FindLinks(ctx, LinkSearch{
+		Namespace:    scope.Namespace,
+		Principals:   scope.Principals,
+		RelationType: rel,
+		Query:        query,
+		Limit:        max(limit*2, e.cfg.CandidateK),
+	})
 	if err != nil {
-		return res, err
+		return res, fmt.Errorf("brain: edge search: %w", err)
 	}
 	if len(hits) == 0 {
 		return res, nil
@@ -93,9 +99,4 @@ func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksReques
 	}
 	res.Links = out
 	return res, nil
-}
-
-// HasEdgeSearch reports whether FindLinks is available.
-func (e *Engine) HasEdgeSearch() bool {
-	return e.graphE != nil
 }

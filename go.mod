@@ -13,7 +13,7 @@ require (
 	github.com/exaring/otelpgx v0.11.1
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.12.1
-	github.com/helixdb/helix-db/sdks/go v0.1.3
+	github.com/helixdb/helix-db/sdks/go v0.3.1
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/microsoft/kiota-abstractions-go v1.9.4
 	github.com/microsoft/kiota-http-go v1.5.6

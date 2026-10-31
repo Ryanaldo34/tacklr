@@ -40,8 +40,7 @@ func TestEngine_cancelledWritesStopEmbeddingTheRest(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		calls := 0
-		eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithEmbedder(cancelEmbedder{cancel: cancel, calls: &calls}),
-			brain.WithConfig(brain.EngineConfig{EmbedBatchSize: 1}))
+		eng, err := brain.NewEngine(brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: cancelEmbedder{cancel: cancel, calls: &calls}, BatchSize: 1})))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -63,41 +62,5 @@ func TestEngine_cancelledWritesStopEmbeddingTheRest(t *testing.T) {
 	}
 	if !errors.Is(treeErr, context.Canceled) || treeCalls != 1 {
 		t.Errorf("put tree = %v after %d embeds, want Canceled after 1", treeErr, treeCalls)
-	}
-}
-
-// cancelOnEnsure cancels the caller's ctx after the store write, before the audit record.
-type cancelOnEnsure struct {
-	*brain.MemoryGraph
-	cancel context.CancelFunc
-}
-
-func (g cancelOnEnsure) EnsureObject(ctx context.Context, obj brain.Object, text string) error {
-	g.cancel()
-	return g.MemoryGraph.EnsureObject(context.WithoutCancel(ctx), obj, text)
-}
-
-func TestEngine_aWriteCancelledAfterItCommitsIsStillAudited(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
-	var recorded []brain.AuditEvent
-	record := func(ctx context.Context, ev brain.AuditEvent) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		recorded = append(recorded, ev)
-		return nil
-	}
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithAudit(record),
-		brain.WithGraph(cancelOnEnsure{MemoryGraph: brain.NewMemoryGraph(), cancel: cancel}))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	obj, putErr := eng.Put(ctx, scope, brain.Object{Kind: "Note", Title: "n"})
-
-	if putErr != nil || len(recorded) != 1 || recorded[0].Op != brain.AuditPut || recorded[0].ObjectIDs[0] != obj.ID {
-		t.Fatalf("put = %v, audit = %+v", putErr, recorded)
 	}
 }

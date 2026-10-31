@@ -11,7 +11,7 @@ import (
 )
 
 func TestSystemPrompt_knowledgeGuidanceWhenBrainSet(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestSystemPrompt_knowledgeGuidanceWhenBrainSet(t *testing.T) {
 }
 
 func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 }
 
 func TestAbsorb_retainsCompressedEpisode(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,8 +136,9 @@ func TestAbsorb_retainsCompressedEpisode(t *testing.T) {
 }
 
 func TestHandoff_sessionMessageSaveErrorKeepsWindow(t *testing.T) {
-	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(failSessionSave{MemoryStore: store}, brain.WithLexicalOnly())
+	// The store embeds the window, so a cancelled handoff fails its save.
+	store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: vectorEmbedder{}}))
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,9 +159,13 @@ func TestHandoff_sessionMessageSaveErrorKeepsWindow(t *testing.T) {
 		{Title: "A", Status: TodoStatusCompleted, Description: "done"},
 		{Title: "B", Status: TodoStatusPending, Description: "next"},
 	})
-	err = h.applyBatchToolResultEffect(t.Context(), EffectHandoff)
-	if err == nil || !strings.Contains(err.Error(), "session messages down") {
-		t.Fatalf("err = %v", err)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err = h.applyBatchToolResultEffect(cancelled, EffectHandoff)
+
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "save session messages") {
+		t.Fatalf("handoff with a failing save = %v, want the save's error", err)
 	}
 	window := h.context.Messages()
 	if len(window) != 2 || window[1].Content != "kept-detail" {
@@ -190,16 +195,21 @@ func TestHandoff_nilBrainReplacesWindow(t *testing.T) {
 	}
 }
 
-type failSessionSave struct {
-	*brain.MemoryStore
+// vectorEmbedder embeds every text as one fixed vector.
+type vectorEmbedder struct{}
+
+func (vectorEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = []float32{1, 0}
+	}
+	return out, nil
 }
 
-func (failSessionSave) SaveSessionMessages(context.Context, brain.Namespace, string, string, []brain.SessionMessage) (int, error) {
-	return 0, errors.New("session messages down")
-}
+func (vectorEmbedder) Model() string { return "vector-model" }
 
 func TestSpecialist_retainsResultEpisode(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}

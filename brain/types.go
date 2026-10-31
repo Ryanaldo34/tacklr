@@ -21,10 +21,11 @@ var (
 	// ErrConflict is returned when another write changed the object first.
 	// Nothing was written; retry from a fresh read.
 	ErrConflict = errors.New("brain: conflict")
-	// ErrGraphEnsure / ErrGraphRemove are dual-write failures. Callers re-Put
-	// after fixing the graph; store row is the source of truth.
-	ErrGraphEnsure = errors.New("brain: graph ensure object")
-	ErrGraphRemove = errors.New("brain: graph remove object")
+	// ErrIndexPut and ErrIndexRemove are index write failures (a graph is an
+	// index). The store row is the source of truth: re-Put after fixing the
+	// index.
+	ErrIndexPut    = errors.New("brain: index put")
+	ErrIndexRemove = errors.New("brain: index remove")
 )
 
 // Scope is the isolation every Engine and store call runs under. Namespace is
@@ -144,7 +145,7 @@ func RelationFromNeighbor(n GraphNeighbor) Relation {
 	return Relation{
 		Type:      n.RelationType,
 		Direction: n.Direction,
-		Depth:     1,
+		Depth:     n.Depth,
 		EdgeMeta:  n.Meta,
 	}
 }

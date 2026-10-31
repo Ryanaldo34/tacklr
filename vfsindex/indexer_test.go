@@ -32,7 +32,7 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +371,7 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +446,7 @@ func TestMountIndexer_IndexFileAndDefaults(t *testing.T) {
 		vfs.At("off", vfs.Local(t.TempDir())).Indexed("none"),
 	)
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -651,7 +651,7 @@ func TestMountIndexer_docsBlockText(t *testing.T) {
 	})
 	ms := treeLocal(t, vfs.At("docs", richFactory{doc: doc}.Open))
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +700,7 @@ func TestMountIndexer_docsBlockText(t *testing.T) {
 func TestMountIndexer_unindexLeavesFileThenReindexRecovers(t *testing.T) {
 	ctx := t.Context()
 	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -750,7 +750,7 @@ func TestMountIndexer_nonePolicySkippedAndMaxFilesStops(t *testing.T) {
 		vfs.At("work", vfs.Local(t.TempDir())),
 		vfs.At("off", vfs.Local(t.TempDir())).Indexed("none"),
 	)
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -815,11 +815,11 @@ func TestMountIndexer_aMarkdownIndexStopsAtTheFirstRejectedOrCancelledSection(t 
 	} {
 		ctx, cancel := context.WithCancel(t.Context())
 		ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
-		opt := brain.WithLexicalOnly()
+		var emb brain.Embedding
 		if tc.cancel {
-			opt = brain.WithEmbedder(cancelOnEmbed{cancel})
+			emb.Embedder = cancelOnEmbed{cancel}
 		}
-		eng, err := brain.NewEngine(brain.NewMemoryStore(), opt)
+		eng, err := brain.NewEngine(brain.NewMemoryStore(brain.WithMemoryEmbedding(emb)))
 		if err != nil {
 			t.Fatal(err)
 		}

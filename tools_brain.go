@@ -23,7 +23,10 @@ type brainToolDeps struct {
 
 // brainTools closes over the engine and SearchContext (host ceiling + result set).
 type brainTools struct {
-	engine    *brain.Engine
+	engine *brain.Engine
+	graph  *brain.KnowledgeGraph
+	// expand is graph.Expand when there is a graph, else engine.Expand.
+	expand    func(context.Context, brain.Scope, brain.ExpandRequest, brain.ResultSetStore) (brain.ExpandResult, error)
 	sc        *brain.SearchContext
 	deps      brainToolDeps
 	sessionID string
@@ -236,7 +239,7 @@ Returns neighboring records (with vfs_path when set, and relation metadata on gr
 				return "", err
 			}
 			runtime.EmitUpdate("Expanding knowledge object…")
-			res, err := b.engine.Expand(ctx, scope, brain.ExpandRequest{
+			res, err := b.expand(ctx, scope, brain.ExpandRequest{
 				ObjectID:      id,
 				RelationTypes: args.RelationTypes,
 				MaxHops:       args.MaxHops,
@@ -332,7 +335,7 @@ Returns each link's endpoints (ids and paths when set), relation_type, and optio
 			if err != nil {
 				return "", fmt.Errorf("find_links: %w", err)
 			}
-			res, err := b.engine.FindLinks(ctx, scope, brain.FindLinksRequest{
+			res, err := b.graph.FindLinks(ctx, scope, brain.FindLinksRequest{
 				RelationType: args.RelationType,
 				Query:        args.Query,
 				Limit:        args.Limit,
@@ -365,7 +368,7 @@ Returns a page of ranked records, a result_set_id, and has_more. Replaces the ac
 			if err != nil {
 				return "", fmt.Errorf("find_objects: %w", err)
 			}
-			page, err := b.engine.FindObjects(ctx, scope, brain.FindObjectsRequest{
+			page, err := b.graph.FindObjects(ctx, scope, brain.FindObjectsRequest{
 				Query:   args.Query,
 				Kinds:   args.Kinds,
 				Filters: filters,
@@ -407,7 +410,7 @@ On success returns the endpoint ids/paths, relation_type, and metadata. Re-linki
 				return "", fmt.Errorf("link: %w", err)
 			}
 			runtime.EmitUpdate("Linking knowledge objects…")
-			if err := b.engine.LinkWith(ctx, scope, from, to, args.RelationType, meta); err != nil {
+			if err := b.graph.LinkWith(ctx, scope, from, to, args.RelationType, meta); err != nil {
 				return "", fmt.Errorf("link: %w", err)
 			}
 			out := linkResult{
@@ -455,7 +458,7 @@ On success the edge is gone. If the relationship was already absent, the call st
 				return "", fmt.Errorf("unlink: %w", err)
 			}
 			runtime.EmitUpdate("Unlinking knowledge objects…")
-			if err := b.engine.Unlink(ctx, scope, from, to, args.RelationType); err != nil {
+			if err := b.graph.Unlink(ctx, scope, from, to, args.RelationType); err != nil {
 				return "", fmt.Errorf("unlink: %w", err)
 			}
 			return formatBrainJSON(linkResult{
@@ -687,11 +690,14 @@ func parseOptionalUUIDList(raw []string, field string) ([]uuid.UUID, error) {
 }
 
 // newBrainTools builds knowledge tools. Caller must pass a non-nil engine and SearchContext.
-// save_* tools are registered only for non-empty WriteKinds fields; link only with GraphWriter;
-// find_objects only when GraphObjectSearcher is available; find_links when GraphEdgeSearcher is available.
+// save_* tools are registered only for non-empty WriteKinds fields. With a graph,
+// find_objects, find_links, link and unlink are registered and expand also walks relations.
 // link and expand accept an indexed file path or an object id. save_* calls Engine.Put.
-func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, sessionID string, kinds brain.WriteKinds, deps brainToolDeps) []*Tool {
-	b := brainTools{engine: engine, sc: sc, deps: deps, sessionID: sessionID}
+func newBrainTools(engine *brain.Engine, graph *brain.KnowledgeGraph, sc *brain.SearchContext, sessionID string, kinds brain.WriteKinds, deps brainToolDeps) []*Tool {
+	b := brainTools{engine: engine, graph: graph, expand: engine.Expand, sc: sc, deps: deps, sessionID: sessionID}
+	if graph != nil {
+		b.expand = graph.Expand
+	}
 	tools := []*Tool{
 		b.newReadObjectTool(),
 		b.newSchemaTool(),
@@ -700,11 +706,8 @@ func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, sessionID stri
 		b.newContinueTool(),
 		b.newExpandTool(),
 	}
-	if engine.HasObjectSearch() {
-		tools = append(tools, b.newFindObjectsTool())
-	}
-	if engine.HasEdgeSearch() {
-		tools = append(tools, b.newFindLinksTool())
+	if graph != nil {
+		tools = append(tools, b.newFindObjectsTool(), b.newFindLinksTool(), b.newLinkTool(), b.newUnlinkTool())
 	}
 	for _, s := range []struct {
 		name, display, kind, role string
@@ -716,9 +719,6 @@ func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, sessionID stri
 		if kind := strings.TrimSpace(s.kind); kind != "" {
 			tools = append(tools, b.newSaveTool(s.name, s.display, kind, s.role))
 		}
-	}
-	if engine.HasGraphWriter() {
-		tools = append(tools, b.newLinkTool(), b.newUnlinkTool())
 	}
 	return tools
 }

@@ -92,16 +92,8 @@ func applyTemporal(parts []ScoredID, lambda float64, now time.Time) {
 	if lambda <= 0 {
 		return
 	}
-	now = now.UTC()
 	for i := range parts {
-		if parts[i].UpdatedAt.IsZero() {
-			continue
-		}
-		age := now.Sub(parts[i].UpdatedAt.UTC()).Hours() / 24.0
-		if age < 0 {
-			age = 0
-		}
-		parts[i].Score *= math.Exp(-lambda * age)
+		parts[i].Score *= ageFactor(lambda, now, parts[i].UpdatedAt)
 	}
 }
 
@@ -139,4 +131,77 @@ func TopScores(in []ScoredID, k int) []ScoredID {
 		out = out[:k]
 	}
 	return out
+}
+
+// Ranking is how a backend fuses ranked lists: reciprocal rank fusion with
+// constant RRFk (0 is 60), after each list is aged by exp(-Decay * age in
+// days) using UpdatedAt and re-sorted. Decay 0 keeps the lists as ranked.
+// Now is the clock for age (nil is time.Now).
+type Ranking struct {
+	RRFk  int
+	Decay float64
+	Now   func() time.Time
+}
+
+// Fuse ages each list, fuses them, and returns the hits best first. The
+// lists are changed in place.
+func (r Ranking) Fuse(lists ...[]ScoredID) []ScoredID {
+	if r.Decay > 0 {
+		now := time.Now()
+		if r.Now != nil {
+			now = r.Now()
+		}
+		for _, list := range lists {
+			applyTemporal(list, r.Decay, now)
+			sortScored(list)
+		}
+	}
+	fused := FuseRanks(lists, r.RRFk)
+	sortScored(fused)
+	return fused
+}
+
+// FuseEdges fuses ranked edge lists the same way, best first. An edge in
+// several lists keeps its first hit's metadata; decay uses Meta.UpdatedAt.
+func (r Ranking) FuseEdges(lists ...[]EdgeSearchHit) []EdgeSearchHit {
+	k := cmp.Or(r.RRFk, defaultRRFk)
+	now := time.Now()
+	if r.Now != nil {
+		now = r.Now()
+	}
+	type key struct {
+		from, to uuid.UUID
+		rel      string
+	}
+	byKey := make(map[key]int)
+	var out []EdgeSearchHit
+	for _, list := range lists {
+		if r.Decay > 0 {
+			for i := range list {
+				list[i].Score *= ageFactor(r.Decay, now, list[i].Meta.UpdatedAt)
+			}
+			slices.SortStableFunc(list, func(a, b EdgeSearchHit) int { return cmp.Compare(b.Score, a.Score) })
+		}
+		for rank, h := range list {
+			kk := key{h.FromID, h.ToID, h.RelationType}
+			i, ok := byKey[kk]
+			if !ok {
+				i = len(out)
+				byKey[kk] = i
+				h.Score = 0
+				out = append(out, h)
+			}
+			out[i].Score += 1.0 / float64(k+rank+1)
+		}
+	}
+	slices.SortStableFunc(out, func(a, b EdgeSearchHit) int { return cmp.Compare(b.Score, a.Score) })
+	return out
+}
+
+// ageFactor is exp(-lambda * age in days); a zero time does not age.
+func ageFactor(lambda float64, now, at time.Time) float64 {
+	if lambda <= 0 || at.IsZero() {
+		return 1
+	}
+	return math.Exp(-lambda * max(now.Sub(at).Hours()/24, 0))
 }

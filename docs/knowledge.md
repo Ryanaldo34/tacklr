@@ -97,7 +97,9 @@ Almost every design mistake in this area comes from treating these as the same t
          ┌────────────┬──────────────┐
          │ Store      │ Graph        │
          │ Postgres   │ Helix        │
-         │ or memory  │ or MemoryGraph│
+         │ or memory  │ (or another  │
+         │            │  graphtest   │
+         │            │  backend)    │
          │            │              │
          │ full rows  │ parent nodes │
          │ text+vector│ + edges      │
@@ -194,8 +196,13 @@ Every durable object belongs to a **namespace**: ordered named attributes
 (for example `org=acme`, `workspace=west`). `AgentOptions.SearchNamespace` is the
 host ceiling. Each brain tool call may pass extra `namespace` attrs to narrow
 that search; it cannot change the host's values. Continue uses the namespace
-stamped on the result set. Retrieval keeps a row when every scope attr is on
-the object (`Covers`). Wrong-namespace looks like not-found.
+stamped on the result set. The first attribute is the **tenant**: a scope
+reaches a row only when the row has the same first attribute, and every other
+scope attr is on the row (`Covers`). Matching attrs in another tenant, or the
+same attrs in another order, reach nothing. Every store enforces the tenant by
+equality: a generated, indexed `tenant` column in Postgres, and tenant-scoped
+text, vector and edge indexes in Helix, so search ranks one tenant only.
+Wrong-namespace looks like not-found.
 
 ---
 
@@ -245,10 +252,10 @@ sequenceDiagram
 
     Agent->>E: save_fact / Put
     E->>E: ValidateObject
-    E->>E: embed index text
-    E->>S: Put row
-    E->>G: EnsureObject (parents only)
-    Note over E: Fail closed: unknown field or missing required property → no leftover row
+    E->>E: choose the index text
+    E->>S: Put(Indexed{object, text}) — the store embeds the text
+    E->>G: Put(Indexed{object, text}) — parents only; the graph embeds the text
+    Note over E: Fail closed: unknown field, missing required property, or text that does not embed → no leftover row
 ```
 
 IR edits (`write` / `WriteDocument`) persist the same way:
@@ -286,7 +293,7 @@ id := uuid.NewSHA1(ns, buf)
 
 In-process code should call `MountIndexer.DocumentID` instead of copying that. The same path in another namespace is a different id. `link` and `expand` resolve a workspace path by reading the parent with this id and using its `vfs_path`.
 
-Chunk ids come from content. `Engine.PutTree` computes each id from the parent id, the embedding model, and the chunk's kind, title, summary, content and index text. A repeated chunk text in one file gets a counter, so each id stays unique. A chunk with the same text keeps its id, row and vector across re-indexes. Line numbers are not in the id or the title, so a chunk that only moves keeps its id too. A writer outside this module cannot reproduce these ids; it must call `PutTree` with parts that have no id.
+Chunk ids come from content. `Engine.PutTree` computes each id from the parent id and the chunk's kind, content type, title, summary, content and index text. The model is not in the id: a store re-embeds a live chunk only when its embedding came from another model. A repeated chunk text in one file gets a counter, so each id stays unique. A chunk with the same text keeps its id, row and vector across re-indexes. Line numbers are not in the id or the title, so a chunk that only moves keeps its id too. A writer outside this module cannot reproduce these ids; it must call `PutTree` with parts that have no id.
 
 Parent row (`Engine.Put`):
 
@@ -327,7 +334,7 @@ Markdown, Docs and Sheets need their block tree, so `IndexPath` reads them whole
 
 **When a file is read.** `IndexPath` compares `FileInfo.Version` (an ETag, a content tag, or size, mtime and inode on disk) and the readers with the stored parent. When both match, it returns `PathSkipped` and does not open the file. When the backend gives no version, the file is read every time; unchanged chunks then write nothing.
 
-**How a re-index writes.** `PutTree` streams the chunks. It embeds only chunks whose id is not live, in batches of `EngineConfig.EmbedBatchSize` (128), with at most `EmbedConcurrency` (2) batches at a time. Each batch is staged as it finishes. One short commit then makes the staged chunks the parent's only parts: it inserts the new chunks, moves the reused ones (position and line numbers), and deletes the rest. Until the commit, `search` sees the previous chunks. A failure leaves them in place. A one-line edit therefore embeds and writes about one chunk, whatever the file size, and memory holds a few batches plus the live chunk ids. When two indexers write one file, the one that commits second gets `ErrConflict`, and `IndexPath` reads the file again (up to three times).
+**How a re-index writes.** `PutTree` streams the chunks to the store with their content-derived ids. The store embeds only chunks whose id is live under another model or not live at all, in batches of its `Embedding.BatchSize` (128), with at most `Embedding.Concurrency` (2) batches at a time (`Embedding.EmbedBatches` does this for any backend). Each batch is staged as it finishes. One short commit then makes the staged chunks the parent's only parts: it inserts the new chunks, moves the reused ones (position and line numbers), and deletes the rest. Until the commit, `search` sees the previous chunks. A failure leaves them in place. A one-line edit therefore embeds and writes about one chunk, whatever the file size, and memory holds a few batches plus the live chunk ids. When two indexers write one file, the one that commits second gets `ErrConflict`, and `IndexPath` reads the file again (up to three times).
 
 A missing file soft-deletes the parent and its chunks (`PathRemoved`). A binary file is left unchanged (`PathSkipped`).
 
@@ -366,6 +373,62 @@ They are complementary. The store is the document corpus and the source of
 truth. The graph is tracked records and how they relate. Do not treat Helix as
 a second document database.
 
+**Who does what.** Backends own retrieval. Each backend embeds with its own
+`brain.Embedding`, picks its channels, ranks and fuses them, applies filters,
+and returns only what the caller's namespace and principals can read. The
+engine owns orchestration and the domain rules: it validates requests and
+scopes, keeps the kind catalog, chooses the text that represents each object,
+derives part ids from content, writes the store and then every index and then
+the audit, loads graph hits from the store (which drops rows that are deleted or
+that the caller cannot read), promotes part hits to parents, merges `expand`
+results, pages them, runs the optional reranker, and registers the tools.
+
+**Two types, so no feature checks for a graph.** `brain.Engine` is the store
+features: writes, `search`, `find_exact`, `read_object`, sessions, kinds, and
+`expand` over children. Every committed write of a first-class object goes to
+the engine's indexes (`brain.Index`: `Put` and `Remove`), in order: store,
+indexes, audit. With no indexes the list is empty. `brain.KnowledgeGraph`,
+built with `brain.NewKnowledgeGraph(eng, g)`, adds `g` to those indexes and
+holds every graph feature: `find_objects`, `find_links`, `link`, `unlink`,
+paths, and `expand` over children and relations. An engine alone has no graph
+methods, so a graph feature cannot be called without a graph.
+`Engine.Expand` with a relation type other than containment returns
+`ErrUnsupported`. `brain.WithIndex` adds other indexes (a second search
+system, a change feed).
+
+Each side is one required interface:
+
+```go
+type Store interface {
+    Get, GetMany, ListChildren, ListByKind, GetByProperty, KindsWithObjects
+    Put(ctx, scope, Indexed) (Object, error)
+    PutTree(ctx, scope, parent Indexed, parts iter.Seq2[Indexed, error]) (Object, error)
+    SoftDelete, PurgeDeleted, Erase
+    Search(ctx, scope, PartSearch) ([]ScoredID, error) // ranked parts, best first
+    GetKind, ListKinds, PutKind
+    SaveSessionMessages, DeleteSessionMessages, PurgeSessionMessages
+}
+
+type Index interface {
+    Put(ctx, Indexed) error                               // parents only
+    Remove(ctx, id) error
+}
+
+type Graph interface {
+    Index
+    Link(ctx, GraphEdge) error                            // ErrNotFound if a node is missing
+    Unlink(ctx, from, to, rel) error
+    FindObjects(ctx, ObjectSearch) ([]ScoredID, error)    // filters before ranking
+    FindLinks(ctx, LinkSearch) ([]EdgeSearchHit, error)
+    Neighborhood(ctx, NeighborhoodQuery) ([]GraphNeighbor, error)
+    ShortestPath(ctx, PathQuery) ([]uuid.UUID, error)
+}
+```
+
+`Indexed{Object; Text}` is an object plus the text the engine chose for it. A
+backend indexes that text its own way. A method a backend cannot support
+returns `ErrUnsupported`.
+
 ```mermaid
 flowchart TB
     subgraph Store["Store — Postgres or MemoryStore"]
@@ -377,7 +440,7 @@ flowchart TB
         Soft[Soft-delete + namespace]
     end
 
-    subgraph Graph["Graph — Helix or MemoryGraph"]
+    subgraph Graph["Graph — Helix"]
         Nodes[Parent nodes only]
         Edges[Labeled edges + metadata]
         Txt[Text search on nodes]
@@ -397,7 +460,7 @@ flowchart TB
 |-|-------|-------|
 | **Holds** | Full rows, chunks, embeddings, filters | Parent nodes + edges |
 | **Answers** | `search`, `find_exact`, `read_object`, expand-children | `find_objects`, `link`, expand-relations, `find_links` |
-| **Required?** | Yes | Optional. Without it: no `link` / `find_objects` / named-relation expand |
+| **Required?** | Yes | Optional. Without a `KnowledgeGraph` there is no `link`, `unlink`, `find_objects`, `find_links`, named-relation expand or paths: the engine has no such methods and the tools are not registered |
 | **What the query matches** | Parts (chunks of notes and indexed files) | Parent records (a Deal, a Person, …) |
 
 `search` and `find_exact` look at **parts** (`parent_id` set): title, summary,
@@ -423,23 +486,31 @@ always go to the store.
 - Graph search returns ids; the engine **hydrates** full rows from the store
   under the current namespace. Ids that are missing or out of scope disappear.
 
-**What gets embedded** (one vector dimension per process):
+**What text represents an object** (the engine chooses it; each backend embeds
+it with its own `Embedding`, and each backend's vector dimension is its own
+option):
 
-| Object | Text that is embedded |
-|--------|------------------------|
+| Object | Text |
+|--------|------|
 | Parent / Engram | `EntityIndexText`: title, summary, indexed scalar properties, full body |
 | Part / Chunk | `IndexText` (title + summary + content), prefixed with the parent title |
 
-`WithIndexText` can rewrite that document at Put (prefix, replace, or drop
-fields) without changing the stored object. The same string is embedded and
-written as graph search text.
+`WithIndexText` can rewrite that text at Put (prefix, replace, or drop fields)
+without changing the stored object. The store and the graph get the same
+string.
 
 So `find_objects "open renewal"` can match a Deal whose `stage` property is
 `open`, not only the narrative body. Corpus `search` still matches chunk text,
 not those parent fields.
 
-A host that uses Helix must `Bootstrap` so object
-search is actually on. `MemoryGraph` is always ready and is what tests use.
+`helixgraph.Open` creates the Helix indexes and waits until they are active, so
+object search is on as soon as it returns. Opens that race on one server, and
+writers that conflict, are replayed until they land or the context ends.
+
+Tests run against live Helix (`internal/helixtest`). `make test` and CI start one
+server for every package through `scripts/with-helix.sh`, which sets
+`TACKLR_HELIX_URL`; a package run alone starts its own container. A fresh server
+builds each index once, which is most of the graph tests' time.
 
 ---
 
@@ -484,15 +555,17 @@ sequenceDiagram
 
     T->>E: query + filters + optional scope_ids
     E->>E: validate filters against kind catalog
-    E->>S: lexical search, k candidates
-    alt embedder configured
-        E->>Emb: embed query
-        E->>S: vector search, k candidates
-    else embedder fails and degrade is allowed
-        Note over E: lexical-only
+    E->>S: Search(query, filters, CandidateK)
+    S->>S: lexical channel
+    alt the store has an embedder
+        S->>Emb: embed query
+        S->>S: vector channel (rows of the same model only)
+    else the query does not embed
+        Note over S: words only (logged)
     end
-    E->>E: when λ > 0, decay each channel
-    E->>E: Reciprocal Rank Fusion, sum of 1/(k+r)
+    S->>S: session rows when the scope has a session
+    S->>S: Ranking: decay by updated_at, then Reciprocal Rank Fusion
+    S-->>E: ranked parts
     E->>E: keep ids in scope_ids if set
     E->>E: promote parts to parents plus evidence quotes
     E->>E: optional host reranker, up to CandidateK parents
@@ -500,10 +573,11 @@ sequenceDiagram
     E-->>T: page of parents + result_set_id
 ```
 
-Production defaults (overridable on the engine, not per tool call): 40
-candidates per channel, RRF `k=60`, no age decay (`λ=0`), 3 evidence
-quotes of 240 characters, page size 10 (max 50). A host sets `Lambda`
-above 0 when a newer write should outrank an older one. `updated_at` is
+Production defaults (not per tool call): the engine asks the store for 40
+candidates (`EngineConfig.CandidateK`) and keeps 3 evidence quotes of 240
+characters, page size 10 (max 50). The store's `brain.Ranking` uses RRF
+`k=60` and no age decay (`Decay` 0). A host sets `Ranking.Decay` above 0 on
+the store or the graph when a newer write should outrank an older one. `updated_at` is
 the last write, not an expiry. Equal scores still prefer the newer row.
 
 Indexed file recall is the same pipeline via `search` (prefer hits with
@@ -515,8 +589,10 @@ Live grep is `run_command` → `rg`.
 
 ### `find_exact` — equality first, no dense channel
 
-1. If the query is a UUID, load that object.
-2. Otherwise fuse lexical + **trigram** (typo-tolerant) lists.
+1. If the query is a UUID, the engine loads that object.
+2. Otherwise the store runs an exact search (`PartSearch.Exact`): literal
+   channels only, such as lexical and **trigram** (typo-tolerant), with an
+   exact title match first. It does not embed the query.
 3. Same promotion and paging as `search`.
 
 Use for ids, titles, and “that exact phrase.”
@@ -526,21 +602,24 @@ Use for ids, titles, and “that exact phrase.”
 Use for “which Deal / Person / Fact is this about?” This searches **graph
 nodes**, not chunk bodies. There is no evidence path.
 
-Helix text + vector lists are fused with RRF, then rows are loaded from the
-store. Kind filters and property filters apply on **store truth**, not on
-whatever Helix happened to index.
+One graph call (`FindObjects`) returns one ranked list. The graph applies the
+namespace, the readers, the kinds and the property filters **before** it
+ranks, so no hit that fails them takes a slot. It embeds the query itself and
+fuses its own lists (Helix: a text list and a vector list, fused with its
+`Ranking`). The engine then loads the rows from the store and checks the
+filters again on **store truth**.
 
-Requires a graph that implements object search (`MemoryGraph` or a bootstrapped
-Helix).
+Requires a graph.
 
 ### `find_links` — land on an edge
 
-Searches **edge note text** for a required relation label (`about`,
-`has_contact`, …). Both endpoints are hydrated under the namespace. The tool
-prefers `from_path` / `to_path` when `vfs_path` is set.
-
-On Helix the host must create an edge text index for that label. `MemoryGraph`
-substring-matches notes (fine for tests).
+Searches **edge notes** by text, and by vector when the graph has an embedder
+(the graph embeds each note when `LinkWith` writes the edge), for a required
+relation label (`about`, `has_contact`, …). The graph fuses its lists and ranks
+only edges whose two ends the caller can read. With Helix,
+the relation must be in `helixgraph.Options.EdgeRelations`; Helix rejects a
+search on any other relation. Both endpoints are hydrated under the namespace.
+The tool prefers `from_path` / `to_path` when `vfs_path` is set.
 
 ### Filters and `schema`
 
@@ -671,9 +750,9 @@ eng, err := brain.NewEngine(store, brain.WithKinds(
 // The harness closes `eng` into those tool handlers (same pattern as host tools).
 ```
 
-Production-shaped. `postgres.Store.Setup` applies versioned migrations (recorded
-in `schema_migrations`) under an advisory lock, then upserts the kinds you pass.
-Run it as a deploy step; concurrent runs are safe. `postgres.Open` takes the
+Production-shaped. `postgres.Store.Setup` creates whatever schema is missing,
+then upserts the kinds you pass. Run it on each deploy; concurrent runs wait for
+each other on an advisory lock. `postgres.Open` takes the
 connection string and `Options`: `EmbeddingDim` must match the embedder (zero
 means 1536), and Setup fails when the existing vector column has another size.
 `Schema` names the schema (default `tacklr`); every connection's `search_path`
@@ -688,25 +767,34 @@ Lexical search reads the stored `search_tsv` column on `objects`: title weight A
 Helix is an optional graph. Inject both; `brain` does not import either package.
 
 ```go
-store, err := postgres.Open(ctx, os.Getenv("DATABASE_URL"), postgres.Options{EmbeddingDim: 1536}) // schema "tacklr"
+// Each backend embeds with its own Embedding; they can share one Embedder.
+emb := brain.Embedding{Embedder: myEmbedder} // Embed(ctx, texts) and Model()
+
+store, err := postgres.Open(ctx, os.Getenv("DATABASE_URL"), postgres.Options{
+    EmbeddingDim: 1536, // schema "tacklr"
+    Embedding:    emb,  // nil Embedder: keyword search only
+})
 defer store.Close()
 kinds := append([]brain.KindSpec{dealSpec, personSpec}, vfsindex.MountIndexKinds()...)
 if err := store.Setup(ctx, kinds...); err != nil { /* ... */ }
-g, err := helixgraph.New(helixURL)
-if err := g.Bootstrap(ctx); err != nil { /* ... */ }
+client, err := helix.NewClient(helixURL)
+// Open creates the indexes (text and vector per tenant, edge indexes per
+// relation) and waits until they are active.
+g, err := helixgraph.Open(ctx, client, helixgraph.Options{
+    Dimension:     1536,                           // must match the embedder
+    EdgeRelations: []string{"about", "has_buyer"}, // relations find_links searches
+    Embedding:     emb,                            // nil Embedder: text only
+})
 
-eng, err := brain.NewEngine(store,
-    brain.WithEmbedder(emb),          // hybrid search + Put embeddings
-    brain.WithGraph(g),               // link / find_objects / named expand
-)
-// Pass WithLexicalOnly() instead of WithEmbedder when you want keyword search only.
-// emb implements brain.QueryEmbedder: Embed(ctx, texts) returns one vector per
-// text (PutTree sends up to EngineConfig.EmbedBatchSize at once), and Model()
-// names the model stored on every row.
+eng, err := brain.NewEngine(store)
+kg := brain.NewKnowledgeGraph(eng, g) // link / find_objects / find_links / named expand / paths
+// Model() names the model each backend stores with every vector; a backend
+// compares only vectors from the same model.
 if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 
 // AgentOptions:
 //   Brain:           eng
+//   Graph:           kg (optional; must wrap Brain) adds the graph tools
 //   SearchNamespace:  from brain.ParseNamespace("org", orgID) (required with Brain)
 //   SearchPrincipals: the caller's user and group ids (checked against Readers)
 //   IndexReaders:     a file's source ACL for index_file (optional)
@@ -718,12 +806,41 @@ if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 ```
 
 Optional knobs: `WithReranker` (reorders up to `CandidateK` parents before the page cut),
-`WithExpandRecipes` (named expand templates), `WithConfig` (`CandidateK`, `RRFk`, `Lambda`, `EvidenceN`, `SnippetCap`, `DefaultLimit`, `MaxLimit`).
+`WithExpandRecipes` (named expand templates), `WithConfig` (`CandidateK`, `EvidenceN`, `SnippetCap`, `DefaultLimit`, `MaxLimit`, expand and path limits).
+Ranking knobs live on the backend that ranks: `brain.Ranking` (`RRFk`, `Decay`)
+on the store and on the graph.
+
+For tests and offline hosts, `brain.NewMemoryStore(brain.WithMemoryEmbedding(emb), brain.WithMemoryRanking(r))`
+is the whole `Store` in process; without an embedder it ranks words only.
 
 Integration tests that need real backends use Testcontainers (Postgres image
-under `brain/testdata`, Helix `enterprise-dev`). They skip when Docker is
-unavailable. Tests call `store.Setup` (embedding dim 3) instead of loading SQL
-files.
+under `brain/testdata`, Helix through `internal/helixtest`). They skip when
+Docker is unavailable. Tests call `store.Setup` (embedding dim 3) instead of
+loading SQL files.
+
+---
+
+## Writing a backend
+
+A backend is one type that implements `brain.Store` or `brain.Graph`. The
+engine gives it whole requests (a search with its query, filters and scope; a
+tree with all its parts) and trusts its answers, so a database with native
+hybrid search, filters or embedding can use them directly. Where a database
+lacks a feature, the backend fills it in its own code. `brain` exports the
+pieces for that:
+
+| Gap in the database | Helper |
+|---------------------|--------|
+| No batching or bounded embedding | `brain.Embedding`: `Embed`, `EmbedOne`, and `EmbedBatches(ctx, parts, reuse, stage)`, which embeds a stream of parts in bounded concurrent batches, skips the ids `reuse` reports, and hands each batch to `stage` |
+| No hybrid fusion or recency decay | `brain.Ranking`: `Fuse(lists...)` and `FuseEdges(lists...)` (decay by `UpdatedAt`, then RRF) |
+| No native filters | `brain.CompileFilter(f)` → `FilterPlan`: `Match(obj)` evaluates the filter in process, `Conditions()` lists the field, operator and values to translate into the database's own predicates, and `FilterValueKey` gives a typed key for a property value |
+| No scope or readers check | `Scope.CanRead(obj)` and `Namespace.Covers` give the rule every backend applies |
+
+A backend proves itself with the contracts: `storetest.Run(t, newStore)` and
+`graphtest.Run(t, newGraph)`. Each runner passes the backend a test embedder
+(or nil for text only) and checks outcomes: tenants and readers, filters before
+ranking, atomic trees and part reuse, conflicts, embedding failures, and fused
+search. `MemoryStore`, `postgres.Store` and `helixgraph.Graph` pass them.
 
 ---
 
@@ -732,20 +849,21 @@ files.
 | Situation | Behavior |
 |-----------|----------|
 | Empty namespace | Every Engine and store call fails with `ErrInvalid`. `AgentOptions.Validate` rejects `Brain` without `SearchNamespace`. |
-| Wrong namespace | `Get` / search look like not found. Graph ids that fail hydrate are dropped. A coarser scope (fewer attrs) sees objects with extra attrs. |
+| Wrong namespace | `Get` / search look like not found. Graph ids that fail hydrate are dropped. A coarser scope (fewer attrs) in the same tenant sees objects with extra attrs; another tenant sees nothing. |
 | Id held by another tenant | `Put` / `PutTree` / `SoftDelete` return `ErrNotFound` and change nothing. |
-| Object with `Readers` | Visible only to a scope whose `Principals` include one of them. `vfsindex.MountIndexer.Readers` (or `AgentOptions.IndexReaders`) sets them from source sharing; a sharing change re-indexes the file. |
+| Object with `Readers` | Visible only to a scope whose `Principals` include one of them. `vfsindex.MountIndexer.Readers` (or `AgentOptions.IndexReaders`) sets them from source sharing; a sharing change re-indexes the file. The graph node carries the readers too. For a caller who cannot read the object, `find_objects` does not rank it, `find_links` does not rank an edge that touches it, and `expand` and paths do not go through it. A tenant-wide search still ranks from the index while at most `helixgraph.Options.MaxOverfetch` (256) such objects or edges are in the tenant; past that, Helix ranks within the readable candidates. |
 | Re-index fails midway | `PutTree` stages new parts, which no read or search sees, and swaps them in with one short commit, so the previous version stays. `PurgeDeleted` drops staged parts that never committed. |
 | Two writes of one tree | The commit that reads an older tree revision returns `ErrConflict` and changes nothing. |
-| Embedding model change | Vector search only compares rows from `QueryEmbedder.Model()`. Rows from the old model drop out of the dense channel until re-indexed. |
-| Retention and erasure | `PurgeDeleted`, `PurgeSessionMessages`, and `Erase` hard-delete under a scope. |
+| Embedding model change | A backend's vector search only compares rows from its `Embedder.Model()`. Rows from the old model drop out of the dense channel, and the next re-index embeds those parts again. |
+| Retention and erasure | `PurgeDeleted`, `PurgeSessionMessages`, and `Erase` hard-delete under a scope. `Erase` erases every index (the graph) by scope first, then the store, so a failed erase leaves the store intact and running it again finishes the erase everywhere. |
 | Audit | `WithAudit(store.Record)` records every served read and write; a failed record fails the operation. |
 | Soft-deleted object | Hidden from Get, search, find_exact, and find_objects. `unindex` does this for an indexed file. There is no separate expired flag. A row stays in search until that delete, or until a property filter excludes it. |
-| No embedder at construct | `NewEngine` fails unless you pass `WithEmbedder` or `WithLexicalOnly`. |
-| Embedder down at **query** time | `search` / `find_objects` can run lexical-only (default). Set `FailOnEmbedderError` to surface the error. |
-| Embedder down at **Put** time | **Fail closed.** An unindexed parent is not persisted. |
+| No embedder | A backend without an `Embedder` ranks words only. |
+| Embedder down at **query** time | The backend logs the error and answers by the query's words. |
+| Embedder down at **Put** time | **Fail closed.** The write fails and leaves no unindexed row. A session-message save still saves, without vectors. |
 | Graph down at expand | Can degrade to containment if containment was requested. |
-| Graph missing entirely | `link` / `find_objects` / named-relation expand error with a clear sentinel. |
+| No graph | The host does not build a `KnowledgeGraph`, so the graph tools are not registered and the engine has no graph methods. `Engine.Expand` with a relation type returns `ErrUnsupported`. |
+| Index write fails after the store write | The row stays (source of truth) and the write is audited; the error wraps `ErrIndexPut` (or `ErrIndexRemove` for a delete, which leaves the row). Re-Put after fixing the index. |
 | Invalid `Put` | Validate error; no leftover object. |
 
 ---
@@ -757,16 +875,21 @@ files.
 | Object + search types | `brain/types.go` |
 | Engine construct / config | `brain/engine.go` |
 | Corpus search / exact / continue | `brain/search.go` |
-| RRF + temporal decay | `brain/rank.go` |
+| RRF + temporal decay for backends (`Ranking`) | `brain/rank.go` |
+| Batched embedding for backends (`Embedding`) | `brain/embed.go` |
+| In-process filter evaluation (`FilterPlan`) | `brain/filter_plan.go` |
 | Parent promotion + evidence | `brain/promote.go` |
 | Entity find | `brain/find_objects.go` |
 | Edge find | `brain/find_links.go` |
 | Expand / recipes | `brain/expand.go` |
-| Put / Link / embeddings | `brain/write.go` |
+| Put / Link / index text | `brain/write.go` |
 | Kind catalog | `brain/kind.go` |
-| Store ports | `brain/store.go` |
-| Postgres store | `brain/postgres` (`postgres.New`, `Store.Setup`) |
-| Graph ports + MemoryGraph | `brain/graph.go` |
+| Store interface | `brain/store.go` |
+| In-process store | `brain/memory.go` |
+| Store backend contract | `brain/storetest` |
+| Postgres store | `brain/postgres` (`postgres.Open`, `Store.Setup`) |
+| Graph interface | `brain/graph.go` |
+| Graph backend contract | `brain/graphtest` |
 | Helix adapter | `brain/helixgraph/` |
 | Artifact indexer | `vfsindex/indexer.go` |
 | Index policy + bridge | `vfsindex/policy.go`, `vfsindex/bridge.go` |

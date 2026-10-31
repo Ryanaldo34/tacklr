@@ -2,14 +2,82 @@ package brain
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// filterPlan is the single compiled form of Filter used by MemoryStore and
-// relational stores (via FilterSQL).
-type filterPlan struct {
+// FilterPlan is the compiled form of a Filter. A backend evaluates it in
+// process with Match, or translates its Conditions into its own query
+// language (FilterSQL does so for SQL stores).
+type FilterPlan struct {
 	preds []filterPred
+}
+
+// FilterCondition is one condition of a FilterPlan; an object passes the
+// plan when it meets every condition.
+type FilterCondition struct {
+	// Field is FieldKind, FieldTitle, FieldCreatedAt, FieldUpdatedAt, or a
+	// property key when Property is set.
+	Field    string
+	Property bool
+	// Op is OpEq (Values has one value), OpIn (any of Values), OpGte or
+	// OpLt (against Time). Values keep their JSON types: a property matches
+	// only a value of the same type (string, bool, or a number compared as
+	// float64).
+	Op     string
+	Values []any
+	Time   time.Time
+}
+
+// Filter condition fields and operators.
+const (
+	FieldKind      = "kind"
+	FieldTitle     = "title"
+	FieldCreatedAt = "created_at"
+	FieldUpdatedAt = "updated_at"
+
+	OpEq  = "eq"
+	OpIn  = "in"
+	OpGte = "gte"
+	OpLt  = "lt"
+)
+
+// FilterValueKey is the canonical typed form of a scalar filter or property
+// value: values a filter treats as equal (the same string, the same bool, or
+// numbers equal as float64) have equal keys, and values of other types never
+// do. A backend can index property values by key to match filters natively.
+// A non-scalar value has no key.
+func FilterValueKey(v any) (string, bool) {
+	switch x := v.(type) {
+	case string:
+		return "s:" + x, true
+	case bool:
+		return "b:" + strconv.FormatBool(x), true
+	}
+	if f, ok := asFloat64(v); ok {
+		return "n:" + strconv.FormatFloat(f, 'g', -1, 64), true
+	}
+	return "", false
+}
+
+// Conditions lists the plan's conditions.
+func (p FilterPlan) Conditions() []FilterCondition {
+	out := make([]FilterCondition, len(p.preds))
+	for i, pred := range p.preds {
+		c := FilterCondition{Field: pred.field, Op: pred.op, Time: pred.timeVal}
+		if key, ok := strings.CutPrefix(pred.field, "prop:"); ok {
+			c.Field, c.Property = key, true
+		}
+		switch pred.op {
+		case OpEq:
+			c.Values = []any{pred.want}
+		case OpIn:
+			c.Values = pred.wantIn
+		}
+		out[i] = c
+	}
+	return out
 }
 
 type filterPred struct {
@@ -20,12 +88,13 @@ type filterPred struct {
 	timeVal time.Time
 }
 
-func compileFilters(f Filter) (filterPlan, error) {
+// CompileFilter validates f and compiles it.
+func CompileFilter(f Filter) (FilterPlan, error) {
 	if err := ValidateFilters(f); err != nil {
-		return filterPlan{}, err
+		return FilterPlan{}, err
 	}
 	if f.empty() {
-		return filterPlan{}, nil
+		return FilterPlan{}, nil
 	}
 	preds := make([]filterPred, 0, 6+len(f.Props))
 	if f.Kind.set() {
@@ -57,7 +126,7 @@ func compileFilters(f Filter) (filterPlan, error) {
 	for key, pf := range f.Props {
 		preds = append(preds, propPred("prop:"+key, pf)) // ValidateFilters checked key
 	}
-	return filterPlan{preds: preds}, nil
+	return FilterPlan{preds: preds}, nil
 }
 
 func stringMatchPred(field string, s StringMatch) filterPred {
@@ -78,7 +147,8 @@ func propPred(field string, pf PropFilter) filterPred {
 	return filterPred{field: field, op: "eq", want: pf.Eq}
 }
 
-func (p filterPlan) match(obj Object) bool {
+// Match reports whether obj meets every condition.
+func (p FilterPlan) Match(obj Object) bool {
 	for _, pred := range p.preds {
 		if !pred.match(obj) {
 			return false
@@ -121,7 +191,7 @@ func matchTime(got time.Time, p filterPred) bool {
 	return got.Before(p.timeVal)
 }
 
-func (p filterPlan) sql(startArg int) (string, []any) {
+func (p FilterPlan) sql(startArg int) (string, []any) {
 	var b strings.Builder
 	var args []any
 	n := startArg
@@ -202,7 +272,7 @@ func sanitizeJSONKey(k string) string {
 // begins with AND when non-empty. Scope isolation is the store's own
 // predicate, joined in front of this one.
 func FilterSQL(filters Filter, startArg int) (string, []any, error) {
-	plan, err := compileFilters(filters)
+	plan, err := CompileFilter(filters)
 	if err != nil {
 		return "", nil, err
 	}

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -17,14 +16,19 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
+var _ brain.Store = (*Store)(nil)
+
 // Store is the Postgres brain.Store. Hosts open it with Open and inject it
-// into brain.NewEngine. Run Setup before serving (a deploy or migration
-// step); it applies pending schema migrations and is safe to run from many
-// processes at once.
+// into brain.NewEngine. Run Setup before serving; it creates whatever schema
+// is missing and is safe to run from many processes at once. It embeds with
+// its own Options.Embedding and fuses its search channels with
+// Options.Ranking.
 type Store struct {
-	db     *pgxpool.Pool
-	schema string
-	dim    int
+	db        *pgxpool.Pool
+	schema    string
+	dim       int
+	embedding brain.Embedding
+	ranking   brain.Ranking
 }
 
 // objectSelectCols are the columns scanObject reads, in order.
@@ -34,14 +38,14 @@ const objectSelectCols = `
 	namespace, readers, coalesce(embedding_model, ''), created_at, updated_at, deleted_at
 `
 
-// Get implements ObjectReader.
+// Get implements brain.Store.
 func (s *Store) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) (brain.Object, error) {
 	if err := scope.Namespace.Validate(); err != nil {
 		return brain.Object{}, err
 	}
 	obj, err := scanObject(s.db.QueryRow(ctx, `SELECT `+objectSelectCols+` FROM objects
 		WHERE id = $1 AND deleted_at IS NULL
-		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])`,
+		  AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])`,
 		id, scope.Namespace, scope.Principals))
 	if !errors.Is(err, brain.ErrNotFound) || strings.TrimSpace(scope.SessionID) == "" {
 		return obj, err
@@ -56,7 +60,7 @@ func (s *Store) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) (brain
 	return saved[0], nil
 }
 
-// GetMany implements ObjectReader.
+// GetMany implements brain.Store.
 func (s *Store) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID) ([]brain.Object, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -66,7 +70,7 @@ func (s *Store) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID)
 	}
 	found, err := s.queryObjects(ctx, `SELECT `+objectSelectCols+` FROM objects
 		WHERE id = ANY($1) AND deleted_at IS NULL
-		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])`,
+		  AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])`,
 		ids, scope.Namespace, scope.Principals)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get many: %w", err)
@@ -101,14 +105,14 @@ func (s *Store) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID)
 	return out, nil
 }
 
-// ListChildren implements ObjectReader.
+// ListChildren implements brain.Store.
 func (s *Store) ListChildren(ctx context.Context, scope brain.Scope, parentID uuid.UUID) ([]brain.Object, error) {
 	if err := scope.Namespace.Validate(); err != nil {
 		return nil, err
 	}
 	kids, err := s.queryObjects(ctx, `SELECT `+objectSelectCols+` FROM objects
 		WHERE parent_id = $1 AND deleted_at IS NULL
-		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])
+		  AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])
 		ORDER BY position ASC NULLS LAST, id ASC`,
 		parentID, scope.Namespace, scope.Principals)
 	if err != nil {
@@ -117,26 +121,43 @@ func (s *Store) ListChildren(ctx context.Context, scope brain.Scope, parentID uu
 	return kids, nil
 }
 
-// Put implements ObjectWriter: a full-column upsert that clears a soft
-// delete. The conflict update only applies to a row visible under scope, so
-// an id held outside scope updates nothing (ErrNotFound).
-func (s *Store) Put(ctx context.Context, scope brain.Scope, obj brain.Object) error {
+// Put implements brain.Store: it embeds in.Text, then runs a full-column
+// upsert that clears a soft delete and returns the stored row. The conflict
+// update only applies to a row visible under scope, so an id held outside
+// scope updates nothing (ErrNotFound).
+func (s *Store) Put(ctx context.Context, scope brain.Scope, in brain.Indexed) (brain.Object, error) {
+	obj, err := s.embedded(ctx, in)
+	if err != nil {
+		return brain.Object{}, err
+	}
 	q, args, err := upsertObject(scope, obj)
 	if err != nil {
-		return err
+		return brain.Object{}, err
 	}
-	tag, err := s.db.Exec(ctx, q, args...)
-	if err != nil {
-		return fmt.Errorf("postgres: put object: %w", err)
+	stored, err := scanObject(s.db.QueryRow(ctx, q, args...))
+	if errors.Is(err, brain.ErrNotFound) {
+		return brain.Object{}, fmt.Errorf("%w: %s", brain.ErrNotFound, obj.ID)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: %s", brain.ErrNotFound, obj.ID)
-	}
-	return nil
+	return stored, err
 }
 
-// upsertObject is the statement Put and CommitTree run to write obj. It
-// affects no row when obj.ID is held by a row outside scope.
+// embedded returns in's object with the embedding of its text.
+func (s *Store) embedded(ctx context.Context, in brain.Indexed) (brain.Object, error) {
+	obj := in.Object
+	vec, err := s.embedding.EmbedOne(ctx, in.Text)
+	if err != nil {
+		return brain.Object{}, fmt.Errorf("postgres: embed object: %w", err)
+	}
+	obj.Embedding, obj.EmbeddingModel = vec, ""
+	if vec != nil {
+		obj.EmbeddingModel = s.embedding.Model()
+	}
+	return obj, nil
+}
+
+// upsertObject is the statement Put and PutTree run to write obj; it
+// returns the stored row. It affects no row when obj.ID is held by a row
+// outside scope.
 func upsertObject(scope brain.Scope, obj brain.Object) (string, []any, error) {
 	if err := brain.ValidateObjectIdentity(obj); err != nil {
 		return "", nil, err
@@ -178,15 +199,16 @@ func upsertObject(scope brain.Scope, obj brain.Object) (string, []any, error) {
 			readers = EXCLUDED.readers,
 			updated_at = EXCLUDED.updated_at,
 			deleted_at = NULL
-		WHERE objects.namespace @> $16::jsonb
-		  AND (cardinality(objects.readers) = 0 OR objects.readers && $17::text[])`, []any{
+		WHERE objects.tenant = ($16::jsonb)->0 AND objects.namespace @> $16::jsonb
+		  AND (cardinality(objects.readers) = 0 OR objects.readers && $17::text[])
+		RETURNING ` + objectSelectCols, []any{
 		obj.ID, obj.Kind, obj.Title, obj.Summary, obj.Properties, obj.Content, obj.ContentType,
 		obj.ParentID, obj.Position, obj.Embedding, model, obj.Namespace, obj.Readers,
 		cmp.Or(obj.CreatedAt, now), cmp.Or(obj.UpdatedAt, now), scope.Namespace, scope.Principals,
 	}, nil
 }
 
-// SoftDelete implements ObjectWriter: id and its parts.
+// SoftDelete implements brain.Store: id and its parts.
 func (s *Store) SoftDelete(ctx context.Context, scope brain.Scope, id uuid.UUID) error {
 	if id == uuid.Nil {
 		return fmt.Errorf("%w: object id is required", brain.ErrInvalid)
@@ -196,7 +218,7 @@ func (s *Store) SoftDelete(ctx context.Context, scope brain.Scope, id uuid.UUID)
 	}
 	tag, err := s.db.Exec(ctx, `UPDATE objects SET deleted_at = $1, updated_at = $1
 		WHERE (id = $2 OR parent_id = $2) AND deleted_at IS NULL
-		  AND namespace @> $3::jsonb AND (cardinality(readers) = 0 OR readers && $4::text[])`,
+		  AND tenant = ($3::jsonb)->0 AND namespace @> $3::jsonb AND (cardinality(readers) = 0 OR readers && $4::text[])`,
 		time.Now().UTC(), id, scope.Namespace, scope.Principals)
 	if err != nil {
 		return fmt.Errorf("postgres: soft delete: %w", err)
@@ -207,30 +229,30 @@ func (s *Store) SoftDelete(ctx context.Context, scope brain.Scope, id uuid.UUID)
 	return nil
 }
 
-// PurgeDeleted implements Purger. It also drops parts staged by tree writes
+// PurgeDeleted implements brain.Store. It also drops parts staged by tree writes
 // that never committed.
 func (s *Store) PurgeDeleted(ctx context.Context, scope brain.Scope, before time.Time) (int, error) {
 	if err := scope.Namespace.Validate(); err != nil {
 		return 0, err
 	}
 	tag, err := s.db.Exec(ctx, `
-		WITH staged AS (DELETE FROM objects_staging WHERE staged_at < $1 AND namespace @> $2::jsonb)
-		DELETE FROM objects WHERE deleted_at < $1 AND namespace @> $2::jsonb`, before, scope.Namespace)
+		WITH staged AS (DELETE FROM objects_staging WHERE staged_at < $1 AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb)
+		DELETE FROM objects WHERE deleted_at < $1 AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb`, before, scope.Namespace)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: purge deleted: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
 }
 
-// Erase implements Purger in one statement.
+// Erase implements brain.Store in one statement.
 func (s *Store) Erase(ctx context.Context, scope brain.Scope) ([]uuid.UUID, error) {
 	if err := scope.Namespace.Validate(); err != nil {
 		return nil, err
 	}
 	rows, _ := s.db.Query(ctx, `
-		WITH gone AS (DELETE FROM objects WHERE namespace @> $1::jsonb RETURNING id, parent_id),
-		     sessions AS (DELETE FROM session_messages WHERE namespace @> $1::jsonb),
-		     staged AS (DELETE FROM objects_staging WHERE namespace @> $1::jsonb)
+		WITH gone AS (DELETE FROM objects WHERE tenant = ($1::jsonb)->0 AND namespace @> $1::jsonb RETURNING id, parent_id),
+		     sessions AS (DELETE FROM session_messages WHERE tenant = ($1::jsonb)->0 AND namespace @> $1::jsonb),
+		     staged AS (DELETE FROM objects_staging WHERE tenant = ($1::jsonb)->0 AND namespace @> $1::jsonb)
 		SELECT id FROM gone WHERE parent_id IS NULL`, scope.Namespace)
 	parents, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
 	if err != nil {
@@ -251,7 +273,7 @@ func (s *Store) Record(ctx context.Context, ev brain.AuditEvent) error {
 	return nil
 }
 
-// PutKind implements KindWriter.
+// PutKind implements brain.Store.
 func (s *Store) PutKind(ctx context.Context, k brain.ObjectKind) error {
 	if strings.TrimSpace(k.Kind) == "" {
 		return fmt.Errorf("postgres: kind is required")
@@ -277,7 +299,7 @@ func (s *Store) PutKind(ctx context.Context, k brain.ObjectKind) error {
 // kindSelect reads object_kinds rows in brain.ObjectKind field order.
 const kindSelect = `SELECT kind, coalesce(description, ''), is_part, is_parent, filterable_fields FROM object_kinds`
 
-// GetKind implements KindReader.
+// GetKind implements brain.Store.
 func (s *Store) GetKind(ctx context.Context, kind string) (brain.ObjectKind, error) {
 	rows, _ := s.db.Query(ctx, kindSelect+` WHERE kind = $1`, kind)
 	k, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[brain.ObjectKind])
@@ -290,7 +312,7 @@ func (s *Store) GetKind(ctx context.Context, kind string) (brain.ObjectKind, err
 	return k, nil
 }
 
-// ListKinds implements KindReader.
+// ListKinds implements brain.Store.
 func (s *Store) ListKinds(ctx context.Context) ([]brain.ObjectKind, error) {
 	rows, _ := s.db.Query(ctx, kindSelect+` ORDER BY kind ASC`)
 	kinds, err := pgx.CollectRows(rows, pgx.RowToStructByPos[brain.ObjectKind])
@@ -300,7 +322,7 @@ func (s *Store) ListKinds(ctx context.Context) ([]brain.ObjectKind, error) {
 	return kinds, nil
 }
 
-// ListByKind implements ObjectLister (first-class objects only).
+// ListByKind implements brain.Store (first-class objects only).
 func (s *Store) ListByKind(ctx context.Context, scope brain.Scope, kind string, limit int) ([]brain.Object, error) {
 	kind = strings.TrimSpace(kind)
 	if kind == "" || limit <= 0 {
@@ -311,7 +333,7 @@ func (s *Store) ListByKind(ctx context.Context, scope brain.Scope, kind string, 
 	}
 	objs, err := s.queryObjects(ctx, `SELECT `+objectSelectCols+` FROM objects
 		WHERE kind = $1 AND deleted_at IS NULL AND parent_id IS NULL
-		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])
+		  AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])
 		ORDER BY title ASC NULLS LAST, id ASC
 		LIMIT $4`,
 		kind, scope.Namespace, scope.Principals, limit)
@@ -321,7 +343,7 @@ func (s *Store) ListByKind(ctx context.Context, scope brain.Scope, kind string, 
 	return objs, nil
 }
 
-// GetByProperty implements ObjectLister.
+// GetByProperty implements brain.Store.
 func (s *Store) GetByProperty(ctx context.Context, scope brain.Scope, key, value string) (brain.Object, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
@@ -332,19 +354,19 @@ func (s *Store) GetByProperty(ctx context.Context, scope brain.Scope, key, value
 	}
 	return scanObject(s.db.QueryRow(ctx, `SELECT `+objectSelectCols+` FROM objects
 		WHERE deleted_at IS NULL AND properties->>$1 = $2
-		  AND namespace @> $3::jsonb AND (cardinality(readers) = 0 OR readers && $4::text[])
+		  AND tenant = ($3::jsonb)->0 AND namespace @> $3::jsonb AND (cardinality(readers) = 0 OR readers && $4::text[])
 		LIMIT 1`,
 		key, value, scope.Namespace, scope.Principals))
 }
 
-// KindsWithObjects implements ObjectLister.
+// KindsWithObjects implements brain.Store.
 func (s *Store) KindsWithObjects(ctx context.Context, scope brain.Scope) ([]string, error) {
 	if err := scope.Namespace.Validate(); err != nil {
 		return nil, err
 	}
 	rows, _ := s.db.Query(ctx, `SELECT DISTINCT kind FROM objects
 		WHERE deleted_at IS NULL AND parent_id IS NULL AND kind <> ''
-		  AND namespace @> $1::jsonb AND (cardinality(readers) = 0 OR readers && $2::text[])
+		  AND tenant = ($1::jsonb)->0 AND namespace @> $1::jsonb AND (cardinality(readers) = 0 OR readers && $2::text[])
 		ORDER BY kind ASC`,
 		scope.Namespace, scope.Principals)
 	kinds, err := pgx.CollectRows(rows, pgx.RowTo[string])
@@ -375,175 +397,4 @@ func scanObject(row pgx.Row) (brain.Object, error) {
 		o.Readers = nil
 	}
 	return o, nil
-}
-
-// SearchLexical implements PartSearcher over parts (parent_id set).
-// Score is ts_rank_cd on search_tsv (title A, summary B, body C).
-// websearch_to_tsquery runs first (every term). A short page then ORs those terms.
-func (s *Store) SearchLexical(ctx context.Context, scope brain.Scope, query string, filters brain.Filter, k int) ([]brain.ScoredID, error) {
-	if k <= 0 || strings.TrimSpace(query) == "" {
-		return nil, nil
-	}
-	if err := scope.Namespace.Validate(); err != nil {
-		return nil, err
-	}
-	where, fargs, err := brain.FilterSQL(filters, 4)
-	if err != nil {
-		return nil, err
-	}
-	args := append([]any{query, scope.Namespace, scope.Principals}, fargs...)
-	args = append(args, k)
-	limitPos := len(args)
-	hits, err := s.searchFTS(ctx, objectsLexicalSQL(where, limitPos, true), objectsLexicalSQL(where, limitPos, false), args, k)
-	if err != nil || strings.TrimSpace(scope.SessionID) == "" {
-		return hits, err
-	}
-	extra, err := s.sessionLexical(ctx, scope, query, k)
-	if err != nil {
-		return nil, err
-	}
-	return mergeRanked(hits, extra), nil
-}
-
-func objectsLexicalSQL(where string, limitPos int, matchAll bool) string {
-	return fmt.Sprintf(`
-		SELECT id, coalesce(title, ''), coalesce(content, ''), parent_id, position, updated_at,
-		       ts_rank_cd(search_tsv, tacklr_web_terms($1, %t), %d) AS score
-		FROM objects
-		WHERE deleted_at IS NULL AND parent_id IS NOT NULL
-		  AND tacklr_web_terms($1, %t) IS NOT NULL
-		  AND search_tsv @@ tacklr_web_terms($1, %t)
-		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])%s
-		ORDER BY score DESC
-		LIMIT $%d`, matchAll, ftsRankNorm, matchAll, matchAll, where, limitPos)
-}
-
-// searchFTS runs the every-term query, then the any-term query when that page is shorter than k.
-func (s *Store) searchFTS(ctx context.Context, matchAll, matchAny string, args []any, k int) ([]brain.ScoredID, error) {
-	hits, err := s.queryScored(ctx, matchAll, args)
-	if err != nil || len(hits) >= k {
-		return hits, err
-	}
-	extra, err := s.queryScored(ctx, matchAny, args)
-	if err != nil {
-		return nil, err
-	}
-	return mergeLex(hits, extra, k), nil
-}
-
-func mergeLex(primary, extra []brain.ScoredID, k int) []brain.ScoredID {
-	if len(extra) == 0 {
-		return primary
-	}
-	seen := make(map[uuid.UUID]struct{}, len(primary)+len(extra))
-	out := make([]brain.ScoredID, 0, len(primary)+len(extra))
-	for _, hit := range primary {
-		seen[hit.ID] = struct{}{}
-		out = append(out, hit)
-	}
-	for _, hit := range extra {
-		if _, ok := seen[hit.ID]; ok {
-			continue
-		}
-		seen[hit.ID] = struct{}{}
-		out = append(out, hit)
-	}
-	slices.SortStableFunc(out, func(a, b brain.ScoredID) int {
-		return cmp.Compare(b.Score, a.Score)
-	})
-	if k > 0 && len(out) > k {
-		out = out[:k]
-	}
-	return out
-}
-
-// SearchVector implements PartSearcher using pgvector cosine distance over parts.
-func (s *Store) SearchVector(ctx context.Context, scope brain.Scope, model string, embedding []float32, filters brain.Filter, k int) ([]brain.ScoredID, error) {
-	if k <= 0 || len(embedding) == 0 {
-		return nil, nil
-	}
-	if err := scope.Namespace.Validate(); err != nil {
-		return nil, err
-	}
-	where, fargs, err := brain.FilterSQL(filters, 5)
-	if err != nil {
-		return nil, err
-	}
-	args := append([]any{embedding, model, scope.Namespace, scope.Principals}, fargs...)
-	args = append(args, k)
-	limitPos := len(args)
-	q := fmt.Sprintf(`
-		SELECT id, coalesce(title, ''), coalesce(content, ''), parent_id, position, updated_at,
-		       1 - (embedding <=> $1::real[]::vector) AS score
-		FROM objects
-		WHERE deleted_at IS NULL AND parent_id IS NOT NULL
-		  AND embedding IS NOT NULL AND embedding_model = $2
-		  AND namespace @> $3::jsonb AND (cardinality(readers) = 0 OR readers && $4::text[])%s
-		ORDER BY embedding <=> $1::real[]::vector
-		LIMIT $%d`, where, limitPos)
-	hits, err := s.queryScored(ctx, q, args)
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(scope.SessionID) == "" {
-		return brain.TopScores(hits, k), nil
-	}
-	extra, err := s.sessionVector(ctx, scope, model, embedding, k)
-	if err != nil {
-		return nil, err
-	}
-	return brain.TopScores(append(hits, extra...), k), nil
-}
-
-// SearchTrigram implements PartSearcher using pg_trgm similarity over parts.
-func (s *Store) SearchTrigram(ctx context.Context, scope brain.Scope, query string, filters brain.Filter, k int) ([]brain.ScoredID, error) {
-	if k <= 0 || strings.TrimSpace(query) == "" {
-		return nil, nil
-	}
-	if err := scope.Namespace.Validate(); err != nil {
-		return nil, err
-	}
-	where, fargs, err := brain.FilterSQL(filters, 4)
-	if err != nil {
-		return nil, err
-	}
-	args := append([]any{query, scope.Namespace, scope.Principals}, fargs...)
-	args = append(args, k)
-	limitPos := len(args)
-	q := fmt.Sprintf(`
-		SELECT id, coalesce(title, ''), coalesce(content, ''), parent_id, position, updated_at,
-		       GREATEST(similarity(coalesce(title,''), $1), word_similarity($1, coalesce(content,''))) AS score
-		FROM objects
-		WHERE deleted_at IS NULL AND parent_id IS NOT NULL
-		  AND (
-		    strpos(lower(coalesce(title,'')), lower($1)) > 0
-		    OR strpos(lower(coalesce(content,'')), lower($1)) > 0
-		    OR similarity(coalesce(title,''), $1) > 0.3
-		    OR word_similarity($1, coalesce(content,'')) > 0.3
-		  )
-		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])%s
-		ORDER BY score DESC
-		LIMIT $%d`, where, limitPos)
-	hits, err := s.queryScored(ctx, q, args)
-	if err != nil || strings.TrimSpace(scope.SessionID) == "" {
-		return hits, err
-	}
-	extra, err := s.sessionTrigram(ctx, scope, query, k)
-	if err != nil {
-		return nil, err
-	}
-	return mergeRanked(hits, extra), nil
-}
-
-func (s *Store) queryScored(ctx context.Context, q string, args []any) ([]brain.ScoredID, error) {
-	rows, _ := s.db.Query(ctx, q, args...)
-	hits, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (brain.ScoredID, error) {
-		var h brain.ScoredID
-		err := row.Scan(&h.ID, &h.Title, &h.Content, &h.ParentID, &h.Position, &h.UpdatedAt, &h.Score)
-		return h, err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("postgres: search: %w", err)
-	}
-	return hits, nil
 }

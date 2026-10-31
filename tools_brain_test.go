@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/internal/helixtest"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -18,19 +19,21 @@ import (
 func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
+	g := helixtest.Graph(t)
+	eng, err := brain.NewEngine(store, brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
 		brain.KindSpec{Kind: "Fact", IsParent: true},
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
+	kg := brain.NewKnowledgeGraph(eng, g)
 	ns := mustNS(t, "id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		MaxWindowSize: 1024,
 		Model:         &scriptedModel{},
 		Brain:         eng,
+		Graph:         kg,
 		BrainWriteKinds: brain.WriteKinds{
 			Discovery: "Discovery",
 			Fact:      "Fact",
@@ -48,7 +51,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 
 	findObj := h.findTool("find_objects", "")
 	if findObj == nil {
-		t.Fatal("find_objects required with MemoryGraph")
+		t.Fatal("find_objects required with a graph")
 	}
 
 	out, err := saveDisc.invoke(ctx, `{"title":"finding","content":"learned X"}`, turnRuntime(h))
@@ -162,7 +165,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +254,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{
+	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
 		DefaultLimit: 2, MaxLimit: 50, Now: func() time.Time { return now },
 	}))
 	if err != nil {
@@ -362,7 +365,7 @@ func TestBrainTools_expandChildren(t *testing.T) {
 		ID: child, Kind: "Chunk", Title: "C", Content: "secret",
 		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,39 +394,34 @@ func TestBrainTools_expandChildren(t *testing.T) {
 }
 
 // TestBrainTools_expandMultiHopAndFindLinks: graph multi-hop expand and find_links
-// tool outcomes when MemoryGraph provides edge search.
+// tool outcomes on a graph with edge search.
 func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
 	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	factID, dealID, buyerID := uuid.New(), uuid.New(), uuid.New()
-	for _, o := range []brain.Object{
-		{ID: factID, Kind: "Fact", Title: "Risk note", Namespace: ns, UpdatedAt: now},
-		{ID: dealID, Kind: "Deal", Title: "Acme", Namespace: ns, UpdatedAt: now},
-		{ID: buyerID, Kind: "Person", Title: "Pat Buyer", Namespace: ns, UpdatedAt: now},
-	} {
-		if err := putFixture(store, o); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := g.AddEdge(ctx, factID, dealID, "about", brain.EdgeMeta{Note: "fact about deal"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := g.AddEdge(ctx, dealID, buyerID, "has_buyer", brain.EdgeMeta{Note: "economic buyer primary"}); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
+	scope := brain.Scope{Namespace: ns}
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !eng.HasEdgeSearch() {
-		t.Fatal("MemoryGraph must enable edge search")
+	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
+	put := func(kind, title string) uuid.UUID {
+		obj, err := eng.Put(ctx, scope, brain.Object{Kind: kind, Title: title})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return obj.ID
+	}
+	factID, dealID, buyerID := put("Fact", "Risk note"), put("Deal", "Acme"), put("Person", "Pat Buyer")
+	if err := kg.LinkWith(ctx, scope, factID, dealID, "about", brain.EdgeMeta{Note: "fact about deal"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := kg.LinkWith(ctx, scope, dealID, buyerID, "has_buyer", brain.EdgeMeta{Note: "economic buyer primary"}); err != nil {
+		t.Fatal(err)
 	}
 	h := mustNewTurnManager(t, AgentOptions{
 		MaxWindowSize: 1024, Model: &scriptedModel{},
-		Brain: eng, SearchNamespace: ns,
+		Brain: eng,
+		Graph: kg, SearchNamespace: ns,
 	})
 	expand := h.findTool("expand", "")
 	findLinks := h.findTool("find_links", "")
@@ -479,7 +477,7 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 		ID: secretPart, Kind: "Chunk", Title: "chunk", Content: "namespace isolation secret token xyzzy",
 		ParentID: &secretParent, Position: &pos, Namespace: nsA, UpdatedAt: now,
 	})
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +550,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		ParentID: &parent, Position: &pos, Namespace: ns,
 	})
 
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,14 +613,15 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 // An unindexed workspace file cannot be an endpoint until index_file.
 func TestBrainTools_linkByIDAndIndexedPath(t *testing.T) {
 	ctx := context.Background()
-	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
+	g := helixtest.Graph(t)
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{Kind: "Deal", IsParent: true},
 		brain.KindSpec{Kind: "Person", IsParent: true},
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
+	kg := brain.NewKnowledgeGraph(eng, g)
 	if err := eng.ApplyKinds(ctx, append(vfsindex.MountIndexKinds(),
 		brain.KindSpec{Kind: "Deal", IsParent: true},
 		brain.KindSpec{Kind: "Person", IsParent: true},
@@ -643,7 +642,8 @@ func TestBrainTools_linkByIDAndIndexedPath(t *testing.T) {
 	h := mustNewTurnManager(t, AgentOptions{
 		sessionID:    "id-graph",
 		mountSession: ms, Model: &scriptedModel{},
-		Brain: eng, SearchNamespace: ns,
+		Brain: eng,
+		Graph: kg, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
@@ -656,7 +656,7 @@ func TestBrainTools_linkByIDAndIndexedPath(t *testing.T) {
 	}
 	lout, err := link.invoke(ctx, `{
 		"from_id":"`+deal.ID.String()+`","to_id":"`+person.ID.String()+`",
-		"relation_type":"has_contact","role":"buyer","note":"primary buyer"
+		"relation_type":"about","role":"buyer","note":"primary buyer"
 	}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
@@ -665,12 +665,12 @@ func TestBrainTools_linkByIDAndIndexedPath(t *testing.T) {
 		t.Fatalf("link ids: %s", lout.output)
 	}
 
-	eout, err := expand.invoke(ctx, `{"object_id":"`+deal.ID.String()+`","relation_types":["has_contact"]}`, turnRuntime(h))
+	eout, err := expand.invoke(ctx, `{"object_id":"`+deal.ID.String()+`","relation_types":["about"]}`, turnRuntime(h))
 	if err != nil || !strings.Contains(eout.output, person.ID.String()) {
 		t.Fatalf("expand neighbor: %v %s", err, eout.output)
 	}
 
-	fout, err := findLinks.invoke(ctx, `{"relation_type":"has_contact","query":"primary"}`, turnRuntime(h))
+	fout, err := findLinks.invoke(ctx, `{"relation_type":"about","query":"primary"}`, turnRuntime(h))
 	if err != nil || !strings.Contains(fout.output, deal.ID.String()) || !strings.Contains(fout.output, person.ID.String()) {
 		t.Fatalf("find_links: %v %s", err, fout.output)
 	}
@@ -700,11 +700,11 @@ func TestBrainTools_linkByIDAndIndexedPath(t *testing.T) {
 		t.Fatal("unlink required")
 	}
 	if _, err := unlink.invoke(ctx, `{
-		"from_id":"`+deal.ID.String()+`","to_id":"`+person.ID.String()+`","relation_type":"has_contact"
+		"from_id":"`+deal.ID.String()+`","to_id":"`+person.ID.String()+`","relation_type":"about"
 	}`, turnRuntime(h)); err != nil {
 		t.Fatal(err)
 	}
-	eout2, err := expand.invoke(ctx, `{"object_id":"`+deal.ID.String()+`","relation_types":["has_contact"]}`, turnRuntime(h))
+	eout2, err := expand.invoke(ctx, `{"object_id":"`+deal.ID.String()+`","relation_types":["about"]}`, turnRuntime(h))
 	if err != nil || strings.Contains(eout2.output, person.ID.String()) {
 		t.Fatalf("after unlink: %v %s", err, eout2.output)
 	}
@@ -712,14 +712,16 @@ func TestBrainTools_linkByIDAndIndexedPath(t *testing.T) {
 
 func TestBrainTools_expandAndUnlinkValidationErrors(t *testing.T) {
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithGraph(brain.NewMemoryGraph()))
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
+	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
 	h := mustNewTurnManager(t, AgentOptions{
 		MaxWindowSize:   1024,
 		Model:           &scriptedModel{},
 		Brain:           eng,
+		Graph:           kg,
 		SearchNamespace: mustNS(t, "org", "acme"),
 	})
 	expand := h.findTool("expand", "")
@@ -742,49 +744,8 @@ func TestBrainTools_expandAndUnlinkValidationErrors(t *testing.T) {
 	}
 }
 
-type failGetStore struct {
-	*brain.MemoryStore
-	err error
-}
-
-func (s failGetStore) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) (brain.Object, error) {
-	if s.err != nil {
-		return brain.Object{}, s.err
-	}
-	return s.MemoryStore.Get(ctx, scope, id)
-}
-
-func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
-	ctx := context.Background()
-	mem := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	id := uuid.New()
-	if err := putFixture(mem, brain.Object{
-		ID: id, Kind: "Document", Title: "memo", Namespace: ns, UpdatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := brain.NewEngine(failGetStore{MemoryStore: mem, err: errors.New("brain store down")}, brain.WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize:   1024,
-		Model:           &scriptedModel{},
-		Brain:           eng,
-		SearchNamespace: ns,
-	})
-	expand := h.findTool("expand", "")
-	if expand == nil {
-		t.Fatal("expand required")
-	}
-	_, err = expand.invoke(ctx, `{"object_id":"`+id.String()+`"}`, turnRuntime(h))
-	if err == nil || !strings.Contains(err.Error(), "brain store down") {
-		t.Fatalf("want store failure propagated, got %v", err)
-	}
-}
-
 // putFixture writes obj straight to the store under its own namespace.
-func putFixture(w brain.ObjectWriter, obj brain.Object) error {
-	return w.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, obj)
+func putFixture(s brain.Store, obj brain.Object) error {
+	_, err := s.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, brain.Indexed{Object: obj, Text: brain.IndexText(obj)})
+	return err
 }

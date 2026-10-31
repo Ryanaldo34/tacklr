@@ -48,7 +48,7 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 	}, now)
 	seedDocWithParts(t, store, nsB, "Other ns", []string{"OAuth PKCE elsewhere"}, now)
 
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(fixedNow(now)))
+	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestSearch_filtersProperty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(fixedNow(now)))
+	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,58 +122,6 @@ func TestSearch_filtersProperty(t *testing.T) {
 	}
 	if len(page.Objects) != 1 || page.Objects[0].ID != p2 {
 		t.Fatalf("filter should keep p2 only, got %+v", page.Objects)
-	}
-}
-
-func TestSearch_hybridWithStubEmbedder(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-
-	lexParent, vecParent := uuid.New(), uuid.New()
-	lexPart, vecPart := uuid.New(), uuid.New()
-	pos := 1
-	for _, o := range []brain.Object{
-		{ID: lexParent, Kind: "Document", Title: "Lexical", Namespace: ns, UpdatedAt: now},
-		{ID: vecParent, Kind: "Document", Title: "Vector", Namespace: ns, UpdatedAt: now},
-		{
-			ID: lexPart, Kind: "Chunk", Content: "banana banana banana unique-token-xyz",
-			ParentID: &lexParent, Position: &pos, Namespace: ns, UpdatedAt: now,
-			Embedding: []float32{0, 1}, EmbeddingModel: "test-model",
-		},
-		{
-			ID: vecPart, Kind: "Chunk", Content: "unrelated body text",
-			ParentID: &vecParent, Position: &pos, Namespace: ns, UpdatedAt: now,
-			Embedding: []float32{1, 0}, EmbeddingModel: "test-model",
-		},
-	} {
-		if err := putFixture(store, o); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	eng, err := brain.NewEngine(store,
-		brain.WithEmbedder(stubEmbedder{v: []float32{1, 0}}),
-		brain.WithConfig(fixedNow(now)),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
-		Query: "unique-token-xyz",
-	}, brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	foundVec := false
-	for _, o := range page.Objects {
-		if o.ID == vecParent {
-			foundVec = true
-		}
-	}
-	if !foundVec {
-		t.Fatalf("vector parent missing: %+v", page.Objects)
 	}
 }
 
@@ -202,7 +150,7 @@ func TestFindExact_uuidParentAndPart(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(fixedNow(now)))
+	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +199,7 @@ func TestFindExact_titleMatch(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(fixedNow(now)))
+	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +224,7 @@ func TestContinue_andReplaceResultSet(t *testing.T) {
 			"shared retrieval content alpha beta gamma " + string(rune('a'+i)),
 		}, now)
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{
+	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
 		DefaultLimit: 2, MaxLimit: 50,
 		Now: func() time.Time { return now },
 	}))
@@ -342,7 +290,7 @@ func TestContinue_andReplaceResultSet(t *testing.T) {
 }
 
 func TestSearch_rejectsEmptyQueryAndFilter(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +329,7 @@ func TestFindExact_trigramFuzzy(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(fixedNow(now)))
+	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
 	if err != nil {
 		t.Fatal(err)
 	}

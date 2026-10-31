@@ -20,7 +20,7 @@ import (
 func TestMountIndexer_sourceReadersLimitSearchAndAnACLChangeReindexes(t *testing.T) {
 	ctx := context.Background()
 	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestMountIndexer_sourceReadersLimitSearchAndAnACLChangeReindexes(t *testing
 func TestMountIndexer_aReadersErrorFailsTheIndex(t *testing.T) {
 	ctx := context.Background()
 	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}

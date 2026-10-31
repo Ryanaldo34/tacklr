@@ -14,7 +14,7 @@ func TestStore_aTreeCommitThatCannotFinishLeavesThePreviousTree(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	store, pool := testDB(t)
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}

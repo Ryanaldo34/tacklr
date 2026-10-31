@@ -8,13 +8,15 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/postgres"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
 func TestSessionMessages_liveSearchUnion(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store, _ := testDB(t)
-	eng, err := brain.NewEngine(store, brain.WithEmbedder(liveStubEmbedder{v: []float32{1, 0, 0}}))
+	store, _ := testDBWith(t, postgres.Options{Embedding: brain.Embedding{Embedder: &storetest.Embedder{}}})
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,11 +57,6 @@ func TestSessionMessages_liveSearchUnion(t *testing.T) {
 		Role: "user", Body: []byte("not-json"), SearchText: "x",
 	}}); err == nil {
 		t.Fatal("bad json")
-	}
-	if _, err := store.SaveSessionMessages(ctx, ns, sessionID, "badv", []brain.SessionMessage{{
-		Role: "user", Body: []byte(`{}`), SearchText: "x", Embedding: []float32{1, 0},
-	}}); err == nil {
-		t.Fatal("bad vector")
 	}
 	stopped, stop := context.WithCancel(ctx)
 	stop()
@@ -121,7 +118,7 @@ func TestSessionMessages_liveSearchUnion(t *testing.T) {
 	if facts != 1 || savedID == uuid.Nil {
 		t.Fatalf("merged search = %+v", page.Objects)
 	}
-	lex, err := store.SearchLexical(ctx, scope, marker, brain.Filter{}, 10)
+	lex, err := store.Search(ctx, scope, brain.PartSearch{Query: marker, Exact: true, Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}

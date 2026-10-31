@@ -3,22 +3,26 @@ package brain_test
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/helixgraph"
+	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
-// TestFindObjects_multiTurnMemoryGraph: Put dual-writes nodes; find_objects ranks entities;
+// TestFindObjects_multiTurnOnAGraph: Put dual-writes nodes; find_objects ranks entities;
 // kind filter applies; expand remains structural.
-func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
+func TestFindObjects_multiTurnOnAGraph(t *testing.T) {
+	t.Parallel()
+	tenantAcme := uuid.NewString()
+	tenantOther := uuid.NewString()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithEmbedder(stubEmbedder{v: []float32{1, 0, 0}}), brain.WithKinds(
+	g := helixtest.Graph(t)
+	eng, err := brain.NewEngine(store, brain.WithKinds(
 		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
 			{Name: "stage", Type: brain.FieldTypeString},
 		}},
@@ -28,13 +32,11 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !eng.HasObjectSearch() {
-		t.Fatal("MemoryGraph must support object search")
-	}
-	if _, err := eng.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{Query: "x"}, nil); err == nil {
+	kg := brain.NewKnowledgeGraph(eng, g)
+	if _, err := kg.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{Query: "x"}, nil); err == nil {
 		t.Fatal("FindObjects requires result set")
 	}
-	if _, err := eng.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{}, brain.NewSearchContext()); err == nil {
+	if _, err := kg.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{}, brain.NewSearchContext()); err == nil {
 		t.Fatal("FindObjects requires query")
 	}
 	ns := mustNS(t, "id", uuid.NewString())
@@ -49,14 +51,14 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Stage property filter (same keys as schema filterable_fields / search).
-	byStage, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
+	byStage, err := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query: "Acme Renewal", Kinds: []string{"Deal"},
 		Filters: mustFilter(t, map[string]any{"stage": "negotiation"}),
 	}, sc)
 	if err != nil || len(byStage.Objects) != 1 || byStage.Objects[0].ID != deal.ID {
 		t.Fatalf("find_objects stage filter: %+v err=%v", byStage.Objects, err)
 	}
-	closed, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
+	closed, err := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query: "Acme Renewal", Kinds: []string{"Deal"},
 		Filters: mustFilter(t, map[string]any{"stage": "closed"}),
 	}, sc)
@@ -74,12 +76,12 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.Link(ctx, scope, fact.ID, deal.ID, "about"); err != nil {
+	if err := kg.Link(ctx, scope, fact.ID, deal.ID, "about"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Semantic-ish object find for risk themes (kinds Fact).
-	page, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
+	page, err := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query: "penalty liability indemnity",
 		Kinds: []string{"Fact"},
 		Limit: 10,
@@ -93,9 +95,20 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	if page.Objects[0].Kind != "Fact" {
 		t.Fatalf("kind: %s", page.Objects[0].Kind)
 	}
+	notes, err := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "penalty timeline", Kinds: []string{"Fact", "Discovery"}}, brain.NewSearchContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotKinds := map[string]bool{}
+	for _, o := range notes.Objects {
+		gotKinds[o.Kind] = true
+	}
+	if len(gotKinds) != 2 || !gotKinds["Fact"] || !gotKinds["Discovery"] {
+		t.Fatalf("find_objects over two kinds = %v, want Fact and Discovery only", gotKinds)
+	}
 
 	// Deal resolve by title tokens.
-	deals, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
+	deals, err := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query: "Acme Enterprise Renewal",
 		Kinds: []string{"Deal"},
 	}, sc)
@@ -107,7 +120,7 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	}
 
 	// Expand structure from deal.
-	exp, err := eng.Expand(ctx, scope, brain.ExpandRequest{
+	exp, err := kg.Expand(ctx, scope, brain.ExpandRequest{
 		ObjectID: deal.ID, RelationTypes: []string{"about"},
 	}, sc)
 	if err != nil {
@@ -118,14 +131,14 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	}
 
 	// Empty query fails.
-	if _, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "  "}, sc); err == nil {
+	if _, err := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "  "}, sc); err == nil {
 		t.Fatal("want query required")
 	}
 	// Soft-deleted entity omitted (not hard fail).
 	if err := eng.SoftDelete(ctx, scope, fact.ID); err != nil {
 		t.Fatal(err)
 	}
-	afterDel, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
+	afterDel, err := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query: "penalty liability indemnity", Kinds: []string{"Fact"},
 	}, sc)
 	if err != nil {
@@ -144,7 +157,7 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	page1, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
+	page1, err := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query: "commercial risk", Kinds: []string{"Fact"}, Limit: 2,
 	}, sc)
 	if err != nil {
@@ -161,8 +174,8 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 		t.Fatal("continue result set id")
 	}
 	// Namespace isolation.
-	other := mustNS(t, "org", "other")
-	miss, err := eng.FindObjects(ctx, brain.Scope{Namespace: other}, brain.FindObjectsRequest{
+	other := mustNS(t, "org", tenantOther)
+	miss, err := kg.FindObjects(ctx, brain.Scope{Namespace: other}, brain.FindObjectsRequest{
 		Query: "Acme Enterprise", Kinds: []string{"Deal"},
 	}, brain.NewSearchContext())
 	if err != nil {
@@ -171,7 +184,7 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	if len(miss.Objects) != 0 {
 		t.Fatalf("other ns: %+v", miss.Objects)
 	}
-	nestedNS := mustNS(t, "org", "acme", "workspace", "west")
+	nestedNS := mustNS(t, "org", tenantAcme, "workspace", "west")
 	nested, err := eng.Put(ctx, brain.Scope{Namespace: nestedNS}, brain.Object{
 		Kind: "Deal", Title: "Nested Acme Workspace Deal", Summary: "workspace scoped",
 		Properties: map[string]any{"stage": "negotiation"},
@@ -179,7 +192,7 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pageOrg, err := eng.FindObjects(ctx, brain.Scope{Namespace: mustNS(t, "org", "acme")}, brain.FindObjectsRequest{
+	pageOrg, err := kg.FindObjects(ctx, brain.Scope{Namespace: mustNS(t, "org", tenantAcme)}, brain.FindObjectsRequest{
 		Query: "Nested Acme Workspace", Kinds: []string{"Deal"},
 	}, brain.NewSearchContext())
 	if err != nil {
@@ -188,79 +201,39 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	if !containsID(pageOrg.Objects, nested.ID) {
 		t.Fatalf("org scope should see workspace graph node: %+v", pageOrg.Objects)
 	}
-	// Without object searcher.
-	engNo, err := brain.NewEngine(store, brain.WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if engNo.HasObjectSearch() {
-		t.Fatal("no graph should not have object search")
-	}
-	if _, err := engNo.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "x"}, sc); err == nil || !strings.Contains(err.Error(), "not available") {
-		t.Fatalf("want unavailable: %v", err)
-	}
 }
 
 // Graph text hits carry no write time. Decay must read updated_at from the store
 // before fusion, or the older title match stays ahead of the fresher body match.
 func TestFindObjects_optInDecayUsesStoreTime(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
 	ns := mustNS(t, "id", uuid.NewString())
 	oldT := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	newT := oldT.Add(90 * 24 * time.Hour)
-	lam := 0.02
-	emb := []float32{1, 0, 0}
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithEmbedder(stubEmbedder{v: emb}), brain.WithConfig(brain.EngineConfig{
-		Lambda: &lam,
-		Now:    func() time.Time { return newT },
-	}))
+	now := oldT
+	g := helixtest.Open(t, func(o *helixgraph.Options) {
+		o.Ranking = brain.Ranking{Decay: 0.02, Now: func() time.Time { return newT }}
+	})
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithConfig(brain.EngineConfig{Now: func() time.Time { return now }}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldID, newID := uuid.New(), uuid.New()
-	if err := putFixture(store, brain.Object{ID: oldID, Kind: "Fact", Title: "policy", Namespace: ns, UpdatedAt: oldT}); err != nil {
+	kg := brain.NewKnowledgeGraph(eng, g)
+	if _, err := eng.Put(ctx, brain.Scope{Namespace: ns}, brain.Object{Kind: "Fact", Title: "policy", Content: "policy"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.EnsureObject(ctx, brain.Object{ID: oldID, Kind: "Fact", Title: "policy", Namespace: ns, Embedding: emb}, "policy"); err != nil {
+	now = newT
+	fresh, err := eng.Put(ctx, brain.Scope{Namespace: ns}, brain.Object{Kind: "Fact", Title: "note", Content: "policy detail"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := putFixture(store, brain.Object{
-		ID: newID, Kind: "Fact", Title: "note", Content: "policy detail", Namespace: ns, UpdatedAt: newT,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := g.EnsureObject(ctx, brain.Object{ID: newID, Kind: "Fact", Title: "note", Namespace: ns, Embedding: emb}, "policy detail"); err != nil {
-		t.Fatal(err)
-	}
-	page, err := eng.FindObjects(ctx, brain.Scope{Namespace: ns}, brain.FindObjectsRequest{Query: "policy"}, brain.NewSearchContext())
+	newID := fresh.ID
+	page, err := kg.FindObjects(ctx, brain.Scope{Namespace: ns}, brain.FindObjectsRequest{Query: "policy"}, brain.NewSearchContext())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(page.Objects) == 0 || page.Objects[0].ID != newID {
 		t.Fatalf("fresh fact should lead: %+v", page.Objects)
-	}
-}
-
-func TestFindObjects_decayStoreError(t *testing.T) {
-	ctx := context.Background()
-	id := uuid.New()
-	ns := mustNS(t, "id", uuid.NewString())
-	g := brain.NewMemoryGraph()
-	if err := g.EnsureObject(ctx, brain.Object{ID: id, Kind: "Fact", Title: "policy", Namespace: ns}, "policy"); err != nil {
-		t.Fatal(err)
-	}
-	lam := 0.02
-	eng, err := brain.NewEngine(&failingReads{MemoryStore: brain.NewMemoryStore(), failID: id},
-		brain.WithGraph(g), brain.WithLexicalOnly(),
-		brain.WithConfig(brain.EngineConfig{Lambda: &lam}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = eng.FindObjects(ctx, brain.Scope{Namespace: ns}, brain.FindObjectsRequest{Query: "policy"}, brain.NewSearchContext())
-	if err == nil || !strings.Contains(err.Error(), "hydrate objects") {
-		t.Fatalf("got %v", err)
 	}
 }

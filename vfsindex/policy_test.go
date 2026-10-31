@@ -37,7 +37,7 @@ func TestBridge_policyAndTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}

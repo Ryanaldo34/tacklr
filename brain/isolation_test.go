@@ -12,37 +12,24 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
-// textEmbedder embeds every text as [1, 0] and fails on texts containing poison.
-type textEmbedder struct{ poison string }
-
-func (e textEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	out := make([][]float32, len(texts))
-	for i, text := range texts {
-		if e.poison != "" && strings.Contains(text, e.poison) {
-			return nil, errors.New("embedding API down")
-		}
-		out[i] = []float32{1, 0}
-	}
-	return out, nil
-}
-
-func (textEmbedder) Model() string { return "text-model" }
-
 func TestEngine_everyEntryPointRejectsAnEmptyScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithGraph(brain.NewMemoryGraph()))
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
+	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
 	var none brain.Scope
 	id := uuid.New()
 	sc := brain.NewSearchContext()
 	errs := map[string]error{
 		"soft delete":    eng.SoftDelete(ctx, none, id),
-		"link":           eng.Link(ctx, none, id, id, "rel"),
-		"unlink":         eng.Unlink(ctx, none, id, id, "rel"),
+		"link":           kg.Link(ctx, none, id, id, "rel"),
+		"unlink":         kg.Unlink(ctx, none, id, id, "rel"),
 		"erase":          eng.Erase(ctx, none),
 		"delete session": eng.DeleteSessionMessages(ctx, nil, "s"),
 	}
@@ -58,10 +45,11 @@ func TestEngine_everyEntryPointRejectsAnEmptyScope(t *testing.T) {
 	_, errs["search"] = eng.Search(ctx, none, brain.SearchRequest{Query: "q"}, sc)
 	_, errs["find exact"] = eng.FindExact(ctx, none, brain.SearchRequest{Query: "q"}, sc)
 	_, errs["continue"] = eng.Continue(ctx, none, id, 1, sc)
-	_, errs["find objects"] = eng.FindObjects(ctx, none, brain.FindObjectsRequest{Query: "q"}, sc)
-	_, errs["find links"] = eng.FindLinks(ctx, none, brain.FindLinksRequest{RelationType: "rel", Query: "q"})
-	_, errs["expand"] = eng.Expand(ctx, none, brain.ExpandRequest{ObjectID: id}, sc)
-	_, errs["expand many"] = eng.ExpandMany(ctx, none, brain.ExpandManyRequest{ObjectIDs: []uuid.UUID{id}})
+	_, errs["find objects"] = kg.FindObjects(ctx, none, brain.FindObjectsRequest{Query: "q"}, sc)
+	_, errs["find links"] = kg.FindLinks(ctx, none, brain.FindLinksRequest{RelationType: "rel", Query: "q"})
+	_, errs["expand"] = kg.Expand(ctx, none, brain.ExpandRequest{ObjectID: id}, sc)
+	_, errs["expand many"] = kg.ExpandMany(ctx, none, brain.ExpandManyRequest{ObjectIDs: []uuid.UUID{id}})
+	_, errs["shortest path"] = kg.ShortestPath(ctx, none, brain.PathRequest{From: id, To: id})
 	_, errs["save session"] = eng.SaveSessionMessages(ctx, nil, "s", "k", []brain.SessionMessage{{Role: "user"}})
 	_, errs["purge session"] = eng.PurgeSessionMessages(ctx, nil, time.Now())
 
@@ -74,7 +62,7 @@ func TestEngine_everyEntryPointRejectsAnEmptyScope(t *testing.T) {
 
 func TestEngine_putKeepsObjectsInsideTheCallersScope(t *testing.T) {
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,18 +98,20 @@ func TestEngine_putKeepsObjectsInsideTheCallersScope(t *testing.T) {
 }
 
 func TestEngine_auditRecordsEveryServedReadAndWrite(t *testing.T) {
+	t.Parallel()
+	tenantA := uuid.NewString()
 	ctx := context.Background()
 	var events []brain.AuditEvent
 	record := func(_ context.Context, ev brain.AuditEvent) error {
 		events = append(events, ev)
 		return nil
 	}
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithAudit(record),
-		brain.WithGraph(brain.NewMemoryGraph()))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithAudit(record))
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := brain.Scope{Namespace: mustNS(t, "org", "a"), Principals: []string{"user:ann"}, SessionID: "s1"}
+	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
+	scope := brain.Scope{Namespace: mustNS(t, "org", tenantA), Principals: []string{"user:ann"}, SessionID: "s1"}
 	sc := brain.NewSearchContext()
 	doc, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "Roadmap"}, brain.Parts(brain.Object{Kind: "Chunk", Content: "launch plan"}))
 	if err != nil {
@@ -135,17 +125,17 @@ func TestEngine_auditRecordsEveryServedReadAndWrite(t *testing.T) {
 		op   brain.AuditOp
 		call func()
 	}{
-		{brain.AuditLink, func() { _ = eng.Link(ctx, scope, doc.ID, other.ID, "owner") }},
-		{brain.AuditUnlink, func() { _ = eng.Unlink(ctx, scope, doc.ID, other.ID, "owner") }},
+		{brain.AuditLink, func() { _ = kg.Link(ctx, scope, doc.ID, other.ID, "about") }},
+		{brain.AuditUnlink, func() { _ = kg.Unlink(ctx, scope, doc.ID, other.ID, "about") }},
 		{brain.AuditRead, func() { page, _ = eng.Search(ctx, scope, brain.SearchRequest{Query: "launch"}, sc) }},
 		{brain.AuditRead, func() { _, _ = eng.Read(ctx, scope, doc.ID) }},
 		{brain.AuditRead, func() { _, _ = eng.ListChildren(ctx, scope, doc.ID) }},
 		{brain.AuditRead, func() { _, _ = eng.ListByKind(ctx, scope, "Document", 5) }},
-		{brain.AuditRead, func() { _, _ = eng.Expand(ctx, scope, brain.ExpandRequest{ObjectID: doc.ID}, sc) }},
+		{brain.AuditRead, func() { _, _ = kg.Expand(ctx, scope, brain.ExpandRequest{ObjectID: doc.ID}, sc) }},
 		{brain.AuditRead, func() {
-			_, _ = eng.ExpandMany(ctx, scope, brain.ExpandManyRequest{ObjectIDs: []uuid.UUID{doc.ID}, WantContainment: true})
+			_, _ = kg.ExpandMany(ctx, scope, brain.ExpandManyRequest{ObjectIDs: []uuid.UUID{doc.ID}, WantContainment: true})
 		}},
-		{brain.AuditRead, func() { _, _ = eng.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "Roadmap"}, sc) }},
+		{brain.AuditRead, func() { _, _ = kg.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "Roadmap"}, sc) }},
 		{brain.AuditSessionSave, func() {
 			_, _ = eng.SaveSessionMessages(ctx, scope.Namespace, "s1", "k", []brain.SessionMessage{{Role: "user", SearchText: "hi"}})
 		}},
@@ -178,6 +168,8 @@ func TestEngine_auditRecordsEveryServedReadAndWrite(t *testing.T) {
 }
 
 func TestEngine_aFailedAuditRecordFailsEveryServedReadAndWrite(t *testing.T) {
+	t.Parallel()
+	tenantA := uuid.NewString()
 	ctx := context.Background()
 	var down atomic.Bool
 	record := func(context.Context, brain.AuditEvent) error {
@@ -186,12 +178,12 @@ func TestEngine_aFailedAuditRecordFailsEveryServedReadAndWrite(t *testing.T) {
 		}
 		return nil
 	}
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithAudit(record),
-		brain.WithGraph(brain.NewMemoryGraph()))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithAudit(record))
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
+	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
+	scope := brain.Scope{Namespace: mustNS(t, "org", tenantA)}
 	var docs []brain.Object
 	for _, title := range []string{"Roadmap", "Launch review"} {
 		doc, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: title, Properties: map[string]any{"path": "/" + title}},
@@ -205,7 +197,7 @@ func TestEngine_aFailedAuditRecordFailsEveryServedReadAndWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.LinkWith(ctx, scope, docs[0].ID, owner.ID, "owner", brain.EdgeMeta{Note: "launch owner"}); err != nil {
+	if err := kg.LinkWith(ctx, scope, docs[0].ID, owner.ID, "about", brain.EdgeMeta{Note: "launch owner"}); err != nil {
 		t.Fatal(err)
 	}
 	sc := brain.NewSearchContext()
@@ -222,9 +214,9 @@ func TestEngine_aFailedAuditRecordFailsEveryServedReadAndWrite(t *testing.T) {
 	_, errs["get by property"] = eng.GetByProperty(ctx, scope, "path", "/Roadmap")
 	_, errs["search"] = eng.Search(ctx, scope, brain.SearchRequest{Query: "launch"}, brain.NewSearchContext())
 	_, errs["continue"] = eng.Continue(ctx, scope, first.ResultSetID, 1, sc)
-	_, errs["expand"] = eng.Expand(ctx, scope, brain.ExpandRequest{ObjectID: docs[0].ID}, brain.NewSearchContext())
-	_, errs["find objects"] = eng.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "Roadmap"}, brain.NewSearchContext())
-	_, errs["find links"] = eng.FindLinks(ctx, scope, brain.FindLinksRequest{RelationType: "owner", Query: "launch"})
+	_, errs["expand"] = kg.Expand(ctx, scope, brain.ExpandRequest{ObjectID: docs[0].ID}, brain.NewSearchContext())
+	_, errs["find objects"] = kg.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "Roadmap"}, brain.NewSearchContext())
+	_, errs["find links"] = kg.FindLinks(ctx, scope, brain.FindLinksRequest{RelationType: "about", Query: "launch"})
 	_, errs["put"] = eng.Put(ctx, scope, brain.Object{Kind: "Note"})
 
 	for name, err := range errs {
@@ -233,17 +225,6 @@ func TestEngine_aFailedAuditRecordFailsEveryServedReadAndWrite(t *testing.T) {
 		}
 	}
 }
-
-func TestNewEngine_requiresAnEmbedderModel(t *testing.T) {
-	_, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithEmbedder(namelessEmbedder{}))
-	if !errors.Is(err, brain.ErrInvalid) || !strings.Contains(err.Error(), "Model") {
-		t.Fatalf("nameless embedder = %v", err)
-	}
-}
-
-type namelessEmbedder struct{ textEmbedder }
-
-func (namelessEmbedder) Model() string { return " " }
 
 func TestNamespace_keyIsCollisionFreeWhereStringIsNot(t *testing.T) {
 	dotted := brain.Namespace{{Name: "a", Value: "x"}, {Name: "b", Value: "y"}}

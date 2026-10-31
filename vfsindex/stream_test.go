@@ -176,9 +176,9 @@ type memHarness struct {
 func memIndexer(t *testing.T, files *memFiles) memHarness {
 	t.Helper()
 	ms := treeLocal(t, vfs.At("raw", files.open))
-	store := brain.NewMemoryStore()
 	emb := &countEmbedder{}
-	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb))
+	store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb}))
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func TestMountIndexer_anAuditFailureOnTheVersionCheckFailsTheIndex(t *testing.T)
 		}
 		return nil
 	}
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithAudit(audit))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithAudit(audit))
 	if err != nil {
 		t.Fatal(err)
 	}

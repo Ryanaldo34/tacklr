@@ -11,17 +11,18 @@ DOCKER ?= $(shell command -v docker 2>/dev/null || \
 
 # Race detector + per-package coverage in test output. Requires Docker for brain
 # Postgres + Helix integration tests. -covermode=atomic is required with -race.
+# with-helix.sh starts one Helix server that every package shares.
 test: brain-pg-image helix-image temporal-image
-	go test -race -count=1 -covermode=atomic ./...
+	DOCKER=$(DOCKER) HELIX_IMAGE=$(HELIX_IMAGE) ./scripts/with-helix.sh go test -race -count=1 -covermode=atomic ./...
 
 # pgvector + pg_textsearch image used by brain/postgres integration tests.
 brain-pg-image: require-docker
 	$(DOCKER) build -f brain/testdata/Dockerfile.postgres -t tacklr-pg-brain:test brain/testdata
 
-# Helix enterprise-dev (in-memory) for helixgraph integration tests.
-# https://docs.helix-db.com/database/local-development
+# Helix server (in-memory) for the graph integration tests.
+HELIX_IMAGE ?= ghcr.io/helixdb/helixdb:v0.0.12
 helix-image: require-docker
-	$(DOCKER) pull ghcr.io/helixdb/enterprise-dev:latest
+	$(DOCKER) pull $(HELIX_IMAGE)
 
 # Temporal server + admin-tools. Persistence is tacklr-pg-brain:test (brain-pg-image).
 temporal-image: require-docker
@@ -51,7 +52,7 @@ lint:
 
 # Profile + threshold gate (writes coverage.out for tools; no HTML).
 cover: brain-pg-image helix-image temporal-image
-	go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+	DOCKER=$(DOCKER) HELIX_IMAGE=$(HELIX_IMAGE) ./scripts/with-helix.sh go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
 	@go run github.com/vladopajic/go-test-coverage/v2@latest --config=./.testcoverage.yml
 	@./scripts/coverage-summary.sh coverage.out
 	@./scripts/update-coverage-badge.sh coverage.out docs/badges/coverage.json

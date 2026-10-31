@@ -304,22 +304,13 @@ func kindInfoFromObjectKind(k ObjectKind) ObjectKindInfo {
 	}
 }
 
-// KindRegistry is KindReader + KindWriter for durable kind schemas.
-type KindRegistry interface {
-	KindReader
-	KindWriter
-}
-
-// PersistKinds upserts validated kind specs into any KindWriter (additive).
-func PersistKinds(ctx context.Context, w KindWriter, specs ...KindSpec) error {
-	if w == nil {
-		return fmt.Errorf("brain: kind writer is required")
-	}
+// PersistKinds upserts validated kind specs into store (additive).
+func PersistKinds(ctx context.Context, store Store, specs ...KindSpec) error {
 	batch, err := normalizeKindBatch(specs)
 	if err != nil {
 		return err
 	}
-	return putKindBatch(ctx, w, batch)
+	return putKindBatch(ctx, store, batch)
 }
 
 // ApplyKinds is the host migration entry point: desired process catalog + optional durable upsert.
@@ -331,21 +322,15 @@ func (e *Engine) ApplyKinds(ctx context.Context, specs ...KindSpec) error {
 	if err := e.catalog.ensureNotFrozen(); err != nil {
 		return err
 	}
-	if w, ok := e.store.(KindWriter); ok {
-		if err := putKindBatch(ctx, w, batch); err != nil {
-			return err
-		}
+	if err := putKindBatch(ctx, e.store, batch); err != nil {
+		return err
 	}
 	return e.catalog.replaceNormalized(batch)
 }
 
 // SyncKindsToStore pushes the process catalog to the store.
 func (e *Engine) SyncKindsToStore(ctx context.Context) error {
-	w, ok := e.store.(KindWriter)
-	if !ok {
-		return fmt.Errorf("brain: store does not support kind writes")
-	}
-	return PersistKinds(ctx, w, e.catalog.All()...)
+	return PersistKinds(ctx, e.store, e.catalog.All()...)
 }
 
 // LoadKindsFromStore replaces the process catalog from the store.
@@ -365,7 +350,7 @@ func (e *Engine) LoadKindsFromStore(ctx context.Context) error {
 	return e.catalog.replace(specs)
 }
 
-func putKindBatch(ctx context.Context, w KindWriter, batch map[string]KindSpec) error {
+func putKindBatch(ctx context.Context, w Store, batch map[string]KindSpec) error {
 	for _, name := range slices.Sorted(maps.Keys(batch)) {
 		if err := w.PutKind(ctx, objectKindFromNormalized(batch[name])); err != nil {
 			return fmt.Errorf("brain: persist kind %q: %w", name, err)

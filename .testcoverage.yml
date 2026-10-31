@@ -65,6 +65,7 @@ exclude:
     # Docker bootstrap for live Temporal tests. Failure branches are the
     # container runtime, not a product outcome.
     - internal/temporaldocker
+    - internal/helixtest
     # Exporter constructors, not product outcomes.
     - telemetry/otel.go
 

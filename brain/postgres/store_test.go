@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +21,7 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/postgres"
 	"github.com/ryanaldo34/tacklr/brain/storetest"
+	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
 func TestOpen_rejectsABadSchemaOrConnectionString(t *testing.T) {
@@ -48,7 +51,7 @@ func TestStore_aStatementStuckPastTheTimeoutIsCancelledByTheServer(t *testing.T)
 			store, pool := testDBWith(t, postgres.Options{StatementTimeout: tc.timeout})
 			scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
 			doc := brain.Object{ID: uuid.New(), Kind: "Document", Namespace: scope.Namespace}
-			if err := store.Put(t.Context(), scope, doc); err != nil {
+			if err := putFixture(store, doc); err != nil {
 				t.Fatal(err)
 			}
 			// Another transaction holds the row; the write waits behind it.
@@ -63,7 +66,7 @@ func TestStore_aStatementStuckPastTheTimeoutIsCancelledByTheServer(t *testing.T)
 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
 
-			err = store.Put(ctx, scope, doc)
+			_, err = store.Put(ctx, scope, brain.Indexed{Object: doc})
 
 			if !tc.want(err) {
 				t.Fatalf("blocked write = %v", err)
@@ -79,18 +82,16 @@ func TestStore_everyCallReportsADatabaseFailure(t *testing.T) {
 	cancel()
 	scope := brain.Scope{Namespace: mustNS(t, "org", "a"), SessionID: "s1"}
 	ns, id := scope.Namespace, uuid.New()
-	doc := brain.Object{ID: id, Kind: "Document", Namespace: ns}
-	part := brain.TreePart{Object: brain.Object{ID: uuid.New(), Kind: "Chunk", ParentID: &id, Namespace: ns}}
+	doc := brain.Indexed{Object: brain.Object{ID: id, Kind: "Document", Namespace: ns}}
 	errs := map[string]error{
-		"put":            store.Put(ctx, scope, doc),
 		"soft delete":    store.SoftDelete(ctx, scope, id),
 		"put kind":       store.PutKind(ctx, brain.ObjectKind{Kind: "Document"}),
 		"record":         store.Record(ctx, brain.AuditEvent{Op: brain.AuditRead, Namespace: ns}),
-		"stage parts":    store.StageParts(ctx, scope, uuid.New(), []brain.TreePart{part}),
-		"commit tree":    store.CommitTree(ctx, scope, uuid.New(), 0, doc),
 		"delete session": store.DeleteSessionMessages(ctx, ns, "s1"),
 		"setup":          store.Setup(ctx),
 	}
+	_, errs["put"] = store.Put(ctx, scope, doc)
+	_, errs["put tree"] = store.PutTree(ctx, scope, doc, nil)
 	_, errs["get"] = store.Get(ctx, scope, id)
 	_, errs["get many"] = store.GetMany(ctx, scope, []uuid.UUID{id})
 	_, errs["list children"] = store.ListChildren(ctx, scope, id)
@@ -101,10 +102,7 @@ func TestStore_everyCallReportsADatabaseFailure(t *testing.T) {
 	_, errs["list by kind"] = store.ListByKind(ctx, scope, "Document", 5)
 	_, errs["get by property"] = store.GetByProperty(ctx, scope, "path", "/a")
 	_, errs["kinds with objects"] = store.KindsWithObjects(ctx, scope)
-	_, errs["lexical"] = store.SearchLexical(ctx, scope, "q", brain.Filter{}, 5)
-	_, errs["vector"] = store.SearchVector(ctx, scope, "m", []float32{1, 0, 0}, brain.Filter{}, 5)
-	_, errs["trigram"] = store.SearchTrigram(ctx, scope, "q", brain.Filter{}, 5)
-	_, errs["tree state"] = store.TreeState(ctx, scope, id)
+	_, errs["search"] = store.Search(ctx, scope, brain.PartSearch{Query: "q", Limit: 5})
 	_, errs["save session"] = store.SaveSessionMessages(ctx, ns, "s1", "k", []brain.SessionMessage{{Role: "user"}})
 	_, errs["purge session"] = store.PurgeSessionMessages(ctx, ns, time.Now())
 
@@ -131,14 +129,19 @@ func TestStore_rejectsInvalidArgumentsBeforeQuerying(t *testing.T) {
 	if err := putFixture(store, brain.Object{}); !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("invalid put: %v", err)
 	}
-	if _, err := store.SearchLexical(ctx, scope, "q", brain.Filter{UpdatedAfter: "not-a-time"}, 5); !errors.Is(err, brain.ErrInvalid) {
-		t.Fatalf("invalid lexical filter = %v, want ErrInvalid", err)
+	if _, err := store.PutTree(ctx, scope, brain.Indexed{}, nil); !errors.Is(err, brain.ErrInvalid) {
+		t.Fatalf("invalid tree parent: %v", err)
 	}
-	if _, err := store.SearchVector(ctx, scope, "", []float32{1}, brain.Filter{UpdatedAfter: "not-a-time"}, 5); !errors.Is(err, brain.ErrInvalid) {
-		t.Fatalf("invalid vector filter = %v, want ErrInvalid", err)
+	embedding, _ := testDBWith(t, postgres.Options{Embedding: brain.Embedding{Embedder: &storetest.Embedder{}}})
+	poisoned := brain.Indexed{Object: brain.Object{ID: id, Kind: "Document", Namespace: scope.Namespace}, Text: "poison"}
+	if _, err := embedding.PutTree(ctx, scope, poisoned, nil); err == nil || !strings.Contains(err.Error(), "embedder down") {
+		t.Fatalf("tree whose parent does not embed = %v, want the embedder's error", err)
 	}
-	if _, err := store.SearchTrigram(ctx, scope, "q", brain.Filter{UpdatedAfter: "not-a-time"}, 5); !errors.Is(err, brain.ErrInvalid) {
-		t.Fatalf("invalid trigram filter = %v, want ErrInvalid", err)
+	if _, err := store.Search(ctx, scope, brain.PartSearch{Query: "q", Filters: brain.Filter{UpdatedAfter: "not-a-time"}, Limit: 5}); !errors.Is(err, brain.ErrInvalid) {
+		t.Fatalf("invalid search filter = %v, want ErrInvalid", err)
+	}
+	if got, err := store.Search(ctx, scope, brain.PartSearch{Query: "q"}); err != nil || got != nil {
+		t.Fatalf("search with no limit = %v %v, want nothing", got, err)
 	}
 	if err := store.PutKind(ctx, brain.ObjectKind{}); err == nil {
 		t.Fatal("want empty kind")
@@ -168,237 +171,6 @@ var (
 	pgSkip    string
 	pgSchemas atomic.Int64
 )
-
-// TestPostgresStore_liveRetrievalChannels is the real-Postgres outcome for
-// scoped reads, ordered children, BM25 lexical, dense vector, and trigram search.
-func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	store, pool := testDB(t)
-
-	nsA := mustNS(t, "org", "a")
-	nsB := mustNS(t, "org", "b")
-	parentID := uuid.New()
-	chunkOAuth := uuid.New()
-	chunkOther := uuid.New()
-	chunkDeleted := uuid.New()
-	now := time.Now().UTC().Truncate(time.Microsecond)
-
-	mustExec(t, pool, `
-		INSERT INTO object_kinds (kind, description, is_part, is_parent, filterable_fields)
-		VALUES
-			('Document', 'parent docs', false, true, '[]'),
-			('Chunk', 'parts', true, false, '[{"name":"stage"}]')
-	`)
-	mustExec(t, pool, `
-		INSERT INTO objects (id, kind, title, summary, properties, content, parent_id, position, embedding, namespace, created_at, updated_at)
-		VALUES
-			($1, 'Document', 'OAuth Guide', 'parent', '{"vfs_path":"/workspace/work/oauth.md"}', NULL, NULL, NULL, NULL, $2, $3, $3),
-			($4, 'Chunk', 'pkce flow', '', '{"stage":"open"}', 'oauth pkce implementation details', $1, 1, '[1,0,0]'::vector, $2, $3, $3),
-			($5, 'Chunk', 'unrelated', '', '{}', 'cooking recipes and pasta', $1, 2, '[0,1,0]'::vector, $2, $3, $3),
-			($6, 'Chunk', 'gone', '', '{}', 'soft deleted oauth', $1, 3, '[1,0,0]'::vector, $2, $3, $3)
-	`, parentID, nsA, now, chunkOAuth, chunkOther, chunkDeleted)
-	mustExec(t, pool, `UPDATE objects SET deleted_at = $1 WHERE id = $2`, now, chunkDeleted)
-	mustExec(t, pool, `UPDATE objects SET embedding_model = 'test-model' WHERE embedding IS NOT NULL`)
-	docB := uuid.New()
-	mustExec(t, pool, `
-		INSERT INTO objects (id, kind, title, namespace, created_at, updated_at)
-		VALUES ($1, 'Document', 'other ns', $2, $3, $3)
-	`, docB, nsB, now)
-
-	scopeA := brain.Scope{Namespace: nsA}
-
-	listed, err := store.ListByKind(ctx, scopeA, "Document", 10)
-	if err != nil || len(listed) != 1 || listed[0].ID != parentID {
-		t.Fatalf("list by kind: %+v err=%v", listed, err)
-	}
-	byProp, err := store.GetByProperty(ctx, scopeA, brain.PropVFSPath, "/workspace/work/oauth.md")
-	if err != nil || byProp.ID != parentID {
-		t.Fatalf("get by vfs_path: %+v err=%v", byProp, err)
-	}
-	inUse, err := store.KindsWithObjects(ctx, scopeA)
-	if err != nil || len(inUse) != 1 || inUse[0] != "Document" {
-		t.Fatalf("kinds with objects: %v err=%v", inUse, err)
-	}
-
-	got, err := store.Get(ctx, scopeA, parentID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.ID != parentID || got.Title != "OAuth Guide" || !got.Namespace.Equal(nsA) {
-		t.Fatalf("get parent: %+v", got)
-	}
-
-	_, err = store.Get(ctx, scopeA, docB)
-	if !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("docB must be invisible under nsA: %v", err)
-	}
-	_, err = store.Get(ctx, brain.Scope{Namespace: nsB}, chunkOAuth)
-	if !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("chunk must be invisible outside its namespace: %v", err)
-	}
-	nestedID := uuid.New()
-	if err := putFixture(store, brain.Object{
-		ID: nestedID, Kind: "Document", Title: "nested",
-		Namespace: mustNS(t, "org", "a", "workspace", "west"),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	gotNested, err := store.Get(ctx, scopeA, nestedID)
-	if err != nil || gotNested.ID != nestedID {
-		t.Fatalf("org scope should see workspace row: %v %+v", err, gotNested)
-	}
-	_, err = store.Get(ctx, brain.Scope{Namespace: mustNS(t, "org", "a", "workspace", "east")}, nestedID)
-	if !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("other workspace: %v", err)
-	}
-	_, err = store.Get(ctx, scopeA, chunkDeleted)
-	if !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("soft-deleted chunk must be ErrNotFound: %v", err)
-	}
-
-	kids, err := store.ListChildren(ctx, scopeA, parentID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(kids) != 2 || kids[0].ID != chunkOAuth || kids[1].ID != chunkOther {
-		t.Fatalf("children ordered by position (deleted excluded): %+v", kids)
-	}
-	if kids[0].Position == nil || *kids[0].Position != 1 {
-		t.Fatalf("position: %+v", kids[0])
-	}
-
-	kind, err := store.GetKind(ctx, "Document")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if kind.Kind != "Document" || !kind.IsParent || kind.Description != "parent docs" {
-		t.Fatalf("get kind: %+v", kind)
-	}
-	kinds, err := store.ListKinds(ctx)
-	if err != nil || len(kinds) != 2 {
-		t.Fatalf("list kinds: %+v err=%v", kinds, err)
-	}
-
-	// BM25 lexical: oauth terms should rank the oauth chunk over pasta.
-	lex, err := store.SearchLexical(ctx, scopeA, "oauth pkce", mustFilter(t, map[string]any{"kind": "Chunk"}), 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lex) == 0 || lex[0].ID != chunkOAuth {
-		t.Fatalf("lexical top hit: %+v", lex)
-	}
-	if lex[0].ParentID == nil || *lex[0].ParentID != parentID {
-		t.Fatalf("lexical parent: %+v", lex[0])
-	}
-	if lex[0].Score <= 0 {
-		t.Fatalf("lexical score after invert should be > 0: %+v", lex[0])
-	}
-
-	// Property filter on lexical channel.
-	lexOpen, err := store.SearchLexical(ctx, scopeA, "oauth", mustFilter(t, map[string]any{"stage": "open"}), 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lexOpen) != 1 || lexOpen[0].ID != chunkOAuth {
-		t.Fatalf("lexical property filter: %+v", lexOpen)
-	}
-
-	// Vector: query near [1,0,0] should rank oauth chunk first.
-	vec, err := store.SearchVector(ctx, scopeA, "test-model", []float32{0.95, 0.05, 0}, mustFilter(t, map[string]any{"kind": "Chunk"}), 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(vec) == 0 || vec[0].ID != chunkOAuth {
-		t.Fatalf("vector top hit: %+v", vec)
-	}
-	if vec[0].ParentID == nil || *vec[0].ParentID != parentID {
-		t.Fatalf("vector parent: %+v", vec[0])
-	}
-
-	vecOpen, err := store.SearchVector(ctx, scopeA, "test-model", []float32{0.5, 0.5, 0}, mustFilter(t, map[string]any{"stage": "open"}), 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(vecOpen) != 1 || vecOpen[0].ID != chunkOAuth {
-		t.Fatalf("vector property filter: %+v", vecOpen)
-	}
-
-	tri, err := store.SearchTrigram(ctx, scopeA, "pkce flow", brain.Filter{}, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tri) == 0 || tri[0].ID != chunkOAuth {
-		t.Fatalf("trigram top hit: %+v", tri)
-	}
-	mustExec(t, pool, `UPDATE objects SET content = content || ' ' || repeat('padding word ', 80) || 'grace window' WHERE id = $1`, chunkOAuth)
-	grace, err := store.SearchTrigram(ctx, scopeA, "grace window", brain.Filter{}, 5)
-	if err != nil || len(grace) == 0 || grace[0].ID != chunkOAuth {
-		t.Fatalf("trigram phrase inside long body: %+v err=%v", grace, err)
-	}
-
-	vecB, err := store.SearchVector(ctx, brain.Scope{Namespace: nsB}, "", []float32{1, 0, 0}, brain.Filter{}, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(vecB) != 0 {
-		t.Fatalf("nsB must have no vector parts: %+v", vecB)
-	}
-	lexB, err := store.SearchLexical(ctx, brain.Scope{Namespace: nsB}, "oauth", brain.Filter{}, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lexB) != 0 {
-		t.Fatalf("nsB must have no lexical parts: %+v", lexB)
-	}
-
-	// Date / title / list filters on live SQL (same FilterPlan as Memory).
-	after := now.Add(-time.Hour).Format(time.RFC3339)
-	before := now.Add(time.Hour).Format(time.RFC3339)
-	lexDate, err := store.SearchLexical(ctx, scopeA, "oauth", mustFilter(t, map[string]any{
-		"updated_after":  after,
-		"updated_before": before,
-		"created_after":  after,
-		"created_before": before,
-		"title":          "pkce flow",
-	}), 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lexDate) != 1 || lexDate[0].ID != chunkOAuth {
-		t.Fatalf("date/title filters: %+v", lexDate)
-	}
-	lexList, err := store.SearchLexical(ctx, scopeA, "oauth", mustFilter(t, map[string]any{
-		"stage": []any{"open", "closed"},
-	}), 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lexList) != 1 || lexList[0].ID != chunkOAuth {
-		t.Fatalf("list property filter: %+v", lexList)
-	}
-}
-
-// TestPostgresStore_liveEmptyChannels is the zero-candidate outcome for
-// empty query / empty embedding / k<=0 without hitting the database error path.
-func TestPostgresStore_liveEmptyChannels(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	store, _ := testDB(t)
-	scope := brain.Scope{}
-	if got, err := store.SearchVector(ctx, scope, "", nil, brain.Filter{}, 10); err != nil || got != nil {
-		t.Fatalf("empty embedding: got=%v err=%v", got, err)
-	}
-	if got, err := store.SearchTrigram(ctx, scope, "", brain.Filter{}, 10); err != nil || got != nil {
-		t.Fatalf("empty query: got=%v err=%v", got, err)
-	}
-	if got, err := store.SearchLexical(ctx, scope, "x", brain.Filter{}, 0); err != nil || got != nil {
-		t.Fatalf("k=0 lexical: got=%v err=%v", got, err)
-	}
-	if got, err := store.SearchLexical(ctx, scope, "", brain.Filter{}, 10); err != nil || got != nil {
-		t.Fatalf("empty lexical query: got=%v err=%v", got, err)
-	}
-}
 
 // startPostgres starts one container for the test binary and installs the
 // extensions in public, where every test schema's Setup finds them.
@@ -554,10 +326,9 @@ func mustExec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	store, _ := testDB(t)
+	store, _ := testDBWith(t, postgres.Options{Embedding: brain.Embedding{Embedder: &storetest.Embedder{}}})
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	eng, err := brain.NewEngine(store,
-		brain.WithEmbedder(liveStubEmbedder{v: []float32{1, 0, 0}}),
 		brain.WithConfig(brain.EngineConfig{
 			DefaultLimit: 1, MaxLimit: 50, CandidateK: 20,
 			Now: func() time.Time { return now },
@@ -600,9 +371,6 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(c1.Embedding) != 3 || c1.Embedding[0] != 1 {
-		t.Fatalf("chunk embedding from put: %+v", c1.Embedding)
 	}
 	c2, err := eng.Put(ctx, scope, brain.Object{
 		Kind: "Chunk", Title: "pasta", Content: "cooking pasta recipes",
@@ -682,7 +450,7 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	if _, err := store.Get(ctx, scope, c1.ID); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft-deleted get: %v", err)
 	}
-	lex, err := store.SearchLexical(ctx, scope, "oauth", mustFilter(t, map[string]any{"kind": "Chunk"}), 10)
+	lex, err := store.Search(ctx, scope, brain.PartSearch{Query: "oauth", Filters: mustFilter(t, map[string]any{"kind": "Chunk"}), Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -723,13 +491,6 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	}
 }
 
-// liveStubEmbedder is a deterministic dense embedder for live Postgres hybrid search.
-type liveStubEmbedder struct{ v []float32 }
-
-func (s liveStubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	return repeatVector(s.v, len(texts)), nil
-}
-
 // TestApplyKinds_livePostgresMigration is the durable KindRegistry outcome:
 // host ApplyKinds upserts object_kinds, a new Engine LoadKindsFromStore adopts
 // them, and schema() / filter validation use the catalog.
@@ -737,10 +498,7 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store, _ := testDB(t)
-	// Compile-time / runtime: postgres.Store is a KindRegistry.
-	var _ brain.KindRegistry = store
-
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,7 +541,7 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 	}
 
 	// Fresh process: load durable kinds (no hard-coded WithKinds).
-	eng2, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng2, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -825,93 +583,21 @@ func TestPostgresStore_setupRegistersKinds(t *testing.T) {
 	}
 }
 
-// TestPostgresStore_lexicalRanksTitleAboveBody: a title hit outranks a body hit,
-// a partial term match fills the page, and a stopword matches nothing.
-func TestPostgresStore_lexicalRanksTitleAboveBody(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	store, pool := testDB(t)
-	ns := mustNS(t, "org", "fts")
-	parent := uuid.New()
-	titleHit := uuid.New()
-	bodyHit := uuid.New()
-	bothHit := uuid.New()
-	onlyA := uuid.New()
-	onlyB := uuid.New()
-	now := time.Now().UTC()
-	mustExec(t, pool, `
-		INSERT INTO objects (id, kind, title, summary, content, parent_id, position, namespace, created_at, updated_at)
-		VALUES
-			($1, 'Document', 'Guide', '', NULL, NULL, NULL, $2, $3, $3),
-			($4, 'Chunk', $5, '', 'shipping notes', $1, 1, $2, $3, $3),
-			($6, 'Chunk', 'weekly', '', 'zymurgy', $1, 2, $2, $3, $3),
-			($7, 'Chunk', 'alphaonlyterm betaonlyterm', '', 'paired', $1, 3, $2, $3, $3),
-			($8, 'Chunk', 'notes', '', 'alphaonlyterm', $1, 4, $2, $3, $3),
-			($9, 'Chunk', 'notes', '', 'betaonlyterm', $1, 5, $2, $3, $3)
-	`, parent, ns, now, titleHit, "zymurgy "+strings.Repeat("filler ", 100), bodyHit, bothHit, onlyA, onlyB)
-
-	scope := brain.Scope{Namespace: ns}
-	top, err := store.SearchLexical(ctx, scope, "zymurgy", brain.Filter{}, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(top) != 1 || top[0].ID != titleHit || top[0].Score <= 0 {
-		t.Fatalf("title page: %+v", top)
-	}
-	ranked, err := store.SearchLexical(ctx, scope, "zymurgy", brain.Filter{}, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ranked) < 2 || ranked[0].ID != titleHit || ranked[0].Score <= ranked[1].Score {
-		t.Fatalf("title should outrank body: %+v", ranked)
-	}
-	filled, err := store.SearchLexical(ctx, scope, "alphaonlyterm betaonlyterm", brain.Filter{}, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(filled) != 3 || filled[0].ID != bothHit {
-		t.Fatalf("any-term fill: %+v", filled)
-	}
-	if got, err := store.SearchLexical(ctx, scope, "the", brain.Filter{}, 5); err != nil || len(got) != 0 {
-		t.Fatalf("stopword: %+v err=%v", got, err)
-	}
-	if _, err := store.SaveSessionMessages(ctx, ns, "sess/1", "g1", []brain.SessionMessage{{
-		Role: "user", Body: []byte(`{"role":"user","content":"quillwort"}`), SearchText: "quillwort grows in the margin",
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	msgScope := brain.Scope{Namespace: ns, SessionID: "sess/1"}
-	msgs, err := store.SearchLexical(ctx, msgScope, "quillwort", brain.Filter{}, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var saw bool
-	for _, hit := range msgs {
-		if strings.Contains(hit.Content, "quillwort") {
-			saw = true
-		}
-	}
-	if !saw {
-		t.Fatalf("session message: %+v", msgs)
-	}
-}
-
-func (liveStubEmbedder) Model() string { return "test-model" }
-
 // putFixture writes obj straight to the store under its own namespace.
-func putFixture(w brain.ObjectWriter, obj brain.Object) error {
-	return w.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, obj)
+func putFixture(s brain.Store, obj brain.Object) error {
+	_, err := s.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, brain.Indexed{Object: obj})
+	return err
 }
 
 func TestPostgresStore_isolationContract(t *testing.T) {
 	t.Parallel()
-	storetest.Run(t, func(t *testing.T) storetest.Store {
-		store, _ := testDB(t)
+	storetest.Run(t, func(t *testing.T, emb brain.Embedder) brain.Store {
+		store, _ := testDBWith(t, postgres.Options{Embedding: brain.Embedding{Embedder: emb}})
 		return store
 	})
 }
 
-func TestStore_concurrentSetupMigratesOnceAndRejectsADimensionChange(t *testing.T) {
+func TestStore_concurrentSetupsSucceedAndADimensionChangeFails(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	schema := testSchema(t)
@@ -931,16 +617,17 @@ func TestStore_concurrentSetupMigratesOnceAndRejectsADimensionChange(t *testing.
 	}
 	wg.Wait()
 	resized := newStore(5).Setup(ctx)
-	var applied, version int
-	if err := pgAdmin.QueryRow(ctx, `SELECT count(*), max(version) FROM `+schema+`.schema_migrations`).Scan(&applied, &version); err != nil {
-		t.Fatal(err)
-	}
+	store := newStore(3)
+	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
+	doc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "after setup", Namespace: scope.Namespace}
+	putErr := putFixture(store, doc)
+	got, getErr := store.Get(ctx, scope, doc.ID)
 
 	if err := errors.Join(errs...); err != nil {
 		t.Fatalf("concurrent setup: %v", err)
 	}
-	if applied == 0 || applied != version {
-		t.Fatalf("migrations applied = %d, version = %d, want each version applied once", applied, version)
+	if putErr != nil || getErr != nil || got.Title != "after setup" {
+		t.Fatalf("store after concurrent setups: put %v, get %+v %v", putErr, got, getErr)
 	}
 	if resized == nil || !strings.Contains(resized.Error(), "EmbeddingDim") {
 		t.Fatalf("setup with a new dimension = %v", resized)
@@ -951,7 +638,7 @@ func TestStore_auditEventsArePersisted(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store, pool := testDB(t)
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithAudit(store.Record))
+	eng, err := brain.NewEngine(store, brain.WithAudit(store.Record))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1005,11 +692,150 @@ func TestStore_setupWaitsForAnotherSetupPastTheStatementTimeout(t *testing.T) {
 	}
 }
 
-// repeatVector returns n copies of v, one per embedded text.
-func repeatVector(v []float32, n int) [][]float32 {
-	out := make([][]float32, n)
-	for i := range out {
-		out[i] = v
+func TestEngine_aClosedStoreFailsTheCallsThatFollowAGraphHit(t *testing.T) {
+	ctx := t.Context()
+	store, err := postgres.Open(ctx, pgConn, postgres.Options{Schema: testSchema(t), EmbeddingDim: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Setup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
+	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
+	from, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "from"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	to, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "to"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kg.Link(ctx, scope, from.ID, to.ID, "references"); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	_, pathErr := kg.ShortestPath(ctx, scope, brain.PathRequest{From: from.ID, To: to.ID})
+	_, findErr := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "from"}, brain.NewSearchContext())
+	kindsErr := eng.ApplyKinds(ctx, brain.KindSpec{Kind: "Document", IsParent: true})
+
+	for name, err := range map[string]error{"shortest path": pathErr, "find objects": findErr, "apply kinds": kindsErr} {
+		if err == nil || !strings.Contains(err.Error(), "closed pool") {
+			t.Errorf("%s on a closed store = %v, want its error", name, err)
+		}
+	}
+}
+
+func TestStore_searchRanksByTheWordsTheWayAReaderExpects(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, _ := testDB(t)
+	ns := mustNS(t, "org", "fts")
+	doc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "Guide", Namespace: ns}
+	titleHit := chunk(doc, "zymurgy", "shipping notes "+strings.Repeat("filler ", 100), 0)
+	bodyHit := chunk(doc, "weekly", "zymurgy", 1)
+	both := chunk(doc, "alphaonlyterm betaonlyterm", "paired", 2)
+	onlyA, onlyB := chunk(doc, "notes", "alphaonlyterm", 3), chunk(doc, "notes", "betaonlyterm", 4)
+	deep := chunk(doc, "long", strings.Repeat("padding word ", 80)+"grace window", 5)
+	if _, err := store.PutTree(ctx, brain.Scope{Namespace: ns}, brain.Indexed{Object: doc}, indexedParts(titleHit, bodyHit, both, onlyA, onlyB, deep)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveSessionMessages(ctx, ns, "sess/1", "g1", []brain.SessionMessage{{
+		Role: "user", Body: []byte(`{"role":"user","content":"quillwort"}`), SearchText: "quillwort grows in the margin",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	search := func(query string, exact bool) []brain.ScoredID {
+		hits, err := store.Search(ctx, brain.Scope{Namespace: ns, SessionID: "sess/1"}, brain.PartSearch{Query: query, Exact: exact, Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hits
+	}
+
+	zymurgy := search("zymurgy", false)
+	terms := search("alphaonlyterm betaonlyterm", false)
+	phrase := search("grace window", true)
+	session := search("quillwort", false)
+
+	if len(zymurgy) != 2 || zymurgy[0].ID != titleHit.ID || zymurgy[1].ID != bodyHit.ID {
+		t.Errorf("a title hit and a body hit = %v, want the title hit first", hitIDs(zymurgy))
+	}
+	if len(terms) != 3 || terms[0].ID != both.ID {
+		t.Errorf("two terms = %v, want the part holding both first, then each part holding one", hitIDs(terms))
+	}
+	if len(phrase) == 0 || phrase[0].ID != deep.ID {
+		t.Errorf("exact search for a phrase deep in a long body = %v, want that part", hitIDs(phrase))
+	}
+	if stop := search("the", false); len(stop) != 0 {
+		t.Errorf("a stopword = %v, want nothing", hitIDs(stop))
+	}
+	if len(session) != 1 || !strings.Contains(session[0].Content, "quillwort") {
+		t.Errorf("the session's message = %+v, want it found by its words", session)
+	}
+}
+
+func TestStore_searchByMeaningKeepsFiltersAndNestedNamespaces(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, _ := testDBWith(t, postgres.Options{Embedding: brain.Embedding{Embedder: &storetest.Embedder{}}})
+	org := mustNS(t, "org", uuid.NewString())
+	west := append(org.Clone(), brain.Attr{Name: "workspace", Value: "west"})
+	east := append(org.Clone(), brain.Attr{Name: "workspace", Value: "east"})
+	doc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "fleet", Namespace: west}
+	manual, list := chunk(doc, "manual", "car manual", 0), chunk(doc, "list", "car parts list", 1)
+	manual.Properties, list.Properties = map[string]any{"stage": "open"}, map[string]any{"stage": "closed"}
+	if _, err := store.PutTree(ctx, brain.Scope{Namespace: west}, brain.Indexed{Object: doc}, indexedParts(manual, list)); err != nil {
+		t.Fatal(err)
+	}
+	search := func(ns brain.Namespace, filter brain.Filter) []uuid.UUID {
+		hits, err := store.Search(ctx, brain.Scope{Namespace: ns}, brain.PartSearch{Query: "automobile", Filters: filter, Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hitIDs(hits)
+	}
+
+	open := search(org, mustFilter(t, map[string]any{"stage": "open"}))
+	all := search(org, brain.Filter{})
+	sibling := search(east, brain.Filter{})
+
+	if !slices.Equal(open, []uuid.UUID{manual.ID}) {
+		t.Errorf("by meaning with a filter = %v, want the open part only", open)
+	}
+	if len(all) != 2 || len(sibling) != 0 {
+		t.Errorf("by meaning from the org = %v, from a sibling workspace = %v, want both parts, then none", all, sibling)
+	}
+}
+
+// chunk is a part of parent, indexed by its content, as Engine hands it to
+// PutTree.
+func chunk(parent brain.Object, title, content string, position int) brain.Indexed {
+	return brain.Indexed{Object: brain.Object{
+		ID: uuid.New(), Kind: "Chunk", Title: title, Content: content, Namespace: parent.Namespace,
+		ParentID: &parent.ID, Position: new(position),
+	}, Text: content}
+}
+
+func indexedParts(in ...brain.Indexed) iter.Seq2[brain.Indexed, error] {
+	return func(yield func(brain.Indexed, error) bool) {
+		for _, p := range in {
+			if !yield(p, nil) {
+				return
+			}
+		}
+	}
+}
+
+func hitIDs(hits []brain.ScoredID) []uuid.UUID {
+	out := make([]uuid.UUID, len(hits))
+	for i, h := range hits {
+		out[i] = h.ID
 	}
 	return out
 }

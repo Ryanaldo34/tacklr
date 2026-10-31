@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -55,10 +56,10 @@ func (e *countingEmbedder) take() int {
 
 func TestEngine_putTreeHoldsAFewBatchesWhateverTheTreeSizeAndReusesUnchangedParts(t *testing.T) {
 	ctx := t.Context()
-	store := brain.NewMemoryStore()
 	emb := &countingEmbedder{}
 	const batch, slots, total = 4, 2, 1000
-	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb), brain.WithConfig(brain.EngineConfig{EmbedBatchSize: batch, EmbedConcurrency: slots}))
+	store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb, BatchSize: batch, Concurrency: slots}))
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,53 +101,47 @@ func TestEngine_putTreeHoldsAFewBatchesWhateverTheTreeSizeAndReusesUnchangedPart
 
 func TestEngine_putTreeFailsOnABadPartOrSourceAndKeepsThePreviousTree(t *testing.T) {
 	ctx := t.Context()
-	store := brain.NewMemoryStore()
-	emb := &countingEmbedder{}
-	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb))
-	if err != nil {
-		t.Fatal(err)
-	}
 	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
-	doc, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "v1"}, brain.Parts(brain.Object{Kind: "Chunk", Content: "kept"}))
-	if err != nil {
-		t.Fatal(err)
-	}
 	failing := func(yield func(brain.Object, error) bool) {
 		if yield(brain.Object{Kind: "Chunk", Content: "first"}, nil) {
 			yield(brain.Object{}, errors.New("disk read failed"))
 		}
 	}
-	catalogEng, err := brain.NewEngine(store, brain.WithEmbedder(emb), brain.WithKinds(
-		brain.KindSpec{Kind: "Document", IsParent: true}, brain.KindSpec{Kind: "Chunk", IsPart: true}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	short := &countingEmbedder{short: true}
-	down, err := brain.NewEngine(store, brain.WithEmbedder(&countingEmbedder{failOn: "doomed"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	shortEng, err := brain.NewEngine(store, brain.WithEmbedder(short))
-	if err != nil {
-		t.Fatal(err)
-	}
+	catalog := brain.WithKinds(brain.KindSpec{Kind: "Document", IsParent: true}, brain.KindSpec{Kind: "Chunk", IsPart: true})
 
 	for name, tc := range map[string]struct {
-		eng   *brain.Engine
+		fault func(*countingEmbedder) // breaks the embedder after the first tree
+		opts  []brain.EngineOption
 		parts iter.Seq2[brain.Object, error]
 		want  string
 	}{
-		"a part with an id":            {eng, brain.Parts(brain.Object{ID: uuid.New(), Kind: "Chunk", Content: "x"}), "part ids come from content"},
-		"a part in another namespace":  {eng, brain.Parts(brain.Object{Kind: "Chunk", Content: "x", Namespace: mustNS(t, "org", "b")}), "is not the parent's"},
-		"a soft-deleted part":          {eng, brain.Parts(brain.Object{Kind: "Chunk", Content: "x", DeletedAt: new(doc.UpdatedAt)}), "soft-deleted"},
-		"a source read error":          {eng, failing, "disk read failed"},
-		"an embedder short a vector":   {shortEng, brain.Parts(brain.Object{Kind: "Chunk", Content: "x"}), "returned 0 vectors for 1 texts"},
-		"a part the embedder fails on": {down, brain.Parts(brain.Object{Kind: "Chunk", Content: "doomed"}), "embedding API down"},
-		"a part of an unknown kind":    {catalogEng, brain.Parts(brain.Object{Kind: "Unknown", Content: "x"}), "Unknown"},
+		"a part with an id":            {nil, nil, brain.Parts(brain.Object{ID: uuid.New(), Kind: "Chunk", Content: "x"}), "part ids come from content"},
+		"a part in another namespace":  {nil, nil, brain.Parts(brain.Object{Kind: "Chunk", Content: "x", Namespace: mustNS(t, "org", "b")}), "is not the parent's"},
+		"a soft-deleted part":          {nil, nil, brain.Parts(brain.Object{Kind: "Chunk", Content: "x", DeletedAt: new(time.Now())}), "soft-deleted"},
+		"a source read error":          {nil, nil, failing, "disk read failed"},
+		"an embedder short a vector":   {func(e *countingEmbedder) { e.short = true }, nil, brain.Parts(brain.Object{Kind: "Chunk", Content: "x"}), "returned 0 vectors for 1 texts"},
+		"a part the embedder fails on": {func(e *countingEmbedder) { e.failOn = "doomed" }, nil, brain.Parts(brain.Object{Kind: "Chunk", Content: "doomed"}), "embedding API down"},
+		"a part of an unknown kind":    {nil, []brain.EngineOption{catalog}, brain.Parts(brain.Object{Kind: "Unknown", Content: "x"}), "Unknown"},
 	} {
+		emb := &countingEmbedder{}
+		store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb}))
+		eng, err := brain.NewEngine(store, tc.opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "v1"}, brain.Parts(brain.Object{Kind: "Chunk", Content: "kept"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.fault != nil {
+			emb.mu.Lock()
+			tc.fault(emb)
+			emb.mu.Unlock()
+		}
 		renamed := doc
 		renamed.Title = "v2"
-		_, err := tc.eng.PutTree(ctx, scope, renamed, tc.parts)
+
+		_, err = eng.PutTree(ctx, scope, renamed, tc.parts)
 		kids, _ := store.ListChildren(ctx, scope, doc.ID)
 		parent, _ := store.Get(ctx, scope, doc.ID)
 
@@ -159,32 +154,23 @@ func TestEngine_putTreeFailsOnABadPartOrSourceAndKeepsThePreviousTree(t *testing
 	}
 }
 
-// failEnsure is a graph whose node writes fail.
-type failEnsure struct{ *brain.MemoryGraph }
-
-func (failEnsure) EnsureObject(context.Context, brain.Object, string) error {
-	return errors.New("graph down")
-}
-
-func TestEngine_putTreeWithNoPartsEmptiesTheTreeAndReportsAGraphFailureAfterTheStoreWrite(t *testing.T) {
+func TestEngine_putTreeWithNoPartsEmptiesTheTree(t *testing.T) {
 	ctx := t.Context()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(failEnsure{brain.NewMemoryGraph()}))
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
-	doc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "doc"}
-	_, first := eng.PutTree(ctx, scope, doc, brain.Parts(brain.Object{Kind: "Chunk", Content: "old"}))
+	doc, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "doc"}, brain.Parts(brain.Object{Kind: "Chunk", Content: "old"}))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	_, err = eng.PutTree(ctx, scope, doc, nil)
 	kids, _ := store.ListChildren(ctx, scope, doc.ID)
 
-	if !errors.Is(first, brain.ErrGraphEnsure) || !errors.Is(err, brain.ErrGraphEnsure) {
-		t.Errorf("put tree with a failing graph = %v, %v, want ErrGraphEnsure", first, err)
-	}
-	// The store is the source of truth: the tree is written before the graph.
-	if len(kids) != 0 {
-		t.Errorf("parts after a put with no parts = %v, want none", kids)
+	if err != nil || len(kids) != 0 {
+		t.Errorf("put tree with no parts = %v, parts %v, want none", err, kids)
 	}
 }

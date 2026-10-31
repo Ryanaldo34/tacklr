@@ -1,6 +1,8 @@
 package brain
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -101,21 +103,6 @@ func TestTemporal_prefersFresherWhenSimilar(t *testing.T) {
 	}
 }
 
-func TestEngineConfig_explicitZeroLambdaPreserved(t *testing.T) {
-	zero := 0.0
-	cfg := EngineConfig{Lambda: &zero}.withDefaults()
-	if cfg.Lambda == nil || *cfg.Lambda != 0 {
-		t.Fatalf("want preserved zero, got %v", cfg.Lambda)
-	}
-	cfg2 := EngineConfig{}.withDefaults()
-	if cfg2.Lambda == nil || *cfg2.Lambda != 0 {
-		t.Fatalf("want default lambda 0, got %v", cfg2.Lambda)
-	}
-	if cfg2.lambdaValue() != 0 {
-		t.Fatal("lambdaValue default")
-	}
-}
-
 func TestPromote_multipleEvidenceAndParentHit(t *testing.T) {
 	parent := uuid.New()
 	p1, p2, p3 := uuid.New(), uuid.New(), uuid.New()
@@ -177,4 +164,38 @@ func idsOf(parts []ScoredID) []uuid.UUID {
 		out[i] = p.ID
 	}
 	return out
+}
+
+func TestRanking_fuseEdgesAgesEachListByUpdatedAt(t *testing.T) {
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	from, stale, fresh := uuid.New(), uuid.New(), uuid.New()
+	old := EdgeSearchHit{FromID: from, ToID: stale, RelationType: "about", Score: 1, Meta: EdgeMeta{UpdatedAt: now.AddDate(0, -6, 0)}}
+	recent := EdgeSearchHit{FromID: from, ToID: fresh, RelationType: "about", Score: 0.9, Meta: EdgeMeta{UpdatedAt: now}}
+
+	plain := Ranking{}.FuseEdges([]EdgeSearchHit{old, recent})
+	aged := Ranking{Decay: 0.05, Now: func() time.Time { return now }}.FuseEdges([]EdgeSearchHit{old, recent}, []EdgeSearchHit{recent})
+
+	if plain[0].ToID != stale || aged[0].ToID != fresh || len(aged) != 2 {
+		t.Fatalf("without decay first = %s, with decay = %+v, want the stale edge first, then the fresh one", plain[0].ToID, aged)
+	}
+}
+
+func TestEmbedding_embedBatchesStopsAtTheFirstStageError(t *testing.T) {
+	parts := func(yield func(Indexed, error) bool) {
+		for i := range 10 {
+			if !yield(Indexed{Object: Object{ID: uuid.New()}, Text: strings.Repeat("x", i+1)}, nil) {
+				return
+			}
+		}
+	}
+	staged := 0
+
+	n, err := Embedding{BatchSize: 2, Concurrency: 1}.EmbedBatches(t.Context(), parts, func(uuid.UUID) bool { return false }, func(context.Context, []TreePart) error {
+		staged++
+		return errors.New("disk full")
+	})
+
+	if err == nil || err.Error() != "disk full" || staged != 1 || n > 4 {
+		t.Fatalf("embed batches = %d parts read, %d batches staged, %v, want it to stop at the failed stage", n, staged, err)
+	}
 }

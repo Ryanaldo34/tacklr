@@ -4,11 +4,10 @@
 // brain.NewEngine. Every connection's search_path is the tacklr schema, then
 // public, with a server-side statement_timeout (Options).
 // A transaction-mode pooler must support prepared statements and forward
-// those startup parameters. Run Setup as a deploy step: it applies versioned
-// migrations (schema_migrations) under an advisory lock, so concurrent runs
-// are safe. Tables live in Options.Schema (default "tacklr"): objects,
-// objects_staging, object_kinds, session_messages, audit_events, and
-// schema_migrations.
+// those startup parameters. Run Setup on each deploy: its schema script is
+// idempotent, and concurrent runs wait for each other on an advisory lock.
+// Tables live in Options.Schema (default "tacklr"): objects, objects_staging,
+// object_kinds, session_messages, and audit_events.
 // Store.Record is a brain.AuditFunc over audit_events (brain.WithAudit(store.Record)).
 //
 // Lexical search uses a stored tsvector, search_tsv, on objects. Title is weight
@@ -31,9 +30,8 @@
 // entries. A failed check rolls the whole batch back. A session window is
 // saved as one batch too: each row takes its key's generation or the next one.
 //
-// Setup runs one script: the schema bootstrap, then one DO block per schema
-// version that applies it only when schema_migrations lacks it, then the
-// vector size check. PurgeDeleted and Erase are single statements.
+// Setup runs one script that creates whatever is missing, then checks the
+// vector size. PurgeDeleted and Erase are single statements.
 //
 // Other object indexes: namespace GIN (jsonb @>), parent btree (list children),
 // a partial kind btree for live parents, and HNSW for vectors. Session messages

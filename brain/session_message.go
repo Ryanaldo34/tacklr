@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -20,14 +21,12 @@ const (
 )
 
 // SessionMessage is one exact message saved from a context window before a plan handoff.
-// Body is the message JSON. SearchText is the visible text used for retrieval.
-// Embedding is optional. A failed embed leaves it nil and the row still saves.
+// Body is the message JSON. SearchText is the visible text the store indexes
+// (and embeds, when it has an Embedder) for retrieval.
 type SessionMessage struct {
-	Role           string
-	Body           []byte
-	SearchText     string
-	Embedding      []float32
-	EmbeddingModel string
+	Role       string
+	Body       []byte
+	SearchText string
 }
 
 // NamespaceForSession is the host namespace with the session id as the last attribute.
@@ -38,64 +37,28 @@ func NamespaceForSession(host Namespace, sessionID string) Namespace {
 }
 
 // SaveSessionMessages writes one pre-handoff context window under host.
-// Embed errors do not fail the save. A store that cannot write returns ErrUnsupported.
+// The store indexes each message; an embedding failure does not fail the save.
 func (e *Engine) SaveSessionMessages(ctx context.Context, host Namespace, sessionID, generationKey string, messages []SessionMessage) (int, error) {
-	w, err := capability[SessionWriter](ctx, e, host, "session messages")
-	if err != nil {
+	if err := checkScope(ctx, host); err != nil {
 		return 0, err
 	}
-	if e.embedder != nil {
-		if err := e.embedSessionMessages(ctx, messages); err != nil {
-			return 0, err
-		}
-	}
-	gen, err := w.SaveSessionMessages(ctx, host, sessionID, generationKey, messages)
+	gen, err := e.store.SaveSessionMessages(ctx, host, sessionID, generationKey, messages)
 	if err != nil {
 		return 0, err
 	}
 	return gen, e.record(ctx, Scope{Namespace: host, SessionID: sessionID}, AuditEvent{Op: AuditSessionSave, Count: len(messages)})
 }
 
-// embedSessionMessages fills missing vectors in batches. An embed error only
-// leaves that batch without vectors; a cancelled ctx stops the save.
-func (e *Engine) embedSessionMessages(ctx context.Context, messages []SessionMessage) error {
-	var pending []int
-	for i, m := range messages {
-		if strings.TrimSpace(m.SearchText) != "" && len(m.Embedding) == 0 {
-			pending = append(pending, i)
-		}
-	}
-	for batch := range slices.Chunk(pending, e.cfg.EmbedBatchSize) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		texts := make([]string, len(batch))
-		for j, i := range batch {
-			texts[j] = strings.TrimSpace(messages[i].SearchText)
-		}
-		vecs, err := e.embed(ctx, texts)
-		if err != nil {
-			slog.ErrorContext(ctx, "session message embed failed", "error", err)
-			continue
-		}
-		for j, i := range batch {
-			messages[i].Embedding, messages[i].EmbeddingModel = vecs[j], e.embedder.Model()
-		}
-	}
-	return nil
-}
-
 // DeleteSessionMessages removes every saved message for sessionID under host.
 func (e *Engine) DeleteSessionMessages(ctx context.Context, host Namespace, sessionID string) error {
-	w, err := capability[SessionWriter](ctx, e, host, "session messages")
-	if err != nil {
+	if err := checkScope(ctx, host); err != nil {
 		return err
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return fmt.Errorf("%w: session id is required", ErrInvalid)
 	}
-	if err := w.DeleteSessionMessages(ctx, host, sessionID); err != nil {
+	if err := e.store.DeleteSessionMessages(ctx, host, sessionID); err != nil {
 		return err
 	}
 	return e.record(ctx, Scope{Namespace: host, SessionID: sessionID}, AuditEvent{Op: AuditSessionDelete})
@@ -105,11 +68,10 @@ func (e *Engine) DeleteSessionMessages(ctx context.Context, host Namespace, sess
 // for every session (retention for sessions that are never closed). It
 // returns how many rows it removed.
 func (e *Engine) PurgeSessionMessages(ctx context.Context, host Namespace, before time.Time) (int, error) {
-	w, err := capability[SessionWriter](ctx, e, host, "session messages")
-	if err != nil {
+	if err := checkScope(ctx, host); err != nil {
 		return 0, err
 	}
-	n, err := w.PurgeSessionMessages(ctx, host, before)
+	n, err := e.store.PurgeSessionMessages(ctx, host, before)
 	if err != nil {
 		return 0, err
 	}
@@ -187,8 +149,9 @@ func (s *MemoryStore) initSessionLocked() {
 	}
 }
 
-// SaveSessionMessages implements SessionWriter.
-func (s *MemoryStore) SaveSessionMessages(_ context.Context, host Namespace, sessionID, generationKey string, messages []SessionMessage) (int, error) {
+// SaveSessionMessages implements Store. It embeds each message's SearchText
+// in batches; a failed batch is logged and saves without vectors.
+func (s *MemoryStore) SaveSessionMessages(ctx context.Context, host Namespace, sessionID, generationKey string, messages []SessionMessage) (int, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	generationKey = strings.TrimSpace(generationKey)
 	if sessionID == "" {
@@ -203,9 +166,14 @@ func (s *MemoryStore) SaveSessionMessages(_ context.Context, host Namespace, ses
 	if err := host.Validate(); err != nil {
 		return 0, err
 	}
+	vecs, err := s.embedMessages(ctx, messages)
+	if err != nil {
+		return 0, err
+	}
 	ns := NamespaceForSession(host, sessionID)
 	key := ns.Key()
 	now := time.Now().UTC()
+	model := s.embedding.Model()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.initSessionLocked()
@@ -220,6 +188,10 @@ func (s *MemoryStore) SaveSessionMessages(_ context.Context, host Namespace, ses
 	}
 	for i, msg := range messages {
 		id := uuid.New()
+		var rowModel string
+		if vecs[i] != nil {
+			rowModel = model
+		}
 		s.sessionMsgs[id] = sessionRow{
 			id:            id,
 			sessionID:     sessionID,
@@ -230,8 +202,8 @@ func (s *MemoryStore) SaveSessionMessages(_ context.Context, host Namespace, ses
 			body:          slices.Clone(msg.Body),
 			searchText:    msg.SearchText,
 			namespace:     ns.Clone(),
-			embedding:     slices.Clone(msg.Embedding),
-			model:         msg.EmbeddingModel,
+			embedding:     vecs[i],
+			model:         rowModel,
 			created:       now,
 			updated:       now,
 		}
@@ -241,6 +213,39 @@ func (s *MemoryStore) SaveSessionMessages(_ context.Context, host Namespace, ses
 	}
 	s.sessionKeys[key][generationKey] = gen
 	return gen, nil
+}
+
+// embedMessages returns one vector per message (nil when it has no text or
+// its batch failed). Only a done ctx fails it.
+func (s *MemoryStore) embedMessages(ctx context.Context, messages []SessionMessage) ([][]float32, error) {
+	vecs := make([][]float32, len(messages))
+	if !s.embedding.Enabled() {
+		return vecs, nil
+	}
+	var pending []int
+	for i, m := range messages {
+		if strings.TrimSpace(m.SearchText) != "" {
+			pending = append(pending, i)
+		}
+	}
+	for batch := range slices.Chunk(pending, cmp.Or(s.embedding.BatchSize, 128)) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		texts := make([]string, len(batch))
+		for j, i := range batch {
+			texts[j] = strings.TrimSpace(messages[i].SearchText)
+		}
+		got, err := s.embedding.Embed(ctx, texts)
+		if err != nil {
+			slog.ErrorContext(ctx, "session message embed failed", "error", err)
+			continue
+		}
+		for j, i := range batch {
+			vecs[i] = got[j]
+		}
+	}
+	return vecs, nil
 }
 
 // appendSessionParts adds this session's messages to an object candidate list.
@@ -256,7 +261,7 @@ func (s *MemoryStore) appendSessionParts(scope Scope, parts []Object) []Object {
 	return parts
 }
 
-// DeleteSessionMessages implements SessionWriter.
+// DeleteSessionMessages implements Store.
 func (s *MemoryStore) DeleteSessionMessages(_ context.Context, host Namespace, sessionID string) error {
 	if err := host.Validate(); err != nil {
 		return err
@@ -274,7 +279,7 @@ func (s *MemoryStore) DeleteSessionMessages(_ context.Context, host Namespace, s
 	return nil
 }
 
-// PurgeSessionMessages implements SessionWriter.
+// PurgeSessionMessages implements Store.
 func (s *MemoryStore) PurgeSessionMessages(_ context.Context, host Namespace, before time.Time) (int, error) {
 	if err := host.Validate(); err != nil {
 		return 0, err

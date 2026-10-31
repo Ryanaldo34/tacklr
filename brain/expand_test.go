@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -11,11 +12,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
 // TestExpand_cancelledContextFailsClosed before store work.
 func TestExpand_cancelledContextFailsClosed(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +46,7 @@ func TestExpand_partNeighborhoodWindow(t *testing.T) {
 			ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 		})
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{SiblingRadius: 1}))
+	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{SiblingRadius: 1}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +87,7 @@ func TestExpand_highCardinalityResultSetAndContinue(t *testing.T) {
 			Namespace: ns, UpdatedAt: now,
 		})
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{
+	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
 		ExpandInlineMax: 5, MaxResultSetSize: 10, DefaultLimit: 3, MaxLimit: 50,
 		Now: func() time.Time { return now },
 	}))
@@ -116,171 +118,152 @@ func TestExpand_highCardinalityResultSetAndContinue(t *testing.T) {
 	}
 }
 
-// TestExpand_directionFiltersEdges: Direction=out ignores inbound edges (multi-hop depths covered by eval golden).
-func TestExpand_directionFiltersEdges(t *testing.T) {
+func TestExpand_followsTheDirectionAsked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	a, b, c := uuid.New(), uuid.New(), uuid.New()
-	for _, id := range []uuid.UUID{a, b, c} {
-		_ = putFixture(store, brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], Namespace: ns, UpdatedAt: now})
-	}
-	_ = g.AddEdge(ctx, a, b, "references", brain.EdgeMeta{})
-	_ = g.AddEdge(ctx, b, c, "references", brain.EdgeMeta{})
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithExpandRecipes(
+		brain.ExpandRecipe{Name: "outward", RelationTypes: []string{"references"}, Direction: "out"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// From b: inbound a, outbound c. out → only c.
-	outOnly, err := eng.Expand(ctx, brain.Scope{Namespace: ns}, brain.ExpandRequest{
-		ObjectID: b, RelationTypes: []string{"references"}, Direction: "out",
-	}, brain.NewSearchContext())
-	if err != nil || len(outOnly.Objects) != 1 || outOnly.Objects[0].ID != c {
-		t.Fatalf("out only: %+v err=%v", outOnly.Objects, err)
-	}
-	inOnly, err := eng.Expand(ctx, brain.Scope{Namespace: ns}, brain.ExpandRequest{
-		ObjectID: b, RelationTypes: []string{"references"}, Direction: "in",
-	}, brain.NewSearchContext())
-	if err != nil || len(inOnly.Objects) != 1 || inOnly.Objects[0].ID != a {
-		t.Fatalf("in only: %+v err=%v", inOnly.Objects, err)
-	}
-	both, err := eng.Expand(ctx, brain.Scope{Namespace: ns}, brain.ExpandRequest{
-		ObjectID: b, RelationTypes: []string{"references"},
-	}, brain.NewSearchContext())
-	if err != nil || len(both.Objects) != 2 {
-		t.Fatalf("default direction: %+v err=%v", both.Objects, err)
-	}
-	got := map[uuid.UUID]bool{}
-	for _, o := range both.Objects {
-		got[o.ID] = true
-	}
-	if !got[a] || !got[c] {
-		t.Fatalf("default direction want inbound and outbound: %+v", both.Objects)
-	}
-}
-
-// TestExpand_graphContinuePreservesRelation: large graph expand stores hop meta for continue.
-func TestExpand_graphContinuePreservesRelation(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	root := uuid.New()
-	_ = putFixture(store, brain.Object{ID: root, Kind: "Document", Title: "root", Namespace: ns, UpdatedAt: now})
-	for i := 0; i < 8; i++ {
-		id := uuid.New()
-		_ = putFixture(store, brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], Namespace: ns, UpdatedAt: now})
-		_ = g.AddEdge(ctx, root, id, "references", brain.EdgeMeta{Note: "hop-" + id.String()[:4]})
-	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{
-		ExpandInlineMax: 2, DefaultLimit: 2, MaxLimit: 50, GraphNeighborK: 50,
-		Now: func() time.Time { return now },
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sc := brain.NewSearchContext()
-	page1, err := eng.Expand(ctx, brain.Scope{Namespace: ns}, brain.ExpandRequest{
-		ObjectID: root, RelationTypes: []string{"references"}, Limit: 2,
-	}, sc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !page1.HasMore || page1.ResultSetID == uuid.Nil || len(page1.Objects) != 2 {
-		t.Fatalf("page1: %+v", page1)
-	}
-	for _, o := range page1.Objects {
-		if o.Relation == nil || o.Relation.Type != "references" || !strings.HasPrefix(o.Relation.Note, "hop-") {
-			t.Fatalf("page1 relation: %+v", o.Relation)
-		}
-	}
-	page2, err := eng.Continue(ctx, brain.Scope{Namespace: ns}, page1.ResultSetID, 2, sc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page2.Objects) == 0 {
-		t.Fatal("continue empty")
-	}
-	for _, o := range page2.Objects {
-		if o.Relation == nil || o.Relation.Type != "references" || !strings.HasPrefix(o.Relation.Note, "hop-") {
-			t.Fatalf("continue must re-attach relation: %+v", o)
-		}
-	}
-}
-
-// TestExpandMany_landingsAndBudget: multi-seed expand with containment + budget.
-func TestExpandMany_landingsAndBudget(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	p1, p2 := uuid.New(), uuid.New()
-	c1, c2, n1 := uuid.New(), uuid.New(), uuid.New()
-	for _, o := range []brain.Object{
-		{ID: p1, Kind: "Document", Title: "p1", Namespace: ns, UpdatedAt: now},
-		{ID: p2, Kind: "Document", Title: "p2", Namespace: ns, UpdatedAt: now},
-		{ID: c1, Kind: "Chunk", Title: "c1", ParentID: &p1, Namespace: ns, UpdatedAt: now},
-		{ID: c2, Kind: "Chunk", Title: "c2", ParentID: &p2, Namespace: ns, UpdatedAt: now},
-		{ID: n1, Kind: "Document", Title: "neighbor", Namespace: ns, UpdatedAt: now},
-	} {
-		if err := putFixture(store, o); err != nil {
+	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
+	scope := brain.Scope{Namespace: mustNS(t, "id", uuid.NewString())}
+	a, b, c := putDoc(t, eng, scope, "a"), putDoc(t, eng, scope, "b"), putDoc(t, eng, scope, "c")
+	for _, l := range [][2]uuid.UUID{{a, b}, {b, c}} {
+		if err := kg.Link(ctx, scope, l[0], l[1], "references"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	_ = g.AddEdge(ctx, p1, n1, "references", brain.EdgeMeta{Note: "edge"})
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{
-		MaxResultSetSize: 2, Now: func() time.Time { return now },
-	}))
+	expand := func(dir string) []string {
+		res, err := kg.Expand(ctx, scope, brain.ExpandRequest{ObjectID: b, RelationTypes: []string{"references"}, Direction: dir}, brain.NewSearchContext())
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := titlesOf(res.Objects)
+		slices.Sort(got)
+		return got
+	}
+
+	outward, outwardErr := kg.ExpandByRecipe(ctx, scope, b, "outward", brain.NewSearchContext())
+	_, unknown := kg.ExpandByRecipe(ctx, scope, b, "nope", brain.NewSearchContext())
+
+	for dir, want := range map[string][]string{"out": {"c"}, "in": {"a"}, "": {"a", "c"}} {
+		if got := expand(dir); !slices.Equal(got, want) {
+			t.Errorf("expand %q from b = %v, want %v", dir, got, want)
+		}
+	}
+	if got := titlesOf(outward.Objects); outwardErr != nil || !slices.Equal(got, []string{"c"}) {
+		t.Errorf("expand by the outward recipe = %v %v, want c", got, outwardErr)
+	}
+	if !errors.Is(unknown, brain.ErrNotFound) {
+		t.Errorf("expand by an unknown recipe = %v, want ErrNotFound", unknown)
+	}
+}
+
+// putDoc puts a Document titled title and returns its id.
+func putDoc(t *testing.T, eng *brain.Engine, scope brain.Scope, title string) uuid.UUID {
+	t.Helper()
+	obj, err := eng.Put(context.Background(), scope, brain.Object{Kind: "Document", Title: title})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// empty ids
-	empty, err := eng.ExpandMany(ctx, brain.Scope{Namespace: ns}, brain.ExpandManyRequest{})
-	if err != nil || len(empty.Objects) != 0 {
-		t.Fatalf("empty: %+v err=%v", empty, err)
-	}
-	// graph required without graph engine
-	engNoG, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	return obj.ID
+}
+
+func TestExpand_continueKeepsEachNeighborsRelation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(),
+		brain.WithConfig(brain.EngineConfig{ExpandInlineMax: 2, DefaultLimit: 2}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engNoG.ExpandMany(ctx, brain.Scope{Namespace: ns}, brain.ExpandManyRequest{
-		ObjectIDs: []uuid.UUID{p1}, RelationTypes: []string{"references"},
-	}); err == nil {
-		t.Fatal("graph required")
+	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
+	scope := brain.Scope{Namespace: mustNS(t, "id", uuid.NewString())}
+	root := putDoc(t, eng, scope, "root")
+	notes := map[string]string{}
+	for i := range 8 {
+		title := fmt.Sprintf("n%d", i)
+		notes[title] = "hop " + title
+		if err := kg.LinkWith(ctx, scope, root, putDoc(t, eng, scope, title), "references", brain.EdgeMeta{Note: notes[title]}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	// containment + graph with budget 2
-	res, err := eng.ExpandMany(ctx, brain.Scope{Namespace: ns}, brain.ExpandManyRequest{
-		ObjectIDs:       []uuid.UUID{uuid.Nil, p1, p2},
-		WantContainment: true,
-		RelationTypes:   []string{"references"},
-		NeighborBudget:  2,
-	})
+	sc := brain.NewSearchContext()
+
+	first, err := kg.Expand(ctx, scope, brain.ExpandRequest{ObjectID: root, RelationTypes: []string{"references"}, Limit: 2}, sc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Objects) == 0 || len(res.Objects) > 2 {
-		t.Fatalf("budget/content: n=%d", len(res.Objects))
+	rest, err := eng.Continue(ctx, scope, first.ResultSetID, 10, sc)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// missing seed skipped
-	res, err = eng.ExpandMany(ctx, brain.Scope{Namespace: ns}, brain.ExpandManyRequest{
-		ObjectIDs:       []uuid.UUID{uuid.New()},
-		WantContainment: true,
-	})
-	if err != nil || len(res.Objects) != 0 {
-		t.Fatalf("missing seed: %+v err=%v", res, err)
+
+	all := slices.Concat(first.Objects, rest.Objects)
+	if !first.HasMore || len(all) != 8 {
+		t.Fatalf("expand then continue = %d objects (more %v), want 8 over two pages", len(all), first.HasMore)
 	}
-	// canceled
-	cctx, cancel := context.WithCancel(ctx)
+	for _, o := range all {
+		if o.Relation == nil || o.Relation.Type != "references" || o.Relation.Note != notes[o.Title] {
+			t.Errorf("%s relation = %+v, want references with note %q", o.Title, o.Relation, notes[o.Title])
+		}
+	}
+}
+
+func TestExpandMany_spendsOneBudgetAcrossSeeds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
+	scope := brain.Scope{Namespace: mustNS(t, "id", uuid.NewString())}
+	tree := func(title string) uuid.UUID {
+		doc, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: title}, brain.Parts(brain.Object{Kind: "Chunk", Content: title + " part"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return doc.ID
+	}
+	p1, p2, neighbor := tree("p1"), tree("p2"), putDoc(t, eng, scope, "neighbor")
+	if err := kg.Link(ctx, scope, p1, neighbor, "references"); err != nil {
+		t.Fatal(err)
+	}
+	noGraph, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(budget int, ids ...uuid.UUID) brain.ExpandManyRequest {
+		return brain.ExpandManyRequest{ObjectIDs: ids, WantContainment: true, RelationTypes: []string{"references"}, NeighborBudget: budget}
+	}
+	expand := func(ctx context.Context, budget int, ids ...uuid.UUID) ([]brain.RichObject, error) {
+		res, err := kg.ExpandMany(ctx, scope, request(budget, ids...))
+		return res.Objects, err
+	}
+	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := eng.ExpandMany(cctx, brain.Scope{Namespace: ns}, brain.ExpandManyRequest{
-		ObjectIDs: []uuid.UUID{p1}, WantContainment: true,
-	}); err == nil {
-		t.Fatal("canceled")
+
+	all, allErr := expand(ctx, 10, p1, uuid.New(), p2)
+	budgeted, budgetErr := expand(ctx, 2, p1, p2)
+	_, unsupported := noGraph.ExpandMany(ctx, scope, request(10, p1))
+	_, stopped := expand(cancelled, 10, p1)
+
+	var landings []string
+	for _, o := range all {
+		landings = append(landings, fmt.Sprintf("%s<-%s", o.Title, map[uuid.UUID]string{p1: "p1", p2: "p2"}[*o.Relation.SourceID]))
+	}
+	slices.Sort(landings)
+	if allErr != nil || !slices.Equal(landings, []string{"<-p1", "<-p2", "neighbor<-p1"}) {
+		t.Errorf("expand many over p1, an unknown id and p2 = %v %v, want each part and the neighbor by its landing", landings, allErr)
+	}
+	if budgetErr != nil || len(budgeted) != 2 {
+		t.Errorf("expand many with a budget of 2 = %d objects %v, want 2", len(budgeted), budgetErr)
+	}
+	if !errors.Is(unsupported, brain.ErrUnsupported) || !errors.Is(stopped, context.Canceled) {
+		t.Errorf("relations on an engine %v, cancelled %v, want ErrUnsupported and Canceled", unsupported, stopped)
 	}
 }
 
@@ -303,7 +286,7 @@ func TestSearch_withReranker(t *testing.T) {
 		ID: weakPart, Kind: "Chunk", Content: "alpha beta beta beta beta beta beta beta beta",
 		ParentID: &weak, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(),
+	eng, err := brain.NewEngine(store,
 		brain.WithReranker(reverseRerank{}),
 		brain.WithConfig(brain.EngineConfig{DefaultLimit: 1, Now: func() time.Time { return now }}),
 	)
@@ -321,15 +304,12 @@ func TestSearch_withReranker(t *testing.T) {
 
 func TestSearch_optInDecayReorders(t *testing.T) {
 	ctx := context.Background()
-	store := brain.NewMemoryStore()
 	ns := mustNS(t, "id", uuid.NewString())
 	oldT := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	now := oldT
-	lam := 0.02
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{
-		Lambda: &lam,
-		Now:    func() time.Time { return now },
-	}))
+	clock := func() time.Time { return now }
+	store := brain.NewMemoryStore(brain.WithMemoryRanking(brain.Ranking{Decay: 0.02, Now: clock}))
+	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{Now: clock}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,110 +351,36 @@ func (reverseRerank) Rerank(_ context.Context, objects []brain.RichObject) ([]br
 	return out, nil
 }
 
-func TestExpand_partMixedContainmentAndGraph(t *testing.T) {
+func TestExpand_mixesChildrenAndLinks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	parent := uuid.New()
-	part := uuid.New()
-	linked := uuid.New()
-	pos := 1
-	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Namespace: ns, UpdatedAt: now})
-	_ = putFixture(store, brain.Object{
-		ID: part, Kind: "Chunk", Content: "c", ParentID: &parent, Position: &pos,
-		Namespace: ns, UpdatedAt: now,
-	})
-	_ = putFixture(store, brain.Object{ID: linked, Kind: "Document", Title: "ref", Namespace: ns, UpdatedAt: now})
-
-	g := brain.NewMemoryGraph()
-	_ = g.AddEdge(context.Background(), part, linked, "references", brain.EdgeMeta{})
-
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{SiblingRadius: 1}))
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := eng.Expand(ctx, brain.Scope{Namespace: ns}, brain.ExpandRequest{
-		ObjectID: part, RelationTypes: []string{"contains", "references"},
-	}, brain.NewSearchContext())
+	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
+	scope := brain.Scope{Namespace: mustNS(t, "id", uuid.NewString())}
+	doc, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "doc"}, brain.Parts(brain.Object{Kind: "Chunk", Content: "part"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Mode != "mixed" {
-		t.Fatalf("mode %s", res.Mode)
+	if err := kg.Link(ctx, scope, doc.ID, putDoc(t, eng, scope, "linked"), "references"); err != nil {
+		t.Fatal(err)
 	}
-	got := map[uuid.UUID]bool{}
+
+	res, err := kg.Expand(ctx, scope, brain.ExpandRequest{ObjectID: doc.ID, RelationTypes: []string{"contains", "references"}}, brain.NewSearchContext())
+
+	var got []string
 	for _, o := range res.Objects {
-		got[o.ID] = true
+		got = append(got, o.Kind+" "+o.Title)
 	}
-	if !got[parent] || !got[part] || !got[linked] {
-		t.Fatalf("want parent, part, linked: %+v", res.Objects)
-	}
-	if res.Objects[0].ID != parent {
-		t.Fatalf("parent first: %+v", res.Objects)
-	}
-}
-
-func TestExpand_graphStoreErrorSurfaces(t *testing.T) {
-	store := &failingReads{MemoryStore: brain.NewMemoryStore(), failID: uuid.New()}
-	ns := mustNS(t, "id", uuid.NewString())
-	root := uuid.New()
-	_ = putFixture(store.MemoryStore, brain.Object{ID: root, Kind: "Document", Namespace: ns})
-
-	g := brain.NewMemoryGraph()
-	_ = g.AddEdge(context.Background(), root, store.failID, "references", brain.EdgeMeta{})
-
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = eng.Expand(context.Background(), brain.Scope{Namespace: ns}, brain.ExpandRequest{
-		ObjectID: root, RelationTypes: []string{"references"},
-	}, brain.NewSearchContext())
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("want store error, got %v", err)
-	}
-}
-
-// failingReads is a store whose reads of failID fail, as a database does.
-type failingReads struct {
-	*brain.MemoryStore
-	failID uuid.UUID
-}
-
-func (s *failingReads) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) (brain.Object, error) {
-	if id == s.failID {
-		return brain.Object{}, errors.New("boom")
-	}
-	return s.MemoryStore.Get(ctx, scope, id)
-}
-
-func (s *failingReads) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID) ([]brain.Object, error) {
-	if slices.Contains(ids, s.failID) {
-		return nil, errors.New("boom")
-	}
-	return s.MemoryStore.GetMany(ctx, scope, ids)
-}
-
-func TestExpand_graphRequiresBackend(t *testing.T) {
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	id := uuid.New()
-	_ = putFixture(store, brain.Object{ID: id, Kind: "Document", Namespace: ns})
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = eng.Expand(context.Background(), brain.Scope{Namespace: ns}, brain.ExpandRequest{
-		ObjectID: id, RelationTypes: []string{"references"},
-	}, brain.NewSearchContext())
-	if err == nil || !strings.Contains(err.Error(), "graph backend") {
-		t.Fatalf("got %v", err)
+	if err != nil || res.Mode != "mixed" || !slices.Equal(got, []string{"Chunk ", "Document linked"}) {
+		t.Errorf("expand children and links = %s %v %v, want mixed: the part, then the link", res.Mode, got, err)
 	}
 }
 
 func TestExpand_missingObject(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
