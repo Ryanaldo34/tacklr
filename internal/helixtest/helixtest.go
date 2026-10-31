@@ -28,7 +28,7 @@ const Image = "ghcr.io/helixdb/helixdb:v0.0.12"
 // ranks text only; Open can add one.
 var Options = helixgraph.Options{
 	Dimension:     graphtest.Dimension,
-	EdgeRelations: []string{graphtest.EdgeSearchLabel, "about", "has_buyer"},
+	EdgeRelations: []string{graphtest.EdgeSearchLabel, graphtest.OtherEdgeSearchLabel, "about", "has_buyer"},
 }
 
 var (

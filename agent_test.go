@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -86,10 +87,10 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 	}
 
 	page := mustSearch(t, eng, brain.Scope{Namespace: ns, SessionID: sessionID}, token)
-	if len(page.Objects) != 1 || page.Objects[0].Kind != brain.KindSessionMessage {
-		t.Fatalf("search = %+v", page.Objects)
+	if len(slices.Collect(page.Results.Objects())) != 1 || slices.Collect(page.Results.Objects())[0].Kind != brain.KindSessionMessage {
+		t.Fatalf("search = %+v", slices.Collect(page.Results.Objects()))
 	}
-	got, err := eng.Read(t.Context(), brain.Scope{Namespace: ns, SessionID: sessionID}, page.Objects[0].ID)
+	got, err := eng.Get(t.Context(), brain.Scope{Namespace: ns, SessionID: sessionID}, slices.Collect(page.Results.Objects())[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,9 +250,9 @@ func TestSpecialist_retainsResultEpisode(t *testing.T) {
 	mustSearchKind(t, eng, ns, token, KindEpisode)
 }
 
-func mustSearch(t *testing.T, eng *brain.Engine, scope brain.Scope, query string) brain.SearchPage {
+func mustSearch(t *testing.T, eng *brain.Engine, scope brain.Scope, query string) brain.Page {
 	t.Helper()
-	page, err := eng.Search(t.Context(), scope, brain.SearchRequest{Query: query}, brain.NewSearchContext())
+	page, err := eng.Search(t.Context(), scope, brain.SearchRequest{Query: query})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,13 +262,13 @@ func mustSearch(t *testing.T, eng *brain.Engine, scope brain.Scope, query string
 func mustSearchKind(t *testing.T, eng *brain.Engine, ns brain.Namespace, query, kind string) brain.RichObject {
 	t.Helper()
 	page := mustSearch(t, eng, brain.Scope{Namespace: ns}, query)
-	if len(page.Objects) == 0 {
+	if len(slices.Collect(page.Results.Objects())) == 0 {
 		t.Fatalf("search %q: no hits", query)
 	}
-	if page.Objects[0].Kind != kind {
-		t.Fatalf("kind = %q, want %s", page.Objects[0].Kind, kind)
+	if slices.Collect(page.Results.Objects())[0].Kind != kind {
+		t.Fatalf("kind = %q, want %s", slices.Collect(page.Results.Objects())[0].Kind, kind)
 	}
-	return page.Objects[0]
+	return slices.Collect(page.Results.Objects())[0]
 }
 
 type stubJobHost struct {

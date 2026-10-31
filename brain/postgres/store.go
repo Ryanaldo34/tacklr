@@ -105,21 +105,66 @@ func (s *Store) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID)
 	return out, nil
 }
 
-// ListChildren implements brain.Store.
-func (s *Store) ListChildren(ctx context.Context, scope brain.Scope, parentID uuid.UUID) ([]brain.Object, error) {
+// GetTree implements brain.Store in one query: the object, a part's
+// record, and the record's parts. A saved session message (Scope.SessionID
+// set) is read when no object has the id.
+func (s *Store) GetTree(ctx context.Context, scope brain.Scope, id uuid.UUID, limit int) (brain.Tree, error) {
 	if err := scope.Namespace.Validate(); err != nil {
-		return nil, err
+		return brain.Tree{}, err
 	}
-	kids, err := s.queryObjects(ctx, `SELECT `+objectSelectCols+` FROM objects
-		WHERE parent_id = $1 AND deleted_at IS NULL
-		  AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])
-		ORDER BY position ASC NULLS LAST, id ASC`,
-		parentID, scope.Namespace, scope.Principals)
+	var lim *int // LIMIT NULL is no limit
+	if limit > 0 {
+		lim = &limit
+	}
+	rows, err := s.queryObjects(ctx, treeSQL, id, scope.Namespace, scope.Principals, lim)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: list children: %w", err)
+		return brain.Tree{}, fmt.Errorf("postgres: get tree: %w", err)
 	}
-	return kids, nil
+	if len(rows) == 0 {
+		obj, err := s.Get(ctx, scope, id)
+		return brain.Tree{Object: obj}, err
+	}
+	var t brain.Tree
+	for _, row := range rows {
+		if row.ID == id {
+			t.Object = row
+		}
+	}
+	// The object is one row; a part is also one of its record's parts.
+	self := false
+	for _, row := range rows {
+		switch {
+		case row.ID == id && !self:
+			self = true
+		case t.Object.ParentID != nil && row.ID == *t.Object.ParentID:
+			t.Parent = &row
+		default:
+			t.Parts = append(t.Parts, row)
+		}
+	}
+	return t, nil
 }
+
+// treeSQL selects the object, a part's record, and the record's first $4
+// parts, ordered by position, so the parts come back in order.
+const treeSQL = `
+	WITH t AS (
+		SELECT id AS tid, parent_id AS tparent FROM objects
+		WHERE id = $1 AND deleted_at IS NULL
+		  AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])
+	)
+	(SELECT ` + objectSelectCols + ` FROM objects JOIN t ON id = tid)
+	UNION ALL
+	(SELECT ` + objectSelectCols + ` FROM objects JOIN t ON id = tparent
+	 WHERE deleted_at IS NULL
+	   AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[]))
+	UNION ALL
+	(SELECT ` + objectSelectCols + ` FROM objects JOIN t ON parent_id = coalesce(tparent, tid)
+	 WHERE deleted_at IS NULL
+	   AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])
+	 ORDER BY position ASC NULLS LAST, id ASC
+	 LIMIT $4)
+	ORDER BY position ASC NULLS LAST, id ASC`
 
 // Put implements brain.Store: it embeds in.Text, then runs a full-column
 // upsert that clears a soft delete and returns the stored row. The conflict
@@ -159,7 +204,7 @@ func (s *Store) embedded(ctx context.Context, in brain.Indexed) (brain.Object, e
 // returns the stored row. It affects no row when obj.ID is held by a row
 // outside scope.
 func upsertObject(scope brain.Scope, obj brain.Object) (string, []any, error) {
-	if err := brain.ValidateObjectIdentity(obj); err != nil {
+	if err := obj.ValidateIdentity(); err != nil {
 		return "", nil, err
 	}
 	if err := scope.Namespace.Validate(); err != nil {
@@ -299,19 +344,6 @@ func (s *Store) PutKind(ctx context.Context, k brain.ObjectKind) error {
 // kindSelect reads object_kinds rows in brain.ObjectKind field order.
 const kindSelect = `SELECT kind, coalesce(description, ''), is_part, is_parent, filterable_fields FROM object_kinds`
 
-// GetKind implements brain.Store.
-func (s *Store) GetKind(ctx context.Context, kind string) (brain.ObjectKind, error) {
-	rows, _ := s.db.Query(ctx, kindSelect+` WHERE kind = $1`, kind)
-	k, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[brain.ObjectKind])
-	if errors.Is(err, pgx.ErrNoRows) {
-		return brain.ObjectKind{}, fmt.Errorf("%w: kind %q", brain.ErrNotFound, kind)
-	}
-	if err != nil {
-		return brain.ObjectKind{}, fmt.Errorf("postgres: get kind: %w", err)
-	}
-	return k, nil
-}
-
 // ListKinds implements brain.Store.
 func (s *Store) ListKinds(ctx context.Context) ([]brain.ObjectKind, error) {
 	rows, _ := s.db.Query(ctx, kindSelect+` ORDER BY kind ASC`)
@@ -322,33 +354,8 @@ func (s *Store) ListKinds(ctx context.Context) ([]brain.ObjectKind, error) {
 	return kinds, nil
 }
 
-// ListByKind implements brain.Store (first-class objects only).
-func (s *Store) ListByKind(ctx context.Context, scope brain.Scope, kind string, limit int) ([]brain.Object, error) {
-	kind = strings.TrimSpace(kind)
-	if kind == "" || limit <= 0 {
-		return nil, nil
-	}
-	if err := scope.Namespace.Validate(); err != nil {
-		return nil, err
-	}
-	objs, err := s.queryObjects(ctx, `SELECT `+objectSelectCols+` FROM objects
-		WHERE kind = $1 AND deleted_at IS NULL AND parent_id IS NULL
-		  AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])
-		ORDER BY title ASC NULLS LAST, id ASC
-		LIMIT $4`,
-		kind, scope.Namespace, scope.Principals, limit)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: list by kind: %w", err)
-	}
-	return objs, nil
-}
-
 // GetByProperty implements brain.Store.
 func (s *Store) GetByProperty(ctx context.Context, scope brain.Scope, key, value string) (brain.Object, error) {
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return brain.Object{}, fmt.Errorf("postgres: property key is required")
-	}
 	if err := scope.Namespace.Validate(); err != nil {
 		return brain.Object{}, err
 	}
@@ -357,23 +364,6 @@ func (s *Store) GetByProperty(ctx context.Context, scope brain.Scope, key, value
 		  AND tenant = ($3::jsonb)->0 AND namespace @> $3::jsonb AND (cardinality(readers) = 0 OR readers && $4::text[])
 		LIMIT 1`,
 		key, value, scope.Namespace, scope.Principals))
-}
-
-// KindsWithObjects implements brain.Store.
-func (s *Store) KindsWithObjects(ctx context.Context, scope brain.Scope) ([]string, error) {
-	if err := scope.Namespace.Validate(); err != nil {
-		return nil, err
-	}
-	rows, _ := s.db.Query(ctx, `SELECT DISTINCT kind FROM objects
-		WHERE deleted_at IS NULL AND parent_id IS NULL AND kind <> ''
-		  AND tenant = ($1::jsonb)->0 AND namespace @> $1::jsonb AND (cardinality(readers) = 0 OR readers && $2::text[])
-		ORDER BY kind ASC`,
-		scope.Namespace, scope.Principals)
-	kinds, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return nil, fmt.Errorf("postgres: kinds with objects: %w", err)
-	}
-	return kinds, nil
 }
 
 // queryObjects runs a query that selects objectSelectCols.

@@ -39,7 +39,8 @@ func TestStore_aTreeCommitThatCannotFinishLeavesThePreviousTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, unencodableErr := eng.PutTree(ctx, scope, doc, brain.Parts(brain.Object{Kind: "Chunk", Content: "x", Properties: map[string]any{"bad": make(chan int)}}))
-	kids, _ := store.ListChildren(ctx, scope, doc.ID)
+	kidsTree, _ := store.GetTree(ctx, scope, doc.ID, 0)
+	kids := kidsTree.Parts
 
 	if !errors.Is(blockedErr, context.DeadlineExceeded) {
 		t.Errorf("commit blocked past its deadline = %v, want DeadlineExceeded", blockedErr)

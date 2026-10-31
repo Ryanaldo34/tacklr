@@ -29,9 +29,9 @@ type SessionMessage struct {
 	SearchText string
 }
 
-// NamespaceForSession is the host namespace with the session id as the last attribute.
+// ForSession is the host namespace with the session id as the last attribute.
 // The session id is stored raw, including ".". Lookup uses the attribute list.
-func NamespaceForSession(host Namespace, sessionID string) Namespace {
+func (host Namespace) ForSession(sessionID string) Namespace {
 	out := host.Clone()
 	return append(out, Attr{Name: SessionTailName, Value: sessionID})
 }
@@ -83,13 +83,13 @@ func (e *Engine) PurgeSessionMessages(ctx context.Context, host Namespace, befor
 // uses the caller's filters, not the prepared object filters.
 func sessionSearchID(scope Scope, filters Filter) string {
 	id := strings.TrimSpace(scope.SessionID)
-	if id == "" || !sessionMessagesVisible(filters) {
+	if id == "" || !filters.allowsSessionMessages() {
 		return ""
 	}
 	return id
 }
 
-func sessionMessagesVisible(f Filter) bool {
+func (f Filter) allowsSessionMessages() bool {
 	if f.Title.set() || f.CreatedAfter != "" || f.CreatedBefore != "" || f.UpdatedAfter != "" || f.UpdatedBefore != "" || len(f.Props) > 0 {
 		return false
 	}
@@ -170,7 +170,7 @@ func (s *MemoryStore) SaveSessionMessages(ctx context.Context, host Namespace, s
 	if err != nil {
 		return 0, err
 	}
-	ns := NamespaceForSession(host, sessionID)
+	ns := host.ForSession(sessionID)
 	key := ns.Key()
 	now := time.Now().UTC()
 	model := s.embedding.Model()
@@ -266,7 +266,7 @@ func (s *MemoryStore) DeleteSessionMessages(_ context.Context, host Namespace, s
 	if err := host.Validate(); err != nil {
 		return err
 	}
-	ns := NamespaceForSession(host, strings.TrimSpace(sessionID))
+	ns := host.ForSession(strings.TrimSpace(sessionID))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.initSessionLocked()
@@ -301,7 +301,7 @@ func (s *MemoryStore) sessionRows(scope Scope) []sessionRow {
 	if s.sessionMsgs == nil || strings.TrimSpace(scope.SessionID) == "" {
 		return nil
 	}
-	ns := NamespaceForSession(scope.Namespace, scope.SessionID)
+	ns := scope.Namespace.ForSession(scope.SessionID)
 	out := make([]sessionRow, 0)
 	for _, row := range s.sessionMsgs {
 		if row.namespace.Equal(ns) {

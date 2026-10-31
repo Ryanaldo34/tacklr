@@ -75,16 +75,13 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		_, treeErr := s.PutTree(ctx, f.scopeB, indexed(takeover), parts())
 		delErr := s.SoftDelete(ctx, f.scopeB, f.docA)
 		_, getErr := s.Get(ctx, f.scopeB, f.docA)
-		kids, kidsErr := s.ListChildren(ctx, f.scopeB, f.docA)
+		_, treeReadErr := s.GetTree(ctx, f.scopeB, f.docA, 0)
 		mine, mineErr := s.Get(ctx, f.scopeA, f.docA)
 
-		for name, err := range map[string]error{"put": putErr, "put tree": treeErr, "soft delete": delErr, "get": getErr} {
+		for name, err := range map[string]error{"put": putErr, "put tree": treeErr, "soft delete": delErr, "get": getErr, "get tree": treeReadErr} {
 			if !errors.Is(err, brain.ErrNotFound) {
 				t.Errorf("%s as tenant B = %v, want ErrNotFound", name, err)
 			}
-		}
-		if kidsErr != nil || len(kids) != 0 {
-			t.Errorf("list children as tenant B = %v %v", kids, kidsErr)
 		}
 		if mineErr != nil || mine.Title != "doc a" || !mine.Namespace.Equal(f.a) {
 			t.Errorf("tenant A row after B's writes = %+v %v", mine, mineErr)
@@ -95,27 +92,25 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		ctx, s, f := arrange(t, newStore, &Embedder{})
 
 		many, _ := s.GetMany(ctx, f.scopeB, []uuid.UUID{f.docA, f.docB})
-		listed, _ := s.ListByKind(ctx, f.scopeB, "Document", 10)
 		byProp, propErr := s.GetByProperty(ctx, f.scopeB, "path", "/shared.md")
-		kinds, _ := s.KindsWithObjects(ctx, f.scopeB)
-		semantic, _ := s.Search(ctx, f.scopeB, brain.PartSearch{Query: "shared", Limit: 10})
-		exact, _ := s.Search(ctx, f.scopeB, brain.PartSearch{Query: "shared", Exact: true, Limit: 10})
+		semantic, _ := s.Search(ctx, f.scopeB, brain.RecordSearch{Query: "shared", Limit: 10})
+		exact, _ := s.Search(ctx, f.scopeB, brain.RecordSearch{Query: "shared", Exact: true, Limit: 10})
 
 		if got := objectIDs(many); !slices.Equal(got, []uuid.UUID{f.docB}) {
 			t.Errorf("get many = %v, want [%s]", got, f.docB)
 		}
-		if got := objectIDs(listed); !slices.Equal(got, []uuid.UUID{f.docB}) {
-			t.Errorf("list by kind = %v", got)
-		}
 		if propErr != nil || byProp.ID != f.docB {
 			t.Errorf("get by property = %s %v", byProp.ID, propErr)
 		}
-		if !slices.Equal(kinds, []string{"Document"}) {
-			t.Errorf("kinds with objects = %v", kinds)
-		}
 		for name, hits := range map[string][]brain.ScoredID{"search": semantic, "exact search": exact} {
-			if got := scoredIDs(hits); !slices.Equal(got, []uuid.UUID{f.chunkB}) || *hits[0].ParentID != f.docB {
-				t.Errorf("%s = %v, want [%s] with its parent", name, got, f.chunkB)
+			mine := []uuid.UUID{f.docB, f.chunkB}
+			for _, h := range hits {
+				if !slices.Contains(mine, h.ID) || (h.ID == f.chunkB && *h.ParentID != f.docB) {
+					t.Errorf("%s hit %s, want only tenant B's record and its part", name, h.ID)
+				}
+			}
+			if !slices.Contains(scoredIDs(hits), f.chunkB) {
+				t.Errorf("%s = %v, want tenant B's matching part", name, scoredIDs(hits))
 			}
 		}
 	})
@@ -129,11 +124,9 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		_, errs["put tree"] = s.PutTree(ctx, none, indexed(newDoc(f.a, "x")), parts())
 		_, errs["get"] = s.Get(ctx, none, f.docA)
 		_, errs["get many"] = s.GetMany(ctx, none, []uuid.UUID{f.docA})
-		_, errs["list children"] = s.ListChildren(ctx, none, f.docA)
-		_, errs["list by kind"] = s.ListByKind(ctx, none, "Document", 10)
+		_, errs["get tree"] = s.GetTree(ctx, none, f.docA, 0)
 		_, errs["get by property"] = s.GetByProperty(ctx, none, "path", "/shared.md")
-		_, errs["kinds with objects"] = s.KindsWithObjects(ctx, none)
-		_, errs["search"] = s.Search(ctx, none, brain.PartSearch{Query: "shared", Limit: 10})
+		_, errs["search"] = s.Search(ctx, none, brain.RecordSearch{Query: "shared", Limit: 10})
 		_, errs["purge deleted"] = s.PurgeDeleted(ctx, none, time.Now())
 		_, errs["erase"] = s.Erase(ctx, none)
 		errs["delete session"] = s.DeleteSessionMessages(ctx, nil, "s")
@@ -157,7 +150,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		other := brain.Scope{Namespace: brain.Namespace{{Name: "team", Value: "x"}, f.a[0]}}
 
 		_, getErr := s.Get(ctx, other, doc.ID)
-		hits, _ := s.Search(ctx, other, brain.PartSearch{Query: "shared", Limit: 10})
+		hits, _ := s.Search(ctx, other, brain.RecordSearch{Query: "shared", Limit: 10})
 		erased, eraseErr := s.Erase(ctx, other)
 		kept, keptErr := s.Get(ctx, brain.Scope{Namespace: teamNS}, doc.ID)
 
@@ -179,9 +172,9 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		board := brain.Scope{Namespace: f.a, Principals: []string{"user:ann", "group:board"}}
 
 		got, getErr := s.Get(ctx, board, restricted.ID)
-		hits, _ := s.Search(ctx, board, brain.PartSearch{Query: "quarterly", Limit: 10})
+		hits, _ := s.Search(ctx, board, brain.RecordSearch{Query: "quarterly", Limit: 10})
 		_, hiddenErr := s.Get(ctx, f.scopeA, restricted.ID)
-		hidden, _ := s.Search(ctx, f.scopeA, brain.PartSearch{Query: "quarterly", Limit: 10})
+		hidden, _ := s.Search(ctx, f.scopeA, brain.RecordSearch{Query: "quarterly", Limit: 10})
 		_, updateErr := s.Put(ctx, f.scopeA, indexed(restricted))
 
 		if getErr != nil || !slices.Equal(got.Readers, []string{"group:board"}) {
@@ -210,9 +203,9 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 
 		_, outsideErr := s.PutTree(ctx, f.scopeA, indexed(parent), parts(next, outside))
 		_, sourceErr := s.PutTree(ctx, f.scopeA, indexed(parent), failing)
-		kept, _ := s.ListChildren(ctx, f.scopeA, f.docA)
+		kept := treeParts(ctx, s, f.scopeA, f.docA)
 		_, replaced := s.PutTree(ctx, f.scopeA, indexed(parent), parts(next))
-		swapped, _ := s.ListChildren(ctx, f.scopeA, f.docA)
+		swapped := treeParts(ctx, s, f.scopeA, f.docA)
 		deleted := s.SoftDelete(ctx, f.scopeA, f.docA)
 		_, partErr := s.Get(ctx, f.scopeA, next.ID)
 
@@ -244,7 +237,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		added := newChunk(parent, "appendix text", 1)
 
 		_, reorderErr := s.PutTree(ctx, f.scopeA, indexed(parent), parts(moved, added))
-		reordered, _ := s.ListChildren(ctx, f.scopeA, f.docA)
+		reordered := treeParts(ctx, s, f.scopeA, f.docA)
 		embedded := emb.Texts() - before
 		// A tree of the same parent commits while this one reads its parts.
 		racing := func(yield func(brain.Indexed, error) bool) {
@@ -255,8 +248,8 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 			must(t, err)
 		}
 		_, conflictErr := s.PutTree(ctx, f.scopeA, indexed(parent), racing)
-		won, _ := s.ListChildren(ctx, f.scopeA, f.docA)
-		bySynonym, _ := s.Search(ctx, f.scopeA, brain.PartSearch{Query: "winner", Limit: 10})
+		won := treeParts(ctx, s, f.scopeA, f.docA)
+		bySynonym, _ := s.Search(ctx, f.scopeA, brain.RecordSearch{Query: "winner", Limit: 10})
 		// A reused part is purged while this tree reads its parts.
 		purging := func(yield func(brain.Indexed, error) bool) {
 			must(t, s.SoftDelete(ctx, f.scopeA, won[0].ID))
@@ -274,11 +267,34 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		if embedded != 2 {
 			t.Errorf("reorder embedded %d texts, want the parent and the new part (2)", embedded)
 		}
-		if !errors.Is(conflictErr, brain.ErrConflict) || !slices.Equal(contents(won), []string{"winner text"}) || len(bySynonym) != 1 {
+		if !errors.Is(conflictErr, brain.ErrConflict) || !slices.Equal(contents(won), []string{"winner text"}) || !slices.Contains(scoredIDs(bySynonym), won[0].ID) {
 			t.Errorf("tree that lost the race = %v, parts %v, want ErrConflict and the winner's tree", conflictErr, contents(won))
 		}
 		if !errors.Is(goneErr, brain.ErrConflict) || !errors.Is(twiceErr, brain.ErrInvalid) {
 			t.Errorf("tree reusing a purged part = %v, with a part twice = %v, want ErrConflict and ErrInvalid", goneErr, twiceErr)
+		}
+	})
+
+	t.Run("get tree reads a record with its first parts, or a part with its record and its record's parts", func(t *testing.T) {
+		ctx, s, f := arrange(t, newStore, nil)
+		parent := newDoc(f.a, "doc a")
+		parent.ID = f.docA
+		first, second, third := newChunk(parent, "one", 0), newChunk(parent, "two", 1), newChunk(parent, "three", 2)
+		_, err := s.PutTree(ctx, f.scopeA, indexed(parent), parts(third, first, second))
+		must(t, err)
+
+		record, recordErr := s.GetTree(ctx, f.scopeA, f.docA, 2)
+		part, partErr := s.GetTree(ctx, f.scopeA, second.ID, 0)
+		_, missingErr := s.GetTree(ctx, f.scopeA, uuid.New(), 0)
+
+		if recordErr != nil || record.Object.ID != f.docA || record.Parent != nil || !slices.Equal(objectIDs(record.Parts), []uuid.UUID{first.ID, second.ID}) {
+			t.Errorf("tree of doc a, two parts = %+v %v, want doc a with its first two parts by position", record, recordErr)
+		}
+		if partErr != nil || part.Object.ID != second.ID || part.Parent == nil || part.Parent.ID != f.docA || !slices.Equal(objectIDs(part.Parts), []uuid.UUID{first.ID, second.ID, third.ID}) {
+			t.Errorf("tree of a part = %+v %v, want the part, doc a, and every part of doc a", part, partErr)
+		}
+		if !errors.Is(missingErr, brain.ErrNotFound) {
+			t.Errorf("tree of an unknown id = %v, want ErrNotFound", missingErr)
 		}
 	})
 
@@ -290,29 +306,26 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		title.Title = "red"
 		_, err := s.PutTree(ctx, f.scopeA, indexed(parent), parts(car, title))
 		must(t, err)
-		search := func(q brain.PartSearch) []uuid.UUID {
+		search := func(q brain.RecordSearch) []uuid.UUID {
 			q.Limit = 10
 			hits, err := s.Search(ctx, f.scopeA, q)
 			must(t, err)
 			return scoredIDs(hits)
 		}
 
-		if got := search(brain.PartSearch{Query: "automobile"}); len(got) == 0 || got[0] != car.ID {
+		if got := search(brain.RecordSearch{Query: "automobile"}); len(got) == 0 || got[0] != car.ID {
 			t.Errorf("search by a synonym = %v, want the car part first", got)
 		}
-		if got := search(brain.PartSearch{Query: "automobile", Exact: true}); len(got) != 0 {
+		if got := search(brain.RecordSearch{Query: "automobile", Exact: true}); len(got) != 0 {
 			t.Errorf("exact search by a synonym = %v, want nothing", got)
 		}
-		if got := search(brain.PartSearch{Query: "red", Exact: true}); len(got) != 2 || got[0] != title.ID {
+		if got := search(brain.RecordSearch{Query: "red", Exact: true}); len(got) != 2 || got[0] != title.ID {
 			t.Errorf("exact search = %v, want the part titled red first", got)
 		}
-		if hits, _ := s.Search(ctx, f.scopeA, brain.PartSearch{Query: "red", Limit: 1}); len(hits) != 1 {
+		if hits, _ := s.Search(ctx, f.scopeA, brain.RecordSearch{Query: "red", Limit: 1}); len(hits) != 1 {
 			t.Errorf("search with limit 1 = %v", scoredIDs(hits))
 		}
-		if got := search(brain.PartSearch{Exact: true}); len(got) != 0 {
-			t.Errorf("exact search for nothing = %v, want nothing", got)
-		}
-		if got := search(brain.PartSearch{Query: "!?", Exact: true}); len(got) != 0 {
+		if got := search(brain.RecordSearch{Query: "!?", Exact: true}); len(got) != 0 {
 			t.Errorf("exact search with no words = %v, want nothing", got)
 		}
 	})
@@ -326,8 +339,8 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		_, treeErr := s.PutTree(ctx, f.scopeA, indexed(tree), parts(newChunk(tree, "poison part", 0)))
 		_, getErr := s.Get(ctx, f.scopeA, poisoned.ID)
 		_, saveErr := s.SaveSessionMessages(ctx, f.a, "s1", "k", []brain.SessionMessage{{Role: "user", SearchText: "poison transcript"}})
-		hits, _ := s.Search(ctx, brain.Scope{Namespace: f.a, SessionID: "s1"}, brain.PartSearch{Query: "transcript", Exact: true, Limit: 10})
-		byWords, searchErr := s.Search(ctx, f.scopeA, brain.PartSearch{Query: "poison roadmap", Limit: 10})
+		hits, _ := s.Search(ctx, brain.Scope{Namespace: f.a, SessionID: "s1"}, brain.RecordSearch{Query: "transcript", Exact: true, Limit: 10})
+		byWords, searchErr := s.Search(ctx, f.scopeA, brain.RecordSearch{Query: "poison roadmap", Limit: 10})
 
 		if searchErr != nil || !slices.Equal(scoredIDs(byWords), []uuid.UUID{f.chunkA}) {
 			t.Errorf("search whose query does not embed = %v %v, want the lexical hit", scoredIDs(byWords), searchErr)
@@ -342,15 +355,22 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 
 	t.Run("search filters narrow hits the same way in every store", func(t *testing.T) {
 		ctx, s, f := arrange(t, newStore, nil)
-		parent := newDoc(f.a, "doc a")
-		parent.ID = f.docA
-		open := newChunk(parent, "roadmap open item", 0)
-		open.Properties = map[string]any{"stage": "open", "amount": 10.0, "urgent": true}
-		closed := newChunk(parent, "roadmap closed item", 1)
-		closed.Kind = "Note"
-		closed.Properties = map[string]any{"stage": "closed", "amount": 20.0, "urgent": false, "owner": nil, "meta": map[string]any{"a": 1.0}}
-		_, err := s.PutTree(ctx, f.scopeA, indexed(parent), parts(open, closed))
-		must(t, err)
+		// Filters test the record a row belongs to, so the records carry the
+		// fields and the hits are their parts.
+		openDoc := newDoc(f.a, "open deal")
+		openDoc.ID = f.docA
+		openDoc.Properties = map[string]any{"stage": "open", "amount": 10.0, "urgent": true}
+		closedDoc := newDoc(f.a, "closed deal")
+		closedDoc.Kind = "Note"
+		closedDoc.Properties = map[string]any{"stage": "closed", "amount": 20.0, "urgent": false, "owner": nil, "meta": map[string]any{"a": 1.0}}
+		open, closed := newChunk(openDoc, "roadmap open item", 0), newChunk(closedDoc, "roadmap closed item", 0)
+		for _, tree := range []struct {
+			doc  brain.Object
+			part brain.Indexed
+		}{{openDoc, open}, {closedDoc, closed}} {
+			_, err := s.PutTree(ctx, f.scopeA, indexed(tree.doc), parts(tree.part))
+			must(t, err)
+		}
 		both := []uuid.UUID{open.ID, closed.ID}
 
 		for _, tc := range []struct {
@@ -366,7 +386,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 			{map[string]any{"amount": []any{int32(10), 20.0}}, both},
 			{map[string]any{"urgent": false}, []uuid.UUID{closed.ID}},
 			{map[string]any{"kind": []any{"Note"}}, []uuid.UUID{closed.ID}},
-			{map[string]any{"title": "chunk"}, both},
+			{map[string]any{"title": "open deal"}, []uuid.UUID{open.ID}},
 			{map[string]any{"updated_after": "2000-01-01"}, both},
 			{map[string]any{"updated_before": "2000-01-01"}, nil},
 			{map[string]any{"missing": "x"}, nil},
@@ -376,11 +396,70 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		} {
 			filter, err := brain.DecodeFilter(tc.filter)
 			must(t, err)
-			hits, err := s.Search(ctx, f.scopeA, brain.PartSearch{Query: "roadmap", Filters: filter, Limit: 10})
+			hits, err := s.Search(ctx, f.scopeA, brain.RecordSearch{Query: "roadmap", Filters: filter, Limit: 10})
 			got := sortedIDs(scoredIDs(hits))
 			if err != nil || !slices.Equal(got, sortedIDs(tc.want)) {
 				t.Errorf("filter %v = %v %v, want %v", tc.filter, got, err, tc.want)
 			}
+		}
+	})
+
+	t.Run("within keeps one record's parts, and an empty query lists the filtered records newest first", func(t *testing.T) {
+		ctx, s, f := arrange(t, newStore, nil)
+		hour := time.Hour
+		older, newer, closed := newDoc(f.a, "older"), newDoc(f.a, "newer"), newDoc(f.a, "closed")
+		older.UpdatedAt, newer.UpdatedAt, closed.UpdatedAt = older.UpdatedAt.Add(-3*hour), newer.UpdatedAt.Add(-2*hour), closed.UpdatedAt.Add(-hour)
+		older.Properties = map[string]any{"stage": "open"}
+		newer.Properties = map[string]any{"stage": "open"}
+		closed.Properties = map[string]any{"stage": "closed"}
+		_, err := s.PutTree(ctx, f.scopeA, indexed(older), parts(newChunk(older, "shared roadmap text", 0)))
+		must(t, err)
+		for _, doc := range []brain.Object{newer, closed} {
+			_, err := s.Put(ctx, f.scopeA, indexed(doc))
+			must(t, err)
+		}
+		_, err = s.SaveSessionMessages(ctx, f.a, "s1", "k", []brain.SessionMessage{{Role: "user", SearchText: "shared roadmap text"}})
+		must(t, err)
+		session := brain.Scope{Namespace: f.a, SessionID: "s1"}
+		open, err := brain.DecodeFilter(map[string]any{"stage": "open"})
+		must(t, err)
+		all, err := brain.DecodeFilter(map[string]any{"updated_after": "2000-01-01"})
+		must(t, err)
+
+		within, withinErr := s.Search(ctx, session, brain.RecordSearch{Query: "roadmap", Within: f.docA, Limit: 10})
+		exactWithin, exactErr := s.Search(ctx, session, brain.RecordSearch{Query: "roadmap", Exact: true, Within: f.docA, Limit: 10})
+		byPart, byPartErr := s.Search(ctx, f.scopeA, brain.RecordSearch{Query: "roadmap", Within: f.chunkA, Limit: 10})
+		listed, listErr := s.Search(ctx, f.scopeA, brain.RecordSearch{Filters: open, Limit: 10})
+		newest, newestErr := s.Search(ctx, f.scopeA, brain.RecordSearch{Filters: all, Limit: 2})
+
+		for name, tc := range map[string]struct {
+			got  []brain.ScoredID
+			err  error
+			want []uuid.UUID
+		}{
+			"search within doc a":           {within, withinErr, []uuid.UUID{f.chunkA}},
+			"exact search within doc a":     {exactWithin, exactErr, []uuid.UUID{f.chunkA}},
+			"search within a part of doc a": {byPart, byPartErr, []uuid.UUID{f.chunkA}},
+			"list the open records":         {listed, listErr, []uuid.UUID{newer.ID, older.ID}},
+			"list the newest two records":   {newest, newestErr, []uuid.UUID{f.docA, closed.ID}},
+		} {
+			if tc.err != nil || !slices.Equal(scoredIDs(tc.got), tc.want) {
+				t.Errorf("%s = %v %v, want %v", name, scoredIDs(tc.got), tc.err, tc.want)
+			}
+		}
+	})
+
+	t.Run("search ranks a record by its own text, with no part", func(t *testing.T) {
+		ctx, s, f := arrange(t, newStore, nil)
+		policy := newDoc(f.a, "Refund policy")
+		policy.Content = "refunds within thirty days"
+		_, err := s.Put(ctx, f.scopeA, brain.Indexed{Object: policy, Text: policy.Title + " " + policy.Content})
+		must(t, err)
+
+		hits, err := s.Search(ctx, f.scopeA, brain.RecordSearch{Query: "refunds", Limit: 10})
+
+		if err != nil || !slices.Equal(scoredIDs(hits), []uuid.UUID{policy.ID}) || hits[0].ParentID != nil {
+			t.Errorf("search a record's own words = %v %v, want the record, with no parent", scoredIDs(hits), err)
 		}
 	})
 
@@ -395,9 +474,9 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		purgedB, purgeErr := s.PurgeDeleted(ctx, f.scopeB, time.Now().Add(time.Minute))
 		erased, eraseErr := s.Erase(ctx, f.scopeA)
 		_, goneErr := s.Get(ctx, f.scopeA, f.docA)
-		sessionA, _ := s.Search(ctx, brain.Scope{Namespace: f.a, SessionID: "s1"}, brain.PartSearch{Query: "transcript", Limit: 10})
+		sessionA, _ := s.Search(ctx, brain.Scope{Namespace: f.a, SessionID: "s1"}, brain.RecordSearch{Query: "transcript", Limit: 10})
 		keptB, keptErr := s.Get(ctx, f.scopeB, f.docB)
-		sessionB, _ := s.Search(ctx, brain.Scope{Namespace: f.b, SessionID: "s1"}, brain.PartSearch{Query: "transcript", Limit: 10})
+		sessionB, _ := s.Search(ctx, brain.Scope{Namespace: f.b, SessionID: "s1"}, brain.RecordSearch{Query: "transcript", Limit: 10})
 		purgedSessions, sessErr := s.PurgeSessionMessages(ctx, f.b, time.Now().Add(time.Minute))
 
 		if purgeErr != nil || purgedB != 1 {
@@ -423,7 +502,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		must(t, err)
 
 		must(t, s.DeleteSessionMessages(ctx, f.a, "s1"))
-		left, _ := s.Search(ctx, brain.Scope{Namespace: f.b, SessionID: "s1"}, brain.PartSearch{Query: "automobile", Limit: 10})
+		left, _ := s.Search(ctx, brain.Scope{Namespace: f.b, SessionID: "s1"}, brain.RecordSearch{Query: "automobile", Limit: 10})
 
 		if len(left) != 1 {
 			t.Errorf("host B session hits after host A delete = %v, want 1", left)
@@ -534,4 +613,10 @@ func must(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// treeParts is id's record's parts under scope.
+func treeParts(ctx context.Context, s brain.Store, scope brain.Scope, id uuid.UUID) []brain.Object {
+	t, _ := s.GetTree(ctx, scope, id, 0)
+	return t.Parts
 }

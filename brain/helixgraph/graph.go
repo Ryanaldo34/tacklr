@@ -96,7 +96,8 @@ type Options struct {
 	Dimension uint
 	// Metric is the vector distance (default cosine).
 	Metric helix.VectorDistanceMetric
-	// EdgeRelations are the relations whose edges FindLinks can rank.
+	// EdgeRelations are the relations whose edges FindLinks can rank; a
+	// FindLinks without a relation ranks them all.
 	EdgeRelations []string
 	// MaxOverfetch is how many elements a tenant-wide search may skip because
 	// the caller cannot read them, and still rank from the index (default
@@ -112,6 +113,7 @@ type Options struct {
 // Graph is a HelixDB knowledge graph.
 type Graph struct {
 	client       *helix.Client
+	relations    []string // the indexed edge relations FindLinks ranks
 	vectors      bool
 	maxOverfetch int
 	embedding    brain.Embedding
@@ -127,6 +129,7 @@ func Open(ctx context.Context, client *helix.Client, opts Options) (*Graph, erro
 		maxOverfetch: int(cmp.Or(opts.MaxOverfetch, 256)),
 		embedding:    opts.Embedding,
 		ranking:      opts.Ranking,
+		relations:    slices.Clone(opts.EdgeRelations),
 	}
 	metric := cmp.Or(opts.Metric, helix.VectorDistanceCosine)
 	indexes := map[string]helix.IndexSpec{
@@ -333,42 +336,55 @@ type visiblePlan struct {
 	q        *helix.ReadQueryBuilder
 	narrowed bool
 	k, kOver helix.ParamRef
-	names    []string
+	// The plan's variable names, each set once with the plan's prefix, so
+	// several plans share one request: the probes, the rankings, and the
+	// candidate sets a ranking within the candidates may use.
+	hidden, hiddenOver, bounded, excluded, excludedOver, few, many string
+	text, vector, readable, intoReadable                           string
+	names                                                          []string
 }
 
-// planVisible adds the probes to q. excluded maps the bounded hidden nodes to
-// the elements their ranking must skip; excludedVar reads such a set back.
-func (g *Graph) planVisible(q *helix.ReadQueryBuilder, scope scopeFilter, limit int, narrowed bool,
+// planVisible adds the probes to q, naming each variable and parameter with
+// prefix so several plans share one request. excluded maps the bounded
+// hidden nodes to the elements their ranking must skip; excludedVar reads
+// such a set back.
+func (g *Graph) planVisible(q *helix.ReadQueryBuilder, prefix string, scope scopeFilter, limit int, narrowed bool,
 	excluded func(bounded *helix.Traversal) *helix.Traversal, excludedVar func(name string) *helix.Traversal,
 ) *visiblePlan {
-	p := &visiblePlan{q: q, narrowed: narrowed, k: q.ParamI64("limit", int64(limit))}
+	p := &visiblePlan{
+		q: q, narrowed: narrowed, k: q.ParamI64(prefix+"limit", int64(limit)),
+		hidden: prefix + "hidden", hiddenOver: prefix + "hidden_over", bounded: prefix + "bounded",
+		excluded: prefix + "excluded", excludedOver: prefix + "excluded_over", few: prefix + "few", many: prefix + "many",
+		text: prefix + "text", vector: prefix + "vector", readable: prefix + "readable", intoReadable: prefix + "into_readable",
+	}
 	if narrowed {
 		return p
 	}
 	over := g.maxOverfetch
-	p.kOver = q.ParamI64("limit_over", int64(limit+over))
+	p.kOver = q.ParamI64(prefix+"limit_over", int64(limit+over))
 	p.q = q.
-		VarAs("hidden", scope.hidden(over+1)).
-		VarAs("hidden_over", helix.G().N(helix.NodeVar("hidden")).Skip(over)).
-		VarAsIf("bounded", helix.VarEmpty("hidden_over"), helix.G().N(helix.NodeVar("hidden"))).
-		VarAs("excluded", excluded(helix.G().N(helix.NodeVar("bounded")))).
-		VarAs("excluded_over", excludedVar("excluded").Skip(over)).
-		VarAsIf("few", helix.VarEmpty("excluded_over"), helix.G().N(helix.NodeVar("bounded"))).
-		VarAsIf("many", helix.VarEmpty("few"), helix.G().N(helix.NodeVar("hidden")).Limit(1))
+		VarAs(p.hidden, scope.hidden(over+1)).
+		VarAs(p.hiddenOver, helix.G().N(helix.NodeVar(p.hidden)).Skip(over)).
+		VarAsIf(p.bounded, helix.VarEmpty(p.hiddenOver), helix.G().N(helix.NodeVar(p.hidden))).
+		VarAs(p.excluded, excluded(helix.G().N(helix.NodeVar(p.bounded)))).
+		VarAs(p.excludedOver, excludedVar(p.excluded).Skip(over)).
+		VarAsIf(p.few, helix.VarEmpty(p.excludedOver), helix.G().N(helix.NodeVar(p.bounded))).
+		VarAsIf(p.many, helix.VarEmpty(p.few), helix.G().N(helix.NodeVar(p.hidden)).Limit(1))
 	return p
 }
 
-// prepare adds a variable that only rankings within the candidates use.
+// prepare adds the variable name (one of the plan's) that only rankings
+// within the candidates use.
 func (p *visiblePlan) prepare(name string, trav *helix.Traversal) {
 	if p.narrowed {
 		p.q = p.q.VarAs(name, trav)
 		return
 	}
-	p.q = p.q.VarAsIf(name, helix.VarNotEmpty("many"), trav)
+	p.q = p.q.VarAsIf(name, helix.VarNotEmpty(p.many), trav)
 }
 
-// rank adds the ranking name: index ranks the tenant partition to a depth,
-// and within ranks the readable candidates.
+// rank adds the ranking name (p.text or p.vector): index ranks the tenant
+// partition to a depth, and within ranks the readable candidates.
 func (p *visiblePlan) rank(name string, index func(k helix.ParamRef) *helix.Traversal, within func() *helix.Traversal, project ...helix.Projection) {
 	if p.narrowed {
 		p.q = p.q.VarAs(name, within().Project(project...))
@@ -376,16 +392,21 @@ func (p *visiblePlan) rank(name string, index func(k helix.ParamRef) *helix.Trav
 		return
 	}
 	p.q = p.q.
-		VarAsIf(name, helix.VarEmpty("hidden"), index(p.k).Project(project...)).
-		VarAsIf(name+"_over", helix.VarNotEmpty("few"), index(p.kOver).Without("excluded").Limit(p.k).Project(project...)).
-		VarAsIf(name+"_within", helix.VarNotEmpty("many"), within().Project(project...))
+		VarAsIf(name, helix.VarEmpty(p.hidden), index(p.k).Project(project...)).
+		VarAsIf(name+"_over", helix.VarNotEmpty(p.few), index(p.kOver).Without(p.excluded).Limit(p.k).Project(project...)).
+		VarAsIf(name+"_within", helix.VarNotEmpty(p.many), within().Project(project...))
 	p.names = append(p.names, name, name+"_over", name+"_within")
 }
 
-// exec runs the plan and returns each ranking's rows by name.
-func execPlan[T any](ctx context.Context, g *Graph, p *visiblePlan) (map[string][]T, error) {
+// execPlan runs the plans, which share one request, and returns each
+// ranking's rows by its prefixed name.
+func execPlan[T any](ctx context.Context, g *Graph, plans ...*visiblePlan) (map[string][]T, error) {
+	var names []string
+	for _, p := range plans {
+		names = append(names, p.names...)
+	}
 	var out map[string][]T
-	if err := g.exec(ctx, p.q.Returning(p.names...), &out); err != nil {
+	if err := g.exec(ctx, plans[len(plans)-1].q.Returning(names...), &out); err != nil {
 		return nil, err
 	}
 	merged := make(map[string][]T, len(out))
@@ -455,7 +476,7 @@ func valueToken(key string, v any) (string, bool) {
 // filterPredicates translates filters into node predicates, applied before
 // ranking.
 func filterPredicates(filters brain.Filter) ([]helix.Predicate, error) {
-	plan, err := brain.CompileFilter(filters)
+	plan, err := filters.Compile()
 	if err != nil {
 		return nil, err
 	}
@@ -615,14 +636,14 @@ func (g *Graph) FindObjects(ctx context.Context, sq brain.ObjectSearch) ([]brain
 	q := helix.ReadQuery("brain_find_objects")
 	scope := newScopeFilter(q.ParamString, sq.Namespace, sq.Principals)
 	candidates := func() *helix.Traversal { return helix.G().NWithLabelWhere(nodeLabel, scope.nodes(extra...)) }
-	p := g.planVisible(q, scope, sq.Limit, len(sq.Namespace) > 1 || len(extra) > 0,
+	p := g.planVisible(q, "", scope, sq.Limit, len(sq.Namespace) > 1 || len(extra) > 0,
 		func(bounded *helix.Traversal) *helix.Traversal { return bounded },
 		func(name string) *helix.Traversal { return helix.G().N(helix.NodeVar(name)) })
 	project := func(rank string) []helix.Projection {
 		return []helix.Projection{helix.ProjectPropAs(propObjectID, "id"), helix.ProjectPropAs(propUpdatedAt, "updated_at"), helix.ProjectPropAs(rank, strings.TrimPrefix(rank, "$"))}
 	}
 	query := q.ParamString("query", sq.Query)
-	p.rank("text",
+	p.rank(p.text,
 		func(k helix.ParamRef) *helix.Traversal {
 			return helix.G().TextSearchNodes(nodeLabel, propSearchText, query, k, scope.tenant)
 		},
@@ -631,7 +652,7 @@ func (g *Graph) FindObjects(ctx context.Context, sq brain.ObjectSearch) ([]brain
 		},
 		project("$score")...)
 	if vec != nil {
-		p.rank("vector",
+		p.rank(p.vector,
 			func(k helix.ParamRef) *helix.Traversal {
 				return helix.G().VectorSearchNodes(nodeLabel, propEmbedding, vec, k, scope.tenant)
 			},
@@ -644,7 +665,7 @@ func (g *Graph) FindObjects(ctx context.Context, sq brain.ObjectSearch) ([]brain
 	if err != nil {
 		return nil, err
 	}
-	fused := g.ranking.Fuse(scoredIDs(out["text"]), scoredIDs(out["vector"]))
+	fused := g.ranking.Fuse(scoredIDs(out[p.text]), scoredIDs(out[p.vector]))
 	return fused[:min(len(fused), sq.Limit)], nil
 }
 
@@ -694,46 +715,62 @@ func (g *Graph) queryVector(ctx context.Context, query string) []float32 {
 // can read. A tenant-wide scope excludes the edges of the tenant's hidden
 // nodes. Helix rejects a relation not in Options.EdgeRelations.
 func (g *Graph) FindLinks(ctx context.Context, lq brain.LinkSearch) ([]brain.EdgeSearchHit, error) {
-	rel := lq.RelationType
+	rels := g.relations
+	if lq.RelationType != "" {
+		rels = []string{lq.RelationType}
+	}
+	if len(rels) == 0 {
+		return nil, nil
+	}
 	vec := g.queryVector(ctx, lq.Query)
 	q := helix.ReadQuery("brain_find_links")
 	scope := newScopeFilter(q.ParamString, lq.Namespace, lq.Principals)
-	p := g.planVisible(q, scope, lq.Limit, len(lq.Namespace) > 1,
-		func(bounded *helix.Traversal) *helix.Traversal {
-			return bounded.BothE(rel).Dedup().Limit(g.maxOverfetch + 1)
-		},
-		func(name string) *helix.Traversal { return helix.G().E(helix.EdgeVar(name)) })
-	// The candidates are the covered edges leaving a readable node that are
-	// also among the edges entering one.
-	p.prepare("readable", helix.G().NWithLabelWhere(nodeLabel, scope.nodes()))
-	p.prepare("into_readable", helix.G().N(helix.NodeVar("readable")).InE(rel))
-	candidates := func() *helix.Traversal {
-		return helix.G().N(helix.NodeVar("readable")).OutE(rel).Where(scope.covered()).Within("into_readable")
-	}
 	query := q.ParamString("query", lq.Query)
-	p.rank("text",
-		func(k helix.ParamRef) *helix.Traversal {
-			return helix.G().TextSearchEdges(rel, propEdgeNote, query, k, scope.tenant)
-		},
-		func() *helix.Traversal {
-			return candidates().TextSearchEdgesWithin(rel, propEdgeNote, query, p.k, scope.tenant)
-		},
-		edgeProjections("$score")...)
-	if vec != nil {
-		p.rank("vector",
+	plans := make([]*visiblePlan, len(rels))
+	for i, rel := range rels {
+		// Each relation's plan shares the request; the later plans build on
+		// the earlier ones' query.
+		p := g.planVisible(q, fmt.Sprintf("r%d_", i), scope, lq.Limit, len(lq.Namespace) > 1,
+			func(bounded *helix.Traversal) *helix.Traversal {
+				return bounded.BothE(rel).Dedup().Limit(g.maxOverfetch + 1)
+			},
+			func(name string) *helix.Traversal { return helix.G().E(helix.EdgeVar(name)) })
+		// The candidates are the covered edges leaving a readable node that
+		// are also among the edges entering one.
+		p.prepare(p.readable, helix.G().NWithLabelWhere(nodeLabel, scope.nodes()))
+		p.prepare(p.intoReadable, helix.G().N(helix.NodeVar(p.readable)).InE(rel))
+		candidates := func() *helix.Traversal {
+			return helix.G().N(helix.NodeVar(p.readable)).OutE(rel).Where(scope.covered()).Within(p.intoReadable)
+		}
+		p.rank(p.text,
 			func(k helix.ParamRef) *helix.Traversal {
-				return helix.G().VectorSearchEdges(rel, propEdgeEmbedding, vec, k, scope.tenant)
+				return helix.G().TextSearchEdges(rel, propEdgeNote, query, k, scope.tenant)
 			},
 			func() *helix.Traversal {
-				return candidates().VectorSearchEdgesWithin(rel, propEdgeEmbedding, vec, p.k, scope.tenant)
+				return candidates().TextSearchEdgesWithin(rel, propEdgeNote, query, p.k, scope.tenant)
 			},
-			edgeProjections("$distance")...)
+			edgeProjections("$score")...)
+		if vec != nil {
+			p.rank(p.vector,
+				func(k helix.ParamRef) *helix.Traversal {
+					return helix.G().VectorSearchEdges(rel, propEdgeEmbedding, vec, k, scope.tenant)
+				},
+				func() *helix.Traversal {
+					return candidates().VectorSearchEdgesWithin(rel, propEdgeEmbedding, vec, p.k, scope.tenant)
+				},
+				edgeProjections("$distance")...)
+		}
+		plans[i], q = p, p.q
 	}
-	out, err := execPlan[edgeHitRow](ctx, g, p)
+	out, err := execPlan[edgeHitRow](ctx, g, plans...)
 	if err != nil {
 		return nil, err
 	}
-	fused := g.ranking.FuseEdges(edgeHits(rel, out["text"]), edgeHits(rel, out["vector"]))
+	var lists [][]brain.EdgeSearchHit
+	for i, rel := range rels {
+		lists = append(lists, edgeHits(rel, out[plans[i].text]), edgeHits(rel, out[plans[i].vector]))
+	}
+	fused := g.ranking.FuseEdges(lists...)
 	return fused[:min(len(fused), lq.Limit)], nil
 }
 
@@ -770,9 +807,17 @@ func edgeHits(rel string, rows []edgeHitRow) []brain.EdgeSearchHit {
 // from the frontier node set of hop d-1; each (relation, direction) of a hop
 // is one projection of source, edge and peer. Only nodes the namespace
 // covers are returned or join a frontier. Each projection and frontier holds
-// at most q.Limit rows.
+// at most q.Limit rows. No relations follows every edge label, and each hit
+// carries its edge's label.
 func (g *Graph) Neighborhood(ctx context.Context, nq brain.NeighborhoodQuery) ([]brain.GraphNeighbor, error) {
-	rels := nq.Relations
+	// Each step follows one label set: no labels follows every relation.
+	labels := [][]string{nil}
+	if len(nq.Relations) > 0 {
+		labels = make([][]string, len(nq.Relations))
+		for i, rel := range nq.Relations {
+			labels[i] = []string{rel}
+		}
+	}
 	dirs := []string{brain.DirectionOut, brain.DirectionIn}
 	if nq.Direction != brain.DirectionBoth {
 		dirs = []string{nq.Direction}
@@ -782,25 +827,25 @@ func (g *Graph) Neighborhood(ctx context.Context, nq brain.NeighborhoodQuery) ([
 	k := q.ParamI64("limit", int64(nq.Limit))
 	q = q.VarAs("f0", helix.G().NWhere(helix.SourceEq(propObjectID, q.ParamString("object_id", nq.ObjectID.String()))))
 	type entry struct {
-		name, rel, dir string
-		depth          int
+		name, dir string
+		depth     int
 	}
 	var entries []entry
 	for depth := 1; depth <= nq.MaxHops; depth++ {
 		prev := helix.NodeVar(fmt.Sprintf("f%d", depth-1))
 		var steps []helix.SubTraversal
-		for i, rel := range rels {
+		for i, label := range labels {
 			for _, dir := range dirs {
 				name := fmt.Sprintf("h%d_%d_%s", depth, i, dir)
-				edges := helix.G().N(prev).Bind("src").OutE(rel)
-				step := helix.Sub().Out(rel)
+				edges := helix.G().N(prev).Bind("src").OutE(label...)
+				step := helix.Sub().Out(label...)
 				if dir == brain.DirectionIn {
-					edges = helix.G().N(prev).Bind("src").InE(rel)
-					step = helix.Sub().In(rel)
+					edges = helix.G().N(prev).Bind("src").InE(label...)
+					step = helix.Sub().In(label...)
 				}
 				steps = append(steps, step)
 				q = q.VarAs(name, edges.Bind("e").OtherN().Where(scope.nodes()).Limit(k).ProjectBindings(neighborProjections()...))
-				entries = append(entries, entry{name: name, rel: rel, dir: dir, depth: depth})
+				entries = append(entries, entry{name: name, dir: dir, depth: depth})
 			}
 		}
 		if depth < nq.MaxHops {
@@ -810,9 +855,9 @@ func (g *Graph) Neighborhood(ctx context.Context, nq brain.NeighborhoodQuery) ([
 			case len(steps) > 1:
 				next = next.Union(steps...)
 			case dirs[0] == brain.DirectionOut:
-				next = next.Out(rels[0])
+				next = next.Out(labels[0]...)
 			default:
-				next = next.In(rels[0])
+				next = next.In(labels[0]...)
 			}
 			q = q.VarAs(fmt.Sprintf("f%d", depth), next.Where(scope.nodes()).Dedup().Limit(k))
 		}
@@ -833,7 +878,7 @@ func (g *Graph) Neighborhood(ctx context.Context, nq brain.NeighborhoodQuery) ([
 				continue
 			}
 			seen[row.ID] = struct{}{}
-			hits = append(hits, brain.GraphNeighbor{ObjectID: row.ID, SourceID: row.Source, RelationType: e.rel, Direction: e.dir, Depth: e.depth, Meta: row.meta()})
+			hits = append(hits, brain.GraphNeighbor{ObjectID: row.ID, SourceID: row.Source, RelationType: row.Label, Direction: e.dir, Depth: e.depth, Meta: row.meta()})
 			if len(hits) == nq.Limit {
 				return hits, nil
 			}
@@ -846,78 +891,17 @@ type neighborRow struct {
 	edgeRow
 	Source uuid.UUID `json:"source"`
 	ID     uuid.UUID `json:"id"`
+	Label  string    `json:"label"`
 }
 
 func neighborProjections() []helix.BindingProjection {
 	projections := []helix.BindingProjection{
 		helix.ProjectNamedBinding("src", propObjectID, "source"),
 		helix.ProjectCurrentBinding(propObjectID, "id"),
+		helix.ProjectNamedBinding("e", "$label", "label"),
 	}
 	for _, p := range edgeMetaProps {
 		projections = append(projections, helix.ProjectNamedBinding("e", p, p))
 	}
 	return projections
-}
-
-// ShortestPath implements brain.Graph in one request. Layer d holds
-// the readable nodes first reached in d hops. For each d, Helix traces back
-// from To one node per layer, so only path ids come back; the shortest d
-// whose trace reaches From is the path. Helix ShortestPath cannot skip the
-// nodes a query cannot read, so it is not used.
-func (g *Graph) ShortestPath(ctx context.Context, pq brain.PathQuery) ([]uuid.UUID, error) {
-	q := helix.ReadQuery("brain_shortest_path")
-	scope := newScopeFilter(q.ParamString, pq.Namespace, pq.Principals)
-	var labels []string
-	if pq.RelationType != "" {
-		labels = []string{pq.RelationType}
-	}
-	forward, back := (*helix.Traversal).Both, (*helix.Traversal).Both
-	switch pq.Direction {
-	case brain.DirectionOut:
-		forward, back = (*helix.Traversal).Out, (*helix.Traversal).In
-	case brain.DirectionIn:
-		forward, back = (*helix.Traversal).In, (*helix.Traversal).Out
-	}
-	layer := func(d int) string { return fmt.Sprintf("l%d", d) }
-	step := func(d, k int) string { return fmt.Sprintf("p%d_%d", d, k) }
-	q = q.
-		VarAs(layer(0), helix.G().NWhere(helix.SourceEq(propObjectID, q.ParamString("from", pq.From.String()))).Where(scope.nodes())).
-		VarAs("to", helix.G().NWhere(helix.SourceEq(propObjectID, q.ParamString("to", pq.To.String()))).Where(scope.nodes()))
-	for d := 1; d <= pq.MaxDepth; d++ {
-		next := forward(helix.G().N(helix.NodeVar(layer(d-1))), labels...).Where(scope.nodes())
-		for j := range d {
-			next = next.Without(layer(j))
-		}
-		q = q.VarAs(layer(d), next.Dedup())
-	}
-	var names []string
-	for d := 0; d <= pq.MaxDepth; d++ {
-		// step(d, k) is the path's node k hops from From when To is d hops away.
-		q = q.VarAs(step(d, d), helix.G().N(helix.NodeVar("to")).Within(layer(d)))
-		for k := d - 1; k >= 0; k-- {
-			q = q.VarAs(step(d, k), back(helix.G().N(helix.NodeVar(step(d, k+1))), labels...).Within(layer(k)).Limit(1))
-		}
-		for k := range d + 1 {
-			name := step(d, k) + "_id"
-			q = q.VarAs(name, helix.G().N(helix.NodeVar(step(d, k))).Project(helix.ProjectPropAs(propObjectID, "id")))
-			names = append(names, name)
-		}
-	}
-	var out map[string][]struct {
-		ID uuid.UUID `json:"id"`
-	}
-	if err := g.exec(ctx, q.Returning(names...), &out); err != nil {
-		return nil, err
-	}
-	for d := 0; d <= pq.MaxDepth; d++ {
-		if len(out[step(d, d)+"_id"]) == 0 {
-			continue
-		}
-		path := make([]uuid.UUID, d+1)
-		for k := range path {
-			path[k] = out[step(d, k)+"_id"][0].ID
-		}
-		return path, nil
-	}
-	return nil, nil
 }

@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -16,558 +16,283 @@ import (
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
+// kindEnum is the enum of the tool's kind property; none when it is free.
+func kindEnum(t *testing.T, tool *Tool) []any {
+	t.Helper()
+	props, _ := tool.parameters["properties"].(map[string]any)
+	kind, _ := props["kind"].(map[string]any)
+	enum, _ := kind["enum"].([]any)
+	return enum
+}
+
+func toolNames(h *TurnManager) []string {
+	var out []string
+	for _, tool := range h.tools {
+		switch tool.Name() {
+		case "search", "open", "related", "save", "link":
+			out = append(out, tool.Name())
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+func TestBrainTools_registerTheToolsTheEngineCanServeWithKindChoices(t *testing.T) {
+	t.Parallel()
+	catalog, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
+		brain.KindSpec{Kind: "Fact", IsParent: true}, brain.KindSpec{Kind: "Deal", IsParent: true}, brain.KindSpec{Kind: "Chunk", IsPart: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Graph(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "org", uuid.NewString())
+	withKinds := mustNewTurnManager(t, AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: catalog, SearchNamespace: ns, BrainWriteKinds: []string{"Fact", " ", "Fact"}})
+	withGraph := mustNewTurnManager(t, AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: open, SearchNamespace: ns})
+
+	if got := toolNames(withKinds); !slices.Equal(got, []string{"open", "related", "save", "search"}) {
+		t.Errorf("store-only tools with a writable kind = %v, want search, open, related and save", got)
+	}
+	if got := toolNames(withGraph); !slices.Equal(got, []string{"link", "open", "related", "search"}) {
+		t.Errorf("tools with a graph and no writable kind = %v, want search, open, related and link", got)
+	}
+	if got := kindEnum(t, withKinds.findTool("search", "")); !slices.Equal(got, []any{"Deal", "Fact", nil}) {
+		t.Errorf("search kind enum = %v, want the record kinds (not the part kind), or null", got)
+	}
+	if got := kindEnum(t, withKinds.findTool("save", "")); !slices.Equal(got, []any{"Fact"}) {
+		t.Errorf("save kind enum = %v, want the writable kind", got)
+	}
+	if got := kindEnum(t, withGraph.findTool("search", "")); got != nil {
+		t.Errorf("open-mode search kind enum = %v, want a free string", got)
+	}
+}
+
+func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	g := helixtest.Graph(t)
 	eng, err := brain.NewEngine(store, brain.WithKinds(
-		brain.KindSpec{Kind: "Discovery", IsParent: true},
-		brain.KindSpec{Kind: "Fact", IsParent: true},
-	))
+		brain.KindSpec{Kind: "Fact", IsParent: true, Fields: []brain.FieldSpec{{Name: "topic", Type: brain.FieldTypeString}}},
+		brain.KindSpec{Kind: "Document", IsParent: true},
+		brain.KindSpec{Kind: "Chunk", IsPart: true}),
+		brain.WithConfig(brain.EngineConfig{DefaultLimit: 2}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	kg := brain.NewKnowledgeGraph(eng, g)
-	ns := mustNS(t, "id", uuid.NewString())
-	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize: 1024,
-		Model:         &scriptedModel{},
-		Brain:         eng,
-		Graph:         kg,
-		BrainWriteKinds: brain.WriteKinds{
-			Discovery: "Discovery",
-			Fact:      "Fact",
-			// Memory empty → tool not registered
-		},
-		SearchNamespace: ns,
-	})
-
-	saveDisc := h.findTool("save_discovery", "")
-	saveFact := h.findTool("save_fact", "")
-	linkTool := h.findTool("link", "")
-	if saveDisc == nil || saveFact == nil || linkTool == nil {
-		t.Fatal("save_discovery, save_fact, link required")
-	}
-
-	findObj := h.findTool("find_objects", "")
-	if findObj == nil {
-		t.Fatal("find_objects required with a graph")
-	}
-
-	out, err := saveDisc.invoke(ctx, `{"title":"finding","content":"learned X"}`, turnRuntime(h))
+	ns := mustNS(t, "org", uuid.NewString())
+	west := append(ns.Clone(), brain.Attr{Name: "workspace", Value: "west"})
+	doc, err := eng.PutTree(ctx, brain.Scope{Namespace: west}, brain.Object{Kind: "Document", Title: "Runbook"},
+		brain.Parts(brain.Object{Kind: "Chunk", Content: "restart the knowledge service"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var a brain.RichObject
-	if err := json.Unmarshal([]byte(out.output), &a); err != nil {
+	if err := putFixture(store, brain.Object{ID: uuid.New(), Kind: "Fact", Title: "foreign knowledge", Namespace: mustNS(t, "org", uuid.NewString())}); err != nil {
 		t.Fatal(err)
 	}
-	if a.Kind != "Discovery" || a.Title != "finding" || a.ID == uuid.Nil {
-		t.Fatalf("discovery: %+v", a)
+	opts := AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns, BrainWriteKinds: []string{"Fact"}, sessionID: "brain-tools-1"}
+	h := mustNewTurnManager(t, opts)
+	call := func(h *TurnManager, name, args string) (string, error) {
+		out, err := h.findTool(name, "").invoke(ctx, args, turnRuntime(h))
+		return out.output, err
 	}
-
-	fout, err := findObj.invoke(ctx, `{"query":"finding","kinds":["Discovery"],"limit":5}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(fout.output, a.ID.String()) {
-		t.Fatalf("find_objects should return saved discovery: %s", fout.output)
-	}
-	if _, err := findObj.invoke(ctx, `{"query":"  "}`, turnRuntime(h)); err == nil {
-		t.Fatal("find_objects requires query")
-	}
-
-	out2, err := saveFact.invoke(ctx, `{"title":"fact-a","content":"true claim"}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var b brain.RichObject
-	if err := json.Unmarshal([]byte(out2.output), &b); err != nil {
-		t.Fatal(err)
-	}
-
-	// Update discovery
-	out3, err := saveDisc.invoke(ctx, `{"object_id":"`+a.ID.String()+`","title":"finding-v2","content":"updated"}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var a2 brain.RichObject
-	if err := json.Unmarshal([]byte(out3.output), &a2); err != nil {
-		t.Fatal(err)
-	}
-	if a2.ID != a.ID || a2.Title != "finding-v2" {
-		t.Fatalf("update: %+v", a2)
-	}
-
-	// Invalid evidence_id is a distinct link validation path.
-	if _, err := linkTool.invoke(ctx, `{
-		"from_id":"`+a.ID.String()+`",
-		"to_id":"`+b.ID.String()+`",
-		"relation_type":"references",
-		"evidence_id":"not-a-uuid"
-	}`, turnRuntime(h)); err == nil || !strings.Contains(err.Error(), "evidence_id") {
-		t.Fatalf("invalid evidence_id: %v", err)
-	}
-	lout, err := linkTool.invoke(ctx, `{
-		"from_id":"`+a.ID.String()+`",
-		"to_id":"`+b.ID.String()+`",
-		"relation_type":"references",
-		"note":"supports finding",
-		"status":"active",
-		"role":"source",
-		"confidence":0.8,
-		"evidence_id":"`+a.ID.String()+`"
-	}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(lout.output, "supports finding") || !strings.Contains(lout.output, "linked") {
-		t.Fatalf("link output: %s", lout.output)
-	}
-	if !strings.Contains(lout.output, "source") || !strings.Contains(lout.output, a.ID.String()) {
-		t.Fatalf("link meta fields: %s", lout.output)
-	}
-	expandTool := h.findTool("expand", "")
-	if expandTool == nil {
-		t.Fatal("expand required")
-	}
-	eout, err := expandTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`","relation_types":["references"]}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(eout.output, b.ID.String()) || !strings.Contains(eout.output, "supports finding") {
-		t.Fatalf("expand should return neighbor with note: %s", eout.output)
-	}
-	readTool := h.findTool("read_object", "")
-	rout, err := readTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`"}`, turnRuntime(h))
-	if err != nil || !strings.Contains(rout.output, "updated") {
-		t.Fatalf("read after save: %v %v", err, rout)
-	}
-}
-
-func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	other := mustNS(t, "org", "other")
-	docID := uuid.New()
-
-	if err := putFixture(store, brain.Object{
-		ID: docID, Kind: "Document", Title: "Deal memo",
-		Summary: "Q3", Content: "full body", ContentType: "text/plain",
-		Namespace: ns, Properties: map[string]any{"stage": "negotiation"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.PutKind(ctx, brain.ObjectKind{
-		Kind: "Document", Description: "docs", IsParent: true,
-		FilterableFields: json.RawMessage(`[]`),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := brain.NewEngine(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize:   1024,
-		Model:           &scriptedModel{},
-		Brain:           eng,
-		SearchNamespace: ns,
-	})
-	gotNS, ok := h.session.Search.Namespace()
-	if !ok || !gotNS.Equal(ns) {
-		t.Fatalf("SearchNamespace from options: %v %v", gotNS, ok)
-	}
-
-	readTool := h.findTool("read_object", "")
-	schemaTool := h.findTool("schema", "")
-	if readTool == nil || schemaTool == nil {
-		t.Fatal("brain tools must be injected when Brain is configured")
-	}
-
-	out, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var rich brain.RichObject
-	if err := json.Unmarshal([]byte(out.output), &rich); err != nil {
-		t.Fatalf("read JSON: %v\n%s", err, out.output)
-	}
-	if rich.Content != "full body" || rich.Title != "Deal memo" || rich.ID != docID {
-		t.Fatalf("rich object: %+v", rich)
-	}
-
-	h.session.Search.SetNamespace(other)
-	_, err = readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(h))
-	if err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("want not found under other namespace, got %v", err)
-	}
-
-	h.session.Search.ClearNamespace()
-	if _, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(h)); !errors.Is(err, brain.ErrInvalid) {
-		t.Fatalf("read without a host namespace must fail closed, got %v", err)
-	}
-	h.session.Search.SetNamespace(ns)
-
-	sout, err := schemaTool.invoke(ctx, `{"kind":"Document"}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var schema brain.SchemaResult
-	if err := json.Unmarshal([]byte(sout.output), &schema); err != nil {
-		t.Fatal(err)
-	}
-	if len(schema.Kinds) != 1 || schema.Kinds[0].Kind != "Document" {
-		t.Fatalf("schema: %+v", schema)
-	}
-
-	_, err = readTool.invoke(ctx, `{"object_id":"not-a-uuid"}`, turnRuntime(h))
-	if err == nil {
-		t.Fatal("invalid object_id must fail")
-	}
-}
-
-func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	var firstParent uuid.UUID
-	for i := 0; i < 4; i++ {
-		parent := uuid.New()
-		if i == 0 {
-			firstParent = parent
-		}
-		part := uuid.New()
-		pos := 1
-		if err := putFixture(store, brain.Object{
-			ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now,
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if err := putFixture(store, brain.Object{
-			ID: part, Kind: "Chunk", Title: "knowledge-chunk", Content: "shared knowledge base retrieval material item",
-			ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
-		DefaultLimit: 2, MaxLimit: 50, Now: func() time.Time { return now },
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize:   1024,
-		Model:           &scriptedModel{},
-		Brain:           eng,
-		SearchNamespace: ns,
-		sessionID:       "brain-sc-1",
-	})
-
-	searchTool := h.findTool("search", "")
-	findTool := h.findTool("find_exact", "")
-	contTool := h.findTool("continue", "")
-	if searchTool == nil || findTool == nil || contTool == nil {
-		t.Fatal("search, find_exact, continue required")
-	}
-
-	if _, err := searchTool.invoke(ctx, `{"query":"knowledge","namespace":[{"name":"session","value":"x"}]}`, turnRuntime(h)); err == nil {
-		t.Fatal("reserved session attr")
-	}
-	out, err := searchTool.invoke(ctx, `{"query":"knowledge base retrieval","limit":2}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var page brain.SearchPage
-	if err := json.Unmarshal([]byte(out.output), &page); err != nil {
-		t.Fatal(err)
-	}
-	if page.ResultSetID == uuid.Nil || len(page.Objects) == 0 || !page.HasMore {
-		t.Fatalf("page: %+v", page)
-	}
-
-	h2 := reloadHarness(t, h, AgentOptions{
-		MaxWindowSize:   1024,
-		Model:           &scriptedModel{},
-		Brain:           eng,
-		SearchNamespace: ns,
-		sessionID:       "brain-sc-1",
-	})
-	out2, err := h2.findTool("continue", "").invoke(ctx, `{"result_set_id":"`+page.ResultSetID.String()+`","limit":2}`, turnRuntime(h2))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var page2 brain.SearchPage
-	if err := json.Unmarshal([]byte(out2.output), &page2); err != nil {
-		t.Fatal(err)
-	}
-	if page2.ResultSetID != page.ResultSetID {
-		t.Fatalf("result set id changed after load")
-	}
-
-	fout, err := findTool.invoke(ctx, `{"query":"`+firstParent.String()+`"}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fpage brain.SearchPage
-	if err := json.Unmarshal([]byte(fout.output), &fpage); err != nil {
-		t.Fatal(err)
-	}
-	if len(fpage.Objects) != 1 || fpage.Objects[0].ID != firstParent {
-		t.Fatalf("find_exact uuid: %+v", fpage.Objects)
-	}
-
-	// scope_ids bad UUID
-	if _, err := searchTool.invoke(ctx, `{"query":"x","scope_ids":["not-a-uuid"]}`, turnRuntime(h)); err == nil {
-		t.Fatal("bad scope_ids")
-	}
-	// valid scope_ids restrict neighborhood
-	scopeArgs, _ := json.Marshal(map[string]any{
-		"query": "knowledge", "scope_ids": []string{firstParent.String()}, "limit": 5,
-	})
-	if _, err := searchTool.invoke(ctx, string(scopeArgs), turnRuntime(h)); err != nil {
-		t.Fatalf("scope_ids search: %v", err)
-	}
-	// schema unknown kind
-	schemaTool := h.findTool("schema", "")
-	if schemaTool != nil {
-		if _, err := schemaTool.invoke(ctx, `{"kind":"NoSuchKindXYZ"}`, turnRuntime(h)); err == nil {
-			t.Fatal("schema unknown kind")
-		}
-		// list all kinds
-		if _, err := schemaTool.invoke(ctx, `{}`, turnRuntime(h)); err != nil {
-			t.Fatalf("schema all: %v", err)
-		}
-	}
-	// continue with bad result set
-	if _, err := contTool.invoke(ctx, `{"result_set_id":"`+uuid.New().String()+`"}`, turnRuntime(h)); err == nil {
-		t.Fatal("continue unknown set")
-	}
-	if _, err := contTool.invoke(ctx, `{"result_set_id":"bad"}`, turnRuntime(h)); err == nil {
-		t.Fatal("continue bad uuid")
-	}
-}
-
-func TestBrainTools_expandChildren(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	parent := uuid.New()
-	child := uuid.New()
-	pos := 1
-	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Title: "P", Namespace: ns, UpdatedAt: now})
-	_ = putFixture(store, brain.Object{
-		ID: child, Kind: "Chunk", Title: "C", Content: "secret",
-		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
-	})
-	eng, err := brain.NewEngine(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize: 1024, Model: &scriptedModel{},
-		Brain: eng, SearchNamespace: ns,
-	})
-	tool := h.findTool("expand", "")
-	if tool == nil {
-		t.Fatal("expand tool required")
-	}
-	out, err := tool.invoke(ctx, `{"object_id":"`+parent.String()+`"}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var res brain.ExpandResult
-	if err := json.Unmarshal([]byte(out.output), &res); err != nil {
-		t.Fatal(err)
-	}
-	if res.Mode != "children" || len(res.Objects) != 1 || res.Objects[0].ID != child {
-		t.Fatalf("%+v", res)
-	}
-	if res.Objects[0].Content != "" {
-		t.Fatal("no content on expand")
-	}
-}
-
-// TestBrainTools_expandMultiHopAndFindLinks: graph multi-hop expand and find_links
-// tool outcomes on a graph with edge search.
-func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
-	ctx := context.Background()
-	ns := mustNS(t, "id", uuid.NewString())
-	scope := brain.Scope{Namespace: ns}
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
-	if err != nil {
-		t.Fatal(err)
-	}
-	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
-	put := func(kind, title string) uuid.UUID {
-		obj, err := eng.Put(ctx, scope, brain.Object{Kind: kind, Title: title})
+	var saved []brain.RichObject
+	for _, title := range []string{"knowledge one", "knowledge two", "knowledge three"} {
+		out, err := call(h, "save", `{"kind":"Fact","title":"`+title+`","content":"body","properties":{"topic":"ops"}}`)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return obj.ID
+		var rich brain.RichObject
+		if err := json.Unmarshal([]byte(out), &rich); err != nil {
+			t.Fatal(err)
+		}
+		saved = append(saved, rich)
 	}
-	factID, dealID, buyerID := put("Fact", "Risk note"), put("Deal", "Acme"), put("Person", "Pat Buyer")
-	if err := kg.LinkWith(ctx, scope, factID, dealID, "about", brain.EdgeMeta{Note: "fact about deal"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := kg.LinkWith(ctx, scope, dealID, buyerID, "has_buyer", brain.EdgeMeta{Note: "economic buyer primary"}); err != nil {
-		t.Fatal(err)
-	}
-	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize: 1024, Model: &scriptedModel{},
-		Brain: eng,
-		Graph: kg, SearchNamespace: ns,
-	})
-	expand := h.findTool("expand", "")
-	findLinks := h.findTool("find_links", "")
-	if expand == nil || findLinks == nil {
-		t.Fatal("expand and find_links required with graph edge search")
+	page := func(out string, err error) brain.Page {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var p brain.Page
+		if err := json.Unmarshal([]byte(out), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
 	}
 
-	// Multi-hop: fact --about--> deal --has_buyer--> buyer
-	out, err := expand.invoke(ctx, `{"object_id":"`+factID.String()+`","relation_types":["about","has_buyer"],"max_hops":2}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var res brain.ExpandResult
-	if err := json.Unmarshal([]byte(out.output), &res); err != nil {
-		t.Fatal(err)
-	}
-	ids := map[uuid.UUID]bool{}
-	for _, o := range res.Objects {
-		ids[o.ID] = true
-	}
-	if !ids[dealID] {
-		t.Fatalf("multi-hop expand missing deal: %+v", res.Objects)
-	}
-	if !ids[buyerID] {
-		t.Fatalf("multi-hop expand missing buyer: %+v", res.Objects)
-	}
+	first := page(call(h, "search", `{"query":"knowledge","kind":"Fact"}`))
+	reloaded := reloadHarness(t, h, opts)
+	second := page(call(reloaded, "search", `{"more":true}`))
+	updated, updateErr := call(h, "save", `{"kind":"Fact","id":"`+saved[0].ID.String()+`","title":"knowledge one, revised"}`)
+	narrowed := page(call(h, "search", `{"query":"knowledge","namespace":[{"name":"workspace","value":"west"}]}`))
+	openOut, openErr := call(h, "open", `{"ref":"`+doc.ID.String()+`","namespace":[{"name":"workspace","value":"west"}]}`)
+	related := page(call(h, "related", `{"ref":"`+doc.ID.String()+`","namespace":[{"name":"workspace","value":"west"}]}`))
+	_, noMore := call(h, "related", `{"more":true,"ref":"x"}`)
+	_, badKind := call(h, "save", `{"kind":"Memory","title":"x"}`)
+	_, noTitle := call(h, "save", `{"kind":"Fact","title":" "}`)
+	_, badID := call(h, "save", `{"kind":"Fact","title":"x","id":"nope"}`)
+	_, badFilter := call(h, "search", `{"query":"knowledge","kind":"Fact","filters":{"phase":"x"}}`)
+	_, reserved := call(h, "search", `{"query":"knowledge","namespace":[{"name":"session","value":"x"}]}`)
+	_, outside := call(h, "search", `{"query":"x","namespace":[{"name":"org","value":"other"}]}`)
+	_, badRef := call(h, "open", `{"ref":"not a path"}`)
+	_, noRef := call(h, "related", `{"ref":""}`)
+	_, badTime := call(h, "search", `{"query":"knowledge","filters":{"created_after":"yesterday"}}`)
+	_, missing := call(h, "open", `{"ref":"`+uuid.NewString()+`"}`)
+	_, relatedOutside := call(h, "related", `{"ref":"`+doc.ID.String()+`","namespace":[{"name":"org","value":"other"}]}`)
+	_, saveOutside := call(h, "save", `{"kind":"Fact","title":"x","namespace":[{"name":"org","value":"other"}]}`)
+	_, undeclared := call(h, "save", `{"kind":"Fact","title":"x","properties":{"color":"red"}}`)
+	h.session.Search.ClearNamespace()
+	_, noNamespace := call(h, "open", `{"ref":"`+saved[0].ID.String()+`"}`)
 
-	lout, err := findLinks.invoke(ctx, `{"relation_type":"has_buyer","query":"economic buyer","limit":10}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
+	if len(slices.Collect(first.Results.Objects())) != 2 || !first.More || first.Facets.Kinds["Fact"] != 2 || first.Facets.Properties["topic"]["ops"] != 2 {
+		t.Errorf("first search = %+v, want 2 facts, more, and facets naming the kind and topic", first)
 	}
-	var links brain.FindLinksResult
-	if err := json.Unmarshal([]byte(lout.output), &links); err != nil {
-		t.Fatal(err)
+	if len(slices.Collect(second.Results.Objects())) != 1 || second.More || slices.Contains(idsOfPage(first), slices.Collect(second.Results.Objects())[0].ID) {
+		t.Errorf("more after a checkpoint = %+v, want the third fact", second)
 	}
-	if len(links.Links) != 1 || links.Links[0].From.ID != dealID || links.Links[0].To.ID != buyerID {
-		t.Fatalf("find_links: %+v", links.Links)
+	if updateErr != nil || !strings.Contains(updated, "revised") || !strings.Contains(updated, saved[0].ID.String()) {
+		t.Errorf("save with an id = %s %v, want the record updated", updated, updateErr)
+	}
+	if !slices.Contains(titlesOfPage(narrowed), "Runbook") || slices.Contains(titlesOfPage(narrowed), "foreign knowledge") {
+		t.Errorf("narrowed search = %v, want the west runbook and no other tenant's record", titlesOfPage(narrowed))
+	}
+	if openErr != nil || !strings.Contains(openOut, `"kind": "Document"`) || !strings.Contains(openOut, `"children"`) {
+		t.Errorf("open = %s %v, want the record, its kind and its children", openOut, openErr)
+	}
+	if len(slices.Collect(related.Results.Objects())) != 1 || slices.Collect(related.Results.Objects())[0].Relation.Type != brain.RelationChild {
+		t.Errorf("related = %+v, want the runbook's part as a child", related)
+	}
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"more with no earlier call":     {noMore, "no more results"},
+		"an unwritable kind":            {badKind, `kind "Memory" cannot be saved; kinds: Fact`},
+		"no title":                      {noTitle, "title is required"},
+		"a bad id":                      {badID, "id must be a UUID"},
+		"an unknown filter":             {badFilter, `unknown filter "phase" for Fact; filterable: topic`},
+		"the reserved session attr":     {reserved, "reserved"},
+		"another org":                   {outside, "outside host scope"},
+		"a ref that is no path":         {badRef, "neither a UUID nor a path"},
+		"an empty ref":                  {noRef, "ref is required"},
+		"a filter time that is no time": {badTime, "created_after"},
+		"a missing record":              {missing, "not found"},
+		"related in another org":        {relatedOutside, "outside host scope"},
+		"save in another org":           {saveOutside, "outside host scope"},
+		"an undeclared property":        {undeclared, "color"},
+	} {
+		if tc.err == nil || !strings.Contains(tc.err.Error(), tc.want) {
+			t.Errorf("%s = %v, want an error naming %q", name, tc.err, tc.want)
+		}
+	}
+	if !errors.Is(noNamespace, brain.ErrInvalid) {
+		t.Errorf("open without a host namespace = %v, want it to fail closed", noNamespace)
 	}
 }
 
-// TestBrainTools_searchNamespaceIsolation: search under host namespace must not
-// surface objects stored only in another namespace.
-func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
+func idsOfPage(p brain.Page) []uuid.UUID {
+	var out []uuid.UUID
+	for _, o := range slices.Collect(p.Results.Objects()) {
+		out = append(out, o.ID)
+	}
+	return out
+}
+
+func titlesOfPage(p brain.Page) []string {
+	var out []string
+	for _, o := range slices.Collect(p.Results.Objects()) {
+		out = append(out, o.Title)
+	}
+	return out
+}
+
+// TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote: records link by
+// id, an indexed file by its path (an unindexed one cannot be an end), the
+// note makes the link searchable, and remove takes it away.
+func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	nsA, nsB := mustNS(t, "org", "a"), mustNS(t, "org", "b")
-	now := time.Now().UTC()
-	secretParent := uuid.New()
-	secretPart := uuid.New()
-	pos := 1
-	_ = putFixture(store, brain.Object{ID: secretParent, Kind: "Document", Title: "Secret deal", Namespace: nsA, UpdatedAt: now})
-	_ = putFixture(store, brain.Object{
-		ID: secretPart, Kind: "Chunk", Title: "chunk", Content: "namespace isolation secret token xyzzy",
-		ParentID: &secretParent, Position: &pos, Namespace: nsA, UpdatedAt: now,
-	})
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Graph(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Agent scoped to nsB only.
-	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize: 1024, Model: &scriptedModel{},
-		Brain: eng, SearchNamespace: nsB,
-	})
-	search := h.findTool("search", "")
-	read := h.findTool("read_object", "")
-	if search == nil || read == nil {
-		t.Fatal("search and read_object required")
+	if err := eng.ApplyKinds(ctx, append(vfsindex.MountIndexKinds(),
+		brain.KindSpec{Kind: "Deal", IsParent: true}, brain.KindSpec{Kind: "Person", IsParent: true})...); err != nil {
+		t.Fatal(err)
 	}
-	out, err := search.invoke(ctx, `{"query":"namespace isolation secret token xyzzy","limit":10}`, turnRuntime(h))
+	ns := mustNS(t, "org", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
+	deal, err := eng.Save(ctx, scope, brain.Object{Kind: "Deal", Title: "Acme", Content: "Deal body."})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out.output, secretParent.String()) || strings.Contains(out.output, "xyzzy") {
-		t.Fatalf("search leaked nsA object into nsB: %s", out.output)
+	person, err := eng.Save(ctx, scope, brain.Object{Kind: "Person", Title: "Sam", Content: "Buyer."})
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, err = read.invoke(ctx, `{"object_id":"`+secretParent.String()+`"}`, turnRuntime(h))
-	if err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("read foreign ns want not found, got %v", err)
+	ms := mustMountTree(t, "link-graph", vfs.At("work", vfs.Local(t.TempDir())))
+	h := mustNewTurnManager(t, AgentOptions{sessionID: "link-graph", mountSession: ms, Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns})
+	t.Cleanup(h.Close)
+	activatePlan(t, h)
+	call := func(name, args string) (string, error) {
+		out, err := h.findTool(name, "").invoke(ctx, args, turnRuntime(h))
+		return out.output, err
+	}
+	if err := ms.Route(ctx, "/workspace/work/doc.md").WriteFile(ctx, []byte("# Doc\n\nartifact\n")); err != nil {
+		t.Fatal(err)
 	}
 
-	westParent := uuid.New()
-	westPart := uuid.New()
-	_ = putFixture(store, brain.Object{ID: westParent, Kind: "Document", Title: "West deal", Namespace: mustNS(t, "org", "b", "workspace", "west"), UpdatedAt: now})
-	_ = putFixture(store, brain.Object{
-		ID: westPart, Kind: "Chunk", Title: "chunk", Content: "per-call workspace west token plugh",
-		ParentID: &westParent, Position: &pos, Namespace: mustNS(t, "org", "b", "workspace", "west"), UpdatedAt: now,
-	})
-	narrow, err := search.invoke(ctx, `{"query":"per-call workspace west token plugh","limit":10,"namespace":[{"name":"workspace","value":"west"}]}`, turnRuntime(h))
-	if err != nil {
+	linked, linkErr := call("link", `{"from":"`+deal.ID.String()+`","to":"`+person.ID.String()+`","relation":"about","note":"signs the renewal contract"}`)
+	found, foundErr := call("search", `{"query":"signs the renewal contract"}`)
+	related, relatedErr := call("related", `{"ref":"`+deal.ID.String()+`","relation":"about"}`)
+	_, unindexed := call("link", `{"from":"/workspace/work/doc.md","to":"`+deal.ID.String()+`","relation":"about"}`)
+	if _, err := runWriteTool(t, h, h.findTool("index_file", ""), `{"path":"/workspace/work/doc.md"}`); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(narrow.output, westParent.String()) {
-		t.Fatalf("workspace=west search should hit west object: %s", narrow.output)
+	_, byPath := call("link", `{"from":"/workspace/work/doc.md","to":"`+deal.ID.String()+`","relation":"about"}`)
+	removed, removeErr := call("link", `{"from":"`+deal.ID.String()+`","to":"`+person.ID.String()+`","relation":"about","remove":true}`)
+	after, _ := call("related", `{"ref":"`+deal.ID.String()+`","relation":"about"}`)
+	_, noTo := call("link", `{"from":"`+deal.ID.String()+`","to":"","relation":"about"}`)
+
+	if linkErr != nil || !strings.Contains(linked, `"linked": true`) || !strings.Contains(linked, person.ID.String()) {
+		t.Errorf("link = %s %v, want it linked", linked, linkErr)
 	}
-	east, err := search.invoke(ctx, `{"query":"per-call workspace west token plugh","limit":10,"namespace":[{"name":"workspace","value":"east"}]}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
+	if foundErr != nil || !strings.Contains(found, `"relation": "about"`) || !strings.Contains(found, "signs the renewal contract") {
+		t.Errorf("search the note = %s %v, want the link", found, foundErr)
 	}
-	if strings.Contains(east.output, westParent.String()) || strings.Contains(east.output, "plugh") {
-		t.Fatalf("workspace=east search leaked west object: %s", east.output)
+	if relatedErr != nil || !strings.Contains(related, person.ID.String()) {
+		t.Errorf("related by about = %s %v, want the person", related, relatedErr)
 	}
-	if _, err := search.invoke(ctx, `{"query":"x","namespace":[{"name":"org","value":"a"}]}`, turnRuntime(h)); err == nil || !strings.Contains(err.Error(), "outside host scope") {
-		t.Fatalf("conflicting org: %v", err)
+	if unindexed == nil || !strings.Contains(unindexed.Error(), "not indexed") || byPath != nil {
+		t.Errorf("link an unindexed file = %v, then an indexed one = %v, want not indexed, then linked", unindexed, byPath)
+	}
+	if removeErr != nil || !strings.Contains(removed, `"linked": false`) || strings.Contains(after, person.ID.String()) {
+		t.Errorf("remove = %s %v, then related %s, want the person gone", removed, removeErr, after)
+	}
+	if noTo == nil || !strings.Contains(noTo.Error(), "to is required") {
+		t.Errorf("link with no to = %v, want it named", noTo)
 	}
 }
 
 func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	docID := uuid.New()
-	if err := putFixture(store, brain.Object{
-		ID: docID, Kind: "Document", Title: "Shared", Content: "worker-visible",
-		Namespace: ns,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// part for worker search isolation
-	parent := uuid.New()
-	part := uuid.New()
-	pos := 1
-	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Title: "P", Namespace: ns})
-	_ = putFixture(store, brain.Object{
-		ID: part, Kind: "Chunk", Content: "worker search isolation token",
-		ParentID: &parent, Position: &pos, Namespace: ns,
-	})
-
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
-
+	ns := mustNS(t, "org", uuid.NewString())
+	doc, err := eng.Save(ctx, brain.Scope{Namespace: ns}, brain.Object{Kind: "Document", Title: "Shared", Content: "worker-visible"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	workerModel := &scriptedModel{
 		InvokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
 	parentOpts := AgentOptions{
-		MaxWindowSize:   1024,
-		Model:           &scriptedModel{},
-		Brain:           eng,
-		SearchNamespace: ns,
-		Specialists: []*Specialist{
-			{Name: "researcher", Model: workerModel},
-		},
+		MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns,
+		Specialists: []*Specialist{{Name: "researcher", Model: workerModel}},
 	}
 	parentH := mustNewTurnManager(t, parentOpts)
 	t.Cleanup(parentH.Close)
@@ -577,175 +302,21 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	worker := mustNewTurnManager(t, workerOpts)
 	t.Cleanup(worker.Close)
 
-	gotNS, ok := worker.session.Search.Namespace()
-	if !ok || !gotNS.Equal(ns) {
-		t.Fatalf("worker namespace %v %v, want %v", gotNS, ok, ns)
-	}
-
-	readTool := worker.findTool("read_object", "")
-	searchTool := worker.findTool("search", "")
-	if readTool == nil || searchTool == nil {
-		t.Fatal("worker must inherit brain read_object and search")
-	}
-	out, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(worker))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.output, "worker-visible") {
-		t.Fatalf("worker read: %s", out.output)
-	}
-	sout, err := searchTool.invoke(ctx, `{"query":"worker search isolation token"}`, turnRuntime(worker))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(sout.output, parent.String()) && !strings.Contains(sout.output, "worker search isolation") {
-		t.Fatalf("worker search: %s", sout.output)
-	}
-
+	opened, openErr := worker.findTool("open", "").invoke(ctx, `{"ref":"`+doc.ID.String()+`"}`, turnRuntime(worker))
+	found, searchErr := worker.findTool("search", "").invoke(ctx, `{"query":"worker-visible"}`, turnRuntime(worker))
 	parentH.session.Search.ClearNamespace()
-	gotNS, ok = worker.session.Search.Namespace()
+	gotNS, ok := worker.session.Search.Namespace()
+
+	if openErr != nil || !strings.Contains(opened.output, "worker-visible") || searchErr != nil || !strings.Contains(found.output, doc.ID.String()) {
+		t.Errorf("worker open = %s %v, search = %s %v, want the parent's record", opened.output, openErr, found.output, searchErr)
+	}
 	if !ok || !gotNS.Equal(ns) {
-		t.Fatalf("worker namespace after parent clear: %v %v", gotNS, ok)
-	}
-}
-
-// TestBrainTools_linkByIDAndIndexedPath: knowledge records link by id.
-// An unindexed workspace file cannot be an endpoint until index_file.
-func TestBrainTools_linkByIDAndIndexedPath(t *testing.T) {
-	ctx := context.Background()
-	g := helixtest.Graph(t)
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
-		brain.KindSpec{Kind: "Deal", IsParent: true},
-		brain.KindSpec{Kind: "Person", IsParent: true},
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	kg := brain.NewKnowledgeGraph(eng, g)
-	if err := eng.ApplyKinds(ctx, append(vfsindex.MountIndexKinds(),
-		brain.KindSpec{Kind: "Deal", IsParent: true},
-		brain.KindSpec{Kind: "Person", IsParent: true},
-	)...); err != nil {
-		t.Fatal(err)
-	}
-	ns := mustNS(t, "id", uuid.NewString())
-	scope := brain.Scope{Namespace: ns}
-	deal, err := eng.Put(ctx, scope, brain.Object{Kind: "Deal", Title: "Acme", Content: "Deal body."})
-	if err != nil {
-		t.Fatal(err)
-	}
-	person, err := eng.Put(ctx, scope, brain.Object{Kind: "Person", Title: "Sam", Content: "Buyer."})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ms := mustMountTree(t, "id-graph", vfs.At("work", vfs.Local(t.TempDir())))
-	h := mustNewTurnManager(t, AgentOptions{
-		sessionID:    "id-graph",
-		mountSession: ms, Model: &scriptedModel{},
-		Brain: eng,
-		Graph: kg, SearchNamespace: ns,
-	})
-	t.Cleanup(h.Close)
-	activatePlan(t, h)
-
-	link := h.findTool("link", "")
-	expand := h.findTool("expand", "")
-	findLinks := h.findTool("find_links", "")
-	if link == nil || expand == nil || findLinks == nil {
-		t.Fatal("link/expand/find_links required")
-	}
-	lout, err := link.invoke(ctx, `{
-		"from_id":"`+deal.ID.String()+`","to_id":"`+person.ID.String()+`",
-		"relation_type":"about","role":"buyer","note":"primary buyer"
-	}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(lout.output, deal.ID.String()) || !strings.Contains(lout.output, person.ID.String()) {
-		t.Fatalf("link ids: %s", lout.output)
-	}
-
-	eout, err := expand.invoke(ctx, `{"object_id":"`+deal.ID.String()+`","relation_types":["about"]}`, turnRuntime(h))
-	if err != nil || !strings.Contains(eout.output, person.ID.String()) {
-		t.Fatalf("expand neighbor: %v %s", err, eout.output)
-	}
-
-	fout, err := findLinks.invoke(ctx, `{"relation_type":"about","query":"primary"}`, turnRuntime(h))
-	if err != nil || !strings.Contains(fout.output, deal.ID.String()) || !strings.Contains(fout.output, person.ID.String()) {
-		t.Fatalf("find_links: %v %s", err, fout.output)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/doc.md").
-		WriteFile(ctx, []byte("# Doc\n\nartifact\n")); err != nil {
-		t.Fatal(err)
-	}
-	_, err = link.invoke(ctx, `{
-		"from":"/workspace/work/doc.md","to_id":"`+deal.ID.String()+`","relation_type":"about"
-	}`, turnRuntime(h))
-	if err == nil || !strings.Contains(err.Error(), "not indexed") {
-		t.Fatalf("unindexed artifact: %v", err)
-	}
-	idx := h.findTool("index_file", "")
-	if _, err := runWriteTool(t, h, idx, `{"path":"/workspace/work/doc.md"}`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := link.invoke(ctx, `{
-		"from":"/workspace/work/doc.md","to_id":"`+deal.ID.String()+`","relation_type":"about"
-	}`, turnRuntime(h)); err != nil {
-		t.Fatal(err)
-	}
-
-	unlink := h.findTool("unlink", "")
-	if unlink == nil {
-		t.Fatal("unlink required")
-	}
-	if _, err := unlink.invoke(ctx, `{
-		"from_id":"`+deal.ID.String()+`","to_id":"`+person.ID.String()+`","relation_type":"about"
-	}`, turnRuntime(h)); err != nil {
-		t.Fatal(err)
-	}
-	eout2, err := expand.invoke(ctx, `{"object_id":"`+deal.ID.String()+`","relation_types":["about"]}`, turnRuntime(h))
-	if err != nil || strings.Contains(eout2.output, person.ID.String()) {
-		t.Fatalf("after unlink: %v %s", err, eout2.output)
-	}
-}
-
-func TestBrainTools_expandAndUnlinkValidationErrors(t *testing.T) {
-	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
-	if err != nil {
-		t.Fatal(err)
-	}
-	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
-	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize:   1024,
-		Model:           &scriptedModel{},
-		Brain:           eng,
-		Graph:           kg,
-		SearchNamespace: mustNS(t, "org", "acme"),
-	})
-	expand := h.findTool("expand", "")
-	unlink := h.findTool("unlink", "")
-	if expand == nil || unlink == nil {
-		t.Fatal("expand and unlink required with brain")
-	}
-	rt := turnRuntime(h)
-
-	if _, err := expand.invoke(ctx, `{}`, rt); err == nil || !strings.Contains(err.Error(), "expand") {
-		t.Fatalf("expand missing ref = %v", err)
-	}
-	if _, err := unlink.invoke(ctx, `{"relation_type":"about"}`, rt); err == nil || !strings.Contains(err.Error(), "unlink") {
-		t.Fatalf("unlink missing ref = %v", err)
-	}
-	if _, err := unlink.invoke(ctx, `{
-		"from_id":"not-a-uuid","to_id":"not-a-uuid","relation_type":"about"
-	}`, rt); err == nil || !strings.Contains(err.Error(), "from") {
-		t.Fatalf("unlink invalid uuid = %v", err)
+		t.Errorf("worker namespace after the parent clears its own = %v %v, want %v", gotNS, ok, ns)
 	}
 }
 
 // putFixture writes obj straight to the store under its own namespace.
 func putFixture(s brain.Store, obj brain.Object) error {
-	_, err := s.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, brain.Indexed{Object: obj, Text: brain.IndexText(obj)})
+	_, err := s.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, brain.Indexed{Object: obj, Text: obj.IndexText()})
 	return err
 }

@@ -94,15 +94,12 @@ func TestStore_everyCallReportsADatabaseFailure(t *testing.T) {
 	_, errs["put tree"] = store.PutTree(ctx, scope, doc, nil)
 	_, errs["get"] = store.Get(ctx, scope, id)
 	_, errs["get many"] = store.GetMany(ctx, scope, []uuid.UUID{id})
-	_, errs["list children"] = store.ListChildren(ctx, scope, id)
+	_, errs["get tree"] = store.GetTree(ctx, scope, id, 0)
 	_, errs["purge deleted"] = store.PurgeDeleted(ctx, scope, time.Now())
 	_, errs["erase"] = store.Erase(ctx, scope)
-	_, errs["get kind"] = store.GetKind(ctx, "Document")
 	_, errs["list kinds"] = store.ListKinds(ctx)
-	_, errs["list by kind"] = store.ListByKind(ctx, scope, "Document", 5)
 	_, errs["get by property"] = store.GetByProperty(ctx, scope, "path", "/a")
-	_, errs["kinds with objects"] = store.KindsWithObjects(ctx, scope)
-	_, errs["search"] = store.Search(ctx, scope, brain.PartSearch{Query: "q", Limit: 5})
+	_, errs["search"] = store.Search(ctx, scope, brain.RecordSearch{Query: "q", Limit: 5})
 	_, errs["save session"] = store.SaveSessionMessages(ctx, ns, "s1", "k", []brain.SessionMessage{{Role: "user"}})
 	_, errs["purge session"] = store.PurgeSessionMessages(ctx, ns, time.Now())
 
@@ -137,10 +134,10 @@ func TestStore_rejectsInvalidArgumentsBeforeQuerying(t *testing.T) {
 	if _, err := embedding.PutTree(ctx, scope, poisoned, nil); err == nil || !strings.Contains(err.Error(), "embedder down") {
 		t.Fatalf("tree whose parent does not embed = %v, want the embedder's error", err)
 	}
-	if _, err := store.Search(ctx, scope, brain.PartSearch{Query: "q", Filters: brain.Filter{UpdatedAfter: "not-a-time"}, Limit: 5}); !errors.Is(err, brain.ErrInvalid) {
+	if _, err := store.Search(ctx, scope, brain.RecordSearch{Query: "q", Filters: brain.Filter{UpdatedAfter: "not-a-time"}, Limit: 5}); !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("invalid search filter = %v, want ErrInvalid", err)
 	}
-	if got, err := store.Search(ctx, scope, brain.PartSearch{Query: "q"}); err != nil || got != nil {
+	if got, err := store.Search(ctx, scope, brain.RecordSearch{Query: "q"}); err != nil || got != nil {
 		t.Fatalf("search with no limit = %v %v, want nothing", got, err)
 	}
 	if err := store.PutKind(ctx, brain.ObjectKind{}); err == nil {
@@ -148,9 +145,6 @@ func TestStore_rejectsInvalidArgumentsBeforeQuerying(t *testing.T) {
 	}
 	if _, err := store.GetByProperty(ctx, scope, "", "v"); err == nil {
 		t.Fatal("want empty property key")
-	}
-	if got, err := store.ListByKind(ctx, scope, "", 10); err != nil || got != nil {
-		t.Fatalf("empty kind list: %v %v", got, err)
 	}
 	if err := putFixture(store, brain.Object{
 		ID: id, Kind: "Document", Namespace: mustNS(t, "org", "a"),
@@ -273,7 +267,7 @@ func TestPostgresStore_notFoundAndCorruptProperties(t *testing.T) {
 	if err := store.SoftDelete(ctx, scope, uuid.New()); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft delete missing: %v", err)
 	}
-	if _, err := store.GetKind(ctx, "ghost"); !errors.Is(err, brain.ErrNotFound) {
+	if _, err := kindNamed(ctx, store, "ghost"); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("get kind missing: %v", err)
 	}
 	many, err := store.GetMany(ctx, scope, []uuid.UUID{id, uuid.New()})
@@ -322,7 +316,7 @@ func mustExec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 
 // TestEngine_livePostgresMultiTurnWriteSearch covers a multi-turn host path on
 // real Postgres: ApplyKinds → Put (parent+parts with vectors) → hybrid search →
-// continue → find_exact → expand children → soft-delete → revive Put → namespace isolation.
+// next page → lookup by id → related children → soft-delete → revive Save → namespace isolation.
 func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -346,7 +340,7 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Persist kinds so store.GetKind reflects host migration.
+	// Persist kinds so the store registry reflects host migration.
 	if err := eng.SyncKindsToStore(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -354,10 +348,9 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	otherNS := mustNS(t, "org", "other")
 	scope := brain.Scope{Namespace: ns}
-	sc := brain.NewSearchContext()
 
 	// Turn 1: create parent + two searchable parts.
-	doc, err := eng.Put(ctx, scope, brain.Object{
+	doc, err := eng.Save(ctx, scope, brain.Object{
 		Kind: "Document", Title: "OAuth guide",
 		Properties: map[string]any{"stage": "open"},
 	})
@@ -365,14 +358,14 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	pos1, pos2 := 1, 2
-	c1, err := eng.Put(ctx, scope, brain.Object{
+	c1, err := eng.Save(ctx, scope, brain.Object{
 		Kind: "Chunk", Title: "pkce", Content: "oauth pkce authorization code flow",
 		ParentID: &doc.ID, Position: &pos1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c2, err := eng.Put(ctx, scope, brain.Object{
+	c2, err := eng.Save(ctx, scope, brain.Object{
 		Kind: "Chunk", Title: "pasta", Content: "cooking pasta recipes",
 		ParentID: &doc.ID, Position: &pos2,
 	})
@@ -382,15 +375,15 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	_ = c2
 
 	// Turn 2: hybrid search ranks parent; result set + continue.
-	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "oauth pkce", Limit: 1}, sc)
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "oauth pkce", Limit: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Objects) != 1 || page.Objects[0].ID != doc.ID {
-		t.Fatalf("search page: %+v", page.Objects)
+	if len(slices.Collect(page.Results.Objects())) != 1 || slices.Collect(page.Results.Objects())[0].ID != doc.ID {
+		t.Fatalf("search page: %+v", slices.Collect(page.Results.Objects()))
 	}
 	// Seed a second parent so continue has a next page of ranked parents.
-	doc2, err := eng.Put(ctx, scope, brain.Object{
+	doc2, err := eng.Save(ctx, scope, brain.Object{
 		Kind: "Document", Title: "Second guide",
 		Properties: map[string]any{"stage": "open"},
 	})
@@ -398,49 +391,49 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	pos3 := 1
-	if _, err := eng.Put(ctx, scope, brain.Object{
+	if _, err := eng.Save(ctx, scope, brain.Object{
 		Kind: "Chunk", Title: "pkce-2", Content: "oauth pkce secondary material",
 		ParentID: &doc2.ID, Position: &pos3,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "oauth pkce", Limit: 1}, sc)
+	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "oauth pkce", Limit: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.ResultSetID == uuid.Nil || !page.HasMore {
-		t.Fatalf("want has_more with limit 1: %+v", page)
+	if !page.More {
+		t.Fatalf("want more with limit 1: %+v", page)
 	}
-	page2, err := eng.Continue(ctx, scope, page.ResultSetID, 1, sc)
+	page2, err := eng.Next(ctx, scope, page.Rest, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page2.ResultSetID != page.ResultSetID || len(page2.Objects) == 0 {
-		t.Fatalf("continue: %+v", page2)
+	if len(slices.Collect(page2.Results.Objects())) == 0 {
+		t.Fatalf("next: %+v", page2)
 	}
-	if page2.Objects[0].ID == page.Objects[0].ID {
-		t.Fatalf("continue should advance: first=%s second=%s", page.Objects[0].ID, page2.Objects[0].ID)
+	if slices.Collect(page2.Results.Objects())[0].ID == slices.Collect(page.Results.Objects())[0].ID {
+		t.Fatalf("continue should advance: first=%s second=%s", slices.Collect(page.Results.Objects())[0].ID, slices.Collect(page2.Results.Objects())[0].ID)
 	}
 
-	// Turn 3: find_exact by parent UUID.
-	exact, err := eng.FindExact(ctx, scope, brain.SearchRequest{Query: doc.ID.String()}, sc)
+	// Turn 3: search by the parent UUID.
+	exact, err := eng.Search(ctx, scope, brain.SearchRequest{Query: doc.ID.String()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(exact.Objects) != 1 || exact.Objects[0].ID != doc.ID {
-		t.Fatalf("find_exact: %+v", exact.Objects)
+	if len(slices.Collect(exact.Results.Objects())) != 1 || slices.Collect(exact.Results.Objects())[0].ID != doc.ID {
+		t.Fatalf("search by id: %+v", slices.Collect(exact.Results.Objects()))
 	}
 
 	// Turn 4: expand containment children (ordered).
-	kids, err := eng.Expand(ctx, scope, brain.ExpandRequest{ObjectID: doc.ID}, sc)
+	kids, err := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if kids.Mode != "children" || len(kids.Objects) != 2 {
-		t.Fatalf("expand children: %+v", kids)
+	if len(slices.Collect(kids.Results.Objects())) != 2 {
+		t.Fatalf("related children: %+v", kids)
 	}
-	if kids.Objects[0].ID != c1.ID {
-		t.Fatalf("child order: %+v", kids.Objects)
+	if slices.Collect(kids.Results.Objects())[0].ID != c1.ID {
+		t.Fatalf("child order: %+v", slices.Collect(kids.Results.Objects()))
 	}
 
 	// Turn 5: soft-delete part → lexical no longer returns it; Get is ErrNotFound.
@@ -450,7 +443,7 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	if _, err := store.Get(ctx, scope, c1.ID); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft-deleted get: %v", err)
 	}
-	lex, err := store.Search(ctx, scope, brain.PartSearch{Query: "oauth", Filters: mustFilter(t, map[string]any{"kind": "Chunk"}), Limit: 10})
+	lex, err := store.Search(ctx, scope, brain.RecordSearch{Query: "oauth", Filters: mustFilter(t, map[string]any{"kind": "Chunk"}), Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +457,7 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	c1.Title = "pkce-revived"
 	c1.Content = "oauth pkce revived content"
 	c1.DeletedAt = nil
-	revived, err := eng.Put(ctx, scope, c1)
+	revived, err := eng.Save(ctx, scope, c1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +467,7 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	}
 
 	// Turn 7: catalog rejects bad put; namespace soft-delete isolation.
-	if _, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "no stage"}); err == nil {
+	if _, err := eng.Save(ctx, scope, brain.Object{Kind: "Document", Title: "no stage"}); err == nil {
 		t.Fatal("want required property failure")
 	}
 	if err := eng.SoftDelete(ctx, brain.Scope{Namespace: otherNS}, doc.ID); !errors.Is(err, brain.ErrNotFound) {
@@ -529,14 +522,14 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := store.GetKind(ctx, "Ghost"); !errors.Is(err, brain.ErrNotFound) {
+	if _, err := kindNamed(ctx, store, "Ghost"); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("missing kind: %v", err)
 	}
-	row, err := store.GetKind(ctx, "Document")
+	row, err := kindNamed(ctx, store, "Document")
 	if err != nil || row.Description != "parent docs v2" {
 		t.Fatalf("upserted document: %+v err=%v", row, err)
 	}
-	if _, err := store.GetKind(ctx, "Deal"); err != nil {
+	if _, err := kindNamed(ctx, store, "Deal"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -548,18 +541,21 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 	if err := eng2.LoadKindsFromStore(ctx); err != nil {
 		t.Fatal(err)
 	}
-	schema, err := eng2.Schema(ctx, "Document")
-	if err != nil || len(schema.Kinds) != 1 || schema.Kinds[0].Description != "parent docs v2" {
-		t.Fatalf("schema after load: %+v err=%v", schema, err)
+	if spec, ok := eng2.Catalog().Get("Document"); !ok || spec.Description != "parent docs v2" {
+		t.Fatalf("kind after load: %+v %v", spec, ok)
 	}
-	if err := brain.ValidateFiltersAgainst(mustFilter(t, map[string]any{
+	if err := mustFilter(t, map[string]any{
 		"kind": "Document", "stage": "open",
-	}), eng2.Catalog()); err != nil {
+	}).ValidateAgainst(
+
+		eng2.Catalog()); err != nil {
 		t.Fatal(err)
 	}
-	if err := brain.ValidateFiltersAgainst(mustFilter(t, map[string]any{
+	if err := mustFilter(t, map[string]any{
 		"kind": "Document", "unknown": "x",
-	}), eng2.Catalog()); err == nil {
+	}).ValidateAgainst(
+
+		eng2.Catalog()); err == nil {
 		t.Fatal("want unknown property rejected after load")
 	}
 }
@@ -577,7 +573,7 @@ func TestPostgresStore_setupRegistersKinds(t *testing.T) {
 	if err := store.Setup(ctx, deal); err != nil {
 		t.Fatal(err)
 	}
-	got, err := store.GetKind(ctx, "Deal")
+	got, err := kindNamed(ctx, store, "Deal")
 	if err != nil || got.Description != "sales" || !got.IsParent {
 		t.Fatalf("kind: %+v err=%v", got, err)
 	}
@@ -644,7 +640,7 @@ func TestStore_auditEventsArePersisted(t *testing.T) {
 	}
 	scope := brain.Scope{Namespace: mustNS(t, "org", "a"), Principals: []string{"user:ann"}, SessionID: "s1"}
 
-	obj, err := eng.Put(ctx, scope, brain.Object{Kind: "Note", Title: "n"})
+	obj, err := eng.Save(ctx, scope, brain.Object{Kind: "Note", Title: "n"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,7 +688,7 @@ func TestStore_setupWaitsForAnotherSetupPastTheStatementTimeout(t *testing.T) {
 	}
 }
 
-func TestEngine_aClosedStoreFailsTheCallsThatFollowAGraphHit(t *testing.T) {
+func TestEngine_aClosedStoreFailsTheCallsThatReadIt(t *testing.T) {
 	ctx := t.Context()
 	store, err := postgres.Open(ctx, pgConn, postgres.Options{Schema: testSchema(t), EmbeddingDim: 3})
 	if err != nil {
@@ -701,30 +697,47 @@ func TestEngine_aClosedStoreFailsTheCallsThatFollowAGraphHit(t *testing.T) {
 	if err := store.Setup(ctx); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithGraph(helixtest.Graph(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	kg := brain.NewKnowledgeGraph(eng, helixtest.Graph(t))
-	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
-	from, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "from"})
-	if err != nil {
+	scope := brain.Scope{Namespace: mustNS(t, "org", uuid.NewString())}
+	var ids []uuid.UUID
+	for _, title := range []string{"from shared", "to shared"} {
+		obj, err := eng.Save(ctx, scope, brain.Object{Kind: "Document", Title: title})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, obj.ID)
+	}
+	if err := eng.Link(ctx, scope, brain.LinkRequest{From: ids[0], To: ids[1], Relation: "references"}); err != nil {
 		t.Fatal(err)
 	}
-	to, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "to"})
-	if err != nil {
+	first, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "shared", Limit: 1})
+	if err != nil || !first.More {
+		t.Fatalf("first page = %+v %v, want more", first, err)
+	}
+	// The first open reads the kind registry; a fresh engine reads it after the close.
+	if _, err := eng.Open(ctx, scope, ids[0]); err != nil {
 		t.Fatal(err)
 	}
-	if err := kg.Link(ctx, scope, from.ID, to.ID, "references"); err != nil {
+	fresh, err := brain.NewEngine(store)
+	if err != nil {
 		t.Fatal(err)
 	}
 	store.Close()
 
-	_, pathErr := kg.ShortestPath(ctx, scope, brain.PathRequest{From: from.ID, To: to.ID})
-	_, findErr := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "from"}, brain.NewSearchContext())
+	_, registryErr := fresh.Open(ctx, scope, ids[0])
+	_, nextErr := eng.Next(ctx, scope, first.Rest, 1)
+	_, searchErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "shared"})
+	_, relatedErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: ids[0]})
+	_, openErr := eng.Open(ctx, scope, ids[0])
+	_, listErr := eng.Search(ctx, scope, brain.SearchRequest{Kind: "Document"})
+	_, withinErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "shared", Within: ids[0]})
+	_, resolveErr := eng.Resolve(ctx, scope, brain.Ref{Path: "/workspace/work/doc.md"})
 	kindsErr := eng.ApplyKinds(ctx, brain.KindSpec{Kind: "Document", IsParent: true})
 
-	for name, err := range map[string]error{"shortest path": pathErr, "find objects": findErr, "apply kinds": kindsErr} {
+	for name, err := range map[string]error{"next page": nextErr, "search": searchErr, "related": relatedErr, "open": openErr, "open's kind registry": registryErr, "list records": listErr, "search within": withinErr, "resolve a path": resolveErr, "apply kinds": kindsErr} {
 		if err == nil || !strings.Contains(err.Error(), "closed pool") {
 			t.Errorf("%s on a closed store = %v, want its error", name, err)
 		}
@@ -751,7 +764,7 @@ func TestStore_searchRanksByTheWordsTheWayAReaderExpects(t *testing.T) {
 		t.Fatal(err)
 	}
 	search := func(query string, exact bool) []brain.ScoredID {
-		hits, err := store.Search(ctx, brain.Scope{Namespace: ns, SessionID: "sess/1"}, brain.PartSearch{Query: query, Exact: exact, Limit: 10})
+		hits, err := store.Search(ctx, brain.Scope{Namespace: ns, SessionID: "sess/1"}, brain.RecordSearch{Query: query, Exact: exact, Limit: 10})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -787,14 +800,20 @@ func TestStore_searchByMeaningKeepsFiltersAndNestedNamespaces(t *testing.T) {
 	org := mustNS(t, "org", uuid.NewString())
 	west := append(org.Clone(), brain.Attr{Name: "workspace", Value: "west"})
 	east := append(org.Clone(), brain.Attr{Name: "workspace", Value: "east"})
-	doc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "fleet", Namespace: west}
-	manual, list := chunk(doc, "manual", "car manual", 0), chunk(doc, "list", "car parts list", 1)
-	manual.Properties, list.Properties = map[string]any{"stage": "open"}, map[string]any{"stage": "closed"}
-	if _, err := store.PutTree(ctx, brain.Scope{Namespace: west}, brain.Indexed{Object: doc}, indexedParts(manual, list)); err != nil {
-		t.Fatal(err)
+	// Filters test the record a part belongs to.
+	openDoc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "fleet", Namespace: west, Properties: map[string]any{"stage": "open"}}
+	closedDoc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "depot", Namespace: west, Properties: map[string]any{"stage": "closed"}}
+	manual, list := chunk(openDoc, "manual", "car manual", 0), chunk(closedDoc, "list", "car parts list", 0)
+	for _, tree := range []struct {
+		doc  brain.Object
+		part brain.Indexed
+	}{{openDoc, manual}, {closedDoc, list}} {
+		if _, err := store.PutTree(ctx, brain.Scope{Namespace: west}, brain.Indexed{Object: tree.doc}, indexedParts(tree.part)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	search := func(ns brain.Namespace, filter brain.Filter) []uuid.UUID {
-		hits, err := store.Search(ctx, brain.Scope{Namespace: ns}, brain.PartSearch{Query: "automobile", Filters: filter, Limit: 10})
+		hits, err := store.Search(ctx, brain.Scope{Namespace: ns}, brain.RecordSearch{Query: "automobile", Filters: filter, Limit: 10})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -806,7 +825,7 @@ func TestStore_searchByMeaningKeepsFiltersAndNestedNamespaces(t *testing.T) {
 	sibling := search(east, brain.Filter{})
 
 	if !slices.Equal(open, []uuid.UUID{manual.ID}) {
-		t.Errorf("by meaning with a filter = %v, want the open part only", open)
+		t.Errorf("by meaning with a filter = %v, want the open record's part only", open)
 	}
 	if len(all) != 2 || len(sibling) != 0 {
 		t.Errorf("by meaning from the org = %v, from a sibling workspace = %v, want both parts, then none", all, sibling)
@@ -838,4 +857,18 @@ func hitIDs(hits []brain.ScoredID) []uuid.UUID {
 		out[i] = h.ID
 	}
 	return out
+}
+
+// kindNamed is kind's row in the store's kind registry.
+func kindNamed(ctx context.Context, s brain.Store, kind string) (brain.ObjectKind, error) {
+	kinds, err := s.ListKinds(ctx)
+	if err != nil {
+		return brain.ObjectKind{}, err
+	}
+	for _, k := range kinds {
+		if k.Kind == kind {
+			return k, nil
+		}
+	}
+	return brain.ObjectKind{}, fmt.Errorf("%w: kind %q", brain.ErrNotFound, kind)
 }

@@ -3,6 +3,7 @@ package vfsindex_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -57,11 +58,11 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	var found bool
 	for time.Now().Before(deadline) {
-		page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{Query: "uniquephrase"}, brain.NewSearchContext())
+		page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{Query: "uniquephrase"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(page.Objects) > 0 {
+		if len(slices.Collect(page.Results.Objects())) > 0 {
 			found = true
 			break
 		}
@@ -123,7 +124,7 @@ func TestIndexPath_andUnindex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := eng.Read(ctx, scope, idx.DocumentID("/workspace/work/x.txt")); !errors.Is(err, brain.ErrNotFound) {
+	if _, err := eng.Get(ctx, scope, idx.DocumentID("/workspace/work/x.txt")); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("expected soft-deleted parent, got %v", err)
 	}
 	removed, err = idx.UnindexPath(ctx, "/workspace/work/x.txt")
@@ -146,14 +147,14 @@ func TestIndexPath_andUnindex(t *testing.T) {
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("dirty index: res=%q err=%v", res, err)
 	}
-	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "dirtyphrase-only-in-cache"}, brain.NewSearchContext())
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "dirtyphrase-only-in-cache"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Objects) == 0 {
+	if len(slices.Collect(page.Results.Objects())) == 0 {
 		t.Fatal("IndexPath should use session-visible dirty body")
 	}
-	if page.Objects[0].Properties[vfsindex.PropVFSPath] != "/workspace/work/dirty.txt" {
-		t.Fatalf("unexpected hit: %+v", page.Objects[0])
+	if slices.Collect(page.Results.Objects())[0].Properties[vfsindex.PropVFSPath] != "/workspace/work/dirty.txt" {
+		t.Fatalf("unexpected hit: %+v", slices.Collect(page.Results.Objects())[0])
 	}
 }

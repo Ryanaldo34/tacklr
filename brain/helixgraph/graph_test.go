@@ -87,8 +87,8 @@ func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 	if afterConflict != nil {
 		t.Errorf("open after a conflict with another open = %v, want it to retry and succeed", afterConflict)
 	}
-	if !helix.IsConflict(keptConflicting) || !errors.Is(keptConflicting, context.DeadlineExceeded) {
-		t.Errorf("open while every create conflicts = %v, want the conflict and the deadline", keptConflicting)
+	if !errors.Is(keptConflicting, context.DeadlineExceeded) {
+		t.Errorf("open while every create conflicts = %v, want it to give up at the deadline", keptConflicting)
 	}
 }
 
@@ -105,7 +105,7 @@ func TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth(t *testing.T) {
 	}
 	store := brain.NewMemoryStore()
 	var audited []string
-	eng, err := brain.NewEngine(store,
+	eng, err := brain.NewEngine(store, brain.WithGraph(g),
 		brain.WithAudit(func(ctx context.Context, ev brain.AuditEvent) error {
 			audited = append(audited, string(ev.Op))
 			return ctx.Err()
@@ -113,81 +113,90 @@ func TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	kg := brain.NewKnowledgeGraph(eng, g)
 	scope := brain.Scope{Namespace: brain.Namespace{{Name: "org", Value: uuid.NewString()}}}
 	doc, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "doc"}, brain.Parts(brain.Object{Kind: "Chunk", Content: "part"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "other"})
+	other, err := eng.Save(ctx, scope, brain.Object{Kind: "Document", Title: "other"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := kg.Link(ctx, scope, doc.ID, other.ID, "references"); err != nil {
+	if err := eng.Link(ctx, scope, brain.LinkRequest{From: doc.ID, To: other.ID, Relation: "references"}); err != nil {
 		t.Fatal(err)
 	}
 	audited = nil
 
 	helixProxy.fail("*", http.StatusBadRequest, "")
-	_, putErr := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "written"})
+	_, saveErr := eng.Save(ctx, scope, brain.Object{Kind: "Document", Title: "written"})
 	_, treeErr := eng.PutTree(ctx, scope, doc, nil)
 	removeErr := eng.SoftDelete(ctx, scope, other.ID)
-	degraded, degradedErr := kg.Expand(ctx, scope, brain.ExpandRequest{ObjectID: doc.ID, RelationTypes: []string{"contains", "references"}}, brain.NewSearchContext())
-	reads := map[string]error{
-		"link":   kg.Link(ctx, scope, other.ID, doc.ID, "references"),
-		"unlink": kg.Unlink(ctx, scope, doc.ID, other.ID, "references"),
+	children, childrenErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID})
+	found, foundErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "written"})
+	failed := map[string]error{
+		"link":   eng.Link(ctx, scope, brain.LinkRequest{From: other.ID, To: doc.ID, Relation: "references"}),
+		"unlink": eng.Link(ctx, scope, brain.LinkRequest{From: doc.ID, To: other.ID, Relation: "references", Remove: true}),
 	}
-	_, reads["expand"] = kg.Expand(ctx, scope, brain.ExpandRequest{ObjectID: doc.ID, RelationTypes: []string{"references"}}, brain.NewSearchContext())
-	_, reads["find objects"] = kg.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "doc"}, brain.NewSearchContext())
-	_, reads["find links"] = kg.FindLinks(ctx, scope, brain.FindLinksRequest{RelationType: graphtest.EdgeSearchLabel, Query: "doc"})
-	_, reads["shortest path"] = kg.ShortestPath(ctx, scope, brain.PathRequest{From: doc.ID, To: other.ID})
+	_, failed["related by a relation"] = eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relation: "references"})
 	helixProxy.hang("brain_put_object")
 	short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
-	_, hungErr := eng.Put(short, scope, brain.Object{Kind: "Document", Title: "hung"})
+	_, hungErr := eng.Save(short, scope, brain.Object{Kind: "Document", Title: "hung"})
 	cancel()
-	writes := slices.Clone(audited)
-	docs, _ := eng.ListByKind(ctx, scope, "Document", 10)
-	_, otherErr := eng.Read(ctx, scope, other.ID)
-	kids, _ := store.ListChildren(ctx, scope, doc.ID)
+	writes := slices.DeleteFunc(slices.Clone(audited), func(op string) bool { return op == string(brain.AuditRead) })
 	helixProxy.fail("*", http.StatusBadRequest, "")
+	hung, _ := eng.Search(ctx, scope, brain.SearchRequest{Query: "hung"})
+	_, otherErr := eng.Open(ctx, scope, other.ID)
+	kidsTree, _ := store.GetTree(ctx, scope, doc.ID, 0)
+	kids := kidsTree.Parts
 	eraseErr := eng.Erase(ctx, scope)
-	_, keptErr := eng.Read(ctx, scope, doc.ID)
+	_, keptErr := eng.Open(ctx, scope, doc.ID)
 	helixProxy.rule.Store(nil)
 	retryErr := eng.Erase(ctx, scope)
-	_, erasedErr := eng.Read(ctx, scope, doc.ID)
-	left, leftErr := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "doc"}, brain.NewSearchContext())
+	_, erasedErr := eng.Open(ctx, scope, doc.ID)
+	left, leftErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "doc"})
 
-	for name, err := range map[string]error{"put": putErr, "put tree": treeErr, "hung put": hungErr} {
+	for name, err := range map[string]error{"save": saveErr, "put tree": treeErr, "hung save": hungErr} {
 		if !errors.Is(err, brain.ErrIndexPut) {
 			t.Errorf("%s on a failing graph = %v, want ErrIndexPut", name, err)
 		}
 	}
 	if !errors.Is(hungErr, context.DeadlineExceeded) {
-		t.Errorf("put whose graph write outlives the caller = %v, want the deadline", hungErr)
+		t.Errorf("save whose graph write outlives the caller = %v, want the deadline", hungErr)
 	}
 	if !slices.Equal(writes, []string{"put", "put", "put"}) {
-		t.Errorf("audited %v, want the three committed puts", writes)
+		t.Errorf("audited %v, want the three committed saves", writes)
 	}
-	if got := titlesOf(docs); !slices.Contains(got, "written") || !slices.Contains(got, "hung") || len(kids) != 0 {
-		t.Errorf("store after the graph failures: documents %v, parts %v, want written and hung, and no parts", got, kids)
+	if foundErr != nil || titles(found) != "written" || titles(hung) != "hung" || len(kids) != 0 {
+		t.Errorf("search on a failing graph = %q %v and %q, parts %v, want the store's written and hung records, and no parts", titles(found), foundErr, titles(hung), kids)
 	}
 	if !errors.Is(removeErr, brain.ErrIndexRemove) || otherErr != nil {
-		t.Errorf("soft delete on a failing graph = %v, then read = %v, want ErrIndexRemove and the row kept", removeErr, otherErr)
+		t.Errorf("soft delete on a failing graph = %v, then open = %v, want ErrIndexRemove and the row kept", removeErr, otherErr)
 	}
 	if !errors.Is(eraseErr, brain.ErrIndexRemove) || keptErr != nil {
-		t.Errorf("erase on a failing graph = %v, then read = %v, want ErrIndexRemove and the rows kept", eraseErr, keptErr)
+		t.Errorf("erase on a failing graph = %v, then open = %v, want ErrIndexRemove and the rows kept", eraseErr, keptErr)
 	}
-	if retryErr != nil || !errors.Is(erasedErr, brain.ErrNotFound) || leftErr != nil || len(left.Objects) != 0 {
-		t.Errorf("erase again once the graph is back = %v, read %v, find objects %+v %v, want everything gone from store and graph", retryErr, erasedErr, left.Objects, leftErr)
+	if retryErr != nil || !errors.Is(erasedErr, brain.ErrNotFound) || leftErr != nil || len(left.Results) != 0 {
+		t.Errorf("erase again once the graph is back = %v, open %v, search %+v %v, want everything gone from store and graph", retryErr, erasedErr, left.Results, leftErr)
 	}
-	if degradedErr != nil || degraded.Mode != "children" {
-		t.Errorf("expand with containment on a failing graph = %+v %v, want the children only", degraded, degradedErr)
+	if childrenErr != nil || len(children.Results) != 0 {
+		t.Errorf("related on a failing graph = %+v %v, want the children only (none left)", children.Results, childrenErr)
 	}
-	for name, err := range reads {
+	for name, err := range failed {
 		if err == nil {
 			t.Errorf("%s on a failing graph succeeded, want an error", name)
 		}
 	}
+}
+
+// titles joins the titles of a page's objects.
+func titles(p brain.Page) string {
+	var out []string
+	for _, r := range p.Results {
+		if r.Object != nil {
+			out = append(out, r.Object.Title)
+		}
+	}
+	return strings.Join(out, ",")
 }
 
 // indexPoll is longer than helixgraph's index poll interval.
@@ -301,73 +310,66 @@ func TestGraph_searchPastMaxOverfetchRanksOnlyReadableElements(t *testing.T) {
 	}
 }
 
-// TestEngine_liveKnowledgeGraph is the Engine outcome on real Helix: Put
-// dual-writes nodes, LinkWith stores edges with note vectors, and Expand,
-// FindObjects, FindLinks and ShortestPath return hydrated objects; a
-// soft-deleted target stops hydrating.
+// TestEngine_liveKnowledgeGraph is the Engine outcome on real Helix: Save
+// writes nodes, Link stores edges with note vectors, and Related and Search
+// return results read from the store; a soft-deleted object leaves them.
 func TestEngine_liveKnowledgeGraph(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	g := helixtest.Graph(t)
-	eng, err := brain.NewEngine(brain.NewMemoryStore(),
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Graph(t)),
 		brain.WithKinds(brain.KindSpec{Kind: "Document", IsParent: true}, brain.KindSpec{Kind: "Fact", IsParent: true}),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	kg := brain.NewKnowledgeGraph(eng, g)
 	scope := brain.Scope{Namespace: brain.Namespace{{Name: "org", Value: uuid.NewString()}}}
-	put := func(kind, title, content string) brain.Object {
-		obj, err := eng.Put(ctx, scope, brain.Object{Kind: kind, Title: title, Content: content})
+	save := func(kind, title, content string) brain.Object {
+		obj, err := eng.Save(ctx, scope, brain.Object{Kind: kind, Title: title, Content: content})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return obj
 	}
-	doc := put("Document", "Contract", "MSA body")
-	fact := put("Fact", "Risk", "indemnity exclusivity penalty on late delivery")
-	summary := put("Document", "Summary", "short summary")
-	if err := kg.LinkWith(ctx, scope, doc.ID, fact.ID, "about", brain.EdgeMeta{Note: "late delivery penalty exclusivity"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := kg.Link(ctx, scope, fact.ID, summary.ID, "about"); err != nil {
-		t.Fatal(err)
+	doc := save("Document", "Contract", "MSA body")
+	fact := save("Fact", "Risk", "indemnity exclusivity penalty on late delivery")
+	summary := save("Document", "Summary", "short summary")
+	for _, l := range []brain.LinkRequest{
+		{From: doc.ID, To: fact.ID, Relation: "about", Meta: brain.EdgeMeta{Note: "late delivery penalty exclusivity"}},
+		{From: fact.ID, To: summary.ID, Relation: "about"},
+	} {
+		if err := eng.Link(ctx, scope, l); err != nil {
+			t.Fatal(err)
+		}
 	}
 	doc.Title = "Contract v2"
-	if _, err := eng.Put(ctx, scope, doc); err != nil {
+	if _, err := eng.Save(ctx, scope, doc); err != nil {
 		t.Fatal(err)
 	}
 
-	expand, expandErr := kg.Expand(ctx, scope, brain.ExpandRequest{ObjectID: doc.ID, RelationTypes: []string{"about"}, MaxHops: 2}, brain.NewSearchContext())
-	objects, objectsErr := kg.FindObjects(ctx, scope, brain.FindObjectsRequest{Query: "indemnity exclusivity penalty", Kinds: []string{"Fact"}, Limit: 10}, brain.NewSearchContext())
-	links, linksErr := kg.FindLinks(ctx, scope, brain.FindLinksRequest{Query: "late delivery penalty", RelationType: "about", Limit: 10})
-	path, pathErr := kg.ShortestPath(ctx, scope, brain.PathRequest{From: doc.ID, To: summary.ID, RelationType: "about", Direction: brain.DirectionOut})
+	related, relatedErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relation: "about", Depth: 2})
+	facts, factsErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "indemnity exclusivity penalty", Kind: "Fact"})
+	links, linksErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "late delivery penalty"})
 	if err := eng.SoftDelete(ctx, scope, fact.ID); err != nil {
 		t.Fatal(err)
 	}
-	afterDelete, afterErr := kg.Expand(ctx, scope, brain.ExpandRequest{ObjectID: doc.ID, RelationTypes: []string{"about"}}, brain.NewSearchContext())
+	afterDelete, afterErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relation: "about"})
 
-	if expandErr != nil || len(expand.Objects) != 2 || expand.Objects[0].ID != fact.ID || expand.Objects[1].ID != summary.ID || expand.Objects[1].Relation.Depth != 2 {
-		t.Errorf("two-hop expand = %+v %v, want fact then summary at depth 2", expand.Objects, expandErr)
+	if relatedErr != nil || len(related.Results) != 2 || related.Results[0].Object.ID != fact.ID || related.Results[1].Object.ID != summary.ID || related.Results[1].Object.Relation.Depth != 2 {
+		t.Errorf("two-hop related = %+v %v, want fact then summary at depth 2", related.Results, relatedErr)
 	}
-	if objectsErr != nil || len(objects.Objects) != 1 || objects.Objects[0].ID != fact.ID {
-		t.Errorf("find objects = %+v %v, want the fact", objects.Objects, objectsErr)
+	if factsErr != nil || len(facts.Results) != 1 || facts.Results[0].Object.ID != fact.ID {
+		t.Errorf("search for the fact = %+v %v, want the fact alone", facts.Results, factsErr)
 	}
-	if linksErr != nil || len(links.Links) == 0 || links.Links[0].From.ID != doc.ID || links.Links[0].To.ID != fact.ID {
-		t.Errorf("find links = %+v %v, want doc→fact first", links.Links, linksErr)
+	var link *brain.LinkResult
+	for _, r := range links.Results {
+		if r.Link != nil && link == nil {
+			link = r.Link
+		}
 	}
-	if pathErr != nil || len(path.Objects) != 3 || path.Objects[0].Title != "Contract v2" || path.Objects[2].ID != summary.ID {
-		t.Errorf("shortest path = %+v %v, want doc, fact, summary", path.Objects, pathErr)
+	if linksErr != nil || link == nil || link.From.Title != "Contract v2" || link.To.ID != fact.ID || link.Relation != "about" {
+		t.Errorf("search for the link note = %+v %v, want the doc→fact link with both ends read", links.Results, linksErr)
 	}
-	if afterErr != nil || len(afterDelete.Objects) != 0 {
-		t.Errorf("expand after soft delete = %+v %v, want none", afterDelete.Objects, afterErr)
+	if afterErr != nil || len(afterDelete.Results) != 0 {
+		t.Errorf("related after soft delete = %+v %v, want none", afterDelete.Results, afterErr)
 	}
-}
-
-func titlesOf(objs []brain.Object) []string {
-	out := make([]string, len(objs))
-	for i, o := range objs {
-		out[i] = o.Title
-	}
-	return out
 }

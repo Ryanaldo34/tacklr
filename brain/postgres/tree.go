@@ -63,7 +63,7 @@ func checkedParts(scope brain.Scope, parts iter.Seq2[brain.Indexed, error]) iter
 		seen := map[uuid.UUID]struct{}{}
 		for p, err := range parts {
 			if err == nil {
-				err = brain.ValidateTreePart(brain.TreePart{Object: p.Object})
+				err = p.ValidateIdentity()
 			}
 			if err == nil && !scope.Namespace.Covers(p.Namespace) {
 				err = fmt.Errorf("%w: part namespace is outside scope", brain.ErrInvalid)

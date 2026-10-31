@@ -32,7 +32,7 @@ func (s *Store) SaveSessionMessages(ctx context.Context, host brain.Namespace, s
 	if err := host.Validate(); err != nil {
 		return 0, err
 	}
-	ns := brain.NamespaceForSession(host, sessionID)
+	ns := host.ForSession(sessionID)
 	texts := make([]string, len(messages))
 	for i, msg := range messages {
 		texts[i] = msg.SearchText
@@ -98,7 +98,7 @@ func (s *Store) readSessionMessages(ctx context.Context, scope brain.Scope, ids 
 		SELECT id, role, body, position, generation, namespace, created_at, updated_at
 		FROM session_messages
 		WHERE session_id = $1 AND namespace = $2::jsonb AND id = ANY($3)`,
-		sid, brain.NamespaceForSession(scope.Namespace, sid), ids)
+		sid, scope.Namespace.ForSession(sid), ids)
 	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (brain.Object, error) {
 		var role, body string
 		var position, gen int
@@ -121,7 +121,7 @@ func (s *Store) DeleteSessionMessages(ctx context.Context, host brain.Namespace,
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if _, err := s.db.Exec(ctx, `DELETE FROM session_messages WHERE session_id = $1 AND namespace = $2::jsonb`,
-		sessionID, brain.NamespaceForSession(host, sessionID)); err != nil {
+		sessionID, host.ForSession(sessionID)); err != nil {
 		return fmt.Errorf("postgres: session delete: %w", err)
 	}
 	return nil

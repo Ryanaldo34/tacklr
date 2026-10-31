@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -109,8 +110,8 @@ func decodePropFilter(key string, val any) (PropFilter, error) {
 	return PropFilter{Eq: val}, nil
 }
 
-// ValidateFilters checks well-known fields and property value shapes. Empty is valid.
-func ValidateFilters(f Filter) error {
+// Validate checks well-known fields and property value shapes. Empty is valid.
+func (f Filter) Validate() error {
 	for _, pair := range []struct {
 		key string
 		val string
@@ -144,23 +145,23 @@ func ValidateFilters(f Filter) error {
 	return nil
 }
 
-// ValidateFiltersAgainst runs structural validation, then catalog rules when non-empty.
-func ValidateFiltersAgainst(f Filter, cat *KindCatalog) error {
-	if err := ValidateFilters(f); err != nil {
+// ValidateAgainst runs structural validation, then catalog rules when non-empty.
+func (f Filter) ValidateAgainst(cat *KindCatalog) error {
+	if err := f.Validate(); err != nil {
 		return err
 	}
 	if cat == nil || cat.Empty() {
 		return nil
 	}
 
-	kinds := kindFilterValues(f)
+	kinds := f.kindValues()
 	var specs []KindSpec
 	if len(kinds) > 0 {
 		specs = make([]KindSpec, len(kinds))
 		for i, name := range kinds {
 			spec, ok := cat.Get(name)
 			if !ok {
-				return fmt.Errorf("%w: kind %q is not registered", ErrInvalid, name)
+				return fmt.Errorf("%w: unknown kind %q; kinds: %s", ErrInvalid, name, strings.Join(cat.RecordKinds(), ", "))
 			}
 			specs[i] = spec
 		}
@@ -168,13 +169,13 @@ func ValidateFiltersAgainst(f Filter, cat *KindCatalog) error {
 
 	for key, pf := range f.Props {
 		if len(specs) == 0 {
-			return fmt.Errorf("%w: property filters require a kind filter when kinds are registered", ErrInvalid)
+			return fmt.Errorf("%w: filter %q needs a kind; kinds: %s", ErrInvalid, key, strings.Join(cat.RecordKinds(), ", "))
 		}
 		val := propFilterValue(pf)
 		for _, spec := range specs {
 			fs, ok := spec.Field(key)
 			if !ok {
-				return fmt.Errorf("%w: property %q is not filterable on kind %q", ErrInvalid, key, spec.Kind)
+				return fmt.Errorf("%w: unknown filter %q for %s; filterable: %s", ErrInvalid, key, spec.Kind, cmp.Or(strings.Join(spec.fieldNames(), ", "), "none"))
 			}
 			if err := checkFilterField(key, val, fs); err != nil {
 				return err
@@ -191,7 +192,7 @@ func propFilterValue(pf PropFilter) any {
 	return pf.Eq
 }
 
-func kindFilterValues(f Filter) []string {
+func (f Filter) kindValues() []string {
 	if len(f.Kind.In) > 0 {
 		return f.Kind.In
 	}
@@ -219,7 +220,7 @@ func checkFilterField(key string, val any, fs FieldSpec) error {
 	return nil
 }
 
-func injectKindAllowList(f Filter, cat *KindCatalog) Filter {
+func (f Filter) withKindAllowList(cat *KindCatalog) Filter {
 	if f.Kind.set() {
 		return f
 	}
@@ -357,7 +358,7 @@ func checkFieldValue(val any, t FieldType) error {
 	return nil
 }
 
-func cloneFilter(f Filter) Filter {
+func (f Filter) clone() Filter {
 	out := f
 	out.Kind.In = slices.Clone(f.Kind.In)
 	out.Title.In = slices.Clone(f.Title.In)
@@ -366,3 +367,5 @@ func cloneFilter(f Filter) Filter {
 	}
 	return out
 }
+
+// fieldNames are spec's field names, sorted; "none" when it has none.

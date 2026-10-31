@@ -36,11 +36,11 @@ func TestMountIndexer_sourceReadersLimitSearchAndAnACLChangeReindexes(t *testing
 		t.Fatal(err)
 	}
 	search := func(principals ...string) []brain.RichObject {
-		page, err := eng.Search(ctx, brain.Scope{Namespace: ns, Principals: principals}, brain.SearchRequest{Query: "forecast"}, brain.NewSearchContext())
+		page, err := eng.Search(ctx, brain.Scope{Namespace: ns, Principals: principals}, brain.SearchRequest{Query: "forecast"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return page.Objects
+		return slices.Collect(page.Results.Objects())
 	}
 
 	first, firstErr := idx.IndexPath(ctx, file)

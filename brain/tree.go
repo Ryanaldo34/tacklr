@@ -54,7 +54,7 @@ func (e *Engine) PutTree(ctx context.Context, scope Scope, parent Object, parts 
 				return
 			}
 			n++
-			digest := partDigest(part.Object, part.Text)
+			digest := part.partDigest(part.Text)
 			part.ID = partID(in.ID, digest, seen[digest])
 			seen[digest]++
 			if !yield(part, nil) {
@@ -70,21 +70,6 @@ func (e *Engine) PutTree(ctx context.Context, scope Scope, parent Object, parts 
 		return Object{}, err
 	}
 	return stored, nil
-}
-
-// ValidateTreePart checks a part before a store stages it: a reused part
-// needs its id and parent; a new part is a full object.
-func ValidateTreePart(p TreePart) error {
-	if p.Object.ParentID == nil {
-		return fmt.Errorf("%w: tree part %s has no parent", ErrInvalid, p.Object.ID)
-	}
-	if !p.Reused {
-		return ValidateObjectIdentity(p.Object)
-	}
-	if p.Object.ID == uuid.Nil {
-		return fmt.Errorf("%w: object id is required", ErrInvalid)
-	}
-	return p.Object.Namespace.Validate()
 }
 
 // Parts yields objs as PutTree parts.
@@ -126,7 +111,7 @@ func (e *Engine) preparePart(parent Object, p Object, i int) (Indexed, error) {
 	p.UpdatedAt = now
 	p.Kind = strings.TrimSpace(p.Kind)
 	p.Embedding, p.EmbeddingModel = nil, ""
-	if err := ValidateObject(p, e.catalog); err != nil {
+	if err := p.Validate(e.catalog); err != nil {
 		return Indexed{}, err
 	}
 	return Indexed{Object: p, Text: e.indexText(p, &parent)}, nil
@@ -134,7 +119,7 @@ func (e *Engine) preparePart(parent Object, p Object, i int) (Indexed, error) {
 
 // partDigest hashes everything a part's row and index depend on, except
 // its place in the tree (position and properties change in place).
-func partDigest(p Object, text string) [sha256.Size]byte {
+func (p Object) partDigest(text string) [sha256.Size]byte {
 	h := sha256.New()
 	for _, s := range []string{p.Kind, p.ContentType, p.Title, p.Summary, p.Content, text} {
 		_ = binary.Write(h, binary.BigEndian, uint64(len(s)))

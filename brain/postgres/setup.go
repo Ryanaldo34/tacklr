@@ -173,21 +173,13 @@ CREATE INDEX IF NOT EXISTS idx_objects_tenant ON objects (tenant);
 CREATE INDEX IF NOT EXISTS idx_objects_namespace ON objects USING GIN (namespace jsonb_path_ops);
 CREATE INDEX IF NOT EXISTS idx_objects_parent_id ON objects (parent_id) WHERE parent_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_objects_parents_kind ON objects (kind) WHERE deleted_at IS NULL AND parent_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_objects_records_recent ON objects (tenant, updated_at DESC, id) WHERE deleted_at IS NULL AND parent_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_objects_readers ON objects USING GIN (readers) WHERE cardinality(readers) > 0;
 CREATE INDEX IF NOT EXISTS idx_objects_deleted ON objects (deleted_at) WHERE deleted_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_objects_embedding_hnsw ON objects
 	USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)
 	WHERE embedding IS NOT NULL AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_objects_fts ON objects USING GIN (search_tsv) WHERE deleted_at IS NULL AND parent_id IS NOT NULL;
-CREATE OR REPLACE FUNCTION tacklr_objects_set_updated_at() RETURNS trigger AS $$
-BEGIN
-	NEW.updated_at = now();
-	RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-CREATE OR REPLACE TRIGGER trg_objects_updated_at
-	BEFORE UPDATE ON objects
-	FOR EACH ROW EXECUTE FUNCTION tacklr_objects_set_updated_at();
 
 -- Parts of tree writes in progress. Unlogged and without vector or text
 -- indexes: rows are written once, read once by the commit, and lost on a

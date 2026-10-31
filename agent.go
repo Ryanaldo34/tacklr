@@ -49,8 +49,7 @@ type TurnManager struct {
 	hostInterceptors     []ToolInterceptor
 	hostResultHooks      map[string]ToolResultHook
 	brain                *brain.Engine
-	graph                *brain.KnowledgeGraph
-	brainWriteKinds      brain.WriteKinds
+	brainWriteKinds      []string
 	indexReaders         vfsindex.ReadersFunc
 	runCommandUnattended bool
 	writeUnattended      bool

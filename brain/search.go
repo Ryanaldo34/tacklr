@@ -2,341 +2,254 @@ package brain
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 )
 
-// Search is corpus retrieval: the store's ranked parts (Store.Search, its
-// own channels, fusion and decay), parent promotion, then a ResultSet page.
-// Query text matches part title, summary, and content. Structured fields on
-// the parent belong in FindObjects filters (or here only if the part row
-// carries them). A parent with no parts does not appear. Entity search is
-// FindObjects.
-func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
-	if err := scope.Namespace.Validate(); err != nil {
-		return SearchPage{}, err
-	}
-	ranked, err := e.hybridCandidates(ctx, scope, req)
-	if err != nil {
-		return SearchPage{}, err
-	}
-	ranked = filterScoredByScopeIDs(ranked, req.ScopeIDs)
-	return e.materialize(ctx, scope, ranked, req.Query, req.Limit, results)
+// SearchRequest is one search: free text, an optional kind, and filters on
+// the records' fields. Without a query, a kind or filters list the matching
+// records. Within limits the search to the parts of one record.
+type SearchRequest struct {
+	Query   string
+	Kind    string // optional; with registered kinds, one of them
+	Filters Filter
+	// Within is a record, or a part (meaning its record); the results are
+	// that record's parts that match the query.
+	Within uuid.UUID
+	Limit  int
 }
 
-// FindExact is corpus retrieval by literal match: UUID Get, else the store's
-// exact search (PartSearch.Exact), promotion, and ResultSet materialization.
-// Same part-only candidate rule as Search. UUID lookup may return a parent.
-func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
-	if err := scope.Namespace.Validate(); err != nil {
-		return SearchPage{}, err
+// Search ranks records for a query in one list: the store's records and
+// parts (with the session's messages when Scope.SessionID is set) and, with
+// a graph, its objects and the links whose notes match. Each backend ranks
+// its own data; Search fuses the lists by reciprocal rank, so a record found
+// by several sources ranks higher, and reads every result from the store.
+//
+// A query that is a UUID returns that object. A query in double quotes is
+// matched literally: only the store's exact search runs. Links rank only in
+// a search without a kind or filters, since filters describe records. When
+// the graph fails, Search returns the store's results unless
+// FailOnGraphError is set.
+//
+// With no query, a kind or filters list the matching records newest first,
+// from the store. Within searches only the store, for that record's parts:
+// the graph's objects and links are other records, so they do not apply.
+func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest) (Page, error) {
+	if err := checkScope(ctx, scope.Namespace); err != nil {
+		return Page{}, err
 	}
-	ranked, err := e.exactCandidates(ctx, scope, req)
+	query := strings.TrimSpace(req.Query)
+	narrowed := strings.TrimSpace(req.Kind) != "" || !req.Filters.empty()
+	switch {
+	case query == "" && req.Within != uuid.Nil:
+		return Page{}, fmt.Errorf("%w: within needs a query; related lists a record's parts", ErrInvalid)
+	case query == "" && !narrowed:
+		return Page{}, fmt.Errorf("%w: give a query, or a kind or filters to list records", ErrInvalid)
+	}
+	filters, err := e.searchFilters(req.Kind, req.Filters)
 	if err != nil {
-		return SearchPage{}, err
+		return Page{}, err
 	}
-	ranked = filterScoredByScopeIDs(ranked, req.ScopeIDs)
-	return e.materialize(ctx, scope, ranked, req.Query, req.Limit, results)
+	limit := e.normalizeLimit(req.Limit)
+	if query == "" {
+		return e.list(ctx, scope, filters, limit)
+	}
+	if id, err := uuid.Parse(query); err == nil && id != uuid.Nil {
+		return e.page(ctx, scope, Rest{refs: []ref{{ID: id}}}, limit)
+	}
+	text, exact := strings.CutPrefix(query, `"`)
+	if exact {
+		text = strings.TrimSuffix(text, `"`)
+	}
+	text = strings.TrimSpace(text)
+	if req.Within != uuid.Nil {
+		return e.searchWithin(ctx, scope, req.Within, text, exact, filters, limit)
+	}
+	// Links rank only when the caller narrowed nothing: filters describe records.
+	withLinks := strings.TrimSpace(req.Kind) == "" && req.Filters.empty()
+	sources, err := e.searchSources(ctx, scope, text, exact, withLinks, filters)
+	if err != nil {
+		return Page{}, err
+	}
+	refs, err := e.rerank(ctx, scope, text, fuse(defaultRRFk, sources...))
+	if err != nil {
+		return Page{}, err
+	}
+	return e.page(ctx, scope, Rest{refs: refs[:min(len(refs), e.cfg.MaxResultSetSize)], filter: filters}, limit)
 }
 
-// filterScoredByScopeIDs keeps hits whose id or parent_id is in allow (empty allow = no-op).
-func filterScoredByScopeIDs(ranked []ScoredID, allow []uuid.UUID) []ScoredID {
-	if len(allow) == 0 || len(ranked) == 0 {
-		return ranked
+// list pages the records filters match, newest first.
+func (e *Engine) list(ctx context.Context, scope Scope, filters Filter, limit int) (Page, error) {
+	hits, err := e.store.Search(ctx, scope, RecordSearch{Filters: filters, Limit: e.cfg.MaxResultSetSize})
+	if err != nil {
+		return Page{}, fmt.Errorf("brain: list records: %w", err)
 	}
-	set := make(map[uuid.UUID]struct{}, len(allow))
-	for _, id := range allow {
-		if id != uuid.Nil {
-			set[id] = struct{}{}
-		}
+	refs := make([]ref, len(hits))
+	for i, h := range hits {
+		refs[i] = ref{ID: h.ID}
 	}
-	if len(set) == 0 {
-		return ranked
-	}
-	out := make([]ScoredID, 0, len(ranked))
-	for _, s := range ranked {
-		if _, ok := set[s.ID]; ok {
-			out = append(out, s)
-			continue
-		}
-		if s.ParentID != nil {
-			if _, ok := set[*s.ParentID]; ok {
-				out = append(out, s)
-			}
-		}
-	}
-	return out
+	return e.page(ctx, scope, Rest{refs: refs}, limit)
 }
 
-// Continue returns the next page of a prior ResultSet under scope.
-func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (page SearchPage, err error) {
-	if err := scope.Namespace.Validate(); err != nil {
-		return page, err
-	}
-	if resultSetID == uuid.Nil {
-		return page, fmt.Errorf("%w: result_set_id is required", ErrInvalid)
-	}
-	limit = e.normalizeLimit(limit)
-	set, err := results.Get(ctx, resultSetID)
+// searchWithin ranks the parts of within's record for text; each result is
+// a part with the snippet that matched.
+func (e *Engine) searchWithin(ctx context.Context, scope Scope, within uuid.UUID, text string, exact bool, filters Filter, limit int) (Page, error) {
+	hits, err := e.store.Search(ctx, scope, RecordSearch{Query: text, Filters: filters, Exact: exact, Within: within, Limit: e.cfg.MaxResultSetSize})
 	if err != nil {
-		return page, err
+		return Page{}, fmt.Errorf("brain: store search: %w", err)
 	}
-	if !set.Namespace.Empty() {
-		scope.Namespace = set.Namespace
+	refs := make([]ref, len(hits))
+	for i, h := range hits {
+		refs[i] = ref{ID: h.ID, Score: h.Score, Evidence: []Evidence{{
+			PartID: h.ID, Title: h.Title, Snippet: snippetAround(h.Content, text, e.cfg.SnippetCap), Score: h.Score, Position: h.Position,
+		}}}
 	}
-	start, end := sliceBounds(set.Offset, limit, len(set.ObjectIDs))
-	objs, err := e.hydrateIDs(ctx, scope, set.ObjectIDs[start:end])
-	if err != nil {
-		return page, err
-	}
-	if err := e.recordRead(ctx, scope, richIDs(objs)); err != nil {
-		return page, err
-	}
-	attachRelations(objs, set.Relations)
-	set.Offset = end
-	if e := results.Put(ctx, set); e != nil {
-		err = e
-		return page, err
-	}
-	return SearchPage{
-		ResultSetID: resultSetID,
-		HasMore:     end < len(set.ObjectIDs),
-		Objects:     objs,
-	}, nil
+	return e.page(ctx, scope, Rest{refs: refs}, limit)
 }
 
-func (e *Engine) materialize(ctx context.Context, scope Scope, ranked []ScoredID, query string, limit int, results ResultSetStore) (SearchPage, error) {
-	limit = e.normalizeLimit(limit)
-	sortScored(ranked)
-	promoted := promoteParents(ranked, e.cfg.EvidenceN, query, e.cfg.SnippetCap)
-
-	ids := make([]uuid.UUID, len(promoted))
-	byID := make(map[uuid.UUID]promotedParent, len(promoted))
-	for i, p := range promoted {
-		ids[i] = p.ParentID
-		byID[p.ParentID] = p
-	}
-	if e.reranker != nil {
-		var err error
-		ids, err = e.rerankPromoted(ctx, scope, ids, byID)
+// searchSources runs the store and, with a graph, its object and link
+// searches at once, and returns their ranked lists. A graph error is
+// logged and its list left empty, unless FailOnGraphError is set.
+func (e *Engine) searchSources(ctx context.Context, scope Scope, text string, exact, withLinks bool, filters Filter) ([][]ref, error) {
+	sources := make([][]ref, 3)
+	errs := make([]error, 3)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		storeScope := scope
+		storeScope.SessionID = sessionSearchID(scope, filters)
+		hits, err := e.store.Search(ctx, storeScope, RecordSearch{Query: text, Filters: filters, Exact: exact, Limit: e.cfg.CandidateK})
 		if err != nil {
-			return SearchPage{}, err
+			errs[0] = fmt.Errorf("brain: store search: %w", err)
+			return
+		}
+		promoted := promoteParents(hits, e.cfg.EvidenceN, text, e.cfg.SnippetCap)
+		refs := make([]ref, len(promoted))
+		for i, p := range promoted {
+			refs[i] = ref{ID: p.ParentID, Evidence: p.Evidence}
+		}
+		sources[0] = refs
+	})
+	if e.graph != nil && !exact {
+		wg.Go(func() {
+			hits, err := e.graph.FindObjects(ctx, ObjectSearch{Namespace: scope.Namespace, Principals: scope.Principals, Query: text, Filters: filters, Limit: e.cfg.CandidateK})
+			if err != nil {
+				errs[1] = fmt.Errorf("brain: graph object search: %w", err)
+				return
+			}
+			refs := make([]ref, len(hits))
+			for i, h := range hits {
+				refs[i] = ref{ID: h.ID, Check: true}
+			}
+			sources[1] = refs
+		})
+		if withLinks {
+			wg.Go(func() {
+				hits, err := e.graph.FindLinks(ctx, LinkSearch{Namespace: scope.Namespace, Principals: scope.Principals, Query: text, Limit: e.cfg.CandidateK})
+				if err != nil {
+					errs[2] = fmt.Errorf("brain: graph link search: %w", err)
+					return
+				}
+				refs := make([]ref, len(hits))
+				for i, h := range hits {
+					refs[i] = ref{Link: &linkRef{From: h.FromID, To: h.ToID, Relation: h.RelationType, Meta: h.Meta}}
+				}
+				sources[2] = refs
+			})
 		}
 	}
-	page, err := e.pageIDs(ctx, scope, ids, limit, results, nil)
-	if err != nil {
-		return SearchPage{}, err
+	wg.Wait()
+	if graphErr := errors.Join(errs[1:]...); graphErr != nil && errs[0] == nil && !e.cfg.FailOnGraphError {
+		slog.WarnContext(ctx, "graph search failed; returning the store's results", "error", graphErr)
+		return sources, nil
 	}
-	for i := range page.Objects {
-		if p, ok := byID[page.Objects[i].ID]; ok {
-			sc := p.Score
-			page.Objects[i].Score = &sc
-			page.Objects[i].Evidence = p.Evidence
-		}
-	}
-	return page, nil
+	return sources, errors.Join(errs...)
 }
 
-// rerankPromoted asks the host reranker to order up to CandidateK parents, then
-// keeps any parents beyond that cutoff in their original order.
-func (e *Engine) rerankPromoted(ctx context.Context, scope Scope, ids []uuid.UUID, byID map[uuid.UUID]promotedParent) ([]uuid.UUID, error) {
-	if len(ids) == 0 {
-		return ids, nil
+// searchFilters checks kind and filters against the catalog and returns the
+// filters the backends apply: kind joins them, and with registered kinds an
+// empty kind filter becomes every registered kind.
+func (e *Engine) searchFilters(kind string, f Filter) (Filter, error) {
+	f = f.clone()
+	if kind = strings.TrimSpace(kind); kind != "" {
+		f.Kind = StringMatch{Eq: kind}
 	}
-	n := min(e.cfg.CandidateK, len(ids))
-	head, err := e.hydrateIDs(ctx, scope, ids[:n])
-	if err != nil {
-		return nil, err
-	}
-	for i := range head {
-		if p, ok := byID[head[i].ID]; ok {
-			sc := p.Score
-			head[i].Score = &sc
-			head[i].Evidence = p.Evidence
-		}
-	}
-	head, err = e.applyRerank(ctx, head)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]uuid.UUID, 0, len(head)+len(ids)-n)
-	seen := make(map[uuid.UUID]struct{}, len(head))
-	for _, o := range head {
-		if _, ok := seen[o.ID]; ok {
-			continue
-		}
-		seen[o.ID] = struct{}{}
-		out = append(out, o.ID)
-	}
-	for _, id := range ids[n:] {
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		out = append(out, id)
-	}
-	return out, nil
-}
-
-// prepareSearch validates the query/filters and returns effective filters for the store.
-// When the catalog is non-empty, property filters require kind, unregistered kinds are
-// rejected, and missing kind filters are expanded to all registered kinds.
-func (e *Engine) prepareSearch(req SearchRequest) (Filter, error) {
-	if strings.TrimSpace(req.Query) == "" {
-		return Filter{}, fmt.Errorf("%w: query is required", ErrInvalid)
-	}
-	return e.effectiveFilters(req.Filters)
-}
-
-func (e *Engine) effectiveFilters(f Filter) (Filter, error) {
-	if err := ValidateFiltersAgainst(f, e.catalog); err != nil {
+	if err := f.ValidateAgainst(e.catalog); err != nil {
 		return Filter{}, err
 	}
 	if e.catalog.Empty() {
 		return f, nil
 	}
 	e.catalog.Freeze()
-	return injectKindAllowList(f, e.catalog), nil
+	return f.withKindAllowList(e.catalog), nil
 }
 
-func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, error) {
-	filters, err := e.prepareSearch(req)
+// keepOrder is the rerank step without a reranker: the fused order.
+func keepOrder(_ context.Context, _ Scope, _ string, refs []ref) ([]ref, error) {
+	return refs, nil
+}
+
+// rerankHead asks fn to reorder the objects among the first CandidateK
+// refs for query; links and refs past CandidateK keep their places, and
+// objects fn leaves out are dropped.
+func (e *Engine) rerankHead(ctx context.Context, scope Scope, query string, refs []ref, fn RerankFunc) ([]ref, error) {
+	head := refs[:min(e.cfg.CandidateK, len(refs))]
+	page, err := e.read(ctx, scope, head, FilterPlan{})
 	if err != nil {
 		return nil, err
 	}
-	return e.searchParts(ctx, scope, req, filters, false)
-}
-
-func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, error) {
-	filters, err := e.prepareSearch(req)
-	if err != nil {
-		return nil, err
+	objs := slices.Collect(page.Objects())
+	if len(objs) == 0 {
+		return refs, nil
 	}
-	if id, err := uuid.Parse(strings.TrimSpace(req.Query)); err == nil && id != uuid.Nil {
-		obj, err := e.store.Get(ctx, scope, id)
-		if err != nil {
-			return nil, err
+	ordered, err := fn(ctx, query, objs)
+	if err != nil {
+		return nil, fmt.Errorf("brain: rerank: %w", err)
+	}
+	byID := make(map[uuid.UUID]ref, len(head))
+	var slots []int
+	for i, r := range head {
+		if r.Link == nil {
+			byID[r.ID] = r
+			slots = append(slots, i)
 		}
-		return []ScoredID{{
-			ID:         obj.ID,
-			Score:      1,
-			UpdatedAt:  obj.UpdatedAt,
-			ParentID:   obj.ParentID,
-			Title:      obj.Title,
-			Content:    obj.Content,
-			Position:   obj.Position,
-			Properties: obj.Properties,
-		}}, nil
 	}
-	return e.searchParts(ctx, scope, req, filters, true)
+	out := append([]ref(nil), refs...)
+	n := 0
+	for _, o := range ordered {
+		if r, ok := byID[o.ID]; ok && n < len(slots) {
+			delete(byID, o.ID)
+			out[slots[n]] = r
+			n++
+		}
+	}
+	// Objects the reranker dropped are dropped from the head.
+	for _, i := range slots[n:] {
+		out[i] = ref{}
+	}
+	return deleteZeroRefs(out), nil
 }
 
-// searchParts asks the store for its ranked parts.
-func (e *Engine) searchParts(ctx context.Context, scope Scope, req SearchRequest, filters Filter, exact bool) ([]ScoredID, error) {
-	scope.SessionID = sessionSearchID(scope, req.Filters)
-	return e.store.Search(ctx, scope, PartSearch{Query: strings.TrimSpace(req.Query), Filters: filters, Exact: exact, Limit: e.cfg.CandidateK})
+func deleteZeroRefs(refs []ref) []ref {
+	out := refs[:0]
+	for _, r := range refs {
+		if r.ID != uuid.Nil || r.Link != nil {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
-// hydrateIDs loads objects for ids in request order, skipping missing/out-of-scope.
-func (e *Engine) hydrateIDs(ctx context.Context, scope Scope, ids []uuid.UUID) ([]RichObject, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	objs, err := e.store.GetMany(ctx, scope, ids)
-	if err != nil {
-		return nil, fmt.Errorf("brain: hydrate: %w", err)
-	}
-	byID := make(map[uuid.UUID]Object, len(objs))
-	for _, o := range objs {
-		byID[o.ID] = o
-	}
-	out := make([]RichObject, 0, len(ids))
+// uniqueUUIDs drops nil and repeated ids, keeping the first order.
+func uniqueUUIDs(ids []uuid.UUID) []uuid.UUID {
+	seen := make(map[uuid.UUID]struct{}, len(ids))
+	out := make([]uuid.UUID, 0, len(ids))
 	for _, id := range ids {
-		obj, ok := byID[id]
-		if !ok {
-			continue
-		}
-		out = append(out, RichFromObject(obj, false))
-	}
-	return out, nil
-}
-
-// pageIDs materializes a ResultSet page. relations (optional) is stored for continue.
-func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limit int, results ResultSetStore, relations map[uuid.UUID]Relation) (SearchPage, error) {
-	if results == nil {
-		return SearchPage{}, fmt.Errorf("%w: result set store is required", ErrUnsupported)
-	}
-	limit = e.normalizeLimit(limit)
-	if maxN := e.cfg.MaxResultSetSize; maxN > 0 && len(ids) > maxN {
-		ids = ids[:maxN]
-	}
-	_, end := sliceBounds(0, limit, len(ids))
-	pageObjs, err := e.hydrateIDs(ctx, scope, ids[:end])
-	if err != nil {
-		return SearchPage{}, err
-	}
-	if err := e.recordRead(ctx, scope, richIDs(pageObjs)); err != nil {
-		return SearchPage{}, err
-	}
-	attachRelations(pageObjs, relations)
-	set := ResultSet{
-		ID:        uuid.New(),
-		ObjectIDs: slices.Clone(ids),
-		Relations: relations,
-		Namespace: scope.Namespace.Clone(),
-		Offset:    end,
-		CreatedAt: e.cfg.Now(),
-	}
-	if err := results.Put(ctx, set); err != nil {
-		return SearchPage{}, err
-	}
-	return SearchPage{
-		ResultSetID: set.ID,
-		HasMore:     end < len(ids),
-		Objects:     pageObjs,
-	}, nil
-}
-
-func attachRelations(objs []RichObject, relations map[uuid.UUID]Relation) {
-	if len(relations) == 0 {
-		return
-	}
-	for i := range objs {
-		if r, ok := relations[objs[i].ID]; ok {
-			r := r
-			objs[i].Relation = &r
-		}
-	}
-}
-
-func sliceBounds(offset, limit, n int) (start, end int) {
-	start = min(max(offset, 0), n)
-	end = min(start+limit, n)
-	return start, end
-}
-
-// LandingIDs returns unique first-class object ids suitable for graph expand / link
-// endpoints from rich hits (search, find_exact, find_objects).
-// Parts use ParentID; parents use their own ID. Nil / empty parent pointers are skipped.
-func LandingIDs(objects []RichObject) []uuid.UUID {
-	if len(objects) == 0 {
-		return nil
-	}
-	out := make([]uuid.UUID, 0, len(objects))
-	seen := make(map[uuid.UUID]struct{}, len(objects))
-	for _, o := range objects {
-		id := o.ID
-		if o.ParentID != nil {
-			if *o.ParentID == uuid.Nil {
-				continue
-			}
-			id = *o.ParentID
-		}
-		if id == uuid.Nil {
-			continue
-		}
 		if _, ok := seen[id]; ok {
 			continue
 		}

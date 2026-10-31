@@ -78,22 +78,6 @@ func (e *Engine) recordRead(ctx context.Context, scope Scope, ids []uuid.UUID) e
 	return e.record(ctx, scope, AuditEvent{Op: AuditRead, ObjectIDs: ids})
 }
 
-func objectIDs(objs ...Object) []uuid.UUID {
-	ids := make([]uuid.UUID, len(objs))
-	for i, o := range objs {
-		ids[i] = o.ID
-	}
-	return ids
-}
-
-func richIDs(objs []RichObject) []uuid.UUID {
-	ids := make([]uuid.UUID, len(objs))
-	for i, o := range objs {
-		ids[i] = o.ID
-	}
-	return ids
-}
-
 // checkScope fails when ctx is done or ns is invalid.
 func checkScope(ctx context.Context, ns Namespace) error {
 	if err := ctx.Err(); err != nil {

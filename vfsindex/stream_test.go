@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -213,8 +214,9 @@ func TestMountIndexer_anEditReembedsOnlyTheChunksAroundIt(t *testing.T) {
 
 	_, err := idx.IndexPath(ctx, vpath)
 	second := emb.take()
-	kids, _ := store.ListChildren(ctx, idx.Scope, idx.DocumentID(vpath))
-	page, _ := eng.Search(ctx, idx.Scope, brain.SearchRequest{Query: "inserted-needle"}, brain.NewSearchContext())
+	kidsTree, _ := store.GetTree(ctx, idx.Scope, idx.DocumentID(vpath), 0)
+	kids := kidsTree.Parts
+	page, _ := eng.Search(ctx, idx.Scope, brain.SearchRequest{Query: "inserted-needle"})
 
 	if err != nil || first < 8 {
 		t.Fatalf("index = %v, first run embedded %d texts, want one per chunk", err, first)
@@ -229,8 +231,8 @@ func TestMountIndexer_anEditReembedsOnlyTheChunksAroundIt(t *testing.T) {
 	if end := kids[len(kids)-1].Properties[vfsindex.PropEndLine]; end != float64(401) {
 		t.Errorf("last chunk ends at line %v, want 401 after the insert", end)
 	}
-	if len(page.Objects) == 0 || page.Objects[0].ID != idx.DocumentID(vpath) {
-		t.Errorf("search for the inserted line = %v", page.Objects)
+	if len(slices.Collect(page.Results.Objects())) == 0 || slices.Collect(page.Results.Objects())[0].ID != idx.DocumentID(vpath) {
+		t.Errorf("search for the inserted line = %v", slices.Collect(page.Results.Objects()))
 	}
 }
 
@@ -272,13 +274,13 @@ func TestMountIndexer_aBackendWithoutVersionsOrDocumentsRereadsButRewritesNothin
 
 	again, err := h.idx.IndexPath(ctx, vpath)
 	embedded := h.emb.take()
-	page, _ := h.eng.Search(ctx, h.idx.Scope, brain.SearchRequest{Query: "unversioned-token"}, brain.NewSearchContext())
+	page, _ := h.eng.Search(ctx, h.idx.Scope, brain.SearchRequest{Query: "unversioned-token"})
 
 	if err != nil || again != vfsindex.PathIndexed || embedded != 1 {
 		t.Errorf("re-index without a version = %q %v, embedded %d texts, want indexed with only the parent embedded", again, err, embedded)
 	}
-	if len(page.Objects) != 1 {
-		t.Errorf("search = %v, want the notes", page.Objects)
+	if len(slices.Collect(page.Results.Objects())) != 1 {
+		t.Errorf("search = %v, want the notes", slices.Collect(page.Results.Objects()))
 	}
 }
 
@@ -298,7 +300,8 @@ func TestMountIndexer_aReindexThatAnotherIndexerCommitsFirstIsRetried(t *testing
 	}
 
 	_, err := idx.IndexPath(ctx, vpath)
-	kids, _ := store.ListChildren(ctx, idx.Scope, idx.DocumentID(vpath))
+	kidsTree, _ := store.GetTree(ctx, idx.Scope, idx.DocumentID(vpath), 0)
+	kids := kidsTree.Parts
 
 	if err != nil {
 		t.Fatalf("index after another indexer committed first = %v, want a retry", err)
@@ -347,7 +350,8 @@ func TestMountIndexer_aFileThatCannotBeReadOrChunkedFailsTheIndexAndKeepsThePrev
 		tc.arrange(cancel, files, h)
 
 		_, err := h.idx.IndexPath(ctx, vpath)
-		kids, _ := h.store.ListChildren(t.Context(), h.idx.Scope, h.idx.DocumentID(vpath))
+		kidsTree, _ := h.store.GetTree(t.Context(), h.idx.Scope, h.idx.DocumentID(vpath), 0)
+		kids := kidsTree.Parts
 		cancel()
 
 		if err == nil || !strings.Contains(err.Error(), tc.want) {

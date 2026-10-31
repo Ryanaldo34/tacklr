@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -175,7 +174,7 @@ func (s *MemoryStore) checkPutLocked(scope Scope, obj Object) error {
 	if err := scope.Namespace.Validate(); err != nil {
 		return err
 	}
-	if err := ValidateObjectIdentity(obj); err != nil {
+	if err := obj.ValidateIdentity(); err != nil {
 		return err
 	}
 	if !scope.Namespace.Covers(obj.Namespace) {
@@ -189,7 +188,7 @@ func (s *MemoryStore) checkPutLocked(scope Scope, obj Object) error {
 
 // storeLocked writes a copy of an already-checked obj and returns it.
 func (s *MemoryStore) storeLocked(obj Object) Object {
-	obj = cloneObject(obj)
+	obj = obj.clone()
 	if obj.Properties == nil {
 		obj.Properties = map[string]any{}
 	}
@@ -201,14 +200,11 @@ func (s *MemoryStore) storeLocked(obj Object) Object {
 		obj.UpdatedAt = now
 	}
 	s.objects[obj.ID] = obj
-	return cloneObject(obj)
+	return obj.clone()
 }
 
 // SoftDelete implements Store.
 func (s *MemoryStore) SoftDelete(_ context.Context, scope Scope, id uuid.UUID) error {
-	if id == uuid.Nil {
-		return fmt.Errorf("%w: object id is required", ErrInvalid)
-	}
 	if err := scope.Namespace.Validate(); err != nil {
 		return err
 	}
@@ -307,11 +303,8 @@ func (s *MemoryStore) GetMany(_ context.Context, scope Scope, ids []uuid.UUID) (
 	out := make([]Object, 0, len(ids))
 	for _, id := range ids {
 		obj, err := s.getLocked(scope, id)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				continue
-			}
-			return nil, err
+		if err != nil { // getLocked fails only with ErrNotFound
+			continue
 		}
 		out = append(out, obj)
 	}
@@ -320,7 +313,7 @@ func (s *MemoryStore) GetMany(_ context.Context, scope Scope, ids []uuid.UUID) (
 
 func (s *MemoryStore) getLocked(scope Scope, id uuid.UUID) (Object, error) {
 	if obj, ok := s.objects[id]; ok && obj.DeletedAt == nil && scope.CanRead(obj) {
-		return cloneObject(obj), nil
+		return obj.clone(), nil
 	}
 	if sid := strings.TrimSpace(scope.SessionID); sid != "" && s.sessionMsgs != nil {
 		if row, ok := s.sessionMsgs[id]; ok && row.sessionID == sid {
@@ -330,54 +323,10 @@ func (s *MemoryStore) getLocked(scope Scope, id uuid.UUID) (Object, error) {
 	return Object{}, fmt.Errorf("%w: %s", ErrNotFound, id)
 }
 
-// ListByKind implements Store (first-class objects only).
-func (s *MemoryStore) ListByKind(_ context.Context, scope Scope, kind string, limit int) ([]Object, error) {
-	if err := scope.Namespace.Validate(); err != nil {
-		return nil, err
-	}
-	kind = strings.TrimSpace(kind)
-	if kind == "" || limit <= 0 {
-		return nil, nil
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var matches []Object
-	for _, obj := range s.objects {
-		if obj.DeletedAt != nil || obj.ParentID != nil {
-			continue
-		}
-		if !scope.CanRead(obj) {
-			continue
-		}
-		if obj.Kind != kind {
-			continue
-		}
-		matches = append(matches, obj)
-	}
-	slices.SortFunc(matches, func(a, b Object) int {
-		if c := strings.Compare(a.Title, b.Title); c != 0 {
-			return c
-		}
-		return cmpUUID(a.ID, b.ID)
-	})
-	if len(matches) > limit {
-		matches = matches[:limit]
-	}
-	out := make([]Object, len(matches))
-	for i, obj := range matches {
-		out[i] = cloneObject(obj)
-	}
-	return out, nil
-}
-
 // GetByProperty implements Store.
 func (s *MemoryStore) GetByProperty(_ context.Context, scope Scope, key, value string) (Object, error) {
 	if err := scope.Namespace.Validate(); err != nil {
 		return Object{}, err
-	}
-	key = strings.TrimSpace(key)
-	if key == "" {
-		return Object{}, fmt.Errorf("brain: property key is required")
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -386,9 +335,6 @@ func (s *MemoryStore) GetByProperty(_ context.Context, scope Scope, key, value s
 			continue
 		}
 		if !scope.CanRead(obj) {
-			continue
-		}
-		if obj.Properties == nil {
 			continue
 		}
 		got, ok := obj.Properties[key]
@@ -399,79 +345,59 @@ func (s *MemoryStore) GetByProperty(_ context.Context, scope Scope, key, value s
 		if !ok || sval != value {
 			continue
 		}
-		return cloneObject(obj), nil
+		return obj.clone(), nil
 	}
 	return Object{}, fmt.Errorf("%w: %s=%s", ErrNotFound, key, value)
 }
 
-// KindsWithObjects implements Store.
-func (s *MemoryStore) KindsWithObjects(_ context.Context, scope Scope) ([]string, error) {
+// GetTree implements Store.
+func (s *MemoryStore) GetTree(_ context.Context, scope Scope, id uuid.UUID, limit int) (Tree, error) {
 	if err := scope.Namespace.Validate(); err != nil {
-		return nil, err
+		return Tree{}, err
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	seen := map[string]struct{}{}
-	for _, obj := range s.objects {
-		if obj.DeletedAt != nil || obj.ParentID != nil {
-			continue
-		}
-		if !scope.CanRead(obj) {
-			continue
-		}
-		if obj.Kind == "" {
-			continue
-		}
-		seen[obj.Kind] = struct{}{}
+	obj, err := s.getLocked(scope, id)
+	if err != nil {
+		return Tree{}, err
 	}
-	return slices.Sorted(maps.Keys(seen)), nil
+	t := Tree{Object: obj}
+	record := obj.ID
+	if obj.ParentID != nil {
+		record = *obj.ParentID
+		if parent, err := s.getLocked(scope, record); err == nil {
+			t.Parent = &parent
+		}
+	}
+	if _, saved := s.objects[obj.ID]; saved {
+		t.Parts = s.partsLocked(scope, record, limit)
+	}
+	return t, nil
 }
 
-// ListChildren implements Store.
-func (s *MemoryStore) ListChildren(_ context.Context, scope Scope, parentID uuid.UUID) ([]Object, error) {
-	if err := scope.Namespace.Validate(); err != nil {
-		return nil, err
-	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// partsLocked is record's live parts scope can read, by position, at most
+// limit (all when limit is not positive).
+func (s *MemoryStore) partsLocked(scope Scope, record uuid.UUID, limit int) []Object {
 	var out []Object
 	for _, obj := range s.objects {
-		if obj.DeletedAt != nil {
-			continue
+		if obj.DeletedAt == nil && obj.ParentID != nil && *obj.ParentID == record && scope.CanRead(obj) {
+			out = append(out, obj.clone())
 		}
-		if obj.ParentID == nil || *obj.ParentID != parentID {
-			continue
-		}
-		if !scope.CanRead(obj) {
-			continue
-		}
-		out = append(out, cloneObject(obj))
 	}
 	slices.SortFunc(out, func(a, b Object) int {
-		if c := cmp.Compare(positionOf(a), positionOf(b)); c != 0 {
-			return c
-		}
-		return cmpUUID(a.ID, b.ID)
+		return cmp.Or(cmp.Compare(a.position(), b.position()), cmpUUID(a.ID, b.ID))
 	})
-	return out, nil
+	if limit > 0 {
+		out = out[:min(len(out), limit)]
+	}
+	return out
 }
 
-func positionOf(o Object) int {
+func (o Object) position() int {
 	if o.Position == nil {
 		return 0
 	}
 	return *o.Position
-}
-
-// GetKind implements Store.
-func (s *MemoryStore) GetKind(_ context.Context, kind string) (ObjectKind, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	k, ok := s.kinds[kind]
-	if !ok {
-		return ObjectKind{}, fmt.Errorf("%w: kind %q", ErrNotFound, kind)
-	}
-	return k, nil
 }
 
 // ListKinds implements Store.
@@ -488,19 +414,22 @@ func (s *MemoryStore) ListKinds(_ context.Context) ([]ObjectKind, error) {
 	return out, nil
 }
 
-// Search implements Store. It ranks parts and the session's messages by a
+// Search implements Store. It ranks records, parts and the session's messages by a
 // TF×IDF lexical score and, unless q.Exact, by cosine similarity to the
 // query's embedding (same model only; a failed query embedding leaves the
 // lexical list alone); q.Exact adds case-fold substring and
 // trigram overlap instead, and puts exact title matches first. The lists
 // are fused with the store's Ranking.
-func (s *MemoryStore) Search(ctx context.Context, scope Scope, q PartSearch) ([]ScoredID, error) {
+func (s *MemoryStore) Search(ctx context.Context, scope Scope, q RecordSearch) ([]ScoredID, error) {
 	if err := scope.Namespace.Validate(); err != nil {
 		return nil, err
 	}
-	plan, err := CompileFilter(q.Filters)
+	plan, err := q.Filters.Compile()
 	if err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(q.Query) == "" {
+		return s.listRecords(scope, plan, q.Limit), nil
 	}
 	var vec []float32
 	if !q.Exact {
@@ -511,7 +440,16 @@ func (s *MemoryStore) Search(ctx context.Context, scope Scope, q PartSearch) ([]
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	parts := s.appendSessionParts(scope, s.candidateParts(scope, plan))
+	parts := s.candidateRows(scope, plan)
+	if q.Within != uuid.Nil {
+		record := q.Within
+		if w, ok := s.objects[q.Within]; ok && w.ParentID != nil {
+			record = *w.ParentID
+		}
+		parts = slices.DeleteFunc(parts, func(o Object) bool { return o.ParentID == nil || *o.ParentID != record })
+	} else {
+		parts = s.appendSessionParts(scope, parts)
+	}
 	lists := [][]ScoredID{lexicalScores(parts, q.Query)}
 	if q.Exact {
 		lists = append(lists, trigramScores(parts, q.Query))
@@ -539,7 +477,7 @@ func lexicalScores(parts []Object, query string) []ScoredID {
 	df := make(map[string]int)
 	docs := make([]doc, 0, len(parts))
 	for _, obj := range parts {
-		toks := tokenize(searchText(obj))
+		toks := tokenize(obj.searchText())
 		if len(toks) == 0 {
 			continue
 		}
@@ -562,7 +500,7 @@ func lexicalScores(parts []Object, query string) []ScoredID {
 			}
 		}
 		if score > 0 {
-			scored = append(scored, scoredFromObject(d.obj, score))
+			scored = append(scored, d.obj.scored(score))
 		}
 	}
 	sortScored(scored)
@@ -577,7 +515,7 @@ func vectorScores(parts []Object, model string, vec []float32) []ScoredID {
 			continue
 		}
 		if sim := cosine(vec, obj.Embedding); sim > 0 {
-			scored = append(scored, scoredFromObject(obj, float64(sim)))
+			scored = append(scored, obj.scored(float64(sim)))
 		}
 	}
 	sortScored(scored)
@@ -587,19 +525,16 @@ func vectorScores(parts []Object, model string, vec []float32) []ScoredID {
 // trigramScores scores parts by case-fold substring, else trigram overlap.
 func trigramScores(parts []Object, query string) []ScoredID {
 	q := strings.ToLower(strings.TrimSpace(query))
-	if q == "" {
-		return nil
-	}
 	qTri := trigrams(q)
 	var scored []ScoredID
 	for _, obj := range parts {
-		text := strings.ToLower(searchText(obj))
+		text := strings.ToLower(obj.searchText())
 		score := trigramOverlap(qTri, trigrams(text))
 		if text != "" && strings.Contains(text, q) {
 			score = 1
 		}
 		if score > 0 {
-			scored = append(scored, scoredFromObject(obj, score))
+			scored = append(scored, obj.scored(score))
 		}
 	}
 	sortScored(scored)
@@ -621,18 +556,19 @@ func titleFirst(hits []ScoredID, query string) []ScoredID {
 	return append(out, rest...)
 }
 
-// candidateParts returns live parts (parent_id set) under the caller's lock.
-// Do not retain the slice across unlock.
-func (s *MemoryStore) candidateParts(scope Scope, plan FilterPlan) []Object {
+// candidateRows are the live rows scope can read whose record passes plan:
+// a record itself, or a part whose parent does.
+func (s *MemoryStore) candidateRows(scope Scope, plan FilterPlan) []Object {
 	out := make([]Object, 0)
 	for _, obj := range s.objects {
-		if obj.DeletedAt != nil || obj.ParentID == nil {
+		if obj.DeletedAt != nil || !scope.CanRead(obj) {
 			continue
 		}
-		if !scope.CanRead(obj) {
-			continue
+		record := obj
+		if obj.ParentID != nil {
+			record = s.objects[*obj.ParentID]
 		}
-		if !plan.Match(obj) {
+		if !plan.Match(record) {
 			continue
 		}
 		out = append(out, obj)
@@ -640,7 +576,28 @@ func (s *MemoryStore) candidateParts(scope Scope, plan FilterPlan) []Object {
 	return out
 }
 
-func scoredFromObject(obj Object, score float64) ScoredID {
+// listRecords is the records under scope that plan matches, newest first,
+// at most limit.
+func (s *MemoryStore) listRecords(scope Scope, plan FilterPlan, limit int) []ScoredID {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var records []Object
+	for _, obj := range s.objects {
+		if obj.ParentID == nil && obj.DeletedAt == nil && scope.CanRead(obj) && plan.Match(obj) {
+			records = append(records, obj)
+		}
+	}
+	slices.SortFunc(records, func(a, b Object) int {
+		return cmp.Or(b.UpdatedAt.Compare(a.UpdatedAt), cmpUUID(a.ID, b.ID))
+	})
+	out := make([]ScoredID, 0, min(len(records), max(limit, 0)))
+	for _, obj := range records[:min(len(records), max(limit, 0))] {
+		out = append(out, obj.scored(0))
+	}
+	return out
+}
+
+func (obj Object) scored(score float64) ScoredID {
 	var props map[string]any
 	if obj.Properties != nil {
 		props = maps.Clone(obj.Properties)
@@ -657,7 +614,7 @@ func scoredFromObject(obj Object, score float64) ScoredID {
 	}
 }
 
-func searchText(o Object) string {
+func (o Object) searchText() string {
 	return strings.TrimSpace(o.Title + " " + o.Summary + " " + o.Content)
 }
 
@@ -705,14 +662,10 @@ func trigramOverlap(a, b map[string]struct{}) float64 {
 			inter++
 		}
 	}
-	union := len(a) + len(b) - inter
-	if union == 0 {
-		return 0
-	}
-	return float64(inter) / float64(union)
+	return float64(inter) / float64(len(a)+len(b)-inter)
 }
 
-func cloneObject(o Object) Object {
+func (o Object) clone() Object {
 	cp := o
 	if o.Properties != nil {
 		cp.Properties = maps.Clone(o.Properties)

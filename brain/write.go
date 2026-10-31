@@ -15,19 +15,19 @@ import (
 	"github.com/google/uuid"
 )
 
-// Put upserts a knowledge object under scope.
+// Save upserts a knowledge object under scope.
 // Catalog non-empty → ValidateObject. Namespace filled from scope when missing;
 // a namespace outside scope is invalid. A part's parent must be visible under
 // scope. ID generated when nil. An id already held by a row outside scope
-// returns ErrNotFound and changes nothing. Put refuses objects that already
+// returns ErrNotFound and changes nothing. Save refuses objects that already
 // have DeletedAt set.
 // The store indexes the object's text (and embeds it when it has an
-// Embedder); an embedding failure fails the Put. A first-class object then
+// Embedder); an embedding failure fails the Save. A first-class object then
 // goes to every index (a graph upserts its node and keeps its edges).
 // If an index write fails after the store write, the store row remains
-// (source of truth) and the write is still audited; re-Put after fixing the
-// index.
-func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, error) {
+// (source of truth) and the write is still audited; Save again after fixing
+// the index.
+func (e *Engine) Save(ctx context.Context, scope Scope, obj Object) (Object, error) {
 	if err := checkScope(ctx, scope.Namespace); err != nil {
 		return Object{}, err
 	}
@@ -53,7 +53,7 @@ func (e *Engine) committed(ctx context.Context, scope Scope, ev AuditEvent, inde
 
 // SoftDelete marks an object and its parts deleted. A first-class object
 // leaves every index first, so an index failure keeps the store row. If the
-// store SoftDelete then fails, re-Put puts the object back in the indexes.
+// store SoftDelete then fails, Save puts the object back in the indexes.
 func (e *Engine) SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error {
 	if err := checkScope(ctx, scope.Namespace); err != nil {
 		return err
@@ -135,74 +135,64 @@ func (e *Engine) removeIndexes(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// Link creates a non-containment edge from→to between first-class, visible objects.
-// Both endpoints must exist under scope, must not be soft-deleted, and must not be parts.
-// Equivalent to LinkWith with zero EdgeMeta.
-func (k *KnowledgeGraph) Link(ctx context.Context, scope Scope, from, to uuid.UUID, relationType string) error {
-	return k.LinkWith(ctx, scope, from, to, relationType, EdgeMeta{})
+// LinkRequest creates, updates or removes the edge From→To with Relation.
+type LinkRequest struct {
+	From, To uuid.UUID
+	Relation string
+	// Meta (note, status, role, …) describes the edge; the graph indexes
+	// the note for Search.
+	Meta   EdgeMeta
+	Remove bool
 }
 
-// LinkWith is Link plus optional relationship metadata (note, status, role, …).
-// The edge takes the source object's namespace. The graph indexes the note
-// for find_links.
-func (k *KnowledgeGraph) LinkWith(ctx context.Context, scope Scope, from, to uuid.UUID, relationType string, meta EdgeMeta) error {
-	e := k.eng
-	rel, src, err := e.linkEnds(ctx, scope, from, to, relationType)
-	if err != nil {
+// Link creates or updates a non-containment edge between two visible
+// first-class objects, or removes it when req.Remove is set (removing a
+// missing edge succeeds). The edge takes the source object's namespace.
+// Link needs a graph (ErrUnsupported without one).
+func (e *Engine) Link(ctx context.Context, scope Scope, req LinkRequest) error {
+	if err := checkScope(ctx, scope.Namespace); err != nil {
 		return err
 	}
-	now := time.Now().UTC()
-	meta.CreatedAt, meta.UpdatedAt = cmp.Or(meta.CreatedAt, now), cmp.Or(meta.UpdatedAt, now)
-	meta.Note = strings.TrimSpace(meta.Note)
-	edge := GraphEdge{Namespace: src.Namespace, From: from, To: to, RelationType: rel, Meta: meta}
-	if err := k.graph.Link(ctx, edge); err != nil {
-		return fmt.Errorf("brain: link: %w", err)
+	if e.graph == nil {
+		return fmt.Errorf("%w: links need a graph", ErrUnsupported)
 	}
-	return e.record(ctx, scope, AuditEvent{Op: AuditLink, ObjectIDs: []uuid.UUID{from, to}})
-}
-
-// Unlink removes a non-containment edge from→to. Endpoints must be visible first-class objects.
-func (k *KnowledgeGraph) Unlink(ctx context.Context, scope Scope, from, to uuid.UUID, relationType string) error {
-	e := k.eng
-	rel, _, err := e.linkEnds(ctx, scope, from, to, relationType)
-	if err != nil {
-		return err
+	rel := strings.TrimSpace(req.Relation)
+	if req.From == uuid.Nil || req.To == uuid.Nil || rel == "" {
+		return fmt.Errorf("%w: from, to, and relation are required", ErrInvalid)
 	}
-	if err := k.graph.Unlink(ctx, from, to, rel); err != nil {
-		return fmt.Errorf("brain: unlink: %w", err)
+	if isContainment(rel) {
+		return fmt.Errorf("%w: %q is containment, not a link; set the part's parent instead", ErrInvalid, rel)
 	}
-	return e.record(ctx, scope, AuditEvent{Op: AuditUnlink, ObjectIDs: []uuid.UUID{from, to}})
-}
-
-// linkEnds checks a link request: a graph writer, ids and a relation, and
-// two visible first-class endpoints. It returns the trimmed relation and the
-// source object.
-func (e *Engine) linkEnds(ctx context.Context, scope Scope, from, to uuid.UUID, relationType string) (string, Object, error) {
-	if err := ctx.Err(); err != nil {
-		return "", Object{}, err
-	}
-	if err := scope.Namespace.Validate(); err != nil {
-		return "", Object{}, err
-	}
-	rel := strings.TrimSpace(relationType)
-	if from == uuid.Nil || to == uuid.Nil || rel == "" {
-		return "", Object{}, fmt.Errorf("%w: from, to, and relation type are required", ErrInvalid)
-	}
-	var ends [2]Object
+	var src Object
 	for i, end := range []struct {
 		id    uuid.UUID
 		label string
-	}{{from, "from"}, {to, "to"}} {
+	}{{req.From, "from"}, {req.To, "to"}} {
 		obj, err := e.store.Get(ctx, scope, end.id)
 		if err != nil {
-			return "", Object{}, fmt.Errorf("brain: link %s: %w", end.label, err)
+			return fmt.Errorf("brain: link %s: %w", end.label, err)
 		}
 		if obj.ParentID != nil {
-			return "", Object{}, fmt.Errorf("brain: link %s: %w: endpoint must be a first-class object (not a part)", end.label, ErrInvalid)
+			return fmt.Errorf("%w: link %s must be a record, not a part", ErrInvalid, end.label)
 		}
-		ends[i] = obj
+		if i == 0 {
+			src = obj
+		}
 	}
-	return rel, ends[0], nil
+	if req.Remove {
+		if err := e.graph.Unlink(ctx, req.From, req.To, rel); err != nil {
+			return fmt.Errorf("brain: unlink: %w", err)
+		}
+		return e.record(ctx, scope, AuditEvent{Op: AuditUnlink, ObjectIDs: []uuid.UUID{req.From, req.To}})
+	}
+	meta := req.Meta
+	now := e.cfg.Now()
+	meta.CreatedAt, meta.UpdatedAt = cmp.Or(meta.CreatedAt, now), cmp.Or(meta.UpdatedAt, now)
+	meta.Note = strings.TrimSpace(meta.Note)
+	if err := e.graph.Link(ctx, GraphEdge{Namespace: src.Namespace, From: req.From, To: req.To, RelationType: rel, Meta: meta}); err != nil {
+		return fmt.Errorf("brain: link: %w", err)
+	}
+	return e.record(ctx, scope, AuditEvent{Op: AuditLink, ObjectIDs: []uuid.UUID{req.From, req.To}})
 }
 
 // preparePut fills defaults, validates obj against scope and the catalog,
@@ -227,7 +217,7 @@ func (e *Engine) preparePut(ctx context.Context, scope Scope, obj Object) (Index
 	obj.UpdatedAt = now
 	obj.Kind = strings.TrimSpace(obj.Kind)
 	obj.Embedding, obj.EmbeddingModel = nil, ""
-	if err := ValidateObject(obj, e.catalog); err != nil {
+	if err := obj.Validate(e.catalog); err != nil {
 		return Indexed{}, err
 	}
 	if !scope.Namespace.Covers(obj.Namespace) {
@@ -248,19 +238,19 @@ func (e *Engine) preparePut(ctx context.Context, scope Scope, obj Object) (Index
 }
 
 // IndexText joins non-empty title, summary, and content for corpus part embeds.
-func IndexText(obj Object) string {
+func (obj Object) IndexText() string {
 	return joinNonEmpty("\n", obj.Title, obj.Summary, obj.Content)
 }
 
 // EntityIndexText builds text for first-class graph nodes and parent embeddings:
 // title, summary, scalar properties (sorted keys), and full content.
 // Reserved store props (slug, vfs_path) are omitted. Callers with a kind catalog
-// should prefer Engine.Put, which also honors FieldSpec.SkipIndex.
-func EntityIndexText(obj Object) string {
-	return entityIndexText(obj, KindSpec{}, false)
+// should prefer Engine.Save, which also honors FieldSpec.SkipIndex.
+func (obj Object) EntityIndexText() string {
+	return obj.entityIndexText(KindSpec{}, false)
 }
 
-func entityIndexText(obj Object, spec KindSpec, haveSpec bool) string {
+func (obj Object) entityIndexText(spec KindSpec, haveSpec bool) string {
 	parts := make([]string, 0, 8)
 	if t := strings.TrimSpace(obj.Title); t != "" {
 		parts = append(parts, t)
@@ -330,8 +320,8 @@ func formatPropertyLine(key string, v any) string {
 }
 
 // IndexTextWithParent prefixes parent context (bursting-style) when parentTitle is set.
-func IndexTextWithParent(obj Object, parentTitle string) string {
-	body := IndexText(obj)
+func (obj Object) IndexTextWithParent(parentTitle string) string {
+	body := obj.IndexText()
 	parentTitle = strings.TrimSpace(parentTitle)
 	if parentTitle == "" {
 		return body
@@ -354,9 +344,6 @@ func joinNonEmpty(sep string, parts ...string) string {
 
 // capRunes returns s truncated to at most maxRunes (no ellipsis).
 func capRunes(s string, maxRunes int) string {
-	if maxRunes <= 0 || s == "" {
-		return s
-	}
 	n := 0
 	for i := range s {
 		if n == maxRunes {
@@ -372,9 +359,9 @@ func (e *Engine) indexText(obj Object, parent *Object) string {
 	var text string
 	if parent == nil {
 		spec, ok := e.catalog.Get(obj.Kind)
-		text = entityIndexText(obj, spec, ok)
+		text = obj.entityIndexText(spec, ok)
 	} else {
-		text = IndexTextWithParent(obj, parent.Title)
+		text = obj.IndexTextWithParent(parent.Title)
 	}
 	if e.indexTextFn != nil {
 		text = strings.TrimSpace(e.indexTextFn(obj, text))
@@ -382,8 +369,8 @@ func (e *Engine) indexText(obj Object, parent *Object) string {
 	return text
 }
 
-// ValidateObject checks an object against the kind catalog when non-empty.
-func ValidateObject(obj Object, cat *KindCatalog) error {
+// Validate checks an object against the kind catalog when non-empty.
+func (obj Object) Validate(cat *KindCatalog) error {
 	kind := strings.TrimSpace(obj.Kind)
 	if kind == "" {
 		return fmt.Errorf("brain: object kind is required")
@@ -409,9 +396,6 @@ func ValidateObject(obj Object, cat *KindCatalog) error {
 		return fmt.Errorf("brain: kind %q is a part kind and requires parent_id", spec.Kind)
 	}
 	props := obj.Properties
-	if props == nil {
-		props = map[string]any{}
-	}
 	byName := make(map[string]FieldSpec, len(spec.Fields))
 	for _, f := range spec.Fields {
 		byName[f.Name] = f
@@ -474,8 +458,8 @@ func isReservedStoreProp(name string) bool {
 	}
 }
 
-// ValidateObjectIdentity checks id, kind, and namespace before a store Put.
-func ValidateObjectIdentity(obj Object) error {
+// ValidateIdentity checks id, kind, and namespace before a store Put.
+func (obj Object) ValidateIdentity() error {
 	if obj.ID == uuid.Nil {
 		return fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
@@ -483,13 +467,4 @@ func ValidateObjectIdentity(obj Object) error {
 		return fmt.Errorf("%w: object kind is required", ErrInvalid)
 	}
 	return obj.Namespace.Validate()
-}
-
-// WriteKinds maps agent save_* tools to host kind names.
-// Empty fields omit that tool. When the process catalog is non-empty, named
-// kinds must already be registered (ApplyKinds / WithKinds).
-type WriteKinds struct {
-	Discovery string // save_discovery
-	Fact      string // save_fact
-	Memory    string // save_memory
 }

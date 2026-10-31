@@ -3,6 +3,7 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -68,12 +69,12 @@ func waitSearchHit(t *testing.T, eng *brain.Engine, scope brain.Scope, query str
 	ctx := context.Background()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: query}, brain.NewSearchContext())
+		page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: query})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(page.Objects) > 0 {
-			return page.Objects[0]
+		if len(slices.Collect(page.Results.Objects())) > 0 {
+			return slices.Collect(page.Results.Objects())[0]
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -174,12 +175,12 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "directory") {
 		t.Fatalf("index_file directory in batch: %v", err)
 	}
-	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "batch-unique-phrase-zzz"}, brain.NewSearchContext())
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "batch-unique-phrase-zzz"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Objects) > 0 {
-		t.Fatalf("partial batch index: %+v", page.Objects[0].Properties)
+	if len(slices.Collect(page.Results.Objects())) > 0 {
+		t.Fatalf("partial batch index: %+v", slices.Collect(page.Results.Objects())[0].Properties)
 	}
 }
 
@@ -222,12 +223,19 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 	if err != nil || !strings.Contains(sout.output, "/workspace/work/sel.txt") {
 		t.Fatalf("search after index: %q err=%v", sout.output, err)
 	}
+	inFile, err := search.invoke(ctx, `{"query":"unique-phrase-selective-aaa","within":"/workspace/work/sel.txt"}`, turnRuntime(h))
+	if err != nil || !strings.Contains(inFile.output, "line two unique-phrase-selective-aaa") {
+		t.Fatalf("search within the indexed file: %q err=%v", inFile.output, err)
+	}
+	if _, err := search.invoke(ctx, `{"query":"x","within":"/workspace/work/missing.txt"}`, turnRuntime(h)); err == nil {
+		t.Fatal("search within a path that is not indexed succeeded")
+	}
 	readTool := h.findTool("read", "")
 	if readTool == nil {
 		t.Fatal("read required")
 	}
-	if h.findTool("read_object", "") == nil {
-		t.Fatal("read_object required when Brain is on")
+	if h.findTool("open", "") == nil {
+		t.Fatal("open required when Brain is on")
 	}
 	readOut, err := readTool.invoke(ctx, `{"path":"/workspace/work/sel.txt","start":1,"end":10}`, turnRuntime(h))
 	if err != nil {
@@ -248,18 +256,17 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 }
 
 // TestKnowledgeSaveSearchRead: save_* writes a brain record. Update-by-object_id
-// rewrites that record. search and read_object return it.
+// rewrites that record. search and open return it.
 func TestKnowledgeSaveSearchRead(t *testing.T) {
 	ctx := context.Background()
 	g := helixtest.Graph(t)
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
 		brain.KindSpec{Kind: "Fact", IsParent: true},
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	kg := brain.NewKnowledgeGraph(eng, g)
 	if err := eng.ApplyKinds(ctx, append(vfsindex.MountIndexKinds(),
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
 		brain.KindSpec{Kind: "Fact", IsParent: true},
@@ -268,23 +275,23 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	}
 	ns := mustNS(t, "id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
-		sessionID: "save-mem",
-		Model:     &scriptedModel{},
-		Brain:     eng,
-		Graph:     kg, SearchNamespace: ns,
-		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery", Fact: "Fact"},
+		sessionID:       "save-mem",
+		Model:           &scriptedModel{},
+		Brain:           eng,
+		SearchNamespace: ns,
+		BrainWriteKinds: []string{"Discovery", "Fact"},
 	})
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
 
-	save := h.findTool("save_discovery", "")
+	save := h.findTool("save", "")
 	if save == nil {
-		t.Fatal("save_discovery required")
+		t.Fatal("save required")
 	}
-	if _, err := save.invoke(ctx, `{"content":"x"}`, turnRuntime(h)); err == nil || !strings.Contains(err.Error(), "title is required") {
+	if _, err := save.invoke(ctx, `{"kind":"Discovery","content":"x"}`, turnRuntime(h)); err == nil || !strings.Contains(err.Error(), "title is required") {
 		t.Fatalf("empty title: %v", err)
 	}
-	out, err := save.invoke(ctx, `{"title":"latency finding","content":"p99 under 40ms in canary"}`, turnRuntime(h))
+	out, err := save.invoke(ctx, `{"kind":"Discovery","title":"latency finding","content":"p99 under 40ms in canary"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,27 +315,24 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	if err != nil || !strings.Contains(obj.Content, "p99 under 40ms in canary") || obj.Kind != "Discovery" {
 		t.Fatalf("engine object: %+v err=%v", obj, err)
 	}
-	readObj := h.findTool("read_object", "")
-	if readObj == nil {
-		t.Fatal("read_object required")
-	}
-	rl, err := readObj.invoke(ctx, `{"object_id":"`+res.ID+`"}`, turnRuntime(h))
+	rl, err := h.findTool("open", "").invoke(ctx, `{"ref":"`+res.ID+`"}`, turnRuntime(h))
 	if err != nil || !strings.Contains(rl.output, "p99 under 40ms") {
-		t.Fatalf("read_object: %v %s", err, rl.output)
+		t.Fatalf("open: %v %s", err, rl.output)
 	}
-	found := h.findTool("find_objects", "")
-	if found == nil {
-		t.Fatal("find_objects required")
-	}
-	fpage, err := found.invoke(ctx, `{"query":"latency finding"}`, turnRuntime(h))
+	fpage, err := h.findTool("search", "").invoke(ctx, `{"query":"latency finding","kind":"Discovery"}`, turnRuntime(h))
 	if err != nil || !strings.Contains(fpage.output, res.ID) {
-		t.Fatalf("find_objects: %v %s", err, fpage.output)
+		t.Fatalf("search: %v %s", err, fpage.output)
+	}
+	listed, err := h.findTool("search", "").invoke(ctx, `{"kind":"Discovery"}`, turnRuntime(h))
+	if err != nil || !strings.Contains(listed.output, res.ID) {
+		t.Fatalf("list Discoveries without a query: %v %s", err, listed.output)
 	}
 
 	updArgs, err := json.Marshal(map[string]any{
-		"title":     "latency finding",
-		"object_id": res.ID,
-		"content":   "p95 under 20ms after fix",
+		"kind":    "Discovery",
+		"title":   "latency finding",
+		"id":      res.ID,
+		"content": "p95 under 20ms after fix",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -413,7 +417,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 			}, IsComplete: true}
 		case 7:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("s1", "save_discovery", `{"title":"research token","content":"unique-research-token lives in /work/research.md"}`),
+				toolCall("s1", "save", `{"kind":"Discovery","title":"research token","content":"unique-research-token lives in /work/research.md"}`),
 			}, IsComplete: true}
 		case 8:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
@@ -438,7 +442,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		mountSession:    ms,
 		Brain:           eng,
 		SearchNamespace: ns,
-		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
+		BrainWriteKinds: []string{"Discovery"},
 		UnattendedWrite: true,
 		Model:           strategy,
 	})
@@ -481,7 +485,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		t.Fatalf("index: %s", idx)
 	}
 	mustInvoke("search", `{"query":"unique-research-token"}`)
-	save := mustInvoke("save_discovery", `{"title":"research token","content":"unique-research-token lives in /work/research.md"}`)
+	save := mustInvoke("save", `{"kind":"Discovery","title":"research token","content":"unique-research-token lives in /work/research.md"}`)
 	if !strings.Contains(save, `"id"`) || !strings.Contains(save, "research token") {
 		t.Fatalf("save: %s", save)
 	}
@@ -507,11 +511,10 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	ms := mustMountTree(t, "path-graph", vfs.At("work", vfs.Local(t.TempDir())))
 	store := brain.NewMemoryStore()
 	g := helixtest.Graph(t)
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithGraph(g))
 	if err != nil {
 		t.Fatal(err)
 	}
-	kg := brain.NewKnowledgeGraph(eng, g)
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
@@ -519,8 +522,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	h := mustNewTurnManager(t, AgentOptions{
 		sessionID:    "path-graph",
 		mountSession: ms, Model: &scriptedModel{},
-		Brain: eng,
-		Graph: kg, SearchNamespace: ns,
+		Brain: eng, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
@@ -546,43 +548,28 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	}
 	lout, err := link.invoke(ctx, `{
 		"from":"/workspace/work/a.md","to":"/workspace/work/b.md",
-		"relation_type":"about","note":"JWT section"
+		"relation":"about","note":"JWT section"
 	}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(lout.output, `/workspace/work/a.md`) || !strings.Contains(lout.output, `/workspace/work/b.md`) {
-		t.Fatalf("link paths: %s", lout.output)
+	if !strings.Contains(lout.output, `"linked": true`) {
+		t.Fatalf("link by paths: %s", lout.output)
 	}
 
-	expand := h.findTool("expand", "")
-	eout, err := expand.invoke(ctx, `{"path":"/workspace/work/a.md","relation_types":["about"]}`, turnRuntime(h))
+	eout, err := h.findTool("related", "").invoke(ctx, `{"ref":"/workspace/work/a.md","relation":"about"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(eout.output, "/workspace/work/b.md") || !strings.Contains(eout.output, "JWT section") {
-		t.Fatalf("expand path neighbor: %s", eout.output)
+		t.Fatalf("related by path: %s", eout.output)
 	}
-
-	fl := h.findTool("find_links", "")
-	if fl == nil {
-		t.Fatal("find_links required with a graph")
-	}
-	fout, err := fl.invoke(ctx, `{"relation_type":"about","query":"JWT"}`, turnRuntime(h))
+	fout, err := h.findTool("search", "").invoke(ctx, `{"query":"JWT section"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(fout.output, "from_path") || !strings.Contains(fout.output, "to_path") {
-		t.Fatalf("find_links path fields: %s", fout.output)
-	}
-	if !strings.Contains(fout.output, "/workspace/work/a.md") || !strings.Contains(fout.output, "/workspace/work/b.md") {
-		t.Fatalf("find_links endpoints: %s", fout.output)
-	}
-	if _, err := fl.invoke(ctx, `{"relation_type":"","query":"JWT"}`, turnRuntime(h)); err == nil {
-		t.Fatal("find_links requires relation_type")
-	}
-	if _, err := fl.invoke(ctx, `{"relation_type":"about","query":""}`, turnRuntime(h)); err == nil {
-		t.Fatal("find_links requires query")
+	if !strings.Contains(fout.output, `"relation": "about"`) || !strings.Contains(fout.output, "/workspace/work/a.md") || !strings.Contains(fout.output, "/workspace/work/b.md") {
+		t.Fatalf("search the link note: %s", fout.output)
 	}
 }
 
@@ -605,13 +592,13 @@ func TestVFSIndexTools_indexedFileACLFollowsSearchPrincipals(t *testing.T) {
 		t.Fatal(err)
 	}
 	legal, err := h.findTool("search", "").invoke(ctx, `{"query":"nda terms"}`, turnRuntime(h))
-	outsider, _ := eng.Search(ctx, brain.Scope{Namespace: ns, Principals: []string{"user:mallory"}}, brain.SearchRequest{Query: "nda terms"}, brain.NewSearchContext())
+	outsider, _ := eng.Search(ctx, brain.Scope{Namespace: ns, Principals: []string{"user:mallory"}}, brain.SearchRequest{Query: "nda terms"})
 
 	if err != nil || !strings.Contains(legal.output, "nda.txt") {
 		t.Fatalf("legal search: %v %s", err, legal.output)
 	}
-	if len(outsider.Objects) != 0 {
-		t.Fatalf("outsider search = %+v", outsider.Objects)
+	if len(slices.Collect(outsider.Results.Objects())) != 0 {
+		t.Fatalf("outsider search = %+v", slices.Collect(outsider.Results.Objects()))
 	}
 }
 
@@ -626,24 +613,5 @@ func TestAgentOptions_brainRequiresASearchNamespace(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "SearchNamespace is required") {
 		t.Fatalf("validate = %v", err)
-	}
-}
-
-func TestAgentOptions_graphMustWrapBrain(t *testing.T) {
-	brainEng, err := brain.NewEngine(brain.NewMemoryStore())
-	if err != nil {
-		t.Fatal(err)
-	}
-	other, err := brain.NewEngine(brain.NewMemoryStore())
-	if err != nil {
-		t.Fatal(err)
-	}
-	opts := AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: brainEng, SearchNamespace: mustNS(t, "org", "a"),
-		Graph: brain.NewKnowledgeGraph(other, helixtest.Graph(t))}
-
-	err = opts.Validate()
-
-	if err == nil || !strings.Contains(err.Error(), "must wrap") {
-		t.Fatalf("validate with a graph over another engine = %v, want it rejected", err)
 	}
 }

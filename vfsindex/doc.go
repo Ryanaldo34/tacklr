@@ -68,6 +68,6 @@
 // Hosts that use a non-empty kind catalog should register MountIndexKinds()
 // (or equivalent fields) before indexing. Open-catalog engines accept any props.
 //
-// Content search over mounts is brain search/find_exact on Chunks with vfs_path.
+// Content search over mounts is brain search on Chunks with vfs_path.
 // Live grep is run_command → rg on the FUSE tree. This package does not implement grep.
 package vfsindex

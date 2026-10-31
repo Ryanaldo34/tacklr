@@ -1,7 +1,6 @@
 package brain
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -9,7 +8,7 @@ import (
 
 // FilterPlan is the compiled form of a Filter. A backend evaluates it in
 // process with Match, or translates its Conditions into its own query
-// language (FilterSQL does so for SQL stores).
+// language (brain/postgres does so for SQL).
 type FilterPlan struct {
 	preds []filterPred
 }
@@ -88,9 +87,9 @@ type filterPred struct {
 	timeVal time.Time
 }
 
-// CompileFilter validates f and compiles it.
-func CompileFilter(f Filter) (FilterPlan, error) {
-	if err := ValidateFilters(f); err != nil {
+// Compile validates f and compiles it.
+func (f Filter) Compile() (FilterPlan, error) {
+	if err := f.Validate(); err != nil {
 		return FilterPlan{}, err
 	}
 	if f.empty() {
@@ -191,69 +190,6 @@ func matchTime(got time.Time, p filterPred) bool {
 	return got.Before(p.timeVal)
 }
 
-func (p FilterPlan) sql(startArg int) (string, []any) {
-	var b strings.Builder
-	var args []any
-	n := startArg
-	add := func(frag string, v any) {
-		args = append(args, v)
-		b.WriteString(" AND ")
-		b.WriteString(fmt.Sprintf(frag, n))
-		n++
-	}
-	addIn := func(col string, vals []any) {
-		b.WriteString(" AND ")
-		b.WriteString(col)
-		b.WriteString(" IN (")
-		for i, v := range vals {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			args = append(args, filterSQLValue(v))
-			b.WriteString(fmt.Sprintf("$%d", n))
-			n++
-		}
-		b.WriteString(")")
-	}
-
-	for _, pred := range p.preds {
-		switch pred.field {
-		case filterKind, filterTitle:
-			col := pred.field
-			if pred.op == "in" {
-				addIn(col, pred.wantIn)
-			} else {
-				add(col+" = $%d", filterSQLValue(pred.want))
-			}
-		case "created_at", "updated_at":
-			switch pred.op {
-			case "gte":
-				add(pred.field+" >= $%d", pred.timeVal)
-			case "lt":
-				add(pred.field+" < $%d", pred.timeVal)
-			}
-		default:
-			col := strings.TrimPrefix(pred.field, "prop:")
-			expr := "properties->>'" + col + "'"
-			if pred.op == "in" {
-				addIn(expr, pred.wantIn)
-			} else {
-				add(expr+" = $%d", filterSQLValue(pred.want))
-			}
-		}
-	}
-	return b.String(), args
-}
-
-// filterSQLValue is v as the text that properties->>'key' and the text
-// columns compare against.
-func filterSQLValue(v any) any {
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return fmt.Sprint(v)
-}
-
 // validPropertyKey reports whether k is a non-empty run of letters, digits
 // and underscores: a property key a filter can name, and safe in SQL.
 func validPropertyKey(k string) bool { return k != "" && sanitizeJSONKey(k) == k }
@@ -265,17 +201,4 @@ func sanitizeJSONKey(k string) string {
 		}
 		return -1
 	}, k)
-}
-
-// FilterSQL compiles filters into a WHERE fragment and bound args for a
-// relational store. startArg is the first $N placeholder. The fragment
-// begins with AND when non-empty. Scope isolation is the store's own
-// predicate, joined in front of this one.
-func FilterSQL(filters Filter, startArg int) (string, []any, error) {
-	plan, err := CompileFilter(filters)
-	if err != nil {
-		return "", nil, err
-	}
-	frag, args := plan.sql(startArg)
-	return frag, args, nil
 }

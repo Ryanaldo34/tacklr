@@ -1,32 +1,29 @@
 package brain
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
 	"sync"
-	"time"
-
-	"github.com/google/uuid"
 )
 
-// SearchContext is the single retrieval session surface for one agent thread:
-// host namespace isolation, the caller's principals, and the active ResultSet
-// for continue. Principals are not exported: the host sets them every turn, so
-// a revoked group membership applies on the next turn.
+// SearchContext is the retrieval state of one agent thread: the host
+// namespace, the caller's principals, and the ranked rest of the last call
+// of each tool, which a call with more continues. Principals are not
+// exported: the host sets them every turn, so a revoked group membership
+// applies on the next turn.
 type SearchContext struct {
 	mu         sync.Mutex
 	namespace  Namespace
 	principals []string
-	current    *ResultSet
+	rests      map[string]Rest
 }
 
-// searchContextExport is the harness checkpoint envelope (namespace + optional result set).
+// searchContextExport is the harness checkpoint envelope.
 type searchContextExport struct {
-	Namespace Namespace  `json:"namespace,omitempty"`
-	ResultSet *ResultSet `json:"result_set,omitempty"`
+	Namespace Namespace       `json:"namespace,omitempty"`
+	Rests     map[string]Rest `json:"rests,omitempty"`
 }
 
 // NewSearchContext returns an empty search context.
@@ -72,57 +69,31 @@ func (c *SearchContext) Namespace() (Namespace, bool) {
 	return c.namespace.Clone(), true
 }
 
-// Put implements ResultSetStore: stores set as the sole active ResultSet.
-func (c *SearchContext) Put(_ context.Context, set ResultSet) error {
-	if set.ID == uuid.Nil {
-		return fmt.Errorf("%w: result_set_id is required", ErrInvalid)
-	}
-	cp := cloneResultSet(set)
-	if cp.CreatedAt.IsZero() {
-		cp.CreatedAt = time.Now().UTC()
-	}
+// SetRest keeps rest as the ranked remainder of the last call named key.
+func (c *SearchContext) SetRest(key string, rest Rest) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.current = &cp
-	return nil
+	if c.rests == nil {
+		c.rests = map[string]Rest{}
+	}
+	c.rests[key] = rest
 }
 
-// Get implements ResultSetStore.
-func (c *SearchContext) Get(_ context.Context, id uuid.UUID) (ResultSet, error) {
+// Rest returns the ranked remainder of the last call named key.
+func (c *SearchContext) Rest(key string) Rest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.current == nil || c.current.ID != id {
-		return ResultSet{}, fmt.Errorf("%w: result set %s", ErrNotFound, id)
-	}
-	return cloneResultSet(*c.current), nil
+	return c.rests[key]
 }
 
-func cloneResultSet(set ResultSet) ResultSet {
-	cp := set
-	cp.ObjectIDs = slices.Clone(set.ObjectIDs)
-	cp.Namespace = set.Namespace.Clone()
-	if len(set.Relations) > 0 {
-		cp.Relations = maps.Clone(set.Relations)
-	}
-	return cp
-}
-
-// Export serializes namespace + active ResultSet into the harness checkpoint.
+// Export serializes the namespace and the rests into the harness checkpoint.
 func (c *SearchContext) Export() ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.namespace.Empty() && c.current == nil {
+	if c.namespace.Empty() && len(c.rests) == 0 {
 		return nil, nil
 	}
-	env := searchContextExport{}
-	if !c.namespace.Empty() {
-		env.Namespace = c.namespace.Clone()
-	}
-	if c.current != nil {
-		rs := cloneResultSet(*c.current)
-		env.ResultSet = &rs
-	}
-	b, err := json.Marshal(env)
+	b, err := json.Marshal(searchContextExport{Namespace: c.namespace.Clone(), Rests: maps.Clone(c.rests)})
 	if err != nil {
 		return nil, fmt.Errorf("brain: export search context: %w", err)
 	}
@@ -134,18 +105,13 @@ func (c *SearchContext) Restore(raw []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(raw) == 0 {
-		c.namespace = nil
-		c.current = nil
+		c.namespace, c.rests = nil, nil
 		return nil
 	}
 	var env searchContextExport
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return fmt.Errorf("brain: restore search context: %w", err)
 	}
-	c.namespace = env.Namespace
-	c.current = env.ResultSet
-	if c.current != nil && c.current.ID == uuid.Nil {
-		c.current = nil
-	}
+	c.namespace, c.rests = env.Namespace, env.Rests
 	return nil
 }

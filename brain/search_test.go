@@ -3,439 +3,299 @@ package brain_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
-func seedDocWithParts(t *testing.T, store *brain.MemoryStore, ns brain.Namespace, title string, partBodies []string, updated time.Time) (parentID uuid.UUID) {
+// docWithParts saves a Document titled title with one part per body.
+func docWithParts(t *testing.T, eng *brain.Engine, scope brain.Scope, title string, props map[string]any, bodies ...string) brain.Object {
 	t.Helper()
-	parentID = uuid.New()
-	if err := putFixture(store, brain.Object{
-		ID: parentID, Kind: "Document", Title: title, Summary: title,
-		Namespace: ns, UpdatedAt: updated, CreatedAt: updated,
-	}); err != nil {
+	parts := make([]brain.Object, len(bodies))
+	for i, b := range bodies {
+		parts[i] = brain.Object{Kind: "Chunk", Title: title + " part", Content: b}
+	}
+	doc, err := eng.PutTree(context.Background(), scope, brain.Object{Kind: "Document", Title: title, Properties: props}, brain.Parts(parts...))
+	if err != nil {
 		t.Fatal(err)
 	}
-	for i, body := range partBodies {
-		pid := uuid.New()
-		pos := i + 1
-		if err := putFixture(store, brain.Object{
-			ID: pid, Kind: "Chunk", Title: title + " part", Content: body,
-			ParentID: &parentID, Position: &pos,
-			Namespace: ns, UpdatedAt: updated, CreatedAt: updated,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return parentID
+	return doc
 }
 
-func fixedNow(t time.Time) brain.EngineConfig {
-	return brain.EngineConfig{Now: func() time.Time { return t }}
-}
-
-func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
+func TestSearch_ranksRecordsAndTheirPartsInTheCallersTenant(t *testing.T) {
 	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	nsA, nsB := mustNS(t, "org", "a"), mustNS(t, "org", "b")
-	now := time.Now().UTC()
-	parent := seedDocWithParts(t, store, nsA, "OAuth guide", []string{
-		"Implement OAuth PKCE for mobile clients with authorization code flow",
-	}, now)
-	seedDocWithParts(t, store, nsB, "Other ns", []string{"OAuth PKCE elsewhere"}, now)
-
-	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sc := brain.NewSearchContext()
-
-	page, err := eng.Search(ctx, brain.Scope{Namespace: nsA}, brain.SearchRequest{
-		Query: "oauth pkce implementation",
-	}, sc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page.Objects) != 1 || page.Objects[0].ID != parent {
-		t.Fatalf("want promoted parent in nsA, got %+v", page.Objects)
-	}
-	if page.Objects[0].Content != "" {
-		t.Fatal("search hits omit full content")
-	}
-	if len(page.Objects[0].Evidence) == 0 {
-		t.Fatal("expected evidence")
-	}
-	if page.ResultSetID == uuid.Nil {
-		t.Fatal("result_set_id required")
-	}
-
-	wrong, err := eng.Search(ctx, brain.Scope{Namespace: nsB}, brain.SearchRequest{
-		Query: "authorization code flow mobile",
-	}, brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, o := range wrong.Objects {
-		if o.ID == parent {
-			t.Fatal("parent from nsA must not appear under nsB")
-		}
-	}
-}
-
-func TestSearch_filtersProperty(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	seedDocWithParts(t, store, ns, "Deal A", []string{"pipeline revenue forecast"}, now)
-
-	p2 := uuid.New()
-	part := uuid.New()
-	pos := 1
-	if err := putFixture(store, brain.Object{
-		ID: p2, Kind: "Document", Title: "Deal B", Namespace: ns, UpdatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := putFixture(store, brain.Object{
-		ID: part, Kind: "Chunk", Title: "chunk", Content: "pipeline revenue forecast",
-		ParentID: &p2, Position: &pos, Namespace: ns, UpdatedAt: now,
-		Properties: map[string]any{"stage": "negotiation"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
-		Query:   "pipeline revenue",
-		Filters: mustFilter(t, map[string]any{"stage": "negotiation"}),
-	}, brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page.Objects) != 1 || page.Objects[0].ID != p2 {
-		t.Fatalf("filter should keep p2 only, got %+v", page.Objects)
-	}
-}
-
-type stubEmbedder struct{ v []float32 }
-
-func (s stubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	return repeatVector(s.v, len(texts)), nil
-}
-
-func TestFindExact_uuidParentAndPart(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	parent := uuid.New()
-	part := uuid.New()
-	pos := 1
-	if err := putFixture(store, brain.Object{
-		ID: parent, Kind: "Document", Title: "Direct", Namespace: ns, UpdatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := putFixture(store, brain.Object{
-		ID: part, Kind: "Chunk", Title: "child", Content: "body",
-		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sc := brain.NewSearchContext()
-
-	page, err := eng.FindExact(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
-		Query: parent.String(),
-	}, sc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page.Objects) != 1 || page.Objects[0].ID != parent || len(page.Objects[0].Evidence) != 0 {
-		t.Fatalf("parent uuid: %+v", page.Objects)
-	}
-
-	page2, err := eng.FindExact(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
-		Query: part.String(),
-	}, brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page2.Objects) != 1 || page2.Objects[0].ID != parent {
-		t.Fatalf("part uuid promotes: %+v", page2.Objects)
-	}
-	if len(page2.Objects[0].Evidence) != 1 || page2.Objects[0].Evidence[0].PartID != part {
-		t.Fatalf("evidence: %+v", page2.Objects[0].Evidence)
-	}
-}
-
-func TestFindExact_titleMatch(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	parent := uuid.New()
-	part := uuid.New()
-	pos := 1
-	if err := putFixture(store, brain.Object{
-		ID: parent, Kind: "Document", Title: "Parent", Namespace: ns, UpdatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := putFixture(store, brain.Object{
-		ID: part, Kind: "Chunk", Title: "exact-filename.go", Content: "package main",
-		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	page, err := eng.FindExact(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
-		Query: "exact-filename.go",
-	}, brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page.Objects) != 1 || page.Objects[0].ID != parent {
-		t.Fatalf("title exact: %+v", page.Objects)
-	}
-}
-
-func TestContinue_andReplaceResultSet(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	for i := 0; i < 5; i++ {
-		seedDocWithParts(t, store, ns, "Topic shared", []string{
-			"shared retrieval content alpha beta gamma " + string(rune('a'+i)),
-		}, now)
-	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
-		DefaultLimit: 2, MaxLimit: 50,
-		Now: func() time.Time { return now },
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	sc := brain.NewSearchContext()
-	page1, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
-		Query: "shared retrieval content", Limit: 2,
-	}, sc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !page1.HasMore || len(page1.Objects) != 2 {
-		t.Fatalf("page1: has_more=%v n=%d", page1.HasMore, len(page1.Objects))
-	}
-	oldID := page1.ResultSetID
-
-	page2, err := eng.Continue(ctx, brain.Scope{Namespace: ns}, oldID, 2, sc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page2.Objects) == 0 {
-		t.Fatal("page2 empty")
-	}
-	seen := map[uuid.UUID]struct{}{}
-	for _, o := range page1.Objects {
-		seen[o.ID] = struct{}{}
-	}
-	for _, o := range page2.Objects {
-		if _, ok := seen[o.ID]; ok {
-			t.Fatalf("overlap on %s", o.ID)
-		}
-	}
-
-	// Export/restore preserves offset for a further continue.
-	raw, err := sc.Export()
-	if err != nil {
-		t.Fatal(err)
-	}
-	sc2 := brain.NewSearchContext()
-	if err := sc2.Restore(raw); err != nil {
-		t.Fatal(err)
-	}
-	page3, err := eng.Continue(ctx, brain.Scope{Namespace: ns}, oldID, 2, sc2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page3.Objects) == 0 && page2.HasMore {
-		t.Fatal("continue after restore failed while has_more")
-	}
-
-	// New search invalidates prior result set.
-	if _, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
-		Query: "shared retrieval content",
-	}, sc); err != nil {
-		t.Fatal(err)
-	}
-	_, err = eng.Continue(ctx, brain.Scope{Namespace: ns}, oldID, 2, sc)
-	if !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("want not found after replace, got %v", err)
-	}
-}
-
-func TestSearch_rejectsEmptyQueryAndFilter(t *testing.T) {
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
-	_, err = eng.Search(ctx, brain.Scope{}, brain.SearchRequest{Query: "  "}, brain.NewSearchContext())
-	if err == nil {
-		t.Fatal("empty query must fail")
+	scope, other := brain.Scope{Namespace: tenant(t)}, brain.Scope{Namespace: tenant(t)}
+	guide := docWithParts(t, eng, scope, "OAuth guide", nil, "Implement OAuth PKCE for mobile clients with authorization code flow")
+	docWithParts(t, eng, other, "Other tenant", nil, "OAuth PKCE elsewhere")
+	policy := save(t, eng, scope, brain.Object{Kind: "Fact", Title: "Refund policy", Content: "refunds within 30 days"})
+	open := docWithParts(t, eng, scope, "Deal A", map[string]any{"stage": "negotiation"}, "pipeline revenue forecast")
+	docWithParts(t, eng, scope, "Deal B", map[string]any{"stage": "closed"}, "pipeline revenue forecast")
+	search := func(req brain.SearchRequest) []brain.RichObject {
+		page, err := eng.Search(ctx, scope, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.Collect(page.Results.Objects())
 	}
-	_, err = eng.Search(ctx, brain.Scope{}, brain.SearchRequest{
-		Query:   "q",
-		Filters: brain.Filter{Props: map[string]brain.PropFilter{"": {Eq: "x"}}},
-	}, brain.NewSearchContext())
-	if err == nil {
-		t.Fatal("empty filter key must fail")
+
+	byPart := search(brain.SearchRequest{Query: "oauth pkce implementation"})
+	byRecord := search(brain.SearchRequest{Query: "refunds"})
+	filtered := search(brain.SearchRequest{Query: "pipeline revenue", Filters: mustFilter(t, map[string]any{"stage": "negotiation"})})
+	byKind := search(brain.SearchRequest{Query: "pipeline revenue", Kind: "Fact"})
+	byID := search(brain.SearchRequest{Query: policy.ID.String()})
+	exact := search(brain.SearchRequest{Query: `"Refund policy"`})
+	_, emptyErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "  "})
+	_, filterErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "q", Filters: brain.Filter{Props: map[string]brain.PropFilter{"": {Eq: "x"}}}})
+	_, noScope := eng.Search(ctx, brain.Scope{}, brain.SearchRequest{Query: "q"})
+
+	if len(byPart) != 1 || byPart[0].ID != guide.ID || len(byPart[0].Evidence) == 0 || byPart[0].Content != "" {
+		t.Errorf("search by a part's words = %+v, want the guide alone, with evidence and without content", byPart)
+	}
+	if !slices.Equal(idsOf(byRecord), []uuid.UUID{policy.ID}) {
+		t.Errorf("search a record without parts = %v, want the policy", titlesOf(byRecord))
+	}
+	if !slices.Equal(idsOf(filtered), []uuid.UUID{open.ID}) {
+		t.Errorf("filter on the record of a matching part = %v, want Deal A", titlesOf(filtered))
+	}
+	if len(byKind) != 0 {
+		t.Errorf("search a kind with no match = %v, want none", titlesOf(byKind))
+	}
+	if !slices.Equal(idsOf(byID), []uuid.UUID{policy.ID}) || len(exact) == 0 || exact[0].ID != policy.ID {
+		t.Errorf("search by id = %v, exact = %v, want the policy", titlesOf(byID), titlesOf(exact))
+	}
+	if !errors.Is(emptyErr, brain.ErrInvalid) || !errors.Is(filterErr, brain.ErrInvalid) || !errors.Is(noScope, brain.ErrInvalid) {
+		t.Errorf("empty query %v, bad filter %v, no scope %v, want ErrInvalid", emptyErr, filterErr, noScope)
 	}
 }
 
-func TestFindExact_trigramFuzzy(t *testing.T) {
+func TestSearch_facetsCountTheKindsAndFieldValuesOfAPage(t *testing.T) {
+	ctx := context.Background()
+	open, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogStore := brain.NewMemoryStore()
+	catalog, err := brain.NewEngine(catalogStore, brain.WithKinds(
+		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := brain.Scope{Namespace: tenant(t)}
+	for _, stage := range []string{"open", "open", "won"} {
+		save(t, open, scope, brain.Object{Kind: "Deal", Title: "renewal deal", Properties: map[string]any{"stage": stage, "ref": uuid.NewString(), "owner": "ann"}})
+		save(t, catalog, scope, brain.Object{Kind: "Deal", Title: "renewal deal", Properties: map[string]any{"stage": stage}})
+	}
+	for i := range 7 {
+		save(t, open, scope, brain.Object{Kind: "Note", Title: fmt.Sprint("renewal note ", i), Properties: map[string]any{"ref": uuid.NewString(), "tags": []any{"a"}}})
+	}
+	// A row written before the kind dropped a field keeps it.
+	if err := putFixture(catalogStore, brain.Object{ID: uuid.New(), Kind: "Deal", Title: "renewal deal", Namespace: scope.Namespace, Properties: map[string]any{"stage": "lost", "color": "red"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	openPage, openErr := open.Search(ctx, scope, brain.SearchRequest{Query: "renewal", Limit: 20})
+	catalogPage, catalogErr := catalog.Search(ctx, scope, brain.SearchRequest{Query: "renewal", Kind: "Deal"})
+
+	if openErr != nil || openPage.Facets.Kinds["Deal"] != 3 || openPage.Facets.Kinds["Note"] != 7 {
+		t.Errorf("open-mode kinds = %v %v, want 3 deals and 7 notes", openPage.Facets.Kinds, openErr)
+	}
+	if got := openPage.Facets.Properties; got["stage"]["open"] != 2 || got["stage"]["won"] != 1 || got["owner"]["ann"] != 3 || got["ref"] != nil || got["tags"] != nil {
+		t.Errorf("open-mode properties = %v, want stage and owner, and not the many-valued ref or the list", got)
+	}
+	if got := catalogPage.Facets.Properties; catalogErr != nil || len(got) != 1 || got["stage"]["open"] != 2 || got["stage"]["won"] != 1 || got["stage"]["lost"] != 1 {
+		t.Errorf("catalog properties = %v %v, want only the kind's field", got, catalogErr)
+	}
+}
+
+func TestSearch_teachingErrorsNameTheValidChoices(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
+		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}, {Name: "amount", Type: brain.FieldTypeNumber}}},
+		brain.KindSpec{Kind: "Fact", IsParent: true},
+		brain.KindSpec{Kind: "Chunk", IsPart: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := brain.Scope{Namespace: tenant(t)}
+	search := func(kind string, filters map[string]any) error {
+		_, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "q", Kind: kind, Filters: mustFilter(t, filters)})
+		return err
+	}
+
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"an unknown kind":       {search("Phase", nil), "unknown kind \"Phase\"; kinds: Deal, Fact"},
+		"an unknown field":      {search("Deal", map[string]any{"phase": "x"}), "unknown filter \"phase\" for Deal; filterable: amount, stage"},
+		"a field with no kind":  {search("", map[string]any{"stage": "x"}), "filter \"stage\" needs a kind; kinds: Deal, Fact"},
+		"a kind with no fields": {search("Fact", map[string]any{"stage": "x"}), "filterable: none"},
+	} {
+		if !errors.Is(tc.err, brain.ErrInvalid) || !strings.Contains(tc.err.Error(), tc.want) {
+			t.Errorf("%s = %v, want ErrInvalid naming %q", name, tc.err, tc.want)
+		}
+	}
+}
+
+func TestSearch_morePagesThroughTheRestEvenAfterACheckpoint(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := brain.Scope{Namespace: tenant(t)}
+	for i := range 5 {
+		save(t, eng, scope, brain.Object{Kind: "Note", Title: fmt.Sprintf("shared retrieval note %d", i)})
+	}
+	sc := brain.NewSearchContext()
+
+	first, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "shared retrieval", Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.SetRest("search", first.Rest)
+	checkpoint, err := sc.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := brain.NewSearchContext()
+	if err := restored.Restore(checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	second, secondErr := eng.Next(ctx, scope, restored.Rest("search"), 2)
+	last, lastErr := eng.Next(ctx, scope, second.Rest, 10)
+	empty, _ := brain.NewSearchContext().Export()
+	badRestore := brain.NewSearchContext().Restore([]byte(`{`))
+	badRest := brain.NewSearchContext().Restore([]byte(`{"rests":{"search":{"refs":"x"}}}`))
+	staleFilter := brain.NewSearchContext()
+	if err := staleFilter.Restore([]byte(`{"rests":{"search":{"refs":[{"id":"` + uuid.NewString() + `"}],"filter":{"CreatedAfter":"yesterday"}}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, staleErr := eng.Next(ctx, scope, staleFilter.Rest("search"), 1)
+
+	seen := map[uuid.UUID]bool{}
+	for _, o := range slices.Concat(slices.Collect(first.Results.Objects()), slices.Collect(second.Results.Objects()), slices.Collect(last.Results.Objects())) {
+		seen[o.ID] = true
+	}
+	if !first.More || secondErr != nil || !second.More || lastErr != nil || last.More || len(slices.Collect(last.Results.Objects())) != 1 || len(seen) != 5 {
+		t.Errorf("pages of 2, 2 and the rest = %v %v %v (more %v %v %v), want all 5 once", titlesOf(slices.Collect(first.Results.Objects())), titlesOf(slices.Collect(second.Results.Objects())), titlesOf(slices.Collect(last.Results.Objects())), first.More, second.More, last.More)
+	}
+	if empty != nil || badRestore == nil || badRest == nil || !last.Rest.Empty() {
+		t.Errorf("empty export = %s, bad restore = %v, bad rest = %v, want nothing and errors", empty, badRestore, badRest)
+	}
+	if !errors.Is(staleErr, brain.ErrInvalid) {
+		t.Errorf("more from a checkpoint whose filter no longer validates = %v, want ErrInvalid", staleErr)
+	}
+}
+
+func TestSearch_aRerankerReordersAndDropsTheTopResults(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	parent := uuid.New()
-	part := uuid.New()
-	pos := 1
-	if err := putFixture(store, brain.Object{
-		ID: parent, Kind: "Document", Title: "P", Namespace: ns, UpdatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// No exact title match and no full substring of the query — only trigram overlap.
-	if err := putFixture(store, brain.Object{
-		ID: part, Kind: "Chunk", Title: "chunk-title",
-		Content:  "abcdefghijklmnopqrstuvwxyz",
-		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
+	plain, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, err := eng.FindExact(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
-		Query: "xyzabc", // shares xyz/abc trigrams; not a contiguous substring of content
-	}, brain.NewSearchContext())
+	var asked string
+	// The reranker reverses the objects and drops the last.
+	reranked, err := brain.NewEngine(store, brain.WithReranker(func(_ context.Context, query string, objs []brain.RichObject) ([]brain.RichObject, error) {
+		asked = query
+		out := slices.Clone(objs)
+		slices.Reverse(out)
+		return out[:len(out)-1], nil
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Objects) != 1 || page.Objects[0].ID != parent {
-		t.Fatalf("trigram fuzzy: %+v", page.Objects)
+	failing, err := brain.NewEngine(store, brain.WithReranker(func(context.Context, string, []brain.RichObject) ([]brain.RichObject, error) {
+		return nil, errString("rerank down")
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := brain.Scope{Namespace: tenant(t)}
+	save(t, plain, scope, brain.Object{Kind: "Note", Title: "alpha alpha alpha"})
+	save(t, plain, scope, brain.Object{Kind: "Note", Title: "alpha beta"})
+	save(t, plain, scope, brain.Object{Kind: "Note", Title: "alpha beta gamma delta"})
+	query := brain.SearchRequest{Query: "alpha"}
+
+	base, _ := plain.Search(ctx, scope, query)
+	got, gotErr := reranked.Search(ctx, scope, query)
+	_, failErr := failing.Search(ctx, scope, query)
+
+	want := titlesOf(slices.Collect(base.Results.Objects()))
+	slices.Reverse(want)
+	if gotErr != nil || !slices.Equal(titlesOf(slices.Collect(got.Results.Objects())), want[:2]) || asked != "alpha" {
+		t.Errorf("reranked for %q = %v %v, want %v reversed without the last, for alpha", asked, titlesOf(slices.Collect(got.Results.Objects())), gotErr, titlesOf(slices.Collect(base.Results.Objects())))
+	}
+	if !errors.Is(failErr, errString("rerank down")) {
+		t.Errorf("failing reranker = %v, want its error", failErr)
 	}
 }
 
-// TestLandingIDs_partsAndParents: unique landing ids for parts vs parents.
-func TestLandingIDs_partsAndParents(t *testing.T) {
-	parent := uuid.New()
-	part := uuid.New()
-	other := uuid.New()
-	nilParent := uuid.Nil
-	objs := []brain.RichObject{
-		{ID: part, ParentID: &parent},
-		{ID: uuid.New(), ParentID: &parent}, // same landing
-		{ID: other},
-		{ID: uuid.New(), ParentID: &nilParent}, // skip nil parent
-		{ID: uuid.Nil},                         // skip nil id
+func TestSearch_listsAKindNewestFirstAndSearchesWithinOneRecord(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store, brain.WithGraph(helixtest.Graph(t)))
+	if err != nil {
+		t.Fatal(err)
 	}
-	ids := brain.LandingIDs(objs)
-	if len(ids) != 2 {
-		t.Fatalf("ids=%v want parent+other", ids)
+	scope := brain.Scope{Namespace: tenant(t)}
+	contract := docWithParts(t, eng, scope, "contract", nil, "the penalty clause applies", "payment terms", "late penalty fees")
+	docWithParts(t, eng, scope, "other", nil, "penalty for another deal")
+	first := save(t, eng, scope, brain.Object{Kind: "Note", Title: "first"})
+	second := save(t, eng, scope, brain.Object{Kind: "Note", Title: "second penalty"})
+	partsTree, err := store.GetTree(ctx, scope, contract.ID, 0)
+	parts := partsTree.Parts
+	if err != nil {
+		t.Fatal(err)
 	}
-	if ids[0] != parent || ids[1] != other {
-		t.Fatalf("order/ids=%v", ids)
+	within := func(ref uuid.UUID) ([]string, error) {
+		page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "penalty", Within: ref})
+		var got []string
+		for _, o := range slices.Collect(page.Results.Objects()) {
+			got = append(got, o.Evidence[0].Snippet)
+		}
+		slices.Sort(got)
+		return got, err
 	}
-	if brain.LandingIDs(nil) != nil {
-		t.Fatal("empty")
+
+	listed, listErr := eng.Search(ctx, scope, brain.SearchRequest{Kind: "Note", Limit: 1})
+	rest, restErr := eng.Next(ctx, scope, listed.Rest, 1)
+	byRecord, recordErr := within(contract.ID)
+	byPart, partErr := within(parts[1].ID)
+	_, nothing := eng.Search(ctx, scope, brain.SearchRequest{})
+	_, withinNothing := eng.Search(ctx, scope, brain.SearchRequest{Kind: "Note", Within: contract.ID})
+
+	newest := func(p brain.Page) string {
+		for o := range p.Results.Objects() {
+			return o.Title
+		}
+		return ""
+	}
+	if listErr != nil || restErr != nil || !listed.More || newest(listed) != second.Title || newest(rest) != first.Title {
+		t.Errorf("list Notes one per page = %v then %v (%v, %v), want second then first", titlesOf(slices.Collect(listed.Results.Objects())), titlesOf(slices.Collect(rest.Results.Objects())), listErr, restErr)
+	}
+	want := []string{"late penalty fees", "the penalty clause applies"}
+	if recordErr != nil || partErr != nil || !slices.Equal(byRecord, want) || !slices.Equal(byPart, want) {
+		t.Errorf("search within the contract = %v %v, within one of its parts = %v %v, want its two penalty parts", byRecord, recordErr, byPart, partErr)
+	}
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{"no query, kind or filters": {nothing, "kind or filters"}, "within with no query": {withinNothing, "related"}} {
+		if !errors.Is(tc.err, brain.ErrInvalid) || !strings.Contains(tc.err.Error(), tc.want) {
+			t.Errorf("%s = %v, want ErrInvalid naming %q", name, tc.err, tc.want)
+		}
 	}
 }
-
-// TestSortRichObjects_keys: title/position/props/times and desc.
-func TestSortRichObjects_keys(t *testing.T) {
-	p0, p1, p2 := 0, 1, 2
-	now := time.Now().UTC()
-	objs := []brain.RichObject{
-		{ID: uuid.New(), Title: "b", Position: &p1, UpdatedAt: now.Add(-time.Hour),
-			Properties: map[string]any{"score": 2.0, "flag": false, "n": 2}},
-		{ID: uuid.New(), Title: "a", Position: &p2, UpdatedAt: now,
-			Properties: map[string]any{"score": 10.0, "flag": true, "n": int64(10), "when": now}},
-		{ID: uuid.New(), Title: "c", Position: &p0, UpdatedAt: now.Add(-2 * time.Hour),
-			Properties: map[string]any{"score": 1.0}},
-	}
-	// title asc
-	cp := append([]brain.RichObject(nil), objs...)
-	brain.SortRichObjects(cp, "title", false)
-	if cp[0].Title != "a" || cp[2].Title != "c" {
-		t.Fatalf("title asc: %v %v %v", cp[0].Title, cp[1].Title, cp[2].Title)
-	}
-	// title desc
-	cp = append([]brain.RichObject(nil), objs...)
-	brain.SortRichObjects(cp, "title", true)
-	if cp[0].Title != "c" {
-		t.Fatalf("title desc: %s", cp[0].Title)
-	}
-	// position
-	cp = append([]brain.RichObject(nil), objs...)
-	brain.SortRichObjects(cp, "position", false)
-	if *cp[0].Position != 0 || *cp[2].Position != 2 {
-		t.Fatalf("position: %v", []*int{cp[0].Position, cp[1].Position, cp[2].Position})
-	}
-	// updated_at
-	cp = append([]brain.RichObject(nil), objs...)
-	brain.SortRichObjects(cp, "updated_at", false)
-	if !cp[0].UpdatedAt.Before(cp[2].UpdatedAt) {
-		t.Fatal("updated_at order")
-	}
-	// property flag (bool → "0"/"1") — true sorts after false ascending
-	cp = append([]brain.RichObject(nil), objs...)
-	brain.SortRichObjects(cp, "flag", false)
-	// false ("0") before true ("1"); missing flag sorts as ""
-	if cp[len(cp)-1].Properties["flag"] != true {
-		t.Fatalf("flag asc last should be true: %+v", cp[len(cp)-1].Properties)
-	}
-	// created_at + empty key no-op
-	cp = append([]brain.RichObject(nil), objs...)
-	brain.SortRichObjects(cp, "created_at", false)
-	brain.SortRichObjects(cp, "", false)
-	brain.SortRichObjects(cp[:1], "title", false)
-	// nil position sorts first via posOrNeg
-	nilPos := []brain.RichObject{{Title: "z"}, {Title: "a", Position: &p1}}
-	brain.SortRichObjects(nilPos, "position", false)
-	if nilPos[0].Position != nil {
-		t.Fatal("nil position should sort as -1 first")
-	}
-	// prop types
-	typed := []brain.RichObject{
-		{Properties: map[string]any{"k": "b"}},
-		{Properties: map[string]any{"k": true}},
-		{Properties: map[string]any{"k": false}},
-		{Properties: map[string]any{"k": int(3)}},
-		{Properties: map[string]any{"k": int32(2)}},
-		{Properties: map[string]any{"k": float32(1.5)}},
-		{Properties: map[string]any{"k": time.Now()}},
-		{Properties: map[string]any{"k": struct{}{}}},
-		{Properties: nil},
-	}
-	brain.SortRichObjects(typed, "k", false)
-}
-
-func (stubEmbedder) Model() string { return "test-model" }

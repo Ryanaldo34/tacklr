@@ -130,11 +130,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithGraph(g))
 	if err != nil {
 		log.Fatal(err)
 	}
-	kg := brain.NewKnowledgeGraph(eng, g)
 	if err := eng.LoadKindsFromStore(ctx); err != nil {
 		log.Fatal(err)
 	}
@@ -155,13 +154,8 @@ func main() {
 		SystemPrompt:    "You are a concise assistant.",
 		Model:           model,
 		Brain:           eng,
-		Graph:           kg,
 		SearchNamespace: ns,
-		BrainWriteKinds: brain.WriteKinds{
-			Discovery: "Discovery",
-			Fact:      "Fact",
-			Memory:    "Memory",
-		},
+		BrainWriteKinds: []string{"Discovery", "Fact", "Memory"},
 		Tools: []*tacklr.Tool{
 			web.WebSearch(client),
 			web.WebFetch(client),
@@ -241,7 +235,7 @@ w := rt.StartWorker()
 
 ACP `_tacklr/vfs/bind` still maps onto `Prompt.Auth`. The worker never sees those tokens in workflow history.
 
-Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`. Skills load from `SkillsPath` and reach the model only through `read_skill`. Knowledge records are brain rows, found with `search` and written with `save_*`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests point the Drive/Graph SDKs at httptest servers with documented REST shapes (`NewGoogleDriveHTTP`, `NewGraph` + `vfs/testhttp`). The store and the graph above rank words only; production hosts give each one a `brain.Embedding` (`postgres.Options.Embedding`, `helixgraph.Options.Embedding`), since each backend embeds and ranks for itself.
+Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`. Skills load from `SkillsPath` and reach the model only through `read_skill`. Knowledge records are brain rows, found with `search`, read with `open` and `related`, and written with `save`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests point the Drive/Graph SDKs at httptest servers with documented REST shapes (`NewGoogleDriveHTTP`, `NewGraph` + `vfs/testhttp`). The store and the graph above rank words only; production hosts give each one a `brain.Embedding` (`postgres.Options.Embedding`, `helixgraph.Options.Embedding`), since each backend embeds and ranks for itself.
 
 `telemetry.Init` installs the process-wide OpenTelemetry providers. With `OTLPEndpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) it exports traces, metrics, and logs over OTLP (gRPC by default, or HTTP). Without an endpoint the tracer does not export. `session/temporal.Dial` replaces that tracer with a replay-safe one that keeps the same export configuration, so workflow replay does not leak spans. Each Prompt or Resume is one `tacklr.turn` span; inference, tools, hand-off, and compress nest under it. `postgres.Store` Query/Exec spans join that same trace. Hosts must not start `tacklr.*` spans themselves. Metrics include turn duration and count, tool calls, model tokens, interrupts, hand-offs, compress, sessions, and checkpoints. Call `Init` before `Dial` when traces should be exported. Details: [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry).
 
@@ -259,7 +253,7 @@ Built-in tools that need a client use the same pattern. You construct them and p
 | `web.WebSearch` / `web.WebFetch` | `web_search`, `web_fetch` |
 | `MountSession` | `read`, `write`, `write_document`, `write_spreadsheet`, `run_command` |
 | `SkillsPath` | `read_skill` |
-| `Brain` | knowledge tools (`search`, `save_*`, …) |
+| `Brain` | knowledge tools (`search`, `open`, `related`, `save`, `link`) |
 | Brain + workspace + search namespace | `index_file`, `unindex` |
 
 Put optional tools on `AgentOptions.Tools`. Swap the fake the same way: `Tools: []*tacklr.Tool{email.ReadInbox(fakeMail)}`, `Brain: testEngine`, a temp `MountSession`. Details: [docs/tools.md](docs/tools.md).

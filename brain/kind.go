@@ -26,7 +26,7 @@ type FieldSpec struct {
 	Type        FieldType `json:"type"`
 	Description string    `json:"description,omitempty"`
 	Required    bool      `json:"required,omitempty"`
-	Operators   []string  `json:"operators,omitempty"`  // always eq, or eq+in (see NormalizeKindSpec)
+	Operators   []string  `json:"operators,omitempty"`  // always eq, or eq+in (see KindSpec.Normalize)
 	Examples    []string  `json:"examples,omitempty"`   // documentation only; not enforced
 	Enum        []string  `json:"enum,omitempty"`       // closed set for string fields; enforced on Put
 	SkipIndex   bool      `json:"skip_index,omitempty"` // omit from entity index text; still stored and filterable
@@ -88,6 +88,19 @@ func (c *KindCatalog) Names() []string {
 	return slices.Sorted(maps.Keys(c.kinds))
 }
 
+// RecordKinds are the registered kinds a record can have (not part kinds),
+// sorted: the kinds a search or a save names.
+func (c *KindCatalog) RecordKinds() []string {
+	var out []string
+	for _, spec := range c.All() {
+		if !spec.IsPart {
+			out = append(out, spec.Kind)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 func (c *KindCatalog) All() []KindSpec {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -127,9 +140,6 @@ func (c *KindCatalog) replaceNormalized(batch map[string]KindSpec) error {
 	if c.frozen {
 		return fmt.Errorf("%w: kind catalog is frozen", ErrInvalid)
 	}
-	if batch == nil {
-		batch = map[string]KindSpec{}
-	}
 	c.kinds = batch
 	return nil
 }
@@ -146,7 +156,7 @@ func (c *KindCatalog) ensureNotFrozen() error {
 func normalizeKindBatch(specs []KindSpec) (map[string]KindSpec, error) {
 	out := make(map[string]KindSpec, len(specs))
 	for _, s := range specs {
-		ns, err := NormalizeKindSpec(s)
+		ns, err := s.Normalize()
 		if err != nil {
 			return nil, err
 		}
@@ -158,8 +168,8 @@ func normalizeKindBatch(specs []KindSpec) (map[string]KindSpec, error) {
 	return out, nil
 }
 
-// NormalizeKindSpec validates a kind and fills default operators (eq / eq+in).
-func NormalizeKindSpec(spec KindSpec) (KindSpec, error) {
+// Normalize validates a kind and fills default operators (eq / eq+in).
+func (spec KindSpec) Normalize() (KindSpec, error) {
 	spec.Kind = strings.TrimSpace(spec.Kind)
 	if spec.Kind == "" {
 		return KindSpec{}, fmt.Errorf("brain: kind is required")
@@ -201,7 +211,7 @@ func NormalizeKindSpec(spec KindSpec) (KindSpec, error) {
 			return KindSpec{}, err
 		}
 		f.Enum = enum
-		// Operators are documentation for schema(); always the closed set we implement.
+		// Operators are the closed set the filters implement.
 		if f.Type == FieldTypeBoolean {
 			f.Operators = []string{"eq"}
 		} else {
@@ -254,16 +264,7 @@ func isCoreFilterKey(k string) bool {
 	}
 }
 
-// ObjectKindFromSpec maps a typed kind into the durable ObjectKind row shape.
-func ObjectKindFromSpec(spec KindSpec) (ObjectKind, error) {
-	spec, err := NormalizeKindSpec(spec)
-	if err != nil {
-		return ObjectKind{}, err
-	}
-	return objectKindFromNormalized(spec), nil
-}
-
-func objectKindFromNormalized(spec KindSpec) ObjectKind {
+func (spec KindSpec) normalizedObjectKind() ObjectKind {
 	raw, _ := json.Marshal(spec.Fields) // FieldSpec is plain JSON; marshal cannot fail
 	return ObjectKind{
 		Kind:             spec.Kind,
@@ -274,34 +275,27 @@ func objectKindFromNormalized(spec KindSpec) ObjectKind {
 	}
 }
 
-// KindSpecFromObjectKind parses a registry row into a KindSpec.
-func KindSpecFromObjectKind(k ObjectKind) (KindSpec, error) {
+// kindSpec parses a registry row into a KindSpec.
+func (k ObjectKind) kindSpec() (KindSpec, error) {
 	var fields []FieldSpec
 	if len(k.FilterableFields) > 0 {
 		if err := json.Unmarshal(k.FilterableFields, &fields); err != nil {
 			return KindSpec{}, fmt.Errorf("brain: kind %q filterable_fields: %w", k.Kind, err)
 		}
 	}
-	return NormalizeKindSpec(KindSpec{
+	return KindSpec{
 		Kind: k.Kind, Description: k.Description,
 		IsParent: k.IsParent, IsPart: k.IsPart, Fields: fields,
-	})
+	}.Normalize()
 }
 
-// KindInfoFromSpec builds the agent-facing schema payload for one kind.
-func KindInfoFromSpec(spec KindSpec) ObjectKindInfo {
-	return kindInfoFromObjectKind(objectKindFromNormalized(spec))
+// Info builds the agent-facing schema payload for one kind.
+func (spec KindSpec) Info() ObjectKindInfo {
+	return spec.normalizedObjectKind().info()
 }
 
-func kindInfoFromObjectKind(k ObjectKind) ObjectKindInfo {
-	return ObjectKindInfo{
-		Kind:             k.Kind,
-		Description:      k.Description,
-		IsPart:           k.IsPart,
-		IsParent:         k.IsParent,
-		Columns:          CoreColumns(),
-		FilterableFields: k.FilterableFields,
-	}
+func (k ObjectKind) info() ObjectKindInfo {
+	return ObjectKindInfo(k)
 }
 
 // PersistKinds upserts validated kind specs into store (additive).
@@ -341,7 +335,7 @@ func (e *Engine) LoadKindsFromStore(ctx context.Context) error {
 	}
 	specs := make([]KindSpec, 0, len(rows))
 	for _, row := range rows {
-		spec, err := KindSpecFromObjectKind(row)
+		spec, err := row.kindSpec()
 		if err != nil {
 			return err
 		}
@@ -352,9 +346,19 @@ func (e *Engine) LoadKindsFromStore(ctx context.Context) error {
 
 func putKindBatch(ctx context.Context, w Store, batch map[string]KindSpec) error {
 	for _, name := range slices.Sorted(maps.Keys(batch)) {
-		if err := w.PutKind(ctx, objectKindFromNormalized(batch[name])); err != nil {
+		if err := w.PutKind(ctx, batch[name].normalizedObjectKind()); err != nil {
 			return fmt.Errorf("brain: persist kind %q: %w", name, err)
 		}
 	}
 	return nil
+}
+
+// fieldNames is the spec's field names, sorted.
+func (s KindSpec) fieldNames() []string {
+	out := make([]string, len(s.Fields))
+	for i, f := range s.Fields {
+		out[i] = f.Name
+	}
+	slices.Sort(out)
+	return out
 }

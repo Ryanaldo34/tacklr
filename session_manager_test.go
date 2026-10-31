@@ -167,7 +167,8 @@ func TestCheckpointer_applyRejectsUnsupportedVersion(t *testing.T) {
 	sm := newSessionManager()
 	checkpoint := SessionCheckpoint{
 		ContextWindow: []*Message{{Role: RoleUser, Content: "x"}},
-	}.WithVersion(CheckpointVersion + 1)
+		state:         sessionState{Version: CheckpointVersion + 1},
+	}
 
 	// Act
 	_, err := applyCheckpoint(checkpoint, sm)
@@ -183,7 +184,8 @@ func TestCheckpointer_applyNilMaps_defaults(t *testing.T) {
 	sm := newSessionManager()
 	checkpoint := SessionCheckpoint{
 		ContextWindow: []*Message{{Role: RoleUser, Content: "x"}},
-	}.WithVersion(CheckpointVersion)
+		state:         sessionState{Version: CheckpointVersion},
+	}
 	applied, err := applyCheckpoint(checkpoint, sm)
 	if err != nil {
 		t.Fatal(err)
@@ -287,12 +289,6 @@ func TestSession_interrupts_parkResumeReentry(t *testing.T) {
 	if !sm.HasPendingInterrupt() {
 		t.Fatal("Park must write pending")
 	}
-	if len(sm.Pending()) != 1 {
-		t.Fatal("Pending()")
-	}
-	if _, ok := sm.PendingInterrupt("tc1"); !ok {
-		t.Fatal("pending by id")
-	}
 
 	// Invalid payload leaves the park in place.
 	if _, err := sm.Resume("tc1", []byte(`{}`)); err == nil {
@@ -370,8 +366,8 @@ func TestSession_interrupts_parkResumeReentry(t *testing.T) {
 	if err == nil {
 		t.Fatal("park after ClearInterrupts")
 	}
-	if _, ok := sm.PendingInterrupt("sm1"); !ok {
-		t.Fatal("PendingInterrupt after Park")
+	if !sm.HasPendingInterrupt() {
+		t.Fatal("pending after Park")
 	}
 	if _, err := sm.Resume("sm1", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
@@ -455,15 +451,14 @@ func TestSessionManager_checkpointInterruptsRoundTrip(t *testing.T) {
 		t.Fatal("pending reload")
 	}
 
-	// Bad JSON paths.
-	if err := sm2.LoadInterruptsJSON([]byte(`{`), nil); err == nil {
-		t.Fatal("want pending unmarshal error")
-	}
-	if err := sm2.LoadInterruptsJSON(nil, []byte(`{`)); err == nil {
-		t.Fatal("want resolved unmarshal error")
-	}
-	if err := sm2.LoadInterruptsJSON(nil, nil); err != nil {
-		t.Fatal(err)
+	// A checkpoint whose interrupts do not decode is not applied.
+	for name, state := range map[string]sessionState{
+		"pending":  {Version: CheckpointVersion, PendingInterrupts: []byte(`{`)},
+		"resolved": {Version: CheckpointVersion, ResolvedInterrupts: []byte(`{`)},
+	} {
+		if _, err := applyCheckpoint(SessionCheckpoint{state: state}, newSessionManager()); err == nil {
+			t.Errorf("apply with bad %s interrupts succeeded", name)
+		}
 	}
 }
 
@@ -488,15 +483,18 @@ func TestInterruptMap_unknownType_errors(t *testing.T) {
 	bad, _ := json.Marshal(map[string]any{
 		"x": map[string]any{"type": "not_registered", "data": map[string]any{}},
 	})
-	sm3 := newSessionManager()
-	if err := sm3.LoadInterruptsJSON(bad, nil); err == nil {
+	apply := func(pending []byte) error {
+		_, err := applyCheckpoint(SessionCheckpoint{state: sessionState{Version: CheckpointVersion, PendingInterrupts: pending}}, newSessionManager())
+		return err
+	}
+	if err := apply(bad); err == nil {
 		t.Fatal("want unknown type")
 	}
 	// Bad data body for known type.
 	badData, _ := json.Marshal(map[string]any{
 		"x": map[string]any{"type": "tool_permission", "data": "not-an-object"},
 	})
-	if err := sm3.LoadInterruptsJSON(badData, nil); err == nil {
+	if err := apply(badData); err == nil {
 		t.Fatal("want data unmarshal error")
 	}
 }
@@ -535,8 +533,8 @@ func TestCheckpointer_uncloneableInterruptFailsSnapshot(t *testing.T) {
 	if err := pending.Park("tc1", ghostInterrupt{}); err == nil {
 		t.Fatal("park returns the interrupt")
 	}
-	if len(pending.Pending()) != 1 {
-		t.Fatal("Pending still lists a park JSON clone cannot copy")
+	if !pending.HasPendingInterrupt() {
+		t.Fatal("a park JSON clone cannot copy is still pending")
 	}
 	if _, err := captureCheckpoint(window, pending, nil); err == nil || !strings.Contains(err.Error(), "pending interrupts") {
 		t.Fatalf("pending clone: %v", err)

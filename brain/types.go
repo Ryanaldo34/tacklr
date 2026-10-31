@@ -130,28 +130,20 @@ type RichObject struct {
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
-// Relation describes a non-containment hop used to reach a neighbor on expand.
-// EdgeMeta fields are embedded so agent JSON stays flat (note, status, role, …).
+// Relation is how a related object was reached: a child or parent, or an
+// edge. An edge hop says the object it was followed from (Via), so the hops
+// of one Related call with depth trace a path back to the start. EdgeMeta
+// fields are embedded so agent JSON stays flat (note, status, role, …).
 type Relation struct {
 	Type      string     `json:"type"`
-	Direction string     `json:"direction,omitempty"` // out | in
-	Depth     int        `json:"depth,omitempty"`     // hops from expand seed
-	SourceID  *uuid.UUID `json:"source_id,omitempty"` // ExpandMany landing id
+	Direction string     `json:"direction,omitempty"` // out | in, from Via
+	Depth     int        `json:"depth,omitempty"`     // hops from the start
+	Via       *uuid.UUID `json:"via,omitempty"`       // the object the edge was followed from
 	EdgeMeta
 }
 
-// RelationFromNeighbor maps a graph hop to the agent-facing Relation payload.
-func RelationFromNeighbor(n GraphNeighbor) Relation {
-	return Relation{
-		Type:      n.RelationType,
-		Direction: n.Direction,
-		Depth:     n.Depth,
-		EdgeMeta:  n.Meta,
-	}
-}
-
-// RichFromObject maps a stored object to a rich reference.
-func RichFromObject(o Object, includeContent bool) RichObject {
+// Rich maps a stored object to a rich reference.
+func (o Object) Rich(includeContent bool) RichObject {
 	r := RichObject{
 		ID:          o.ID,
 		Kind:        o.Kind,
@@ -170,58 +162,12 @@ func RichFromObject(o Object, includeContent bool) RichObject {
 	return r
 }
 
-// SchemaResult is the payload for the schema tool.
-type SchemaResult struct {
-	Kinds []ObjectKindInfo `json:"kinds"`
-	// FilterUsage tells agents which tools accept filterable_fields and how.
-	FilterUsage FilterUsage `json:"filter_usage"`
-}
-
-// FilterUsage is agent-facing guidance for structured filters (shared by corpus and entity find).
-type FilterUsage struct {
-	// Tools list knowledge tools that accept the same property filter keys as filterable_fields.
-	Tools []string `json:"tools"`
-	// Note is short instruction text for the agent.
-	Note string `json:"note"`
-}
-
-// DefaultFilterUsage is embedded in every SchemaResult.
-func DefaultFilterUsage() FilterUsage {
-	return FilterUsage{
-		Tools: []string{"search", "find_exact", "find_objects"},
-		Note: "Each kind lists columns (title, summary, content) and filterable_fields (host properties). " +
-			"search and find_exact take a free-text query over chunk title, summary, and content; " +
-			"put structured fields in filters. find_objects searches parent records; the same " +
-			"filterable_fields apply to the parent. When kinds are registered, property filters " +
-			"require a kind filter (or find_objects.kinds). Core filter keys: kind, title, " +
-			"created_after, created_before, updated_after, updated_before. Field examples are " +
-			"illustrations, not a closed set; enum on a string field is enforced on write. " +
-			"Call schema with a kind before filtering.",
-	}
-}
-
-// CoreColumn is a built-in object field shown next to filterable_fields in schema().
-type CoreColumn struct {
-	Name   string `json:"name"`
-	Filter bool   `json:"filter,omitempty"`
-}
-
-// CoreColumns is title, summary, and content — always present on every object.
-func CoreColumns() []CoreColumn {
-	return []CoreColumn{
-		{Name: "title", Filter: true},
-		{Name: "summary"},
-		{Name: "content"},
-	}
-}
-
 // ObjectKindInfo is the JSON form of ObjectKind for agents.
 type ObjectKindInfo struct {
 	Kind             string          `json:"kind"`
 	Description      string          `json:"description,omitempty"`
 	IsPart           bool            `json:"is_part"`
 	IsParent         bool            `json:"is_parent"`
-	Columns          []CoreColumn    `json:"columns"`
 	FilterableFields json.RawMessage `json:"filterable_fields,omitempty"`
 }
 
@@ -255,27 +201,6 @@ func (f Filter) empty() bool {
 		f.CreatedAfter == "" && f.CreatedBefore == "" &&
 		f.UpdatedAfter == "" && f.UpdatedBefore == "" &&
 		len(f.Props) == 0
-}
-
-// SearchRequest is the engine input for search and find_exact.
-// SearchRequest is corpus retrieval over store parts (Search / FindExact).
-// Query is free text against part title, summary, and content. Structured
-// fields belong in Filters on the part row, or in FindObjectsRequest when
-// they live on the parent.
-type SearchRequest struct {
-	Query   string
-	Filters Filter
-	Limit   int
-	// ScopeIDs, when non-empty, keeps only candidates whose id or parent_id is in the set.
-	// Use after expand/find_objects to restrict corpus search to a deal-local neighborhood.
-	ScopeIDs []uuid.UUID
-}
-
-// SearchPage is one page of ranked rich objects plus ResultSet identity.
-type SearchPage struct {
-	ResultSetID uuid.UUID    `json:"result_set_id"`
-	HasMore     bool         `json:"has_more"`
-	Objects     []RichObject `json:"objects"`
 }
 
 // ScoredID is a candidate from a retrieval channel before fusion.

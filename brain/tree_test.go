@@ -82,7 +82,8 @@ func TestEngine_putTreeHoldsAFewBatchesWhateverTheTreeSizeAndReusesUnchangedPart
 	}
 	_, againErr := eng.PutTree(ctx, scope, doc, parts)
 	againEmbeds := emb.take()
-	kids, _ := store.ListChildren(ctx, scope, doc.ID)
+	kidsTree, _ := store.GetTree(ctx, scope, doc.ID, 0)
+	kids := kidsTree.Parts
 
 	// The reader runs at most one batch per slot, plus the one it is filling, ahead of embedding.
 	if firstHeld > batch*(slots+1) {
@@ -142,7 +143,8 @@ func TestEngine_putTreeFailsOnABadPartOrSourceAndKeepsThePreviousTree(t *testing
 		renamed.Title = "v2"
 
 		_, err = eng.PutTree(ctx, scope, renamed, tc.parts)
-		kids, _ := store.ListChildren(ctx, scope, doc.ID)
+		kidsTree, _ := store.GetTree(ctx, scope, doc.ID, 0)
+		kids := kidsTree.Parts
 		parent, _ := store.Get(ctx, scope, doc.ID)
 
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -168,7 +170,8 @@ func TestEngine_putTreeWithNoPartsEmptiesTheTree(t *testing.T) {
 	}
 
 	_, err = eng.PutTree(ctx, scope, doc, nil)
-	kids, _ := store.ListChildren(ctx, scope, doc.ID)
+	kidsTree, _ := store.GetTree(ctx, scope, doc.ID, 0)
+	kids := kidsTree.Parts
 
 	if err != nil || len(kids) != 0 {
 		t.Errorf("put tree with no parts = %v, parts %v, want none", err, kids)

@@ -249,7 +249,7 @@ Tool guidance:
 |------|-----|
 | Line window / page large file | `ReadLines` → page with `NextStart` until `EOF` (see `Rev`) |
 | Stable edit token | `ContentRev` / `ContentHash` — tools compare expected rev before write |
-| Find in mounts (indexed) | Optional `vfsindex` → brain `search` / `find_exact` on Chunks; then `read` around hit |
+| Find in mounts (indexed) | Optional `vfsindex` → brain `search` on Chunks; then `read` around hit |
 | Edit (SDK) | `ReadText` → mutate → `WriteDocument` |
 | Edit (agent) | Harness tools (`read`, `write`, …) wrap the above with rev checks |
 | Raw bytes | `ReadFile` / `WriteFile` |
@@ -461,13 +461,13 @@ Full model, search, and graph: **[docs/knowledge.md](knowledge.md)**.
 | Job | Store | Sync |
 |-----|--------|------|
 | **Workspace file** | Local/S3/Drive/Graph bytes | **IndexPath** (hash, Document+Chunk) |
-| **Knowledge record** | Brain row | `save_*` calls `Engine.Put`. Search reads the store |
+| **Knowledge record** | Brain row | `save` calls `Engine.Save`. Search reads the store |
 
 `vfs` never imports `brain`. Package
 [`vfsindex`](../vfsindex) copies mounted files into brain Documents and Chunks.
 
-`link` / `unlink` / `expand` accept an indexed file path or an object id.
-There are no `.links` directories. A workspace path must be indexed (`index_file` or a prefix/watch policy) before it can be linked. Knowledge records are written with `save_*` and read with `search` and `read_object`.
+`link`, `open` and `related` accept an indexed file path or an object id.
+There are no `.links` directories. A workspace path must be indexed (`index_file` or a prefix/watch policy) before it can be linked. Knowledge records are written with `save` and read with `search`, `open` and `related`.
 
 ### Index policy
 
@@ -533,9 +533,9 @@ the namespace to leave `index_file` off.
 | `index_file` | Selective ingest of key virtual **files** (max 8); errors under `none` |
 | `unindex` | Soft-delete the brain mirror; drops selective track |
 | `run_command` | `/bin/sh -c` with cwd = FUSE root; relative paths (`work/foo`); `PermissionRequired` by default |
-| `read` / `write` | File window / first page / block read; one mutation mode. Knowledge objects: `read_object`. |
-| `save_*` | Write the Engram file on the brain Provider (or `Engine.Put` if no brain mount) |
-| `link` / `expand` / `find_links` | Path-native graph (G1): prefer virtual paths; surface neighbor `vfs_path` |
+| `read` / `write` | File window / first page / block read; one mutation mode. Knowledge objects: `open`. |
+| `save` | Write a knowledge record of a host-allowed kind (`Engine.Save`) |
+| `link` / `related` | Path-native graph: prefer virtual paths; surface neighbor `vfs_path`. `search` also finds links by their note |
 
 Omit the workspace or the search namespace to leave `index_file` off. Omit Brain to leave knowledge tools off.
 
@@ -547,7 +547,7 @@ update the brain.
 
 Markdown files are chunked by **heading/preamble blocks** (`block_id` and `heading_path` properties) when `Blocks()` is non-empty; other text still uses line windows.
 
-Indexed content is queried with `search` / `find_exact` (prefer hits with `vfs_path`).
+Indexed content is queried with `search` (prefer hits with `vfs_path`).
 Live names/grep are `run_command` → `fd` / `find` / `rg` through the FUSE tree.
 Indexed `search` hits are not a behavior-preserving stand-in for live `rg`.
 

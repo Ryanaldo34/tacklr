@@ -57,7 +57,9 @@ func (a *graphTokenAuth) bearer() (string, error) {
 }
 
 // NewGraph builds a GraphAPI from a user token holder. Hosts pass the result
-// to Graph. base and httpClient are for tests; production: NewGraph(holder, "", nil).
+// to Graph. base overrides the Graph endpoint (a national cloud, a proxy)
+// and httpClient its transport; "" and nil use the public Graph endpoint
+// and the default client.
 func NewGraph(holder *TokenHolder, base string, httpClient *http.Client) (GraphAPI, error) {
 	return newGraphSDK(holder, base, httpClient)
 }

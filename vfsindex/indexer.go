@@ -144,7 +144,7 @@ func (x *MountIndexer) UnindexPath(ctx context.Context, virtualPath string) (boo
 		return false, err
 	}
 	parentID := x.DocumentID(cleaned)
-	if _, err := x.Brain.Read(ctx, x.Scope, parentID); err != nil {
+	if _, err := x.Brain.Get(ctx, x.Scope, parentID); err != nil {
 		if errors.Is(err, brain.ErrNotFound) {
 			return false, nil
 		}

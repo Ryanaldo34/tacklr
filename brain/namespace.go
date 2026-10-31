@@ -40,9 +40,6 @@ func (n Namespace) Key() string {
 
 // String joins attribute values with "." for display.
 func (n Namespace) String() string {
-	if len(n) == 0 {
-		return ""
-	}
 	parts := make([]string, len(n))
 	for i, a := range n {
 		parts[i] = a.Value
@@ -174,10 +171,6 @@ func (n *Namespace) Scan(src any) error {
 		return nil
 	default:
 		return fmt.Errorf("brain: cannot scan %T into Namespace", src)
-	}
-	if len(b) == 0 {
-		*n = nil
-		return nil
 	}
 	return json.Unmarshal(b, n)
 }

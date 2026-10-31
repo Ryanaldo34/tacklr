@@ -27,6 +27,10 @@ import (
 // before Run.
 const EdgeSearchLabel = "cites"
 
+// OtherEdgeSearchLabel is the second relation the contract searches edges
+// on. A graph under test indexes both for edge search.
+const OtherEdgeSearchLabel = "quotes"
+
 // Dimension is the length of every vector Embedder returns.
 const Dimension = 2
 
@@ -97,6 +101,17 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 		}
 		if got, err := g.Neighborhood(ctx, brain.NeighborhoodQuery{Namespace: ns, ObjectID: uuid.New(), Relations: refs, Direction: brain.DirectionBoth, MaxHops: 1, Limit: 10}); err != nil || len(got) != 0 {
 			t.Errorf("unknown object = %v %v, want none", got, err)
+		}
+		every := walk(nil, brain.DirectionBoth, 2, 10)
+		depths := map[uuid.UUID]int{}
+		for _, n := range every {
+			depths[n.ObjectID] = n.Depth
+			if !slices.Contains([]string{"references", "depends_on"}, n.RelationType) {
+				t.Errorf("every relation: %s reached by %q, want the edge's relation", n.ObjectID, n.RelationType)
+			}
+		}
+		if len(every) != 3 || depths[b] != 1 || depths[c] != 1 || depths[d] != 2 {
+			t.Errorf("every relation, two hops = %v, want b and c at 1 and d at 2", every)
 		}
 	})
 
@@ -195,7 +210,7 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 		}
 	})
 
-	t.Run("readers limit search, walks and paths to the principals they name", func(t *testing.T) {
+	t.Run("readers limit search and walks to the principals they name", func(t *testing.T) {
 		t.Parallel()
 		ctx, g := t.Context(), newGraph(t, Embedder{})
 		word := searchWord()
@@ -224,11 +239,6 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 			must(t, err)
 			return sortedIDs(neighborIDs(got))
 		}
-		path := func(principals []string) []uuid.UUID {
-			got, err := g.ShortestPath(ctx, brain.PathQuery{Namespace: ns, Principals: principals, From: open, To: beyond, Direction: brain.DirectionOut, MaxDepth: 4})
-			must(t, err)
-			return got
-		}
 		toMid, toSecret := [2]uuid.UUID{open, mid}, [2]uuid.UUID{open, secret}
 
 		cases := map[string]struct{ got, want []uuid.UUID }{
@@ -237,8 +247,6 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 			"search by kind, an outsider":    {objects(nil, brain.Filter{Kind: brain.StringMatch{Eq: "Document"}}, 1), []uuid.UUID{open}},
 			"walk, an outsider":              {walk(nil), sortedIDs([]uuid.UUID{mid, mid2})},
 			"walk, a reader":                 {walk(legal), sortedIDs([]uuid.UUID{secret, beyond, mid, mid2})},
-			"path, an outsider":              {path(nil), []uuid.UUID{open, mid, mid2, beyond}},
-			"path, a reader":                 {path(legal), []uuid.UUID{open, secret, beyond}},
 		}
 		for name, tc := range cases {
 			if !slices.Equal(tc.got, tc.want) {
@@ -362,6 +370,27 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 		}
 	})
 
+	t.Run("edge search without a relation ranks every indexed relation", func(t *testing.T) {
+		t.Parallel()
+		ctx, g := t.Context(), newGraph(t, nil)
+		ns := namespace()
+		word := searchWord()
+		a, b, c, d := node(t, g, ns, ""), node(t, g, ns, ""), node(t, g, ns, ""), node(t, g, ns, "")
+		link(t, g, ns, a, b, EdgeSearchLabel, brain.EdgeMeta{Note: "the " + word + " clause"})
+		link(t, g, ns, a, c, OtherEdgeSearchLabel, brain.EdgeMeta{Note: "a " + word + " quote"})
+		link(t, g, ns, a, d, "references", brain.EdgeMeta{Note: "an unindexed " + word})
+
+		hits, err := g.FindLinks(ctx, brain.LinkSearch{Namespace: ns, Query: word, Limit: 10})
+
+		got := map[[2]uuid.UUID]string{}
+		for _, h := range hits {
+			got[[2]uuid.UUID{h.FromID, h.ToID}] = h.RelationType
+		}
+		if err != nil || len(got) != 2 || got[[2]uuid.UUID{a, b}] != EdgeSearchLabel || got[[2]uuid.UUID{a, c}] != OtherEdgeSearchLabel {
+			t.Errorf("edge search without a relation = %v %v, want the %s and %s edges", got, err, EdgeSearchLabel, OtherEdgeSearchLabel)
+		}
+	})
+
 	t.Run("edge search ranks notes and vectors on the one relation and namespace asked for", func(t *testing.T) {
 		t.Parallel()
 		ctx, g := t.Context(), newGraph(t, Embedder{})
@@ -398,73 +427,6 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 		}
 		if got := edgeEnds(search(team, "poison "+word, 10)); !slices.Equal(got, [][2]uuid.UUID{{x, y}}) {
 			t.Errorf("team edge search whose query does not embed = %v, want only the team's edge by its words", got)
-		}
-	})
-
-	t.Run("shortest path takes the fewest hops on the relation and direction asked for", func(t *testing.T) {
-		t.Parallel()
-		ctx, g := t.Context(), newGraph(t, nil)
-		ns := namespace()
-		a, b, c, d := node(t, g, ns, ""), node(t, g, ns, ""), node(t, g, ns, ""), node(t, g, ns, "")
-		link(t, g, ns, a, b, "references", brain.EdgeMeta{})
-		link(t, g, ns, b, c, "references", brain.EdgeMeta{})
-		link(t, g, ns, a, c, "depends_on", brain.EdgeMeta{})
-		path := func(from, to uuid.UUID, rel, dir string, depth int) []uuid.UUID {
-			got, err := g.ShortestPath(ctx, brain.PathQuery{Namespace: ns, From: from, To: to, RelationType: rel, Direction: dir, MaxDepth: depth})
-			must(t, err)
-			return got
-		}
-
-		cases := map[string]struct{ got, want []uuid.UUID }{
-			"one relation":      {path(a, c, "references", brain.DirectionOut, 3), []uuid.UUID{a, b, c}},
-			"every relation":    {path(a, c, "", brain.DirectionOut, 3), []uuid.UUID{a, c}},
-			"inbound":           {path(c, a, "references", brain.DirectionIn, 3), []uuid.UUID{c, b, a}},
-			"against the edges": {path(c, a, "references", brain.DirectionOut, 3), nil},
-			"too deep":          {path(a, c, "references", brain.DirectionOut, 1), nil},
-			"unconnected":       {path(a, d, "", brain.DirectionBoth, 3), nil},
-			"same object":       {path(a, a, "", brain.DirectionBoth, 3), []uuid.UUID{a}},
-			"unknown object":    {path(a, uuid.New(), "", brain.DirectionBoth, 3), nil},
-		}
-		for name, tc := range cases {
-			if !slices.Equal(tc.got, tc.want) {
-				t.Errorf("%s = %v, want %v", name, tc.got, tc.want)
-			}
-		}
-	})
-
-	t.Run("shortest path walks only objects the namespace covers", func(t *testing.T) {
-		t.Parallel()
-		ctx, g := t.Context(), newGraph(t, nil)
-		tenant := namespace()
-		team := append(tenant.Clone(), brain.Attr{Name: "team", Value: "x"})
-		other := append(tenant.Clone(), brain.Attr{Name: "team", Value: "y"})
-		a, b, e, c := node(t, g, team, ""), node(t, g, team, ""), node(t, g, team, ""), node(t, g, team, "")
-		hidden := node(t, g, other, "")
-		link(t, g, other, a, hidden, "references", brain.EdgeMeta{})
-		link(t, g, other, hidden, c, "references", brain.EdgeMeta{})
-		link(t, g, team, a, b, "references", brain.EdgeMeta{})
-		link(t, g, team, b, e, "references", brain.EdgeMeta{})
-		link(t, g, team, e, c, "depends_on", brain.EdgeMeta{})
-		path := func(ns brain.Namespace, from, to uuid.UUID, rel, dir string, depth int) []uuid.UUID {
-			got, err := g.ShortestPath(ctx, brain.PathQuery{Namespace: ns, From: from, To: to, RelationType: rel, Direction: dir, MaxDepth: depth})
-			must(t, err)
-			return got
-		}
-
-		cases := map[string]struct{ got, want []uuid.UUID }{
-			"the tenant takes the shortcut": {path(tenant, a, c, "", brain.DirectionOut, 4), []uuid.UUID{a, hidden, c}},
-			"the team goes round it":        {path(team, a, c, "", brain.DirectionOut, 4), []uuid.UUID{a, b, e, c}},
-			"inbound":                       {path(team, c, a, "", brain.DirectionIn, 4), []uuid.UUID{c, e, b, a}},
-			"one relation both ways":        {path(team, e, a, "references", brain.DirectionBoth, 4), []uuid.UUID{e, b, a}},
-			"same object":                   {path(team, a, a, "", brain.DirectionBoth, 4), []uuid.UUID{a}},
-			"too deep for the round trip":   {path(team, a, c, "", brain.DirectionOut, 2), nil},
-			"from an object out of scope":   {path(team, hidden, c, "", brain.DirectionBoth, 4), nil},
-			"in another tenant":             {path(namespace(), a, c, "", brain.DirectionBoth, 4), nil},
-		}
-		for name, tc := range cases {
-			if !slices.Equal(tc.got, tc.want) {
-				t.Errorf("%s = %v, want %v", name, tc.got, tc.want)
-			}
 		}
 	})
 
@@ -517,7 +479,6 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 		_, stopped["neighborhood"] = g.Neighborhood(cancelled, brain.NeighborhoodQuery{Namespace: ns, ObjectID: a, Relations: []string{"references"}, Direction: brain.DirectionBoth, MaxHops: 1, Limit: 10})
 		_, stopped["object search"] = g.FindObjects(cancelled, brain.ObjectSearch{Namespace: ns, Query: "q", Limit: 10})
 		_, stopped["edge search"] = g.FindLinks(cancelled, brain.LinkSearch{Namespace: ns, RelationType: EdgeSearchLabel, Query: "q", Limit: 10})
-		_, stopped["shortest path"] = g.ShortestPath(cancelled, brain.PathQuery{Namespace: ns, From: a, To: b, Direction: brain.DirectionBoth, MaxDepth: 2})
 		left := neighbors(t, g, ns, a, "references")
 
 		if !errors.Is(missing, brain.ErrNotFound) {

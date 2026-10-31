@@ -2,7 +2,6 @@ package tacklr
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -63,19 +62,16 @@ type AgentOptions struct {
 	// it is a virtual path and empty means /workspace/skills. When it does not,
 	// it is a local directory and empty means no skills.
 	SkillsPath string
-	// Brain enables knowledge builtins when non-nil. Workers inherit the same engine.
-	// The host builds the store with its own embedding and passes it to
-	// brain.NewEngine before NewTurnManager. The harness does not construct
-	// store or graph backends.
+	// Brain enables the knowledge tools (search, open, related, save, and
+	// link when the engine has a graph) when non-nil. Workers inherit the
+	// same engine. The host builds the store, and the graph with
+	// brain.WithGraph, each with its own embedding, and passes the engine
+	// before NewTurnManager. The harness does not construct backends.
 	Brain *brain.Engine
-	// Graph adds the graph tools (find_objects, find_links, link, unlink, and
-	// expand over relations). It must wrap Brain: build it with
-	// brain.NewKnowledgeGraph(Brain, g) after helixgraph.Open. Workers inherit it.
-	Graph *brain.KnowledgeGraph
-	// BrainWriteKinds maps save_discovery / save_fact / save_memory to host kind names.
-	// Empty fields skip that tool. Kinds should be registered via brain.ApplyKinds / WithKinds.
-	// Ignored when Brain is nil.
-	BrainWriteKinds brain.WriteKinds
+	// BrainWriteKinds are the kinds the save tool may write; it lists them
+	// as its kind choices. Empty: no save tool. Register them with
+	// brain.WithKinds or ApplyKinds. Ignored when Brain is nil.
+	BrainWriteKinds []string
 	// SearchNamespace is the host ceiling for brain tools (session-owned, checkpointed):
 	// the widest namespace this session may read or write. Each tool call may add
 	// attrs to narrow it; it cannot change ceiling values. Required when Brain is
@@ -131,7 +127,6 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		hostInterceptors:      slices.Clone(opts.ToolInterceptors),
 		hostResultHooks:       maps.Clone(opts.ToolResultHooks),
 		brain:                 opts.Brain,
-		graph:                 opts.Graph,
 		brainWriteKinds:       opts.BrainWriteKinds,
 		indexReaders:          opts.IndexReaders,
 		sessionId:             opts.sessionID,
@@ -193,9 +188,6 @@ func (opts *AgentOptions) Validate() error {
 		if err := opts.SearchNamespace.Validate(); err != nil {
 			return fmt.Errorf("tacklr: AgentOptions.SearchNamespace is required with Brain: %w", err)
 		}
-	}
-	if opts.Graph != nil && opts.Graph.Engine() != opts.Brain {
-		return errors.New("tacklr: AgentOptions.Graph must wrap AgentOptions.Brain (brain.NewKnowledgeGraph(Brain, g))")
 	}
 	for i, tool := range opts.Tools {
 		if tool == nil {
@@ -261,14 +253,7 @@ func (a *TurnManager) injectBuiltinTools() {
 		a.tools = append(a.tools, newRunCommand(ms, !a.runCommandUnattended))
 	}
 	if a.brain != nil {
-		var idx *vfsindex.MountIndexer
-		if br != nil {
-			idx = br.Indexer
-		}
-		a.tools = append(a.tools, newBrainTools(a.brain, a.graph, a.session.Search, a.sessionId, a.brainWriteKinds, brainToolDeps{
-			VFS:     a.session.VFS,
-			Indexer: idx,
-		})...)
+		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search, a.sessionId, a.brainWriteKinds)...)
 	}
 	if br != nil {
 		a.tools = append(a.tools, newVFSIndexTools(br)...)

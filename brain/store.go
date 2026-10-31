@@ -17,18 +17,34 @@ type Indexed struct {
 	Text string
 }
 
-// PartSearch is one corpus search over a store's parts.
-type PartSearch struct {
-	Query   string
-	Filters Filter // applied to the part row
-	// Exact asks for literal matching only (find_exact): no semantic
-	// channel, and an exact title match ranks first.
+// Tree is an object read with its family in one call: a record with its
+// parts, or a part with its record and that record's parts.
+type Tree struct {
+	Object Object
+	// Parent is a part's record; nil for a record.
+	Parent *Object
+	// Parts are the record's parts by position; for a part, its record's,
+	// itself included.
+	Parts []Object
+}
+
+// RecordSearch is one search over a store's records and their parts.
+type RecordSearch struct {
+	Query string
+	// Filters apply to the record a row belongs to: a part matches when its
+	// parent does.
+	Filters Filter
+	// Exact asks for literal matching only: no semantic channel, and an
+	// exact title match ranks first.
 	Exact bool
-	Limit int
+	// Within, when set, keeps only the parts of that record (a part names
+	// its record), and leaves out session messages. The store resolves it.
+	Within uuid.UUID
+	Limit  int
 }
 
 // Store is the knowledge store Engine runs on: the source of truth for
-// objects and the corpus search over their parts. A backend owns its
+// objects and the search over records and their parts. A backend owns its
 // retrieval: its Embedder, channels, ranking and fusion, filters, and the
 // scope and readers rules below. MemoryStore and brain/postgres.Store
 // implement it, and brain/storetest is the contract a store must pass. A
@@ -47,14 +63,12 @@ type Store interface {
 	// GetMany returns the objects for ids in the same order, omitting ids
 	// it cannot return.
 	GetMany(ctx context.Context, scope Scope, ids []uuid.UUID) ([]Object, error)
-	// ListChildren returns parts ordered by position.
-	ListChildren(ctx context.Context, scope Scope, parentID uuid.UUID) ([]Object, error)
-	// ListByKind returns up to limit first-class objects of kind.
-	ListByKind(ctx context.Context, scope Scope, kind string, limit int) ([]Object, error)
+	// GetTree returns the object id names with its family in one read: at
+	// most limit parts (every part when limit is not positive), and a
+	// part's record. A saved session message has no family.
+	GetTree(ctx context.Context, scope Scope, id uuid.UUID, limit int) (Tree, error)
 	// GetByProperty returns a live object whose string property key is value.
 	GetByProperty(ctx context.Context, scope Scope, key, value string) (Object, error)
-	// KindsWithObjects lists the kinds that have first-class objects.
-	KindsWithObjects(ctx context.Context, scope Scope) ([]string, error)
 
 	// Put stores obj, indexes its Text, and returns the stored object. An
 	// embedding failure fails the Put.
@@ -79,17 +93,20 @@ type Store interface {
 	// limit it.
 	Erase(ctx context.Context, scope Scope) ([]uuid.UUID, error)
 
-	// Search ranks parts (hits carry ParentID) best first, at most
-	// q.Limit, over the channels the store chooses, with the session's
-	// messages when Scope.SessionID is set.
-	Search(ctx context.Context, scope Scope, q PartSearch) ([]ScoredID, error)
+	// Search ranks records and parts (a part's hit carries ParentID) best
+	// first, at most q.Limit, over the channels the store chooses, with the
+	// session's messages when Scope.SessionID is set. Filters do not apply
+	// to session messages. An empty Query lists the records Filters match,
+	// newest first (no parts, no session messages).
+	Search(ctx context.Context, scope Scope, q RecordSearch) ([]ScoredID, error)
 
-	GetKind(ctx context.Context, kind string) (ObjectKind, error)
+	// ListKinds and PutKind are the durable kind registry: Engine reads it
+	// once (LoadKindsFromStore) and writes it from ApplyKinds and PersistKinds.
 	ListKinds(ctx context.Context) ([]ObjectKind, error)
 	PutKind(ctx context.Context, k ObjectKind) error
 
 	// SaveSessionMessages writes one context window under
-	// NamespaceForSession(host, sessionID) and returns its generation. A
+	// host.ForSession(sessionID) and returns its generation. A
 	// repeated generationKey returns the first save's generation. The
 	// store indexes each message's SearchText; an embedding failure does
 	// not fail the save.

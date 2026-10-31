@@ -22,14 +22,14 @@ func TestFilters_malformedInputIsInvalid(t *testing.T) {
 		"a title that is no string":     decode(map[string]any{"title": true}),
 		"a date that is no string":      decode(map[string]any{"updated_after": 2024}),
 		"a date in no known format":     decode(map[string]any{"created_before": "June 1st"}),
-		"a hand-built bad date":         brain.ValidateFilters(brain.Filter{UpdatedAfter: "nope"}),
-		"a hand-built empty key":        brain.ValidateFilters(brain.Filter{Props: map[string]brain.PropFilter{"": {Eq: "x"}}}),
-		"a hand-built empty list":       brain.ValidateFilters(brain.Filter{Props: map[string]brain.PropFilter{"stage": {In: []any{nil}}}}),
-		"a hand-built missing value":    brain.ValidateFilters(brain.Filter{Props: map[string]brain.PropFilter{"stage": {}}}),
+		"a hand-built bad date":         brain.Filter{UpdatedAfter: "nope"}.Validate(),
+		"a hand-built empty key":        brain.Filter{Props: map[string]brain.PropFilter{"": {Eq: "x"}}}.Validate(),
+		"a hand-built empty list":       brain.Filter{Props: map[string]brain.PropFilter{"stage": {In: []any{nil}}}}.Validate(),
+		"a hand-built missing value":    brain.Filter{Props: map[string]brain.PropFilter{"stage": {}}}.Validate(),
 		"a key with no usable letters":  decode(map[string]any{"!!": "x"}),
 		"a key with a dash":             decode(map[string]any{"due-date": "x"}),
-		"a hand-built key with a space": brain.ValidateFilters(brain.Filter{Props: map[string]brain.PropFilter{"due date": {Eq: "x"}}}),
-		"a bad filter under a catalog":  brain.ValidateFiltersAgainst(brain.Filter{UpdatedAfter: "nope"}, nil),
+		"a hand-built key with a space": brain.Filter{Props: map[string]brain.PropFilter{"due date": {Eq: "x"}}}.Validate(),
+		"a bad filter under a catalog":  brain.Filter{UpdatedAfter: "nope"}.ValidateAgainst(nil),
 	} {
 		if !errors.Is(err, brain.ErrInvalid) {
 			t.Errorf("%s = %v, want ErrInvalid", name, err)

@@ -51,10 +51,9 @@ into every prompt.
 A plan handoff saves the exact context window as **session messages** in
 `session_messages` before the window is replaced. Each row's namespace is the
 host `SearchNamespace` with the session id appended as the last attribute
-(`session`). `search` and `find_exact` return those messages together with
+(`session`). `search` returns those messages together with
 knowledge rows under the host namespace. Another session's tail is a different
-namespace, so its messages are not in the page. `save_fact`, `save_memory`, and
-`save_discovery` do not append the session attribute. Closing the session
+namespace, so its messages are not in the page. `save` does not append the session attribute. Closing the session
 deletes its session messages.
 
 Session messages are not the harness checkpoint. The checkpoint
@@ -76,14 +75,13 @@ Almost every design mistake in this area comes from treating these as the same t
 
 | Job | What it is | Source of truth | How it becomes searchable | What the agent edits |
 |-----|------------|-----------------|---------------------------|----------------------|
-| **Knowledge record** | A host-defined record: a Deal, Person, Fact, Memory, … | A row in the brain **store** | `save_*` or `Engine.Put` writes the row. `search` reads it | The record itself (`read_object`), not a file |
+| **Knowledge record** | A host-defined record: a Deal, Person, Fact, Memory, … | A row in the brain **store** | `save` or `Engine.Save` writes the row. `search` reads it | The record itself (`open`), not a file |
 | **Artifact** | A normal file the agent is working on | Bytes on local disk, S3, or a bound Drive/Graph folder | **IndexPath** copies a Document + Chunks into the store | `/workspace/work/contract.md` or `/workspace/contracts/nda.pdf` |
 
 ```text
   Agent
     ├─ file tools     read, write, run_command
-    └─ knowledge tools schema, search, find_exact, find_objects,
-                       link, expand, find_links, save_*, continue
+    └─ knowledge tools search, open, related, save, link
               │
          MountSession          ← files only
     ┌─────────┴──────────────┐
@@ -93,7 +91,7 @@ Almost every design mistake in this area comes from treating these as the same t
     │
     │ IndexPath (optional, hash skip)
     ▼
-              brain.Engine   ← save_* / search, no file mount
+              brain.Engine   ← save / search, no file mount
          ┌────────────┬──────────────┐
          │ Store      │ Graph        │
          │ Postgres   │ Helix        │
@@ -128,7 +126,7 @@ they do not get a second FUSE.
 
 Relationships do **not** appear as files. There is no `.links` directory.
 `run_command` → `ls` shows file names only. To see neighbors, the agent calls
-`expand` with an object id or an indexed path.
+`related` with an object id or an indexed path.
 
 ---
 
@@ -174,12 +172,12 @@ classDiagram
 
 | Role | How you recognize it | Appears as a file? | In the graph? |
 |------|----------------------|--------------------|---------------|
-| **Parent / Engram** | `parent_id` is empty | Yes — `{slug}.md` | Yes (dual-written on `Put`) |
+| **Parent / Engram** | `parent_id` is empty | Yes — `{slug}.md` | Yes (dual-written on `Save`) |
 | **Part / Chunk** | `parent_id` is set | Never | Never |
 
 Parts are not files. `search` looks at parts (indexed workspace files, or
 chunks the host writes with `PutTree`). The Engram Markdown body lives
-on the parent and is found with `find_objects` until parts exist.
+on the parent, and `search` matches the parent by its own text too.
 
 **Kinds** are defined by the **host**, not by Tacklr. `Deal` and `Person` in tests
 and examples are sample product types, not SDK types. You register them with
@@ -241,7 +239,7 @@ flowchart LR
 
 ## Writing knowledge
 
-`save_discovery`, `save_fact`, and `save_memory` call `Engine.Put`. The title is required. `object_id` updates that row. `read_object` and `search` return it. Indexed workspace files still store `vfs_path` so `link` and `expand` can take a path. A knowledge record has no path.
+`save` calls `Engine.Save` with a kind the host allows (`AgentOptions.BrainWriteKinds`). The title is required. `id` updates that row. `open` and `search` return it. Indexed workspace files still store `vfs_path` so `open`, `related` and `link` can take a path. A knowledge record has no path.
 
 ```mermaid
 sequenceDiagram
@@ -250,7 +248,7 @@ sequenceDiagram
     participant S as Store
     participant G as Graph
 
-    Agent->>E: save_fact / Put
+    Agent->>E: save / Save
     E->>E: ValidateObject
     E->>E: choose the index text
     E->>S: Put(Indexed{object, text}) — the store embeds the text
@@ -259,7 +257,7 @@ sequenceDiagram
 ```
 
 IR edits (`write` / `WriteDocument`) persist the same way:
-the serialized Markdown is parsed and `Put`.
+the serialized Markdown is parsed and saved.
 
 ### Artifacts — the file stays where it is
 
@@ -276,7 +274,7 @@ store so `search` can find it.
     └─ Chunk  heading block  block_id, heading_path
 ```
 
-A pipeline that can import this module should call `MountIndexer.IndexPath` or `Engine.Put`. Those calls embed the row and, for a parent, update the graph node. The tables below are the row contract for a writer that does not call them. A raw store insert that skips `Put` does not embed and does not update the graph, so `search` and `find_objects` will not see it.
+A pipeline that can import this module should call `MountIndexer.IndexPath` or `Engine.Save`. Those calls embed the row and, for a parent, update the graph node. The tables below are the row contract for a writer that does not call them. A raw store insert that skips `Save` does not embed and does not update the graph, so `search` will not see it.
 
 ### File mirror rows
 
@@ -291,11 +289,11 @@ buf = append(buf, []byte(virtualPath)...)
 id := uuid.NewSHA1(ns, buf)
 ```
 
-In-process code should call `MountIndexer.DocumentID` instead of copying that. The same path in another namespace is a different id. `link` and `expand` resolve a workspace path by reading the parent with this id and using its `vfs_path`.
+In-process code should call `MountIndexer.DocumentID` instead of copying that. The same path in another namespace is a different id. `open`, `related` and `link` resolve a workspace path by the parent row whose `vfs_path` it is.
 
 Chunk ids come from content. `Engine.PutTree` computes each id from the parent id and the chunk's kind, content type, title, summary, content and index text. The model is not in the id: a store re-embeds a live chunk only when its embedding came from another model. A repeated chunk text in one file gets a counter, so each id stays unique. A chunk with the same text keeps its id, row and vector across re-indexes. Line numbers are not in the id or the title, so a chunk that only moves keeps its id too. A writer outside this module cannot reproduce these ids; it must call `PutTree` with parts that have no id.
 
-Parent row (`Engine.Put`):
+Parent row (`Engine.Save`):
 
 | Field | Value |
 |-------|--------|
@@ -363,7 +361,7 @@ The parent holds metadata and `source_version`, not a second copy of the file. A
 | `prefix` | Hint for a host pipeline that walks the mount. The turn does not. |
 | `watch` | Same hint as `prefix`. The turn does not subscribe to the remote system. |
 
-Knowledge records are not this schema. The host registers their kinds. `save_fact` and the other save tools call `Engine.Put` with the title required and the host's properties. A parent that has no chunks does not appear in `search`; `find_objects` reads the parent on the graph. A pipeline for those records follows the host `KindSpec` and `Engine.Put`, not `Document` / `Chunk`.
+Knowledge records are not this schema. The host registers their kinds. `save` calls `Engine.Save` with the title required and the host's properties. `search` matches a parent by its own text, so a record with no chunks is found too. A pipeline for those records follows the host `KindSpec` and `Engine.Save`, not `Document` / `Chunk`.
 
 ---
 
@@ -379,49 +377,48 @@ and returns only what the caller's namespace and principals can read. The
 engine owns orchestration and the domain rules: it validates requests and
 scopes, keeps the kind catalog, chooses the text that represents each object,
 derives part ids from content, writes the store and then every index and then
-the audit, loads graph hits from the store (which drops rows that are deleted or
-that the caller cannot read), promotes part hits to parents, merges `expand`
-results, pages them, runs the optional reranker, and registers the tools.
+the audit, fuses the sources' lists, reads every result from the store (which
+drops rows that are deleted or that the caller cannot read), promotes part hits
+to their records, pages, runs the optional reranker, and computes facets.
 
-**Two types, so no feature checks for a graph.** `brain.Engine` is the store
-features: writes, `search`, `find_exact`, `read_object`, sessions, kinds, and
-`expand` over children. Every committed write of a first-class object goes to
-the engine's indexes (`brain.Index`: `Put` and `Remove`), in order: store,
-indexes, audit. With no indexes the list is empty. `brain.KnowledgeGraph`,
-built with `brain.NewKnowledgeGraph(eng, g)`, adds `g` to those indexes and
-holds every graph feature: `find_objects`, `find_links`, `link`, `unlink`,
-paths, and `expand` over children and relations. An engine alone has no graph
-methods, so a graph feature cannot be called without a graph.
-`Engine.Expand` with a relation type other than containment returns
-`ErrUnsupported`. `brain.WithIndex` adds other indexes (a second search
-system, a change feed).
+**One engine, the graph is a component.** `brain.NewEngine(store,
+brain.WithGraph(g))` adds a graph; without it the engine is store-only. The
+graph is a source, not a feature switch: `Search` and `Related` take what the
+graph adds when there is one and return the store's results when there is
+not. Only `Link` needs a graph and returns `ErrUnsupported` without one, and
+the harness registers the `link` tool only when `Engine.HasGraph()`. Every
+committed write of a first-class object goes to the store, then the engine's
+indexes (`brain.Index`: `Put`, `Remove`, `Erase`; a graph is one), then the
+audit. `brain.WithIndex` adds other indexes (a second search system, a change
+feed).
 
 Each side is one required interface:
 
 ```go
 type Store interface {
-    Get, GetMany, ListChildren, ListByKind, GetByProperty, KindsWithObjects
+    Get, GetMany, GetByProperty
+    ListChildren(ctx, scope, parentID, limit int) ([]Object, error) // limit ≤ 0: every part
     Put(ctx, scope, Indexed) (Object, error)
     PutTree(ctx, scope, parent Indexed, parts iter.Seq2[Indexed, error]) (Object, error)
     SoftDelete, PurgeDeleted, Erase
-    Search(ctx, scope, PartSearch) ([]ScoredID, error) // ranked parts, best first
+    Search(ctx, scope, RecordSearch) ([]ScoredID, error) // ranked records and parts, best first
     GetKind, ListKinds, PutKind
     SaveSessionMessages, DeleteSessionMessages, PurgeSessionMessages
 }
 
 type Index interface {
-    Put(ctx, Indexed) error                               // parents only
+    Put(ctx, Indexed) error                                // parents only
     Remove(ctx, id) error
+    Erase(ctx, scope) error                                // idempotent
 }
 
 type Graph interface {
     Index
-    Link(ctx, GraphEdge) error                            // ErrNotFound if a node is missing
+    Link(ctx, GraphEdge) error                             // ErrNotFound if a node is missing
     Unlink(ctx, from, to, rel) error
-    FindObjects(ctx, ObjectSearch) ([]ScoredID, error)    // filters before ranking
-    FindLinks(ctx, LinkSearch) ([]EdgeSearchHit, error)
-    Neighborhood(ctx, NeighborhoodQuery) ([]GraphNeighbor, error)
-    ShortestPath(ctx, PathQuery) ([]uuid.UUID, error)
+    FindObjects(ctx, ObjectSearch) ([]ScoredID, error)     // filters before ranking
+    FindLinks(ctx, LinkSearch) ([]EdgeSearchHit, error)    // empty relation: every indexed relation
+    Neighborhood(ctx, NeighborhoodQuery) ([]GraphNeighbor, error) // empty Relations: every relation
 }
 ```
 
@@ -449,8 +446,8 @@ flowchart TB
         Walk[Neighbor walks]
     end
 
-    Put[Engine.Put] --> Rows
-    Put --> Nodes
+    Save[Engine.Save] --> Rows
+    Save --> Nodes
     Link[Engine.Link] --> Edges
     SoftDel[SoftDelete] --> Nodes
     SoftDel --> Soft
@@ -459,32 +456,34 @@ flowchart TB
 | | Store | Graph |
 |-|-------|-------|
 | **Holds** | Full rows, chunks, embeddings, filters | Parent nodes + edges |
-| **Answers** | `search`, `find_exact`, `read_object`, expand-children | `find_objects`, `link`, expand-relations, `find_links` |
-| **Required?** | Yes | Optional. Without a `KnowledgeGraph` there is no `link`, `unlink`, `find_objects`, `find_links`, named-relation expand or paths: the engine has no such methods and the tools are not registered |
-| **What the query matches** | Parts (chunks of notes and indexed files) | Parent records (a Deal, a Person, …) |
+| **Search source** | Records and parts (title, summary, body) | Parent records (title, summary, indexed properties, body) and edge notes |
+| **Related source** | Children; a part's parent and nearby parts | Records the relations reach |
+| **Required?** | Yes | Optional. Without one, search and related use the store only and there is no `link` tool |
 
-`search` and `find_exact` look at **parts** (`parent_id` set): title, summary,
-and body. Hits promote to the parent with evidence. An Engram that has no
-parts does not appear there — use `find_objects`, or add chunks (host ingest).
+`RecordSearch` ranks **records and parts** together: a record matches on its
+own title, summary and body, and a part's hit carries its `ParentID`. Filters
+always test the **record**: a part passes when its parent does, so a kind or a
+property filter means the same thing on every source. The engine promotes part
+hits to their record with evidence, and a record scores its own hit plus the
+sum of the evidence it keeps.
 
-`find_objects` looks at **parent** nodes in the graph: the record’s title,
+The graph's `FindObjects` looks at **parent** nodes: the record's title,
 summary, body, and indexed properties. Structured fields belong in **filters**,
-not in the query string. The same filter keys work on corpus search, but they
-apply to the part row, not the parent.
+not in the query string.
 
-Exact lookups (`Get`, `GetByProperty`, `ListByKind`, `find_exact` with a UUID)
-always go to the store.
+Exact lookups (`Get`, `Resolve` by `vfs_path`, a UUID query) always go to the
+store.
 
 **Write rules**
 
 - Only **parents** become graph nodes. Chunks never go to the graph.
-- `Put` upserts the node **in place** so existing edges survive. If the graph
+- `Save` upserts the node **in place** so existing edges survive. If the graph
   write fails after the store write, the row stays (store is source of truth);
-  retry `Put` after fixing the graph.
+  retry `Save` after fixing the graph.
 - `SoftDelete` removes the **graph node first**, then marks the row deleted.
-  If the store delete then fails, a later `Put` recreates the node.
-- Graph search returns ids; the engine **hydrates** full rows from the store
-  under the current namespace. Ids that are missing or out of scope disappear.
+  If the store delete then fails, a later `Save` recreates the node.
+- Graph results are ids; the engine reads the full rows from the store under
+  the current namespace. Ids that are missing or out of scope disappear.
 
 **What text represents an object** (the engine chooses it; each backend embeds
 it with its own `Embedding`, and each backend's vector dimension is its own
@@ -495,13 +494,12 @@ option):
 | Parent / Engram | `EntityIndexText`: title, summary, indexed scalar properties, full body |
 | Part / Chunk | `IndexText` (title + summary + content), prefixed with the parent title |
 
-`WithIndexText` can rewrite that text at Put (prefix, replace, or drop fields)
+`WithIndexText` can rewrite that text at Save (prefix, replace, or drop fields)
 without changing the stored object. The store and the graph get the same
 string.
 
-So `find_objects "open renewal"` can match a Deal whose `stage` property is
-`open`, not only the narrative body. Corpus `search` still matches chunk text,
-not those parent fields.
+So a search for `open renewal` can match a Deal whose `stage` property is
+`open` through the graph, not only the narrative body.
 
 `helixgraph.Open` creates the Helix indexes and waits until they are active, so
 object search is on as soon as it returns. Opens that race on one server, and
@@ -514,171 +512,138 @@ builds each index once, which is most of the graph tests' time.
 
 ---
 
-## Search: four ways to land
+## Search: one ranked list
 
-Pick the landing that matches the question. Then page with `continue`, then
-walk with `expand`.
-
-```mermaid
-flowchart LR
-    Q[Question] --> C{What are you looking for?}
-    C -->|prose / evidence in notes or files| Search[search]
-    C -->|an id or an exact phrase| Exact[find_exact]
-    C -->|which tracked entity| FO[find_objects]
-    C -->|which relationship| FL[find_links]
-    Search --> RS[ResultSet → continue]
-    Exact --> RS
-    FO --> RS
-    RS --> Ex[expand]
-    FL --> Ex
-    Ex --> Neigh["search with scope_ids"]
-```
-
-### `search` — corpus hybrid
-
-Use for “what in the notes or indexed files supports this?”
-
-Hits are often **chunks**. The engine does **not** return those chunks as the
-primary result. It **promotes** them to their parent and attaches the best
-chunks as **evidence** (snippet, score, `start_line`, `block_id`).
-
-The query is free text against that chunk body. Structured fields on the parent
-record (stage, status, …) are filters on `find_objects`, not keywords for
-`search`.
+`search` is the one way to land. It takes free text, an optional `kind`, and
+`filters`, and returns one ranked list of records and links.
 
 ```mermaid
 sequenceDiagram
     participant T as search
     participant E as Engine
     participant S as Store
-    participant Emb as Embedder
+    participant G as Graph
 
-    T->>E: query + filters + optional scope_ids
-    E->>E: validate filters against kind catalog
-    E->>S: Search(query, filters, CandidateK)
-    S->>S: lexical channel
-    alt the store has an embedder
-        S->>Emb: embed query
-        S->>S: vector channel (rows of the same model only)
-    else the query does not embed
-        Note over S: words only (logged)
+    T->>E: query + kind + filters
+    E->>E: validate kind and filters against the catalog
+    par records and parts
+        E->>S: Search(RecordSearch, CandidateK)
+        S-->>E: ranked records and parts
+    and objects (with a graph)
+        E->>G: FindObjects(query, filters)
+        G-->>E: ranked nodes
+    and links (with a graph, no kind or filters)
+        E->>G: FindLinks(query)
+        G-->>E: ranked edges
     end
-    S->>S: session rows when the scope has a session
-    S->>S: Ranking: decay by updated_at, then Reciprocal Rank Fusion
-    S-->>E: ranked parts
-    E->>E: keep ids in scope_ids if set
-    E->>E: promote parts to parents plus evidence quotes
-    E->>E: optional host reranker, up to CandidateK parents
-    E->>S: load the page
-    E-->>T: page of parents + result_set_id
+    E->>E: promote parts to records with evidence
+    E->>E: RRF (k=60) across the sources
+    E->>E: optional host reranker over the CandidateK head
+    E->>S: read the page (one GetMany), re-check graph hits' filters
+    E-->>T: results + facets + more
 ```
 
-Production defaults (not per tool call): the engine asks the store for 40
+- **A UUID query** returns that object.
+- **A query in double quotes** is matched literally: the store's exact
+  channels (lexical and trigram, exact title first), no embedding, no graph.
+- **Otherwise** the sources run at once. A graph error is logged and the
+  page comes from the store, unless `EngineConfig.FailOnGraphError`.
+- **Links** rank only when the request has no kind and no filters, since a
+  link has neither. A link result names both ends, the relation and the note.
+- **No query, with a kind or filters,** lists the matching records newest
+  first, from the store (`RecordSearch` with an empty `Query`; Postgres reads
+  it from an index on tenant and `updated_at`), paged with `more`. No query,
+  no kind and no filters fails with the choices.
+- **`within`** (a record, a part of it, or an indexed file path) searches only
+  that record's parts: each result is a part with the snippet that matched.
+  Only the store runs (`RecordSearch.Within`; no session messages): the
+  graph's objects and links are other records, so they do not apply.
+  `within` needs a query; `related` lists a record's parts.
+
+Hits are often **chunks**. The engine does **not** return those chunks as the
+primary result. It **promotes** them to their record and attaches the best
+chunks as **evidence** (snippet, score, `start_line`, `block_id`).
+
+Production defaults (not per tool call): the engine asks each source for 40
 candidates (`EngineConfig.CandidateK`) and keeps 3 evidence quotes of 240
-characters, page size 10 (max 50). The store's `brain.Ranking` uses RRF
-`k=60` and no age decay (`Decay` 0). A host sets `Ranking.Decay` above 0 on
-the store or the graph when a newer write should outrank an older one. `updated_at` is
-the last write, not an expiry. Equal scores still prefer the newer row.
+characters, page size 10 (max 50). The engine fuses the sources with plain
+RRF, `k=60`: it ranks by position in each list, so the backends' scores,
+which are not comparable, need no normalising, and there is no weight to
+tune. The store's own `brain.Ranking` uses RRF `k=60` and no age
+decay (`Decay` 0). A host sets `Ranking.Decay` above 0 on the store or the
+graph when a newer write should outrank an older one. `updated_at` is the last
+write, not an expiry. Equal scores still prefer the newer row.
 
 Indexed file recall is the same pipeline via `search` (prefer hits with
 `vfs_path`). That is not a behavior-preserving stand-in for live `rg`.
 Live grep is `run_command` → `rg`.
 
-**`scope_ids`** restricts candidates to those ids or their children. After you
-`expand` a Deal, search the neighborhood instead of the whole corpus.
+### Kinds, filters and teaching errors
 
-### `find_exact` — equality first, no dense channel
-
-1. If the query is a UUID, the engine loads that object.
-2. Otherwise the store runs an exact search (`PartSearch.Exact`): literal
-   channels only, such as lexical and **trigram** (typo-tolerant), with an
-   exact title match first. It does not embed the query.
-3. Same promotion and paging as `search`.
-
-Use for ids, titles, and “that exact phrase.”
-
-### `find_objects` — entity find
-
-Use for “which Deal / Person / Fact is this about?” This searches **graph
-nodes**, not chunk bodies. There is no evidence path.
-
-One graph call (`FindObjects`) returns one ranked list. The graph applies the
-namespace, the readers, the kinds and the property filters **before** it
-ranks, so no hit that fails them takes a slot. It embeds the query itself and
-fuses its own lists (Helix: a text list and a vector list, fused with its
-`Ranking`). The engine then loads the rows from the store and checks the
-filters again on **store truth**.
-
-Requires a graph.
-
-### `find_links` — land on an edge
-
-Searches **edge notes** by text, and by vector when the graph has an embedder
-(the graph embeds each note when `LinkWith` writes the edge), for a required
-relation label (`about`, `has_contact`, …). The graph fuses its lists and ranks
-only edges whose two ends the caller can read. With Helix,
-the relation must be in `helixgraph.Options.EdgeRelations`; Helix rejects a
-search on any other relation. Both endpoints are hydrated under the namespace.
-The tool prefers `from_path` / `to_path` when `vfs_path` is set.
-
-### Filters and `schema`
-
-`schema()` is how the agent learns what exists. It returns kinds, descriptions,
-and `filterable_fields`, plus which tools accept those fields
-(`search`, `find_exact`, `find_objects`).
+The tools put the registered record kinds in the JSON schema as an enum on
+`kind` (part kinds are left out: a part is found through its record). There
+are no field lists in the schema: `open` shows a kind's fields, and every
+page's **facets** name the kinds and the common field values among its
+objects (with a catalog, only the kind's declared fields).
 
 Filter map keys:
 
 - Core: `kind`, `title`, `created_after`, `created_before`, `updated_after`, `updated_before`
 - Anything else: an object **property**. When the catalog is non-empty, the key
-  must be listed on that kind, and a kind (or `find_objects.kinds`) is required.
+  must be listed on that kind, and a kind is required.
 
-### `continue`
+A wrong kind or filter fails with an error that names the valid choices:
+`unknown kind "Phase"; kinds: Deal, Fact`, `filter "stage" needs a kind; kinds:
+…`, `unknown filter "phase" for Deal; filterable: stage, …`.
 
-Each `search` / `find_exact` / `find_objects` / large `expand` **replaces** the
-session’s one active result set (ordered ids). `continue` pages it. The set is
-checkpointed with the agent thread.
+### `more`
+
+Every page says whether there is `more`. The page carries a `Rest` (the
+remaining ids, scores, evidence and filter, no rows), which `Engine.Next`
+pages through. The tools keep each tool's last `Rest` in the session's
+`SearchContext`, and `more: true` on `search` or `related` returns the next
+page of that tool's last call. The context is checkpointed with the agent
+thread, so `more` works after a restore.
 
 ---
 
-## Graph: folders vs relationships
+## Related: containment and relations
 
-Two different meanings of “neighbor”:
+Two different meanings of "neighbor", one tool:
 
-| Kind | Stored as | How you ask | Example |
-|------|-----------|-------------|---------|
-| **Containment** | `parent_id` on the store row | `expand` with no `relation_types` | Document → its Chunks |
-| **Relation** | A labeled graph edge | `expand` with `relation_types` | Deal → Person, `has_contact` |
+| Kind | Stored as | `relation` on the result | Example |
+|------|-----------|--------------------------|---------|
+| **Containment** | `parent_id` on the store row | `child`, `parent`, `sibling` | Document → its Chunks |
+| **Relation** | A labeled graph edge | the edge's label, with its direction and note | Deal → Person, `has_contact` |
 
 ```mermaid
 flowchart TD
-    Seed["expand object_id"]
-    Seed --> Rel{relation_types set?}
-    Rel -->|no| Cont[children or parent + siblings]
-    Rel -->|yes| G[graph neighbors]
-    Rel -->|both| Mix[union]
-    Cont --> Hyd[load rows from store]
-    G --> Walk[walk up to max_hops]
-    Walk --> Hyd
+    Seed["related ref"]
+    Seed --> Cont[store: children, or parent + nearby parts]
+    Seed --> G[graph: neighbors up to depth]
+    Cont --> Fuse[one list, each result tagged]
+    G --> Fuse
+    Fuse --> Hyd[read rows from the store]
     Hyd --> Paths[return vfs_path when set]
 ```
 
-- Default `expand` is containment only.
-- Named types need a graph backend. Default depth is 1 hop (capped at 4).
-- If the graph fails and containment was also requested, expand can degrade to
-  containment-only.
+- With no `relation`, `related` returns containment and every graph relation.
+  `relation: "contains"` keeps containment only (results still say `child`,
+  `parent` or `sibling`); any other label keeps that graph relation only.
+- Default depth is 1 hop (capped at `MaxExpandHops`, 4). Each graph hop
+  names the object it came through (`via`), so one `related` call with a
+  depth gives the path from the start to every object it reaches.
+- Without a graph, `related` returns containment.
 - `ls` never lists edges. Tool descriptions say this on purpose.
 
-`link` / `unlink` require both ends to exist in the namespace, not be
-soft-deleted, and **not** be chunks. Paths resolve through `vfs_path`. An
-unindexed `/work/doc.md` cannot be linked until `index_file` (or a prefix
-policy) has created a Document id.
+`link` requires both ends to exist in the namespace, not be soft-deleted, and
+**not** be parts, and refuses the containment relations. `remove: true` drops
+the edge. Paths resolve through `vfs_path`. An unindexed `/work/doc.md` cannot
+be linked until `index_file` (or a prefix policy) has created a Document id.
 
-Optional edge metadata (`note`, `status`, `role`, `confidence`, `evidence_id`)
-comes back on `expand`.
-
-Hosts can register named expand templates (`WithExpandRecipes`) so a product
-can say “deal contacts” without baking that product into the SDK.
+The optional `note` is indexed by the graph (text and, with an embedder,
+vector), so `search` finds the link by what it says. With Helix, a relation
+must be in `helixgraph.Options.EdgeRelations` for its notes to rank.
 
 ---
 
@@ -690,30 +655,28 @@ same as any other tool client. Isolated VFS with no Brain: file tools only.
 
 | Tool | Use it when | Backs onto |
 |------|-------------|------------|
-| `schema` | You need kind names and filter keys | Kind catalog |
-| `search` | You need evidence in notes or indexed files | Store hybrid + parent promotion |
-| `find_exact` | You have an id or a precise phrase | Equality / trigram + promotion |
-| `find_objects` | You need the entity, not a passage | Graph nodes → store hydrate |
-| `read_object` | You have an id | `Engine.Read` |
+| `search` | You need facts: records, indexed files, links, earlier messages | `Engine.Search` / `Engine.Next` |
+| `open` | You have an id or an indexed path and need the whole object and its kind's fields | `Engine.Open` |
+| `related` | You have a record and need its parts, parent or linked records | `Engine.Related` / `Engine.Next` |
+| `save` | You want a durable knowledge record (kinds from `BrainWriteKinds`) | `Engine.Save` |
+| `link` | You are asserting or removing a relationship (graph only) | `Engine.Link` |
 | `read` / `write` | You are editing a workspace file | VFS |
-| `save_*` | You want a durable knowledge record | `Engine.Put` |
 | `index_file` / `unindex` | You must (un)mirror an artifact | `IndexPath` |
-| `link` / `unlink` | You are asserting a relationship | Graph edges |
-| `expand` | You already have a path or id | Containment and/or neighbors |
-| `find_links` | You are looking for a relationship by its note | Edge text search |
-| `continue` | The last page set `has_more` | Session result set |
 | `run_command` | You need live `ls` / `fd` / `find` / `rg` on the FUSE tree | Host shell, cwd = `HostDir` |
+
+`search`, `open` and `related` take an optional `namespace` that narrows the
+host namespace for one call. `save` is registered only when
+`AgentOptions.BrainWriteKinds` names a kind, and its `kind` is an enum of
+those kinds.
 
 ### Suggested loop
 
 ```text
-schema()
+search                                    ← land (facets show kinds and fields)
     │
-find_objects  or  search / find_exact     ← land
+search with kind + filters                ← narrow
     │
-expand  /  find_links                     ← walk
-    │
-search(scope_ids = those parents)         ← neighborhood corpus
+related  /  open                          ← walk, read in full
     │
 read on vfs_path                          ← live bytes, not the chunk snapshot
 ```
@@ -724,13 +687,13 @@ read on vfs_path                          ← live bytes, not the chunk snapshot
 
 The host registered kinds `Deal` and `Person` and wired Postgres + Helix.
 
-1. `save_*` (or `Engine.Put`) writes the Deal and the Person. Each `Put` upserts a graph node.
-2. `link from_id=<deal> to_id=<person> relation_type=has_contact role=buyer`
+1. `save` (or `Engine.Save`) writes the Deal and the Person. Each save upserts a graph node.
+2. `link from=<deal> to=<person> relation=has_contact note="signs the renewal"`
 3. `index_file /workspace/work/nda.md` creates a Document + Chunks with `vfs_path`. A later write with the same hash is skipped.
-4. `link from=/workspace/work/nda.md to_id=<deal> relation_type=about` fails until step 3, because an unindexed file has no object id.
-5. `find_objects "acme renewal"` hits the Deal node and hydrates the Postgres row.
-6. `expand object_id=<deal> relation_types=["has_contact"]` returns the Person.
-7. `search "indemnity"` with `scope_ids` of those parents runs lexical + vector on chunks and attaches evidence.
+4. `link from=/workspace/work/nda.md to=<deal> relation=about` fails until step 3, because an unindexed file has no object id.
+5. `search "acme renewal"` returns the Deal (store and graph agree), the NDA's chunks as evidence on the Document, and the `has_contact` link by its note.
+6. `related ref=<deal> relation=has_contact` returns the Person.
+7. `search "indemnity" kind=Document` narrows to indexed files.
 8. The agent calls `read` on the NDA path from that evidence. The live file is not the chunk snapshot.
 
 ---
@@ -746,7 +709,7 @@ eng, err := brain.NewEngine(store, brain.WithKinds(
         {Name: "topic", Type: brain.FieldTypeString},
     }},
 ))
-// AgentOptions{Brain: eng, ...}  → search / save_* / schema / read_object
+// AgentOptions{Brain: eng, BrainWriteKinds: []string{"Fact"}, ...}  → search / open / related / save
 // The harness closes `eng` into those tool handlers (same pattern as host tools).
 ```
 
@@ -782,19 +745,18 @@ client, err := helix.NewClient(helixURL)
 // relation) and waits until they are active.
 g, err := helixgraph.Open(ctx, client, helixgraph.Options{
     Dimension:     1536,                           // must match the embedder
-    EdgeRelations: []string{"about", "has_buyer"}, // relations find_links searches
+    EdgeRelations: []string{"about", "has_buyer"}, // relations whose notes search ranks
     Embedding:     emb,                            // nil Embedder: text only
 })
 
-eng, err := brain.NewEngine(store)
-kg := brain.NewKnowledgeGraph(eng, g) // link / find_objects / find_links / named expand / paths
+eng, err := brain.NewEngine(store, brain.WithGraph(g)) // graph results in search and related; the link tool
 // Model() names the model each backend stores with every vector; a backend
 // compares only vectors from the same model.
 if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 
 // AgentOptions:
 //   Brain:           eng
-//   Graph:           kg (optional; must wrap Brain) adds the graph tools
+//   BrainWriteKinds: the kinds the save tool may write (none: no save tool)
 //   SearchNamespace:  from brain.ParseNamespace("org", orgID) (required with Brain)
 //   SearchPrincipals: the caller's user and group ids (checked against Readers)
 //   IndexReaders:     a file's source ACL for index_file (optional)
@@ -805,8 +767,8 @@ if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 // events. The host's own pipeline keeps brain rows current.
 ```
 
-Optional knobs: `WithReranker` (reorders up to `CandidateK` parents before the page cut),
-`WithExpandRecipes` (named expand templates), `WithConfig` (`CandidateK`, `EvidenceN`, `SnippetCap`, `DefaultLimit`, `MaxLimit`, expand and path limits).
+Optional knobs: `WithReranker(func(ctx, query, objects))` (reorders or drops the objects among the first `CandidateK` results for the query, before the page cut; without it, the fused order stands),
+`WithIndex` (another index), `WithConfig` (`CandidateK`, `EvidenceN`, `SnippetCap`, `DefaultLimit`, `MaxLimit`, `SiblingRadius`, `GraphNeighborK`, `MaxExpandHops`, `MaxResultSetSize`, `FailOnGraphError`).
 Ranking knobs live on the backend that ranks: `brain.Ranking` (`RRFk`, `Decay`)
 on the store and on the graph.
 
@@ -833,7 +795,7 @@ pieces for that:
 |---------------------|--------|
 | No batching or bounded embedding | `brain.Embedding`: `Embed`, `EmbedOne`, and `EmbedBatches(ctx, parts, reuse, stage)`, which embeds a stream of parts in bounded concurrent batches, skips the ids `reuse` reports, and hands each batch to `stage` |
 | No hybrid fusion or recency decay | `brain.Ranking`: `Fuse(lists...)` and `FuseEdges(lists...)` (decay by `UpdatedAt`, then RRF) |
-| No native filters | `brain.CompileFilter(f)` → `FilterPlan`: `Match(obj)` evaluates the filter in process, `Conditions()` lists the field, operator and values to translate into the database's own predicates, and `FilterValueKey` gives a typed key for a property value |
+| No native filters | `f.Compile()` (a `brain.Filter`) → `FilterPlan`: `Match(obj)` evaluates the filter in process, `Conditions()` lists the field, operator and values to translate into the database's own predicates, and `FilterValueKey` gives a typed key for a property value |
 | No scope or readers check | `Scope.CanRead(obj)` and `Namespace.Covers` give the rule every backend applies |
 
 A backend proves itself with the contracts: `storetest.Run(t, newStore)` and
@@ -850,21 +812,21 @@ search. `MemoryStore`, `postgres.Store` and `helixgraph.Graph` pass them.
 |-----------|----------|
 | Empty namespace | Every Engine and store call fails with `ErrInvalid`. `AgentOptions.Validate` rejects `Brain` without `SearchNamespace`. |
 | Wrong namespace | `Get` / search look like not found. Graph ids that fail hydrate are dropped. A coarser scope (fewer attrs) in the same tenant sees objects with extra attrs; another tenant sees nothing. |
-| Id held by another tenant | `Put` / `PutTree` / `SoftDelete` return `ErrNotFound` and change nothing. |
-| Object with `Readers` | Visible only to a scope whose `Principals` include one of them. `vfsindex.MountIndexer.Readers` (or `AgentOptions.IndexReaders`) sets them from source sharing; a sharing change re-indexes the file. The graph node carries the readers too. For a caller who cannot read the object, `find_objects` does not rank it, `find_links` does not rank an edge that touches it, and `expand` and paths do not go through it. A tenant-wide search still ranks from the index while at most `helixgraph.Options.MaxOverfetch` (256) such objects or edges are in the tenant; past that, Helix ranks within the readable candidates. |
+| Id held by another tenant | `Save` / `PutTree` / `SoftDelete` return `ErrNotFound` and change nothing. |
+| Object with `Readers` | Visible only to a scope whose `Principals` include one of them. `vfsindex.MountIndexer.Readers` (or `AgentOptions.IndexReaders`) sets them from source sharing; a sharing change re-indexes the file. The graph node carries the readers too. For a caller who cannot read the object, the graph does not rank it or an edge that touches it, and `related` does not walk through it. A tenant-wide search still ranks from the index while at most `helixgraph.Options.MaxOverfetch` (256) such objects or edges are in the tenant; past that, Helix ranks within the readable candidates. |
 | Re-index fails midway | `PutTree` stages new parts, which no read or search sees, and swaps them in with one short commit, so the previous version stays. `PurgeDeleted` drops staged parts that never committed. |
 | Two writes of one tree | The commit that reads an older tree revision returns `ErrConflict` and changes nothing. |
 | Embedding model change | A backend's vector search only compares rows from its `Embedder.Model()`. Rows from the old model drop out of the dense channel, and the next re-index embeds those parts again. |
 | Retention and erasure | `PurgeDeleted`, `PurgeSessionMessages`, and `Erase` hard-delete under a scope. `Erase` erases every index (the graph) by scope first, then the store, so a failed erase leaves the store intact and running it again finishes the erase everywhere. |
 | Audit | `WithAudit(store.Record)` records every served read and write; a failed record fails the operation. |
-| Soft-deleted object | Hidden from Get, search, find_exact, and find_objects. `unindex` does this for an indexed file. There is no separate expired flag. A row stays in search until that delete, or until a property filter excludes it. |
+| Soft-deleted object | Hidden from Get, open, search, and related. `unindex` does this for an indexed file. There is no separate expired flag. A row stays in search until that delete, or until a property filter excludes it. |
 | No embedder | A backend without an `Embedder` ranks words only. |
 | Embedder down at **query** time | The backend logs the error and answers by the query's words. |
-| Embedder down at **Put** time | **Fail closed.** The write fails and leaves no unindexed row. A session-message save still saves, without vectors. |
-| Graph down at expand | Can degrade to containment if containment was requested. |
-| No graph | The host does not build a `KnowledgeGraph`, so the graph tools are not registered and the engine has no graph methods. `Engine.Expand` with a relation type returns `ErrUnsupported`. |
-| Index write fails after the store write | The row stays (source of truth) and the write is audited; the error wraps `ErrIndexPut` (or `ErrIndexRemove` for a delete, which leaves the row). Re-Put after fixing the index. |
-| Invalid `Put` | Validate error; no leftover object. |
+| Embedder down at **Save** time | **Fail closed.** The write fails and leaves no unindexed row. A session-message save still saves, without vectors. |
+| Graph down at search or related | The error is logged and the store's results return, unless `FailOnGraphError`. |
+| No graph | Search and related use the store only. `Engine.Link` returns `ErrUnsupported` and the `link` tool is not registered. |
+| Index write fails after the store write | The row stays (source of truth) and the write is audited; the error wraps `ErrIndexPut` (or `ErrIndexRemove` for a delete, which leaves the row). Save again after fixing the index. |
+| Invalid `Save` | Validate error; no leftover object. |
 
 ---
 
@@ -874,15 +836,15 @@ search. `MemoryStore`, `postgres.Store` and `helixgraph.Graph` pass them.
 |------|------------|
 | Object + search types | `brain/types.go` |
 | Engine construct / config | `brain/engine.go` |
-| Corpus search / exact / continue | `brain/search.go` |
+| Search, source fusion | `brain/search.go` |
+| Pages, facets, `Next` | `brain/results.go` |
 | RRF + temporal decay for backends (`Ranking`) | `brain/rank.go` |
 | Batched embedding for backends (`Embedding`) | `brain/embed.go` |
 | In-process filter evaluation (`FilterPlan`) | `brain/filter_plan.go` |
 | Parent promotion + evidence | `brain/promote.go` |
-| Entity find | `brain/find_objects.go` |
-| Edge find | `brain/find_links.go` |
-| Expand / recipes | `brain/expand.go` |
-| Put / Link / index text | `brain/write.go` |
+| Open / Resolve / Get | `brain/open.go` |
+| Related | `brain/related.go` |
+| Save / Link / index text | `brain/write.go` |
 | Kind catalog | `brain/kind.go` |
 | Store interface | `brain/store.go` |
 | In-process store | `brain/memory.go` |
@@ -897,7 +859,7 @@ search. `MemoryStore`, `postgres.Store` and `helixgraph.Graph` pass them.
 | Index tools | `tools_vfsindex.go` |
 
 Tests are outcome-oriented integration tests (in-memory Engine + local VFS
-jail). We assert what *should* happen (write visible as an object, expand
+jail). We assert what *should* happen (write visible as an object, related
 returns paths), not that a private helper was called.
 
 ---
@@ -918,7 +880,7 @@ returns paths), not that a private helper was called.
 |------|---------|
 | **Host** | The application that constructs the engine, kinds, mounts, and agent |
 | **Agent** | The model plus harness-injected tools |
-| **Brain / Engine** | The knowledge facade: `Put`, search, expand, link |
+| **Brain / Engine** | The knowledge facade: search, open, related, save, link |
 | **Store** | Durable object rows (Postgres or in-memory) |
 | **Graph** | Parent nodes + labeled edges (Helix or in-memory) |
 | **Kind / Domain** | A host-registered object type (`KindSpec`). Same idea; “domain” is the product word, “kind” is the field name |
@@ -930,10 +892,10 @@ returns paths), not that a private helper was called.
 | **Namespace** | Ordered named attrs. Host ceiling on options; tools pass extra attrs per call. `Covers` RLS |
 | **Scope** | The engine’s view of that namespace on a call |
 | **`vfs_path`** | Absolute virtual path stored on an object so tools can speak paths |
-| **Evidence** | Chunks that justified a parent `search` hit |
-| **Result set** | Ordered ids from the last search, paged by `continue` |
+| **Evidence** | Chunks that justified a record's `search` hit |
+| **Rest** | The rest of a ranked list (ids, scores, evidence), paged by `more` |
 | **Containment** | Parent/child via `parent_id` (not a graph edge) |
 | **RRF** | Reciprocal Rank Fusion — merges ranked lists without mixing raw scores |
 | **Helix** | Optional graph database used through `brain/helixgraph` |
 | **IndexPath** | Single function that mirrors one artifact path into Document + Chunks |
-| **Fail closed** | A bad write or a failed embed on `Put` does not leave a half-object |
+| **Fail closed** | A bad write or a failed embed on `Save` does not leave a half-object |

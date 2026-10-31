@@ -2,7 +2,6 @@ package brain
 
 import (
 	"context"
-	"slices"
 	"strings"
 	"time"
 
@@ -21,12 +20,6 @@ type EdgeMeta struct {
 	UpdatedAt  time.Time  `json:"updated_at,omitempty"`
 }
 
-// IsZero reports whether meta carries no meaningful fields.
-func (m EdgeMeta) IsZero() bool {
-	return m.Note == "" && m.Status == "" && m.Role == "" && m.Confidence == 0 &&
-		m.EvidenceID == nil && m.CreatedAt.IsZero() && m.UpdatedAt.IsZero()
-}
-
 // Edge directions, as seen from the object a walk leaves.
 const (
 	DirectionOut  = "out"
@@ -41,7 +34,7 @@ type NeighborhoodQuery struct {
 	Namespace  Namespace
 	Principals []string
 	ObjectID   uuid.UUID
-	Relations  []string // required edge labels
+	Relations  []string // edge labels to follow; empty follows every relation
 	Direction  string   // DirectionOut, DirectionIn or DirectionBoth (the default)
 	MaxHops    int
 	Limit      int
@@ -67,7 +60,7 @@ type GraphEdge struct {
 	Meta         EdgeMeta
 }
 
-// ObjectSearch is one entity search over a graph's nodes (find_objects).
+// ObjectSearch is one entity search over a graph's nodes.
 type ObjectSearch struct {
 	// Namespace and Principals limit the ranking as Scope.CanRead does: only
 	// nodes they can read rank.
@@ -80,13 +73,14 @@ type ObjectSearch struct {
 	Limit   int
 }
 
-// LinkSearch is one edge search on one relation (find_links). Query matches
-// the edge note.
+// LinkSearch is one edge search. Query matches the edge note.
 type LinkSearch struct {
 	// Namespace and Principals limit the ranking: only an edge Namespace
 	// covers whose two ends they can read (as Scope.CanRead decides) ranks.
-	Namespace    Namespace
-	Principals   []string
+	Namespace  Namespace
+	Principals []string
+	// RelationType names one relation; empty searches every relation the
+	// graph indexes.
 	RelationType string
 	Query        string
 	Limit        int
@@ -99,17 +93,6 @@ type EdgeSearchHit struct {
 	RelationType string
 	Meta         EdgeMeta
 	Score        float64
-}
-
-// PathQuery asks for the fewest-hop path From→To through objects Namespace
-// and Principals can read, as Scope.CanRead decides.
-type PathQuery struct {
-	Namespace    Namespace
-	Principals   []string
-	From, To     uuid.UUID
-	RelationType string // optional; empty follows every relation
-	Direction    string // DirectionOut, DirectionIn or DirectionBoth
-	MaxDepth     int
 }
 
 // Index receives every committed write of a first-class object: Engine
@@ -126,8 +109,8 @@ type Index interface {
 	Erase(ctx context.Context, scope Scope) error
 }
 
-// Graph is the knowledge graph KnowledgeGraph links and walks objects in: a node
-// per first-class object and labeled edges between them. A backend owns its
+// Graph is the knowledge graph Engine links and walks objects in (WithGraph):
+// a node per first-class object and labeled edges between them. A backend owns its
 // retrieval: its Embedder (node text and edge notes), channels, ranking and
 // fusion, filters, and the scope and readers rules. helixgraph implements
 // it, and brain/graphtest is the contract a graph must pass. A backend
@@ -152,57 +135,22 @@ type Graph interface {
 	// FindObjects returns the readable nodes that pass q.Filters, best
 	// first, at most q.Limit.
 	FindObjects(ctx context.Context, q ObjectSearch) ([]ScoredID, error)
-	// FindLinks returns the readable edges of q.RelationType, best first,
-	// at most q.Limit.
+	// FindLinks returns the readable edges of q.RelationType (every indexed
+	// relation when it is empty), best first, at most q.Limit.
 	FindLinks(ctx context.Context, q LinkSearch) ([]EdgeSearchHit, error)
 	// Neighborhood walks breadth-first from q.ObjectID. Each object appears
 	// once, at its smallest depth; the start never appears. Results are
 	// ordered by depth, then relation (request order), then outbound first.
+	// Empty Relations follows every relation.
 	Neighborhood(ctx context.Context, q NeighborhoodQuery) ([]GraphNeighbor, error)
-	// ShortestPath returns the object ids of the path, From first and To
-	// last, or none when no path within MaxDepth has every object readable.
-	// A path through an object the query cannot read is not taken.
-	ShortestPath(ctx context.Context, q PathQuery) ([]uuid.UUID, error)
 }
 
-// normalizeDirection returns d as DirectionOut, DirectionIn or DirectionBoth.
-func normalizeDirection(d string) string {
-	switch d = strings.ToLower(strings.TrimSpace(d)); d {
-	case DirectionOut, DirectionIn:
-		return d
-	default:
-		return DirectionBoth
-	}
-}
-
-// IsContainmentRelation is true for contains / part_of (and partof).
-func IsContainmentRelation(rel string) bool {
+// isContainment reports whether rel names containment (contains / part_of).
+func isContainment(rel string) bool {
 	switch strings.ToLower(strings.TrimSpace(rel)) {
 	case "contains", "part_of", "partof":
 		return true
 	default:
 		return false
 	}
-}
-
-// SplitRelationTypes returns whether containment apply and remaining graph labels.
-// Empty input means containment-only.
-func SplitRelationTypes(rels []string) (wantContainment bool, graphLabels []string) {
-	if len(rels) == 0 {
-		return true, nil
-	}
-	for _, r := range rels {
-		r = strings.TrimSpace(r)
-		switch {
-		case r == "":
-		case IsContainmentRelation(r):
-			wantContainment = true
-		case !slices.ContainsFunc(graphLabels, func(l string) bool { return strings.EqualFold(l, r) }):
-			graphLabels = append(graphLabels, r)
-		}
-	}
-	if !wantContainment && len(graphLabels) == 0 {
-		wantContainment = true
-	}
-	return wantContainment, graphLabels
 }

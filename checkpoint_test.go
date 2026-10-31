@@ -55,11 +55,10 @@ func TestSessionCheckpoint_copyHelpersAndJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v := cp.WithVersion(9)
-	if v.Version() != 9 || cp.Version() != CheckpointVersion {
-		t.Fatalf("version copy: got %d orig %d", v.Version(), cp.Version())
+	if cp.Version() != CheckpointVersion {
+		t.Fatalf("version = %d, want %d", cp.Version(), CheckpointVersion)
 	}
-	mod := v.WithModule("plan", json.RawMessage(`{"x":1}`))
+	mod := cp.WithModule("plan", json.RawMessage(`{"x":1}`))
 	if string(mod.Modules()["plan"]) != `{"x":1}` {
 		t.Fatalf("module = %s", mod.Modules()["plan"])
 	}

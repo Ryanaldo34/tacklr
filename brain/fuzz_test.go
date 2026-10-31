@@ -40,8 +40,8 @@ func FuzzDecodeFilter(f *testing.F) {
 			}
 			return
 		}
-		if _, _, err := brain.FilterSQL(filter, 1); err != nil {
-			t.Fatalf("DecodeFilter accepted %s, but FilterSQL = %v", raw, err)
+		if _, err := filter.Compile(); err != nil {
+			t.Fatalf("DecodeFilter accepted %s, but Compile = %v", raw, err)
 		}
 	})
 }

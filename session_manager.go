@@ -3,7 +3,6 @@ package tacklr
 import (
 	"encoding/json"
 	"fmt"
-	"maps"
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/brain"
@@ -63,14 +62,6 @@ func (s *sessionManager) StateDelete(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.userState, key)
-}
-
-// PendingInterrupt returns an open interrupt for id if any.
-func (s *sessionManager) PendingInterrupt(id string) (Interrupt, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	intr, ok := s.pending[id]
-	return intr, ok
 }
 
 // HasPendingInterrupt reports whether any interrupt is still awaiting a client payload.
@@ -139,27 +130,6 @@ func (s *sessionManager) TakeResolved(id string) (Interrupt, bool) {
 	}
 	delete(s.resolved, id)
 	return intr, true
-}
-
-// Pending returns a clone of open interrupts (checkpoint / ACP translators).
-func (s *sessionManager) Pending() map[string]Interrupt {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out, err := cloneInterruptMap(s.pending)
-	if err != nil {
-		return maps.Clone(s.pending)
-	}
-	return out
-}
-
-// LoadInterruptsJSON restores interrupt maps from checkpoint JSON blobs.
-func (s *sessionManager) LoadInterruptsJSON(pendingJSON, resolvedJSON []byte) error {
-	pending, resolved, err := decodeInterruptMaps(pendingJSON, resolvedJSON)
-	if err != nil {
-		return err
-	}
-	s.replaceInterrupts(pending, resolved)
-	return nil
 }
 
 func decodeInterruptMaps(pendingJSON, resolvedJSON []byte) (interruptMap, interruptMap, error) {
