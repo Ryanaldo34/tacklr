@@ -60,11 +60,11 @@ func (b brainTools) ref(ctx context.Context, scope brain.Scope, idOrPath, field 
 
 // page returns the next page of the tool's previous call when more is set,
 // else runs call, and keeps the page's rest for the next more.
-func (b brainTools) page(ctx context.Context, tool string, scope brain.Scope, more bool, limit int, call func() (brain.Page, error)) (string, error) {
+func (b brainTools) page(ctx context.Context, rt *HarnessRuntime, tool string, scope brain.Scope, more bool, limit int, call func() (brain.Page, error)) (string, error) {
 	var page brain.Page
 	var err error
 	if more {
-		rest := b.sc.Rest(tool)
+		rest := rt.rest(tool)
 		if rest.Empty() {
 			return "", fmt.Errorf("no more results; call %s again without more", tool)
 		}
@@ -75,7 +75,7 @@ func (b brainTools) page(ctx context.Context, tool string, scope brain.Scope, mo
 	if err != nil {
 		return "", err
 	}
-	b.sc.SetRest(tool, page.Rest)
+	rt.setRest(tool, page.Rest)
 	return formatBrainJSON(page)
 }
 
@@ -99,7 +99,7 @@ Returns one ranked list. Each result is an object (with evidence snippets when i
 		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
-		Handler: func(ctx context.Context, args searchArgs, runtime HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args searchArgs, runtime *HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Searching knowledge…")
 			scope, err := b.scope(args.Namespace)
 			if err != nil {
@@ -109,7 +109,7 @@ Returns one ranked list. Each result is an object (with evidence snippets when i
 			if err != nil {
 				return "", fmt.Errorf("search: %w", err)
 			}
-			out, err := b.page(ctx, "search", scope, args.More, args.Limit, func() (brain.Page, error) {
+			out, err := b.page(ctx, runtime, "search", scope, args.More, args.Limit, func() (brain.Page, error) {
 				req := brain.SearchRequest{Query: args.Query, Kind: args.Kind, Filters: filters, Limit: args.Limit}
 				if strings.TrimSpace(args.Within) != "" {
 					if req.Within, err = b.ref(ctx, scope, args.Within, "within"); err != nil {
@@ -143,7 +143,7 @@ Returns the object with its content, its kind (with the fields a search can filt
 		Category: ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
-		Handler: func(ctx context.Context, args openArgs, runtime HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args openArgs, runtime *HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Opening knowledge…")
 			scope, err := b.scope(args.Namespace)
 			if err != nil {
@@ -181,13 +181,13 @@ Returns one list; each result's relation says how it is related (child, parent, 
 		Category: ToolCategoryFetch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
-		Handler: func(ctx context.Context, args relatedArgs, runtime HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args relatedArgs, runtime *HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Listing related knowledge…")
 			scope, err := b.scope(args.Namespace)
 			if err != nil {
 				return "", fmt.Errorf("related: %w", err)
 			}
-			out, err := b.page(ctx, "related", scope, args.More, args.Limit, func() (brain.Page, error) {
+			out, err := b.page(ctx, runtime, "related", scope, args.More, args.Limit, func() (brain.Page, error) {
 				id, err := b.ref(ctx, scope, args.Ref, "ref")
 				if err != nil {
 					return brain.Page{}, err
@@ -222,7 +222,7 @@ Returns the saved record. Fails if title is empty, kind is not one of the kinds 
 		Category: ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
-		Handler: func(ctx context.Context, args saveArgs, runtime HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args saveArgs, runtime *HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Saving knowledge…")
 			kind := strings.TrimSpace(args.Kind)
 			if !slices.Contains(kinds, kind) {
@@ -286,7 +286,7 @@ Linking the same pair again updates the note. Removing a link that is absent suc
 		Category: ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
-		Handler: func(ctx context.Context, args linkArgs, runtime HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args linkArgs, runtime *HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Linking knowledge…")
 			scope, err := b.scope(args.Namespace)
 			if err != nil {

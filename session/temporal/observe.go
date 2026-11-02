@@ -45,7 +45,3 @@ func startTurn(ctx workflow.Context, agentID string, sessionID session.SessionID
 		)
 	}
 }
-
-func logInfo(ctx workflow.Context, msg string, keyvals ...any) {
-	workflow.GetLogger(ctx).Info(msg, keyvals...)
-}

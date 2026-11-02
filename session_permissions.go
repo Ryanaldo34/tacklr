@@ -41,21 +41,11 @@ func (p *permissions) Decision(name string) permissionDecision {
 	return permNone
 }
 
-// rememberAnswer stores the always-answer a resolved permission prompt
-// carries; a once-answer is not remembered.
-func (p *permissions) rememberAnswer(perm *ToolPermissionInterrupt) {
-	var d permissionDecision
-	switch perm.SelectedKind {
-	case PermissionAllowAlways:
-		d = permAllowAlways
-	case PermissionRejectAlways:
-		d = permDenyAlways
-	default:
-		return
-	}
+// set records a decision for the tool qualified-named name.
+func (p *permissions) set(name string, d permissionDecision) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.decisions[perm.ToolName] = d
+	p.decisions[name] = d
 }
 
 func (p *permissions) snapshot() map[string]permissionDecision {

@@ -247,10 +247,10 @@ func upsertObject(scope brain.Scope, obj brain.Object) (string, []any, error) {
 		WHERE objects.tenant = ($16::jsonb)->0 AND objects.namespace @> $16::jsonb
 		  AND (cardinality(objects.readers) = 0 OR objects.readers && $17::text[])
 		RETURNING ` + objectSelectCols, []any{
-			obj.ID, obj.Kind, obj.Title, obj.Summary, obj.Properties, obj.Content, obj.ContentType,
-			obj.ParentID, obj.Position, obj.Embedding, model, obj.Namespace, obj.Readers,
-			cmp.Or(obj.CreatedAt, now), cmp.Or(obj.UpdatedAt, now), scope.Namespace, scope.Principals,
-		}, nil
+		obj.ID, obj.Kind, obj.Title, obj.Summary, obj.Properties, obj.Content, obj.ContentType,
+		obj.ParentID, obj.Position, obj.Embedding, model, obj.Namespace, obj.Readers,
+		cmp.Or(obj.CreatedAt, now), cmp.Or(obj.UpdatedAt, now), scope.Namespace, scope.Principals,
+	}, nil
 }
 
 // SoftDelete implements brain.Store: id and its parts.

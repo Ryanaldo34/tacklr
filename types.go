@@ -120,48 +120,20 @@ type Job struct {
 	Result string
 }
 
-// JobRequest is Schedule input. Name is a specialist or a Runtime job worker.
+// JobRequest is Schedule input. Name is a Runtime job worker.
 type JobRequest struct {
 	Name string
 	Task string
+	// Wait makes the call wait for the job: the job's output is the call's
+	// result. Without it the call goes on, and the output arrives later as
+	// an inbox message.
+	Wait bool
 }
 
 // JobRunning is a listed job's state. Jobs lists only running jobs: a
 // finished one leaves the list when its result arrives. A specialist child
 // waiting for input stays running.
 const JobRunning = "running"
-
-// HarnessRuntime is the tool-facing hook for one harness turn.
-// Tools emit progress, read/write user session state, Park, and
-// run specialists or schedule jobs of this session. The plan and permission
-// memory are not on this interface.
-//
-// Built-in spawn_specialist / list_children / cancel_child call these.
-// Host tools may call them too. The loop never matches those tool names.
-type HarnessRuntime interface {
-	EmitUpdate(message string)
-	StateGet(key string) (any, bool)
-	StateSet(key string, value any) error
-	StateDelete(key string)
-	// Park parks this tool call on an interrupt of kind and returns it as
-	// the error. The call's run after Resume gets the answered interrupt and
-	// a nil error.
-	Park(kind string, payload []byte) (Interrupt, error)
-	CurrentToolCallID() string
-
-	// RunSpecialist queues a blocking specialist session. The session loop
-	// waits for it, and its result becomes this tool call's result. This is
-	// not a background job: no inbox message.
-	RunSpecialist(ctx context.Context, name, task string) error
-	// Schedule starts a job of this session. It does not wait.
-	// Name is a registered specialist or Runtime job worker. The result
-	// arrives later as an inbox message. Pass the id to Jobs or CancelJob.
-	Schedule(ctx context.Context, job JobRequest) (Job, error)
-	// Jobs lists this session's jobs. Waiting specialist children appear as running.
-	Jobs() []Job
-	// CancelJob stops one job of this session and drops it from Jobs.
-	CancelJob(ctx context.Context, id string) error
-}
 
 // RegisterInterrupt registers a custom interrupt factory for session rehydrate.
 func RegisterInterrupt(factory func() Interrupt) {

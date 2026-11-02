@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
+
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 type createTodosArgs struct {
@@ -44,7 +47,7 @@ var askUserChoiceTool = NewTool(ToolConfig{
 	DisplayName: "Ask: {question}",
 	Description: "Park the turn and ask the user a multiple-choice question when you need a discrete decision before continuing. Returns the selected title (and description when one was given) after the user answers. Fails if the question is empty or fewer than two distinct choice titles are provided.",
 	Category:    ToolCategoryThink,
-	Handler: func(ctx context.Context, args askUserChoiceArgs, runtime HarnessRuntime) (string, error) {
+	Handler: func(ctx context.Context, args askUserChoiceArgs, runtime *HarnessRuntime) (string, error) {
 		if strings.TrimSpace(args.Question) == "" {
 			return "", fmt.Errorf("question is required")
 		}
@@ -92,54 +95,32 @@ var askUserChoiceTool = NewTool(ToolConfig{
 	},
 })
 
-func newCreatePlanTool(sm *sessionManager) *Tool {
+func newCreatePlanTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "create_plan",
 		DisplayName: "Create Plan",
 		Description: "Install the project's plan and the linear todo list derived from it. Call once at the start of multi-step work. On success returns \"Plan created successfully\", installs the plan in context, marks the first incomplete todo in-progress, and unlocks write and command tools. Fails if a plan already exists, plan text is empty, or todos is empty.",
 		Category:    ToolCategoryThink,
-		Handler: func(ctx context.Context, args createTodosArgs) (ToolOutcome, error) {
+		Handler: func(ctx context.Context, args createTodosArgs, rt *HarnessRuntime) (ToolOutcome, error) {
 			if strings.TrimSpace(args.Plan) == "" {
 				return ToolOutcome{}, fmt.Errorf("plan document text is required")
 			}
 			if len(args.Todos) == 0 {
 				return ToolOutcome{}, fmt.Errorf("plan must include at least one todo")
 			}
-			todos := slices.Clone(args.Todos)
-			started := false
-			for i := range todos {
-				if todos[i].Status == TodoStatusCompleted {
-					continue
-				}
-				if !started {
-					todos[i].Status = TodoStatusInProgress
-					started = true
-				} else if todos[i].Status == "" {
-					todos[i].Status = TodoStatusPending
-				}
-			}
-			err := sm.Plan.Change(func(existing []Todo, _ string) ([]Todo, string, error) {
-				if len(existing) > 0 {
-					return nil, "", fmt.Errorf("an active plan already exists (%d todos); use edit_plan to modify it or complete_todo to progress — do not call create_plan again", len(existing))
-				}
-				return todos, args.Plan, nil
-			})
-			if err != nil {
-				return ToolOutcome{}, err
-			}
-			return ToolOutcome{Output: "Plan created successfully", Effect: EffectInstallPlanDocument}, nil
+			return rt.changePlan(planOp{Create: &args})
 		},
 	})
 }
 
-func newListPlanTool(sm *sessionManager) *Tool {
+func newListPlanTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "list_plan",
 		DisplayName: "List Plan",
 		Description: "Return the active todo list exactly as stored: titles, statuses, and descriptions, in order. Call after a handoff or whenever titles or statuses are unclear so later plan edits match exactly. Returns the numbered list. Fails if no plan exists yet.",
 		Category:    ToolCategoryRead,
-		Handler: func(ctx context.Context, _ HarnessRuntime) (string, error) {
-			plan := sm.Plan.Get()
+		Handler: func(ctx context.Context, rt *HarnessRuntime) (string, error) {
+			plan, _ := rt.plan()
 			if len(plan) == 0 {
 				return "", fmt.Errorf("no plan exists yet; call create_plan first")
 			}
@@ -156,91 +137,149 @@ func newListPlanTool(sm *sessionManager) *Tool {
 	})
 }
 
-func newCompleteTodoTool(sm *sessionManager) *Tool {
+func newCompleteTodoTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "complete_todo",
 		DisplayName: "Complete {title}",
 		Description: "Mark a todo completed when its acceptance criteria are met. Before closing a research or discovery todo, durable findings and indexed files should already be saved so later work can find them. If open todos remain, the next incomplete item is marked in-progress, a handoff is written into context, and the return names the todo now starting. If this was the last open todo, returns that all todos completed and leaves context intact so you can give the user-facing answer. Fails if no plan exists, the title is missing from the plan, or the todo is already completed. If the handoff cannot save the current window as session messages, the todo stays completed and the current window stays in place.",
 		Category:    ToolCategoryEdit,
-		Handler: func(ctx context.Context, args completeTodoArgs) (ToolOutcome, error) {
-			var out ToolOutcome
-			err := sm.Plan.Change(func(plan []Todo, doc string) ([]Todo, string, error) {
-				if plan == nil {
-					return nil, "", fmt.Errorf("no plan exists yet; call create_plan first")
-				}
-				i := slices.IndexFunc(plan, func(t Todo) bool { return t.Title == args.Title })
-				if i < 0 {
-					return nil, "", fmt.Errorf("todo %q not found in plan; call list_plan and use an exact title", args.Title)
-				}
-				if plan[i].Status == TodoStatusCompleted {
-					return nil, "", fmt.Errorf("todo %q is already completed; call list_plan and pick a pending title", args.Title)
-				}
-				plan[i].Status = TodoStatusCompleted
-				// Handoff only when another open todo must be picked up. Completing
-				// the final item leaves context intact so the agent can wrap up.
-				out = ToolOutcome{Output: "All todos completed successfully"}
-				for j := i + 1; j < len(plan); j++ {
-					if plan[j].Status != TodoStatusCompleted {
-						plan[j].Status = TodoStatusInProgress
-						out = ToolOutcome{
-							Output: fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[j].Title, plan[j].Description),
-							Effect: EffectHandoff,
-						}
-						break
-					}
-				}
-				return plan, doc, nil
-			})
-			return out, err
+		Handler: func(ctx context.Context, args completeTodoArgs, rt *HarnessRuntime) (ToolOutcome, error) {
+			return rt.changePlan(planOp{Complete: &args})
 		},
 	})
 }
 
-func newEditPlanTool(sm *sessionManager) *Tool {
+func newEditPlanTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "edit_plan",
 		DisplayName: "Edit Plan",
 		Description: "Change an existing plan's todos and, when needed, the plan document. On success returns \"Plan edited successfully\". If the plan document text changed, a handoff is written into context for remaining work. Fails if no plan exists, the plan document is unchanged, a delete title is missing, a completed todo is deleted, or order is out of bounds.",
 		Category:    ToolCategoryEdit,
-		Handler: func(ctx context.Context, args editTodosArgs) (ToolOutcome, error) {
-			revised := strings.TrimSpace(args.Plan)
-			err := sm.Plan.Change(func(plan []Todo, doc string) ([]Todo, string, error) {
-				if plan == nil {
-					return nil, "", fmt.Errorf("no plan exists yet; call create_plan first")
-				}
-				if revised != "" && revised == strings.TrimSpace(doc) {
-					return nil, "", fmt.Errorf("plan document is unchanged; omit plan or provide a revised full plan")
-				}
-				for _, todo := range args.ToAdd {
-					if todo.Order < 0 || todo.Order > len(plan) {
-						return nil, "", fmt.Errorf("order %d is out of bounds (plan has %d items)", todo.Order, len(plan))
-					}
-					plan = slices.Insert(plan, todo.Order, todo.Todo)
-				}
-				for _, title := range args.ToDelete {
-					i := slices.IndexFunc(plan, func(t Todo) bool { return t.Title == title })
-					if i < 0 {
-						return nil, "", fmt.Errorf("todo %q not found in plan", title)
-					}
-					if plan[i].Status == TodoStatusCompleted {
-						return nil, "", fmt.Errorf("cannot delete completed todo: %q", title)
-					}
-					plan = slices.Delete(plan, i, i+1)
-				}
-				if revised != "" {
-					doc = args.Plan
-				}
-				return plan, doc, nil
-			})
-			if err != nil {
-				return ToolOutcome{}, err
-			}
-			// A revised document hands off the remaining work.
-			effect := EffectNone
-			if revised != "" {
-				effect = EffectHandoff
-			}
-			return ToolOutcome{Output: "Plan edited successfully", Effect: effect}, nil
+		Handler: func(ctx context.Context, args editTodosArgs, rt *HarnessRuntime) (ToolOutcome, error) {
+			return rt.changePlan(planOp{Edit: &args})
 		},
 	})
+}
+
+// planOp is one plan tool's change as its call's outcome carries it: the
+// tool's arguments. A plan change is a function of the plan and the
+// arguments, so Commit replays it on the committed plan in call order and
+// plan changes of calls that ran at once all land. One field is set.
+type planOp struct {
+	Create   *createTodosArgs  `json:"create,omitempty"`
+	Complete *completeTodoArgs `json:"complete,omitempty"`
+	Edit     *editTodosArgs    `json:"edit,omitempty"`
+}
+
+// planChange maps the plan to the new plan and the tool's outcome.
+type planChange func(todos []Todo, doc string) ([]Todo, string, ToolOutcome, error)
+
+// change is op's plan change.
+func (op planOp) change() planChange {
+	switch {
+	case op.Create != nil:
+		return createPlanChange(*op.Create)
+	case op.Complete != nil:
+		return completeTodoChange(*op.Complete)
+	default:
+		return editPlanChange(*op.Edit)
+	}
+}
+
+// replayPlanOp applies op to the committed plan. The plan it ran against
+// may have changed since (another call of the round changed it first): a
+// change that no longer applies is skipped.
+func (s *sessionManager) replayPlanOp(op planOp) {
+	change := op.change()
+	err := s.Plan.Change(func(todos []Todo, doc string) ([]Todo, string, error) {
+		next, nextDoc, _, err := change(todos, doc)
+		return next, nextDoc, err
+	})
+	if err != nil {
+		slog.Warn("plan change skipped at commit", "area", telemetry.AreaHarness, "error", err)
+	}
+}
+
+func createPlanChange(args createTodosArgs) planChange {
+	return func(existing []Todo, _ string) ([]Todo, string, ToolOutcome, error) {
+		if len(existing) > 0 {
+			return nil, "", ToolOutcome{}, fmt.Errorf("an active plan already exists (%d todos); use edit_plan to modify it or complete_todo to progress — do not call create_plan again", len(existing))
+		}
+		todos := slices.Clone(args.Todos)
+		started := false
+		for i := range todos {
+			if todos[i].Status == TodoStatusCompleted {
+				continue
+			}
+			if !started {
+				todos[i].Status = TodoStatusInProgress
+				started = true
+			} else if todos[i].Status == "" {
+				todos[i].Status = TodoStatusPending
+			}
+		}
+		return todos, args.Plan, ToolOutcome{Output: "Plan created successfully", Effect: EffectInstallPlanDocument}, nil
+	}
+}
+
+func completeTodoChange(args completeTodoArgs) planChange {
+	return func(plan []Todo, doc string) ([]Todo, string, ToolOutcome, error) {
+		if plan == nil {
+			return nil, "", ToolOutcome{}, fmt.Errorf("no plan exists yet; call create_plan first")
+		}
+		i := slices.IndexFunc(plan, func(t Todo) bool { return t.Title == args.Title })
+		if i < 0 {
+			return nil, "", ToolOutcome{}, fmt.Errorf("todo %q not found in plan; call list_plan and use an exact title", args.Title)
+		}
+		if plan[i].Status == TodoStatusCompleted {
+			return nil, "", ToolOutcome{}, fmt.Errorf("todo %q is already completed; call list_plan and pick a pending title", args.Title)
+		}
+		plan[i].Status = TodoStatusCompleted
+		// Handoff only when another open todo must be picked up. Completing
+		// the final item leaves context intact so the agent can wrap up.
+		for j := i + 1; j < len(plan); j++ {
+			if plan[j].Status != TodoStatusCompleted {
+				plan[j].Status = TodoStatusInProgress
+				return plan, doc, ToolOutcome{
+					Output: fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[j].Title, plan[j].Description),
+					Effect: EffectHandoff,
+				}, nil
+			}
+		}
+		return plan, doc, ToolOutcome{Output: "All todos completed successfully"}, nil
+	}
+}
+
+func editPlanChange(args editTodosArgs) planChange {
+	revised := strings.TrimSpace(args.Plan)
+	return func(plan []Todo, doc string) ([]Todo, string, ToolOutcome, error) {
+		if plan == nil {
+			return nil, "", ToolOutcome{}, fmt.Errorf("no plan exists yet; call create_plan first")
+		}
+		if revised != "" && revised == strings.TrimSpace(doc) {
+			return nil, "", ToolOutcome{}, fmt.Errorf("plan document is unchanged; omit plan or provide a revised full plan")
+		}
+		for _, todo := range args.ToAdd {
+			if todo.Order < 0 || todo.Order > len(plan) {
+				return nil, "", ToolOutcome{}, fmt.Errorf("order %d is out of bounds (plan has %d items)", todo.Order, len(plan))
+			}
+			plan = slices.Insert(plan, todo.Order, todo.Todo)
+		}
+		for _, title := range args.ToDelete {
+			i := slices.IndexFunc(plan, func(t Todo) bool { return t.Title == title })
+			if i < 0 {
+				return nil, "", ToolOutcome{}, fmt.Errorf("todo %q not found in plan", title)
+			}
+			if plan[i].Status == TodoStatusCompleted {
+				return nil, "", ToolOutcome{}, fmt.Errorf("cannot delete completed todo: %q", title)
+			}
+			plan = slices.Delete(plan, i, i+1)
+		}
+		// A revised document hands off the remaining work.
+		out := ToolOutcome{Output: "Plan edited successfully"}
+		if revised != "" {
+			doc, out.Effect = args.Plan, EffectHandoff
+		}
+		return plan, doc, out, nil
+	}
 }

@@ -36,7 +36,7 @@ const (
 // Allows reports whether a includes p.
 func (a ToolAccess) Allows(p ToolPermission) bool { return a&ToolAccess(p) != 0 }
 
-type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
+type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (string, error)
 
 // Tool is a registered harness tool. Construct with NewTool(ToolConfig{...}).
 // Fields are unexported; hosts read metadata through the getters below.
@@ -52,7 +52,7 @@ type Tool struct {
 	// onCall is the pre-invoke middleware stack. Each constructor may park.
 	onCall []OnCallFunc
 
-	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (ToolOutcome, error)
+	handlerFunc func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (ToolOutcome, error)
 	parameters  map[string]any
 	strict      bool
 }
@@ -110,7 +110,7 @@ type mcpToolConfig struct {
 }
 
 var timeType = reflect.TypeOf(time.Time{})
-var harnessRuntimeType = reflect.TypeOf((*HarnessRuntime)(nil)).Elem()
+var harnessRuntimeType = reflect.TypeOf((*HarnessRuntime)(nil))
 var ctxType = reflect.TypeOf((*context.Context)(nil)).Elem()
 
 func NewTool(cfg ToolConfig) *Tool {
@@ -160,12 +160,12 @@ func NewTool(cfg ToolConfig) *Tool {
 				if idx < numIn {
 					rType := fnType.In(idx)
 					if rType != harnessRuntimeType {
-						panic(fmt.Sprintf("tool %q: unexpected parameter type %v (want HarnessRuntime)", cfg.Name, rType))
+						panic(fmt.Sprintf("tool %q: unexpected parameter type %v (want *HarnessRuntime)", cfg.Name, rType))
 					}
 					hasRuntime = true
 				}
 			} else {
-				panic(fmt.Sprintf("tool %q: handler parameter must be a struct or HarnessRuntime, got %v", cfg.Name, pType))
+				panic(fmt.Sprintf("tool %q: handler parameter must be a struct or *HarnessRuntime, got %v", cfg.Name, pType))
 			}
 		}
 	}
@@ -204,7 +204,7 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	handlerValue := reflect.ValueOf(cfg.Handler)
-	t.handlerFunc = func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (ToolOutcome, error) {
+	t.handlerFunc = func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (ToolOutcome, error) {
 		var callArgs []reflect.Value
 
 		callArgs = append(callArgs, reflect.ValueOf(ctx))
@@ -271,7 +271,7 @@ func newMCPTool(cfg mcpToolConfig) *Tool {
 		timeout:     cfg.Timeout,
 		strict:      false,
 		parameters:  params,
-		handlerFunc: func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (ToolOutcome, error) {
+		handlerFunc: func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (ToolOutcome, error) {
 			out, err := cfg.Handler(ctx, args, runtime)
 			return ToolOutcome{Output: out}, err
 		},
@@ -303,7 +303,7 @@ func ResolveToolTitle(displayName, toolName, argsJSON string) string {
 
 // invoke runs the tool handler. Only the harness tool runner should call this
 // so interceptors, permissions, and effects apply.
-func (t *Tool) invoke(ctx context.Context, argsJson string, runtime HarnessRuntime) (ToolOutcome, error) {
+func (t *Tool) invoke(ctx context.Context, argsJson string, runtime *HarnessRuntime) (ToolOutcome, error) {
 	res, err := t.invokeRaw(ctx, argsJson, runtime)
 	if err != nil {
 		return res, presentToolError(t.name, err)
@@ -311,7 +311,7 @@ func (t *Tool) invoke(ctx context.Context, argsJson string, runtime HarnessRunti
 	return res, nil
 }
 
-func (t *Tool) invokeRaw(ctx context.Context, argsJson string, runtime HarnessRuntime) (ToolOutcome, error) {
+func (t *Tool) invokeRaw(ctx context.Context, argsJson string, runtime *HarnessRuntime) (ToolOutcome, error) {
 	var args map[string]any
 	if argsJson != "" {
 		if err := json.Unmarshal([]byte(argsJson), &args); err != nil {

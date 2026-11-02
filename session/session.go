@@ -40,7 +40,9 @@ type Mailbox interface {
 // wait, or cancel. The implementation starts and stops the child process.
 type Ledger interface {
 	IDs() []SessionID
-	Start(ToolOutput) error
+	// Start starts and cancels the children an outcome asks for. A child id
+	// comes from its call, so starting a running child again does nothing.
+	Start(tacklr.CallOutcome) error
 	// Await waits for a child and returns its output. failed is a child that
 	// failed; output is then its error.
 	Await(SessionID) (output string, failed bool, err error)

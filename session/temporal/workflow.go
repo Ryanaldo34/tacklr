@@ -131,7 +131,7 @@ func (w *wfExec) Begin(kind string, promptLen, resumes int) {
 	}
 	w.open = true
 	w.sessionCtx, w.pinned = openTurnLocality(w.ctx, w.in.TurnLocalityTimeout, 2*time.Second)
-	logInfo(w.ctx, "turn start",
+	workflow.GetLogger(w.ctx).Info("turn start",
 		"kind", kind, "session_id", w.in.SessionID,
 		"prompt_len", promptLen, "resume_count", resumes,
 	)
@@ -164,25 +164,78 @@ func (w *wfExec) End() {
 	}
 }
 
-func (w *wfExec) Infer(in session.InferenceInput) (session.InferenceOutput, error) {
+// Commit runs to completion: a cancel queued meanwhile stays queued for the
+// turn. A Commit that a cancel abandoned could still save, and the turn
+// would not learn the revision the next Commit's base must be.
+func (w *wfExec) Commit(base session.Revision, in tacklr.CommitIn) (session.Revision, error) {
 	var act *activities
-	var out session.InferenceOutput
-	err := w.waitActivity(act.Inference, in, &out)
+	var rev session.Revision
+	fut := workflow.ExecuteActivity(workflow.WithActivityOptions(w.sessionCtx, w.opts), act.Commit,
+		commitInput{stepSession: w.stepSession(), Base: base, In: in})
+	err := w.stepErr(fut.Get(w.ctx, &rev))
+	return rev, err
+}
+
+func (w *wfExec) Infer() (tacklr.Reply, error) {
+	var act *activities
+	var out tacklr.Reply
+	err := w.waitActivity(act.Inference, w.stepSession(), &out)
 	return out, err
 }
 
-// Tools runs the open round's calls as one activity: one turn world and
-// one snapshot save for every call, which the harness runs concurrently.
-func (w *wfExec) Tools(in session.ToolsInput) ([]session.ToolOutput, error) {
-	var act *activities
-	var out []session.ToolOutput
-	err := w.waitActivity(act.Tools, in, &out)
-	return out, err
+// stepSession is what every activity needs to build the session's world:
+// the runtime holds it for the session, so steps do not carry it.
+func (w *wfExec) stepSession() stepSession {
+	return stepSession{SessionID: w.turn.SessionID, Identity: w.turn.Identity, MCPServers: w.turn.MCP}
 }
 
-func (w *wfExec) Commit(in session.CommitInput) error {
+// Tools runs one Tool activity per run, all at once, and returns a result
+// per run. A queued cancel stops the ones still running.
+func (w *wfExec) Tools(runs []tacklr.ToolRun) []session.ToolResult {
 	var act *activities
-	return w.waitActivity(act.CommitToolOutput, in, nil)
+	actCtx := workflow.WithActivityOptions(w.sessionCtx, w.opts)
+	cctx, cancelAct := workflow.WithCancel(actCtx)
+	defer cancelAct()
+	sess, children := w.stepSession(), w.IDs()
+	futs := make([]workflow.Future, len(runs))
+	for i, run := range runs {
+		futs[i] = workflow.ExecuteActivity(cctx, act.Tool, toolInput{stepSession: sess, Children: children, Run: run})
+	}
+	results := make([]session.ToolResult, len(runs))
+	done := make([]bool, len(runs))
+	left := len(runs)
+	w.fill()
+	cancelled := w.takeCancel()
+	for left > 0 && !cancelled {
+		sel := workflow.NewSelector(w.ctx)
+		for i, fut := range futs {
+			if done[i] {
+				continue
+			}
+			sel.AddFuture(fut, func(f workflow.Future) {
+				results[i].Err = w.stepErr(f.Get(w.ctx, &results[i].Outcome))
+				done[i] = true
+				left--
+			})
+		}
+		sel.AddReceive(w.wakeCh, func(c workflow.ReceiveChannel, more bool) {
+			w.receive(c)
+			cancelled = w.takeCancel()
+		})
+		sel.Select(w.ctx)
+	}
+	if cancelled {
+		// The calls still running stop; each reports the cancel, so the turn
+		// fails on it even when a call's tool returned on its own.
+		cancelAct()
+		for i, fut := range futs {
+			if !done[i] {
+				_ = fut.Get(w.ctx, nil)
+				results[i] = session.ToolResult{Err: context.Canceled}
+			}
+		}
+	}
+	return results
 }
 
 func (w *wfExec) Emit(ev tacklr.StreamEvent) {
@@ -227,11 +280,17 @@ func (w *wfExec) waitActivity(activity any, in, out any) error {
 		cancelAct()
 		err = fut.Get(w.ctx, out)
 	}
-	if err == nil || turnCanceled(w.ctx, err) {
-		if err != nil {
-			return context.Canceled
-		}
+	return w.stepErr(err)
+}
+
+// stepErr is a step's error as the turn sees it: a cancel is
+// context.Canceled, and a failure its message.
+func (w *wfExec) stepErr(err error) error {
+	if err == nil {
 		return nil
+	}
+	if turnCanceled(w.ctx, err) {
+		return context.Canceled
 	}
 	return errors.New(failureText(err))
 }
@@ -352,14 +411,18 @@ func (w *wfExec) IDs() []session.SessionID {
 	return out
 }
 
-// Start cancels and starts the children one call asked for. The harness
-// asks to start only a child that is not running.
-func (w *wfExec) Start(tout session.ToolOutput) error {
-	for _, id := range tout.Cancels {
+// Start cancels and starts the children one call's outcome asks for. A
+// child id comes from its call, so a child already started is not started
+// again.
+func (w *wfExec) Start(o tacklr.CallOutcome) error {
+	for _, id := range o.Cancels {
 		cancelOne(w.ctx, w.spawned, session.SessionID(id))
 	}
-	for _, s := range tout.Starts {
+	for _, s := range o.Starts {
 		id := session.SessionID(s.ID)
+		if findChild(*w.spawned, id) >= 0 {
+			continue
+		}
 		spec, worker := "", s.Name
 		if s.Specialist {
 			spec, worker = s.Name, ""

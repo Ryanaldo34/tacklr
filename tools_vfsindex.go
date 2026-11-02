@@ -45,7 +45,7 @@ Requires an active plan. Returns one status line per path: indexed, skipped (unc
 		Category: ToolCategoryExecute,
 		Access:   ToolWriteAccess,
 		Timeout:  120 * time.Second,
-		Handler: func(ctx context.Context, args indexFileArgs, runtime HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args indexFileArgs, runtime *HarnessRuntime) (string, error) {
 			paths, err := collectIndexPaths(args.Path, args.Paths)
 			if err != nil {
 				return "", err
@@ -98,7 +98,7 @@ func (v vfsIndexTools) newUnindex() *Tool {
 		Category:    ToolCategoryDelete,
 		Access:      ToolWriteAccess,
 		Timeout:     30 * time.Second,
-		Handler: func(ctx context.Context, args unindexArgs, runtime HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args unindexArgs, runtime *HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", err

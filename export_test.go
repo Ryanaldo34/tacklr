@@ -105,14 +105,19 @@ func reloadHarness(t *testing.T, h *TurnManager, opts AgentOptions) *TurnManager
 	return n
 }
 
-// turnRuntime builds a turn-scoped Runtime for tests (events drained).
-func turnRuntime(h *TurnManager) HarnessRuntime {
-	ch := make(chan StreamEvent, 64)
-	go func() {
-		for range ch {
-		}
-	}()
-	return newToolRuntime(ch, h.session, h.jobHost)
+// callRuntime is the runtime of one call, id, on sm (events drained).
+func callRuntime(sm *sessionManager, host JobHost, id string) *HarnessRuntime {
+	return newHarnessRuntime(drainEventCh(), host, sm, roundCall{Call: ToolCall{ID: id, CallID: id}}, callWrites{})
+}
+
+// turnRuntime is the runtime of one call on h.
+func turnRuntime(h *TurnManager) *HarnessRuntime {
+	return callRuntime(h.session, h.jobHost, "")
+}
+
+// commit applies what the call wrote to the committed state, as Commit does.
+func (rt *HarnessRuntime) commit() {
+	rt.session.apply(rt.writes)
 }
 
 func mustNewTurnManager(t testing.TB, opts AgentOptions) *TurnManager {

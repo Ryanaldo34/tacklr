@@ -69,135 +69,122 @@ type activities struct {
 	Jobs           map[string]session.JobHandler
 }
 
+// stepSession is the session an activity builds its world for. The
+// workflow holds it for the session; the generic steps do not carry it.
+type stepSession struct {
+	SessionID  session.SessionID
+	Identity   session.Identity
+	MCPServers []mcp.MCPConfig
+}
+
+// toolInput is one Tool activity: one run of one call. Children are the
+// session's child ids in start order, for the job tools.
+type toolInput struct {
+	stepSession
+	Children []session.SessionID
+	Run      tacklr.ToolRun
+}
+
+// commitInput is one Commit activity. Base is the revision the previous
+// Commit returned (see session.Step).
+type commitInput struct {
+	stepSession
+	Base session.Revision
+	In   tacklr.CommitIn
+}
+
 type runJobInput struct {
 	Name string
 	Task string
 }
 
-func (a *activities) Inference(ctx context.Context, in session.InferenceInput) (session.InferenceOutput, error) {
+// begin starts a step's activity: a heartbeat, the same-process cancel
+// hook, turn telemetry, and the event stream; a retry is logged and
+// published on the retry topic.
+func (a *activities) begin(ctx context.Context, id session.SessionID, name string) (context.Context, *workflowstreams.Client, func()) {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	defer bindLiveTurn(in.SessionID, cancel)()
-	defer startHeartbeat(ctx)()
-	ctx = telemetry.BindTurnContext(ctx, a.Agent.Name, string(in.SessionID))
-	attempt := int32(1)
-	if activity.IsActivity(ctx) {
-		attempt = activity.GetInfo(ctx).Attempt
-	}
-	if attempt > 1 {
-		slog.WarnContext(ctx, "inference retry",
-			"area", telemetry.AreaRuntime, "session_id", in.SessionID,
-			"agent_id", a.Agent.Name, "attempt", attempt)
-	} else {
-		slog.InfoContext(ctx, "inference started",
-			"area", telemetry.AreaRuntime, "session_id", in.SessionID,
-			"agent_id", a.Agent.Name)
-	}
+	unbind := bindLiveTurn(id, cancel)
+	stopBeat := startHeartbeat(ctx)
+	ctx = telemetry.BindTurnContext(ctx, a.Agent.Name, string(id))
 	stream := a.openStream(ctx)
-	defer closeStream(ctx, stream)
-	if attempt > 1 {
-		_ = a.publish(ctx, stream, in.SessionID, session.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
-	}
-	h, ms, rev, err := a.harness(ctx, in.SessionID, in.Identity, in.MCPServers, in.State)
-	if err != nil {
-		pub := err
-		if err := ctx.Err(); err != nil {
-			pub = err
-		}
-		slog.ErrorContext(ctx, "inference harness", "area", telemetry.AreaRuntime, "error", pub)
-		return session.InferenceOutput{}, activityError(ctx, err)
-	}
-	defer func() {
-		h.Close()
-		adapter.CloseTurnVFS(ms)
-	}()
-	eng := h.Drive()
-	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
-	defer stop()
-	extra := in.Extra
-	if in.User != nil {
-		extra = append(extra, in.User)
-	}
-	for _, msg := range extra {
-		if err := eng.AbsorbUser(ctx, msg, out); err != nil {
-			slog.ErrorContext(ctx, "inference absorb", "area", telemetry.AreaRuntime, "error", err)
-			return session.InferenceOutput{}, activityError(ctx, err)
+	if activity.IsActivity(ctx) {
+		if attempt := activity.GetInfo(ctx).Attempt; attempt > 1 {
+			slog.WarnContext(ctx, name+" retry", "area", telemetry.AreaRuntime, "session_id", id, "agent_id", a.Agent.Name, "attempt", attempt)
+			_ = a.publish(ctx, stream, id, session.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 		}
 	}
-	step, err := eng.RunInference(ctx, out)
-	if err != nil {
-		if ctx.Err() != nil {
-			slog.WarnContext(ctx, "inference cancelled", "area", telemetry.AreaRuntime)
-		} else {
-			slog.ErrorContext(ctx, "inference failed", "area", telemetry.AreaRuntime, "error", err)
-		}
-		return session.InferenceOutput{}, activityError(ctx, err)
+	return ctx, stream, func() {
+		closeStream(ctx, stream)
+		stopBeat()
+		unbind()
+		cancel()
 	}
-	if _, err = a.save(ctx, in.SessionID, h, rev); err != nil {
-		slog.ErrorContext(ctx, "inference persist", "area", telemetry.AreaRuntime, "error", err)
-		return session.InferenceOutput{}, activityError(ctx, err)
-	}
-	slog.InfoContext(ctx, "inference completed", "area", telemetry.AreaRuntime, "complete", step.Complete)
-	return session.InferenceOutput{Complete: step.Complete, Result: step.Result}, nil
 }
 
-// Tools runs the open round's runnable calls (after resume answers, when
-// set): the harness runs them concurrently and records them in call order,
-// then the snapshot is saved once.
-func (a *activities) Tools(ctx context.Context, in session.ToolsInput) ([]session.ToolOutput, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	defer bindLiveTurn(in.SessionID, cancel)()
-	defer startHeartbeat(ctx)()
-	ctx = telemetry.BindTurnContext(ctx, a.Agent.Name, string(in.SessionID))
-	attempt := int32(1)
-	if activity.IsActivity(ctx) {
-		attempt = activity.GetInfo(ctx).Attempt
-	}
-	if attempt > 1 {
-		slog.WarnContext(ctx, "tools retry",
-			"area", telemetry.AreaHarness, "session_id", in.SessionID,
-			"agent_id", a.Agent.Name, "attempt", attempt)
-	}
-	stream := a.openStream(ctx)
-	defer closeStream(ctx, stream)
-	if attempt > 1 {
-		_ = a.publish(ctx, stream, in.SessionID, session.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
-	}
-	// RunTools applies in.State: a retried step must not apply it again.
-	h, ms, rev, err := a.harness(ctx, in.SessionID, in.Identity, in.MCPServers, nil)
+// Inference is one model request on the committed window. It saves
+// nothing: the reply commits once its calls have their results.
+func (a *activities) Inference(ctx context.Context, in stepSession) (tacklr.Reply, error) {
+	ctx, stream, end := a.begin(ctx, in.SessionID, "inference")
+	defer end()
+	h, ms, _, err := a.harness(ctx, in.SessionID, in.Identity, in.MCPServers)
 	if err != nil {
-		slog.ErrorContext(ctx, "tools harness", "area", telemetry.AreaHarness, "error", err)
-		return nil, activityError(ctx, err)
+		slog.ErrorContext(ctx, "inference harness", "area", telemetry.AreaRuntime, "error", err)
+		return tacklr.Reply{}, activityError(ctx, err)
 	}
-	defer func() {
-		h.Close()
-		adapter.CloseTurnVFS(ms)
-	}()
+	defer adapter.AbandonTurn(h, ms)
+	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
+	defer stop()
+	reply, err := h.Infer(ctx, out)
+	if err != nil {
+		slog.ErrorContext(ctx, "inference failed", "area", telemetry.AreaRuntime, "error", err)
+	}
+	return reply, activityError(ctx, err)
+}
+
+// Tool runs one tool call. It saves nothing: its outcome is this
+// activity's result, which Commit applies once the round is complete.
+func (a *activities) Tool(ctx context.Context, in toolInput) (tacklr.CallOutcome, error) {
+	ctx, stream, end := a.begin(ctx, in.SessionID, "tool")
+	defer end()
+	h, ms, _, err := a.harness(ctx, in.SessionID, in.Identity, in.MCPServers)
+	if err != nil {
+		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
+		return tacklr.CallOutcome{}, activityError(ctx, err)
+	}
+	defer adapter.AbandonTurn(h, ms)
 	h.BindJobHost(activityChildren{parent: in.SessionID, agent: a.Agent, jobs: a.Jobs, known: in.Children})
 	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
-	steps, runErr := h.Drive().RunTools(ctx, in.Seq, in.Resume, in.State, out)
-	// Save what the calls recorded even when the commit failed, so a retry
-	// commits it instead of running the tools again.
-	_, err = a.save(ctx, in.SessionID, h, rev)
-	if err = errors.Join(runErr, err); err != nil {
-		slog.ErrorContext(ctx, "tools failed", "area", telemetry.AreaHarness, "error", err)
-		return nil, activityError(ctx, err)
+	o, err := h.RunTool(ctx, in.Run, out)
+	if err == nil {
+		// A call the turn cancelled reports the cancel, not what its tool
+		// returned.
+		err = ctx.Err()
 	}
-	outs := make([]session.ToolOutput, len(steps))
-	for i, step := range steps {
-		outs[i] = session.ToolOutput{
-			Call:          step.Call,
-			Interrupted:   step.Interrupted,
-			InterruptID:   step.InterruptID,
-			InterruptData: step.InterruptData,
-			AwaitID:       session.SessionID(step.AwaitJobID),
-			Starts:        step.Starts,
-			Cancels:       step.Cancels,
-		}
+	if err != nil {
+		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Run.Call.Name, "error", err)
 	}
-	return outs, nil
+	return o, activityError(ctx, err)
+}
+
+// Commit is the only activity that saves the snapshot.
+func (a *activities) Commit(ctx context.Context, in commitInput) (session.Revision, error) {
+	ctx, stream, end := a.begin(ctx, in.SessionID, "commit")
+	defer end()
+	h, ms, rev, err := a.harness(ctx, in.SessionID, in.Identity, in.MCPServers)
+	if err != nil {
+		slog.ErrorContext(ctx, "commit harness", "area", telemetry.AreaRuntime, "error", err)
+		return "", activityError(ctx, err)
+	}
+	defer adapter.AbandonTurn(h, ms)
+	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
+	defer stop()
+	rev, err = adapter.CommitTurn(ctx, a.Snapshots, in.SessionID, h, rev, in.Base, in.In, out)
+	telemetry.RecordCheckpointAttempt(ctx, err)
+	if err != nil {
+		slog.ErrorContext(ctx, "commit failed", "area", telemetry.AreaRuntime, "error", err)
+	}
+	return rev, activityError(ctx, err)
 }
 
 func (a *activities) RunJob(ctx context.Context, in runJobInput) (string, error) {
@@ -212,29 +199,7 @@ func (a *activities) RunJob(ctx context.Context, in runJobInput) (string, error)
 	return out, activityError(ctx, err)
 }
 
-// CommitToolOutput records an awaited child's output as its call's result
-// and commits the round when that was its last result.
-func (a *activities) CommitToolOutput(ctx context.Context, in session.CommitInput) error {
-	h, ms, rev, err := a.harness(ctx, in.SessionID, in.Identity, in.MCPServers, in.State)
-	if err != nil {
-		return activityError(ctx, err)
-	}
-	defer func() {
-		h.Close()
-		adapter.CloseTurnVFS(ms)
-	}()
-	stream := a.openStream(ctx)
-	defer closeStream(ctx, stream)
-	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
-	defer stop()
-	if err := h.Drive().RecordToolResult(ctx, in.Call, in.Output, in.Failed, out); err != nil {
-		return activityError(ctx, err)
-	}
-	_, err = a.save(ctx, in.SessionID, h, rev)
-	return activityError(ctx, err)
-}
-
-func (a *activities) harness(ctx context.Context, id session.SessionID, rec session.Identity, extraMCP []mcp.MCPConfig, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, session.Revision, error) {
+func (a *activities) harness(ctx context.Context, id session.SessionID, rec session.Identity, extraMCP []mcp.MCPConfig) (*tacklr.TurnManager, *vfs.MountSession, session.Revision, error) {
 	sec, err := a.Secrets.Get(ctx, id)
 	if err != nil {
 		return nil, nil, "", err
@@ -257,23 +222,12 @@ func (a *activities) harness(ctx context.Context, id session.SessionID, rec sess
 	if err != nil {
 		return nil, nil, "", err
 	}
-	rev, err := adapter.RestoreTurn(ctx, a.Snapshots, id, h, state)
+	rev, err := adapter.RestoreTurn(ctx, a.Snapshots, id, h)
 	if err != nil {
 		adapter.AbandonTurn(h, ms)
 		return nil, nil, "", err
 	}
 	return h, ms, rev, nil
-}
-
-func (a *activities) save(ctx context.Context, id session.SessionID, h *tacklr.TurnManager, expected session.Revision) (session.Revision, error) {
-	cp, err := h.Checkpoint()
-	if err != nil {
-		telemetry.RecordCheckpointAttempt(ctx, err)
-		return "", err
-	}
-	rev, err := a.Snapshots.Save(ctx, id, cp, expected)
-	telemetry.RecordCheckpointAttempt(ctx, err)
-	return rev, err
 }
 
 const streamBatchInterval = 200 * time.Millisecond

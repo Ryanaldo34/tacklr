@@ -131,7 +131,7 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 	if !opts.skipPlanningLock {
 		chain = append(chain, h.planningWriteLock)
 	}
-	h.toolRunner = newToolRunner(append(chain, onCallMiddleware(sm))...)
+	h.toolRunner = newToolRunner(append(chain, onCallMiddleware)...)
 	if err := h.finishInit(ctx, opts); err != nil {
 		h.Close()
 		return nil, err
@@ -236,10 +236,10 @@ func (h *TurnManager) finishInit(ctx context.Context, opts AgentOptions) error {
 // and index tools, and the job tools.
 func (a *TurnManager) injectBuiltinTools() {
 	a.tools = append(a.tools,
-		newCreatePlanTool(a.session),
-		newEditPlanTool(a.session),
-		newCompleteTodoTool(a.session),
-		newListPlanTool(a.session),
+		newCreatePlanTool(),
+		newEditPlanTool(),
+		newCompleteTodoTool(),
+		newListPlanTool(),
 		askUserChoiceTool,
 	)
 	if ms := a.session.VFS; ms != nil {

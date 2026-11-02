@@ -24,7 +24,7 @@ Work spans many model calls, tools hit real systems, and the window fills with t
 
 **Context is structured around the current work.** The harness runs planning cycles (Adaptive Case Management): the agent writes a plan, works a to-do, and on `complete_todo` the window is rebuilt as a hand-off for what comes next. Unused history does not stay in the prompt just because it happened earlier. Specialists are the same idea at a larger grain — a nested session that returns only what the parent asked for.
 
-**The agent’s world is bounded.** A virtual filesystem gives one path API over the mounts you attach: local disk, S3, Azure Blob, Google Drive and Docs, Microsoft Graph, and knowledge objects. The agent sees `/workspace/work/notes.md`, not a host path or a bucket key. Credentials live on the turn (`Prompt.Auth` / `Resume.Auth`), not in checkpoints or Temporal event history.
+**The agent’s world is bounded.** A virtual filesystem gives one path API over the mounts you attach: local disk, S3, Azure Blob, Google Drive and Docs, Microsoft Graph, and knowledge objects. The agent sees `/workspace/work/notes.md`, not a host path or a bucket key. Credentials live on the turn (`Prompt.Auth` / `Resume.Auth`), not in checkpoints or workflow history.
 
 **Sessions are meant to live in the cloud.** Hosts call `session.Runtime`. The Temporal backend is `session/temporal`. Human-in-the-loop parks a session until `Resume`. JSON-RPC protocols (ACP is the native one) map to that Runtime; autonomous hosts call it directly.
 
@@ -54,7 +54,7 @@ Session data is three frozen planes. Do not mix them:
 
 | Plane | You pass | Holds |
 |-------|----------|--------|
-| **SnapshotStore** | `Config.Snapshots` (zero: memory, kept on the runtime) | `tacklr.SessionCheckpoint`: window, open round, plan, parked interrupt, `userState`, permission decisions, search rests |
+| **SnapshotStore** | `Config.Snapshots` (zero: memory, kept on the runtime) | `tacklr.SessionCheckpoint`: window of complete rounds, plan, `userState`, permission decisions, search rests |
 | **Wait loop** | `temporal.Open` then `StartWorker` | Scheduler: child workflows, Status |
 | **SecretStorage** | `temporal.Config.Secrets` (zero: memory, kept on the runtime) | VFS tokens. Not in snapshots. Not in Temporal history |
 
@@ -266,7 +266,7 @@ Put optional tools on `AgentOptions.Tools`. Swap the fake the same way: `Tools: 
 
 | Plane | Canonical store |
 |-------|-----------------|
-| Conversation, open round, plan, parked interrupt, `userState` | `session.SnapshotStore` (`tacklr.SessionCheckpoint`) |
+| Conversation, plan, `userState` | `session.SnapshotStore` (`tacklr.SessionCheckpoint`) |
 | Identity (specialist, parent, VFS recipes) | Session wait loop (`session.Identity`) |
 | MCP config, child futures, Status | Session wait loop (Temporal workflow replay) |
 | VFS tokens | `session.SecretStorage` |
@@ -275,7 +275,7 @@ Put optional tools on `AgentOptions.Tools`. Swap the fake the same way: `Tools: 
 
 ### Specialists
 
-Register nested agents on `AgentOptions.Specialists`. Tools start work through `HarnessRuntime`: `RunSpecialist` (in line, tool result) or `Schedule` / `Jobs` / `CancelJob` (async job, later inbox message). The stock tools `spawn_specialist`, `list_children`, and `cancel_child` call those methods; host tools can too. A specialist is a nested session with the parent’s MCP Durable topology and mount recipes, overlaid with the specialist’s model, tools, and instructions. Named workers register on Runtime `Config.Jobs`. Tokens come from `SecretStorage` (child, then parent). `spawn_specialist` `block=false` schedules a job; `block=true` (default) runs the specialist in line. Parent park does not stop children. Cancel (including the original Prompt context) and Close do.
+Register nested agents on `AgentOptions.Specialists`; the model starts them with the built-in `spawn_specialist`, and tools cannot. Tools start Runtime job workers (a shell pipeline, a long data job) through `HarnessRuntime.Schedule`: with `JobRequest.Wait` the call waits and the job's output is its result; without it the output arrives later as an inbox message. `Jobs` and `CancelJob` list and stop jobs; the built-ins `list_children` and `cancel_child` use them. A specialist is a nested session with the parent’s MCP Durable topology and mount recipes, overlaid with the specialist’s model, tools, and instructions. Named workers register on Runtime `Config.Jobs`. Tokens come from `SecretStorage` (child, then parent). `spawn_specialist` `block=false` schedules a job; `block=true` (default) runs the specialist in line. Parent park does not stop children. Cancel (including the original Prompt context) and Close do.
 
 ---
 

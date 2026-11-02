@@ -126,7 +126,7 @@ func TestInvoke(t *testing.T) {
 	t.Run("handler that needs runtime fails closed without one", func(t *testing.T) {
 		tool := NewTool(ToolConfig{
 			Name: "needs_rt",
-			Handler: func(ctx context.Context, rt HarnessRuntime) (string, error) {
+			Handler: func(ctx context.Context, rt *HarnessRuntime) (string, error) {
 				return "ok", nil
 			},
 		})

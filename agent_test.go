@@ -31,9 +31,6 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 		Model:           &scriptedModel{},
 	})
 	t.Cleanup(h.Close)
-	if messageSearchText(nil) != "" {
-		t.Fatal("nil message")
-	}
 	text := messageSearchText(&Message{
 		Role:    RoleAssistant,
 		Content: "body",

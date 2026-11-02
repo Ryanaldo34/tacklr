@@ -75,7 +75,7 @@ Fails if the path is missing, the range is invalid, or block_id is unknown.`,
 		Category: ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args readArgs, rt HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args readArgs, rt *HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", vfsToolErr("read", args.Path, err)
@@ -308,7 +308,7 @@ May pause for write permission. On success returns path, line_count, and replace
 		Category: ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args writeTextArgs, rt HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args writeTextArgs, rt *HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", vfsToolErr(writeToolName, args.Path, err)
@@ -357,7 +357,7 @@ May pause for write permission. On success returns path, line_count, and an outl
 		Category: ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args writeDocumentArgs, rt HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args writeDocumentArgs, rt *HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", vfsToolErr(writeDocumentToolName, args.Path, err)
@@ -405,7 +405,7 @@ May pause for write permission. On success returns path and line_count. Fails if
 		Category: ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args writeSpreadsheetArgs, rt HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args writeSpreadsheetArgs, rt *HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", vfsToolErr(writeSpreadsheetToolName, args.Path, err)
@@ -445,7 +445,7 @@ func (v vfsTools) withWritePermission(cfg ToolConfig) *Tool {
 	return NewTool(cfg)
 }
 
-func (v vfsTools) applyWrite(ctx context.Context, tool, p string, mut vfs.Mutation, rt HarnessRuntime) (string, error) {
+func (v vfsTools) applyWrite(ctx context.Context, tool, p string, mut vfs.Mutation, rt *HarnessRuntime) (string, error) {
 	rt.EmitUpdate("Writing " + p)
 	res, err := v.ms.Apply(ctx, p, mut)
 	if err != nil {
@@ -596,7 +596,7 @@ May pause for execute permission. Returns stdout/stderr. A non-zero process exit
 		Access:   ToolExecuteAccess,
 		Timeout:  runCommandTimeout,
 		OnCall:   []OnCallFunc{ToolPermissionOnCall},
-		Handler: func(ctx context.Context, args runCommandArgs, rt HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args runCommandArgs, rt *HarnessRuntime) (string, error) {
 			dir := ms.HostDir()
 			if dir == "" {
 				return "", vfsToolErr("run_command", "", vfs.ErrFuseNotMounted)

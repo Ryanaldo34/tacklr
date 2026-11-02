@@ -3,6 +3,7 @@ package temporal
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/workflow"
@@ -95,7 +96,7 @@ func cancelOne(ctx workflow.Context, spawned *[]childRun, id session.SessionID) 
 	dropChild(spawned, id)
 }
 
-// activityChildren is the Tools activity's JobHost: it resolves a job to
+// activityChildren is the Tool activity's JobHost: it resolves a job to
 // the child the workflow starts, with an id from the call id.
 type activityChildren struct {
 	parent session.SessionID
@@ -105,11 +106,11 @@ type activityChildren struct {
 }
 
 func (a activityChildren) Resolve(job tacklr.JobRequest, callID string) (tacklr.JobStart, error) {
-	name, task, err := adapter.NormalizeSpawn(job.Name, job.Task)
-	if err != nil {
-		return tacklr.JobStart{}, err
+	name, task := strings.TrimSpace(job.Name), strings.TrimSpace(job.Task)
+	if name == "" {
+		return tacklr.JobStart{}, fmt.Errorf("specialist is required: %w", tacklr.ErrInvalid)
 	}
-	specialist := adapter.HasSpecialist(a.agent, name)
+	specialist := tacklr.FindSpecialist(a.agent.Specialists, name) != nil
 	if !specialist {
 		if _, ok := a.jobs[name]; !ok {
 			return tacklr.JobStart{}, fmt.Errorf("%w: %s", tacklr.ErrNotFound, name)

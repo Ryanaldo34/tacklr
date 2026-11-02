@@ -13,7 +13,7 @@ Tacklr’s session API is `session.Runtime`. A `server.Protocol` maps wire frame
 | **Child** | Nested session job. Agent tools `list_children` / `cancel_child` |
 | **Park** | Session idle waiting for `Resume`. Parent-facing `Status` stays `running`; `Waiting` is true until the interrupt is resolved. Parent park does not stop children |
 | **Cancel** | Abort the in-flight turn and stop child sessions (`Runtime.Cancel`, original Prompt/Resume context cancel, client stop). The parent session stays open for a later Prompt |
-| **Checkpoint** | Live harness state inside the snapshot: the current context window, the open round, plan, and parked interrupts. `SessionCheckpoint`. Overwritten on each save |
+| **Checkpoint** | Committed harness state inside the snapshot: the window of complete rounds, plan, user state, permission decisions, search cursors. `SessionCheckpoint`. Only a Commit step saves it |
 | **Session messages** | Messages that left the context window (a collapse or a plan handoff), saved in the brain, searchable for this session only. Not the checkpoint. Deleted on Close |
 | **Close** | Destroy the session, stop children, and delete its session messages |
 | **Turn locality** | Optional: keep a turn’s Temporal activities on one process (`Config.TurnLocality`) so VFS stays put |
@@ -48,13 +48,13 @@ One Temporal workflow per session runs the turn. HITL parks that workflow until 
 
 `Runtime.Prompt` while a turn is live or parked **queues**. It does not cancel in-flight `Invoke` or blocking tools. `Prompt` returns when the session accepted the work (queued, not yet in the window). `Subscribe` still delivers the same turn’s completion. A second concurrent `session/prompt` / `RunTurn` subscriber may see that same completion. No new ACP method.
 
-Queued messages are appended only between rounds: no round is open and the turn is not parked. Both wait loops use that gate, then `tacklr.Next`. They never append while `Invoke` is running or between a `function_call` and its result. A drain that writes messages forces another inference instead of complete.
+Queued messages are appended only between rounds: no round is open and the turn is not parked. `session.Turn.Run` uses that gate. They never append while `Invoke` is running or between a `function_call` and its result. A drain that writes messages forces another inference instead of complete.
 
 `Prompt.Auth` and `Prompt.State` apply immediately (tokens and `userState` must not wait). `MCPServers` apply on the next idle construct, not the live harness.
 
-`session/cancel` (`Runtime.Cancel`) remains the abort path: it cancels the turn, stops children, and **drops unread inbox items**. Close drops the inbox. Resume does not start from a queued Prompt; HITL stays parked until the open round's calls finish after Resume, then the inbox drains.
+`session/cancel` (`Runtime.Cancel`) remains the abort path: it cancels the turn, stops children, and **drops unread inbox items**. Close drops the inbox. Resume does not start from a queued Prompt; HITL stays parked until the open round's calls finish after Resume, then the inbox drains. A Commit is never cancelled: a cancel waits for it, so the turn always knows the snapshot revision it saved.
 
-A worker crash replays the workflow. Prompts that the turn has not absorbed yet stay in workflow history. The open round, with the calls that still need a result, is in the snapshot.
+A worker crash replays the workflow. Prompts that the turn has not committed yet stay in workflow history, and so does the open round: replay rebuilds it from each step's recorded result.
 
 ## Temporal
 
@@ -79,18 +79,18 @@ _ = w.Start()
 |----------------|----------|
 | Agent session | One workflow (`SessionWorkflow`) |
 | Harness loop | `session.Session` (`temporal` only runs steps, signals, and child workflows) |
-| Inference / tools | Activities (`Inference`, and `Tools` for the tool calls of one model reply) |
+| Steps | Activities: `Commit`, `Inference` (one model request), `Tool` (one tool call) |
 | Specialist | Child workflow |
 | Turn locality | `Config.TurnLocality` keeps the turn’s activities on one Temporal worker. Zero (default) does not pin them. |
-| Activity timeout | `Config.ActivityTimeout` is StartToCloseTimeout for Inference/Tools. A `Tools` activity runs every call of a reply, so it lasts as long as the slowest call. Zero is 10 minutes. |
+| Activity timeout | `Config.ActivityTimeout` is StartToCloseTimeout for every step. Zero is 10 minutes. |
 | Heartbeat | `Config.HeartbeatTimeout`. Zero is 30 seconds. |
 | Activity retries | `Config.ActivityAttempts` is Temporal MaximumAttempts. Zero is 3. 1 means no retry. An activity retries `tacklr.ErrNetwork` (wrap a dial, read, timeout, or upstream 408/429/5xx at the call), a model refusal, and a stale checkpoint. Any other error stops on the first attempt. |
 | Progress | Workflow Streams (`events`, `retry`, `close`) |
 | HITL | Signal `Resume` (never inside an activity) |
-| Calls left after HITL | The open round in SnapshotStore: each call that has no result runs after Resume, in call order |
-| Spawn specialist | Child `SessionWorkflow` (wait for started). `ParentClosePolicy` is request-cancel. Tools call `HarnessRuntime` child methods; the workflow reconciles the child ledger after each `Tools` activity, call by call (start, cancel, wait). Child HITL signals the parent (`ChildWaiting`) then parent `Resume` signals the child. |
+| Calls left after HITL | The open round in workflow state (`session.Turn.Round`): the parked call runs with its answer, then each call that has no outcome yet |
+| Spawn specialist | Child `SessionWorkflow` (wait for started). `ParentClosePolicy` is request-cancel. Tools call `HarnessRuntime` child methods; the workflow starts and cancels children from each recorded `Tool` outcome and waits for blocking ones. Child HITL signals the parent (`ChildWaiting`) then parent `Resume` signals the child. |
 
-The worker registers `SessionWorkflow`, `Inference`, `Tools`, `CommitToolOutput`, `EmitEvent`, and `RunJob`. Inference and Tools do not publish complete, yield, or turn-ending error. The workflow commits `Status`, then `EmitEvent` publishes the matching stream event. A blocking specialist returns the child id from the tool activity. The session loop starts that child, waits, and then writes the tool message. It does not park the parent.
+The worker registers `SessionWorkflow`, `Commit`, `Inference`, `Tool`, `EmitEvent`, and `RunJob`. Steps do not publish complete, yield, or turn-ending error. The workflow commits `Status`, then `EmitEvent` publishes the matching stream event. A blocking specialist's `Tool` outcome names the child; the session loop starts it, waits, and runs a `Tool` step for that call with the child's result. It does not park the parent.
 
 ## Child sessions
 
@@ -120,7 +120,7 @@ A later `Prompt` on a session that was cancelled does not resurrect killed child
 
 The parent does not fail with the child. The child becomes `failed` and stays on the parent’s list until collected or the parent is closed.
 
-Drain auto-collects terminal `block=false` jobs at the next safe window point: a `RoleUser` steer (`Job {id} ({name}) completed|failed`) is appended, and the job is dropped from `Jobs`. `block=true` spawn is `RunSpecialist`: the child runs in line as this tool call, the result **is** the tool output, and it never uses the inbox. A later job result is a new `RoleUser` message, never a second `RoleTool` for the schedule `call_id`.
+Drain auto-collects terminal `block=false` jobs at the next safe window point: a `RoleUser` steer (`Job {id} ({name}) completed|failed`) is appended, and the job is dropped from `Jobs`. `block=true` spawn waits for the child: its result **is** the tool output, and it never uses the inbox. Only `spawn_specialist` starts specialists; a tool's `Schedule` starts Runtime job workers. A later job result is a new `RoleUser` message, never a second `RoleTool` for the schedule `call_id`.
 
 The turn does not complete while jobs remain. The wait-loop blocks without parent park and without another parent model call. A finished job or a human `Prompt` wakes it through the inbox. Specialist child HITL is resumed on the **child** session.
 
@@ -149,23 +149,23 @@ A commit fits the round into `MaxWindowSize`:
 3. Over it, the window **collapses**: everything after the first user message and the plan document (an earlier summary too) is saved as session messages, then replaced by one summary of the window as it was. The new round is not in the summary request; it is appended after the summary. With a Brain the summary says that `search` finds the earlier messages and `open` reads one. The window is then small, so the next rounds append without another model call: a session pays for a summary only when the window fills again.
 4. A round still over `MaxWindowSize` alone has its largest tool results cut. With `AgentOptions.OverflowPath` (a directory on a writable mount, for example an object-storage mount), each one's full text is first written to `<OverflowPath>/<session>/<call id>.txt`. The cut result ends with a note: how much was kept, and the path to `read` with `start` and `end`, or that the full text was not kept.
 
-A commit that fails (a token count, the session-message save, the summary request, a round that cannot fit, or the overflow write) fails the step; the round stays open.
+A commit that fails (a token count, the session-message save, the summary request, a round that cannot fit, or the overflow write) fails the step and saves nothing.
 
-### Tool calls run concurrently
+### Steps
 
-The calls of one model reply are independent: the model sent them all before it saw any result. So the runtime runs them as one step (`session.Step.Tools`) through the harness `Engine.RunTools`, which runs the open round's runnable calls **concurrently**, at most 8 at a time, and then records them in the open round in call order, with their client events. The round's plan effect applies once, when it commits. That includes `spawn_specialist`: several blocking specialists in one reply start together, and the turn waits for each.
+Each non-deterministic action is one step, so a session replays safely: the runtime records each completed step and its result, and a replay returns the recorded result instead of running the step again. Neither the harness nor the snapshot records which steps ran.
 
-A tool's shared-state changes (`HarnessRuntime.StateSet`, permissions, search cursors, the plan) are atomic, so concurrent calls never lose a change. The plan tools change the plan in one locked step (`planStore.Change`). Only the runtime-specific part, where the step runs, differs:
+| Step | Does | Writes the snapshot |
+|------|------|---------------------|
+| `Infer` | One model request on the committed window. Returns the reply. | No |
+| `Tool` | One tool call. Input: the call, and from its last outcome the answer to its park or its child's result. Returns the call's outcome: its result, a park, or a wait on a child, the children it starts or cancels, and the shared-state writes it made (user state, plan changes, permission decisions, search cursors). | No |
+| `Commit` | Host state, a complete round (each call's writes in call order, then its messages, then collapse or trim), and user messages. | Yes, the only one |
 
-| Runtime | How a reply's calls run | Where the open round lives |
-|---------|-------------------------|----------------------------|
-| Temporal | One `Tools` activity: one turn world and one SnapshotStore save for every call. `CommitToolOutput` records a blocking specialist's result | SnapshotStore |
+The open round lives in workflow state (`session.Turn.Round`): the reply and each call's last outcome. `Turn.Run` runs every call without an outcome at once (`Step.Tools`: one `Tool` activity each on Temporal; goroutines in a simple runtime), keeps the outcomes in call order, starts the children they ask for (a child id comes from its call, so a child is started once), waits for blocking children and runs their calls again with the results, and commits the round once each call has its result. Plan changes are replayed at Commit (`planOp`), so plan changes of calls that ran at once all land.
 
-A turn parks on one interrupt at a time. When several calls of a reply park, the first in call order parks the turn. The others drop their parks and stay runnable in the open round; they run after resume. A parked tool has not finished, so running it again is safe.
+A runtime may run a step more than once before it records it (a worker dies before the step reports). `Infer` and `Tool` change nothing a later step reads, so that is safe; a tool with external side effects uses its call id (`HarnessRuntime.CurrentToolCallID`) as the idempotency key. `Commit` is idempotent: its `base` is the revision the last Commit returned, and a Commit that finds the snapshot past it already saved and applies nothing again. A cancel does not stop a Commit. Steps carry only what changes per step; the session's identity, MCP servers and children are the runtime's, which builds each step's world from them.
 
-A resume is one `Tools` step: `ToolsInput.Resume` carries the answers, the harness applies them, and the round's runnable calls run (the resumed call and any that dropped their park). No model call runs first.
-
-Each call records on the round what its step did: its result, its park, the child it waits on, and the children it starts or cancels (`JobHost` only resolves a job to a child id from the call id). `ToolsInput.Seq` numbers the step. The step's outputs are built from the round for every call that step ran, so when a `Tools` activity saved and its result was lost, Temporal's retry reports the same park, await and starts, and runs no tool again.
+A turn parks on one interrupt at a time. When several calls of a reply park, the first in call order parks the turn; the others keep no outcome and run after resume. A resume runs the parked call with its answer, then the calls without an outcome. A prompt that moves past an open round (a turn that failed) gives each call without a result a cancelled result and commits the round before the prompt.
 
 Azure/OpenAI Responses requires each `function_call` to be followed by a `function_call_output` with the same `call_id`. Rounds make that hold by construction.
 
@@ -220,8 +220,8 @@ Three stores. Do not add a fourth. Do not copy a field from one into another exc
 
 | Plane | Lifetime | Owns | Never |
 |-------|----------|------|-------|
-| **SnapshotStore** | One Runtime session | `tacklr.SessionCheckpoint`: window, open round (each call's result, park and completed OnCall layers), last Tools step report, plan, `userState`, permission decisions, search rests | Tokens, file bytes, MCP env/headers, identity (specialist, parent, mounts), child workflow futures, host config (search namespace, principals, `AllowTools`) |
-| **Wait loop** | In-process `sessionProc` / Temporal workflow replay | `Identity` (specialist, parent, mount recipes), MCP Durable topology, child futures, Prompt/job inbox (steer + auto-collected jobs), host state not yet sent to a step, secret-free `ApplyAuth` on the current signal, `Status` | Window, plan, tokens, file bytes, `userState`. Inbox is not SnapshotStore. |
+| **SnapshotStore** | One Runtime session | `tacklr.SessionCheckpoint`: window of complete rounds, plan, `userState`, permission decisions, search rests | Tokens, file bytes, MCP env/headers, identity (specialist, parent, mounts), child workflow futures, host config (search namespace, principals, `AllowTools`) |
+| **Wait loop** | In-process `sessionProc` / Temporal workflow replay | `Identity` (specialist, parent, mount recipes), MCP Durable topology, child futures, the open round (each call's last outcome), the last Commit's snapshot revision, Prompt/job inbox (steer + auto-collected jobs), host state not yet committed, secret-free `ApplyAuth` on the current signal, `Status` | Window, plan, tokens, file bytes, `userState`. Inbox is not SnapshotStore. |
 | **SecretStorage** | Session, deleted on Close | VFS credentials | Snapshot rows, Temporal payloads |
 
 `Prompt.State` / `Resume.State` / `CreateSession.State` are sent once, to the next step, which writes them into the checkpoint's `userState`. The wait loop holds them only until then, so a tool's later `StateSet` of the same key is not overwritten.

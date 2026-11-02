@@ -193,14 +193,14 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 		for range out {
 		}
 	}()
-	if err := h.absorbUser(t.Context(), &Message{Role: RoleUser, Content: "hello"}, out); err != nil {
+	if err := h.Commit(t.Context(), CommitIn{Users: []*Message{{Role: RoleUser, Content: "hello"}}}, out); err != nil {
 		t.Fatal(err)
 	}
 	img := &Message{Role: RoleUser, ContentParts: []ContentPart{{
 		Type:     ContentTypeInputImage,
 		FileData: &FileData{MIMEType: "image/png"},
 	}}}
-	if err := h.absorbUser(t.Context(), img, out); err == nil {
+	if err := h.Commit(t.Context(), CommitIn{Users: []*Message{img}}, out); err == nil {
 		t.Fatal("text-only model must reject image input")
 	}
 	write := NewTool(ToolConfig{
@@ -220,25 +220,23 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := h.absorbUser(ctx, &Message{Role: RoleUser, Content: "x"}, out); err == nil {
+	if err := h.Commit(ctx, CommitIn{Users: []*Message{{Role: RoleUser, Content: "x"}}}, out); err == nil {
 		t.Fatal("cancelled absorb")
 	}
 
-	if _, err := h.runTools(t.Context(), 1, map[string][]byte{"missing": []byte(`{}`)}, nil, out); !errors.Is(err, ErrInterruptNotFound) {
-		t.Fatalf("resume of an unknown interrupt = %v", err)
+	ask := ToolCall{ID: "ask1", CallID: "ask1", Name: "ask_user_choice", Arguments: `{"question":"which?","choices":[{"title":"a"},{"title":"b"}]}`}
+	parked, err := h.RunTool(t.Context(), ToolRun{Call: ask}, out)
+	if err != nil || parked.Park == nil {
+		t.Fatalf("ask = %+v %v, want a park", parked, err)
 	}
-	parkID := "ask1"
-	h.session.round = newOpenRound(nil, []ToolCall{{ID: parkID, CallID: parkID, Name: "ask_user_choice"}})
-	_ = h.session.Park(parkID, &UserSelectionInterrupt{Options: []UserChoice{{Title: "a"}, {Title: "b"}}})
-	if _, err := h.runTools(t.Context(), 2, map[string][]byte{parkID: []byte(`{"selectionIdx":9}`)}, nil, out); err == nil {
+	if _, err := h.RunTool(t.Context(), ToolRun{Call: ask, Prior: &parked, Answer: []byte(`{"selectionIdx":9}`)}, out); err == nil {
 		t.Fatal("invalid selection")
 	}
-	h.session.round = nil
 
 	mock.InvokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "hi", IsComplete: true}
 	}
-	if _, err := h.runInference(t.Context(), out); err != nil {
+	if _, err := h.Infer(t.Context(), out); err != nil {
 		t.Fatal(err)
 	}
 	// The window ends on a tool round: the next request answers tools.
@@ -246,14 +244,14 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	result, _ := h.toolResultMessage(call, "ok", "success")
 	h.context.Add(&Message{Role: RoleAssistant, ToolCalls: []ToolCall{call}}, result)
 	mock.InvokeErr = errors.New("upstream")
-	if _, err := h.runInference(t.Context(), out); !errors.Is(err, ErrModelAfterTools) {
+	if _, err := h.Infer(t.Context(), out); !errors.Is(err, ErrModelAfterTools) {
 		t.Fatalf("want ErrModelAfterTools, got %v", err)
 	}
 	mock.InvokeErr = nil
 	mock.InvokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 		ch <- LLMResponseChunk{Type: StreamEventError, Error: errors.New("provider"), IsComplete: true}
 	}
-	if _, err := h.runInference(t.Context(), out); !errors.Is(err, ErrModelAfterTools) {
+	if _, err := h.Infer(t.Context(), out); !errors.Is(err, ErrModelAfterTools) {
 		t.Fatalf("want an after-tools stream error, got %v", err)
 	}
 	prompt := strings.Join(mock.SystemPrompts, "\n")

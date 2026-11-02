@@ -2,14 +2,13 @@ package tacklr
 
 import (
 	"context"
-	"fmt"
 )
 
 // ToolInvocation is one tool call in the interceptor chain.
 type ToolInvocation struct {
 	Tool     *Tool
 	ArgsJSON string
-	Runtime  HarnessRuntime
+	Runtime  *HarnessRuntime
 }
 
 // ToolCallFunc is the next interceptor step or the final tool invoke. It
@@ -60,60 +59,56 @@ func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
 }
 
 // onCallMiddleware runs Tool.OnCall constructors in order. A layer the call
-// completed before a park (on its round call) is not asked again.
-func onCallMiddleware(sm *sessionManager) ToolInterceptor {
-	return func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (ToolOutcome, error) {
-		if len(inv.Tool.onCall) == 0 {
-			return next(ctx, inv)
-		}
-		if inv.Runtime == nil {
-			return ToolOutcome{}, fmt.Errorf("%w: on-call interrupt requires a runtime", ErrFailed)
-		}
-		for _, ctor := range inv.Tool.onCall {
-			if err := applyOnCallLayer(&inv, ctor, sm); err != nil {
-				return ToolOutcome{}, err
-			}
-		}
+// completed before a park is not asked again.
+func onCallMiddleware(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (ToolOutcome, error) {
+	if len(inv.Tool.onCall) == 0 {
 		return next(ctx, inv)
 	}
+	for _, ctor := range inv.Tool.onCall {
+		if err := applyOnCallLayer(&inv, ctor); err != nil {
+			return ToolOutcome{}, err
+		}
+	}
+	return next(ctx, inv)
 }
 
-func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *sessionManager) error {
+func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc) error {
+	rt := inv.Runtime
 	intr := ctor(*inv)
 	if intr == nil {
 		return nil
 	}
-	callID, typeName := inv.Runtime.CurrentToolCallID(), intr.TypeName()
-	if layer, ok := sm.Layer(callID, typeName); ok {
+	typeName := intr.TypeName()
+	if layer, ok := rt.layer(typeName); ok {
 		inv.ArgsJSON = layer.Args
 		return nil
 	}
-	if answered, ok := sm.TakeAnswer(callID, typeName); ok {
+	if answered, ok := rt.takeAnswer(typeName); ok {
 		denied := false
 		if perm, ok := answered.(*ToolPermissionInterrupt); ok {
-			sm.Permissions.rememberAnswer(perm)
+			rt.rememberAnswer(perm)
 			denied = !perm.Allowed
 		}
-		return finishOnCallLayer(inv, typeName, denied, sm)
+		return finishOnCallLayer(inv, typeName, denied)
 	}
 	if perm, ok := intr.(*ToolPermissionInterrupt); ok {
-		switch sm.Permissions.Decision(perm.ToolName) {
+		switch rt.decision(perm.ToolName) {
 		case permDenyAlways:
-			return finishOnCallLayer(inv, typeName, true, sm)
+			return finishOnCallLayer(inv, typeName, true)
 		case permAllowAlways:
-			return finishOnCallLayer(inv, typeName, false, sm)
+			return finishOnCallLayer(inv, typeName, false)
 		}
 	}
-	return sm.Park(callID, intr)
+	return rt.park(intr)
 }
 
 // finishOnCallLayer ends a layer: a denied call fails for the model to
-// correct; an allowed one keeps the layer on its round call, so the call's
-// run after a later park skips it.
-func finishOnCallLayer(inv *ToolInvocation, typeName string, denied bool, sm *sessionManager) error {
+// correct; an allowed one keeps the layer, so the call's run after a later
+// park skips it.
+func finishOnCallLayer(inv *ToolInvocation, typeName string, denied bool) error {
 	if denied {
 		return Correctionf(ErrToolPermissionDenied, "%s was rejected by the user. Do not retry this tool unless the task can proceed another way", inv.Tool.QualifiedName())
 	}
-	sm.RecordLayer(inv.Runtime.CurrentToolCallID(), onCallLayer{TypeName: typeName, Args: inv.ArgsJSON})
+	inv.Runtime.recordLayer(onCallLayer{TypeName: typeName, Args: inv.ArgsJSON})
 	return nil
 }

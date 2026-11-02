@@ -38,8 +38,11 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 	}
 	opts := AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns, BrainWriteKinds: []string{"Fact"}, sessionID: "brain-tools-1"}
 	h := mustNewTurnManager(t, opts)
+	// Each call is a round of its own: its writes commit before the next.
 	call := func(h *TurnManager, name, args string) (string, error) {
-		out, err := h.findTool(name, "").invoke(ctx, args, turnRuntime(h))
+		rt := turnRuntime(h)
+		out, err := h.findTool(name, "").invoke(ctx, args, rt)
+		rt.commit()
 		return out.Output, err
 	}
 	var saved []brain.RichObject

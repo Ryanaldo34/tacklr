@@ -7,25 +7,34 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 )
 
-// planToolsFixture holds builtin plan tools sharing one PlanStore.
+// planToolsFixture holds the builtin plan tools and one session's plan.
 type planToolsFixture struct {
 	create, edit, complete, list *Tool
+	sm                           *sessionManager
 	store                        *planStore
 }
 
 func testPlanTools() planToolsFixture {
 	sm := newSessionManager()
 	return planToolsFixture{
-		create:   newCreatePlanTool(sm),
-		edit:     newEditPlanTool(sm),
-		complete: newCompleteTodoTool(sm),
-		list:     newListPlanTool(sm),
+		create:   newCreatePlanTool(),
+		edit:     newEditPlanTool(),
+		complete: newCompleteTodoTool(),
+		list:     newListPlanTool(),
+		sm:       sm,
 		store:    sm.Plan,
 	}
+}
+
+// run runs tool as one call and commits what it wrote.
+func (pt planToolsFixture) run(tool *Tool, args string) (ToolOutcome, error) {
+	rt := callRuntime(pt.sm, nil, "c1")
+	out, err := tool.invoke(context.Background(), args, rt)
+	rt.commit()
+	return out, err
 }
 
 func drainEventCh() chan StreamEvent {
@@ -37,17 +46,11 @@ func drainEventCh() chan StreamEvent {
 	return c
 }
 
-// planRT is a turn Runtime for plan/ask tool unit tests (events drained).
-func planRT() HarnessRuntime {
-	return newToolRuntime(drainEventCh(), newSessionManager(), nil)
-}
-
 // TestCreatePlanTool covers create_plan success and rejection return paths.
 func TestCreatePlanTool(t *testing.T) {
 	t.Run("installs the plan document", func(t *testing.T) {
-		pt, rt := testPlanTools(), planRT()
-		res, err := pt.create.invoke(context.Background(),
-			`{"plan":"CoS: ship it","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
+		pt := testPlanTools()
+		res, err := pt.run(pt.create, `{"plan":"CoS: ship it","todos":[{"title":"a","status":"pending","description":"d"}]}`)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -59,32 +62,28 @@ func TestCreatePlanTool(t *testing.T) {
 		}
 	})
 	t.Run("rejects active plan and empty document", func(t *testing.T) {
-		pt, rt := testPlanTools(), planRT()
+		pt := testPlanTools()
 		pt.store.set([]Todo{{Title: "existing", Status: TodoStatusInProgress}})
-		_, err := pt.create.invoke(context.Background(),
-			`{"plan":"draft","todos":[{"title":"new","status":"pending","description":""}]}`, rt)
+		_, err := pt.run(pt.create, `{"plan":"draft","todos":[{"title":"new","status":"pending","description":""}]}`)
 		if err == nil || !strings.Contains(err.Error(), "active plan already exists") {
 			t.Fatalf("err = %v", err)
 		}
 		if len(pt.store.Get()) != 1 || pt.store.Get()[0].Title != "existing" {
 			t.Fatalf("plan mutated: %+v", pt.store.Get())
 		}
-		pt2, rt2 := testPlanTools(), planRT()
-		_, err = pt2.create.invoke(context.Background(),
-			`{"plan":"  ","todos":[{"title":"a","status":"pending","description":""}]}`, rt2)
+		pt2 := testPlanTools()
+		_, err = pt2.run(pt2.create, `{"plan":"  ","todos":[{"title":"a","status":"pending","description":""}]}`)
 		if err == nil || !strings.Contains(err.Error(), "plan document text is required") {
 			t.Fatalf("err = %v", err)
 		}
-		_, err = pt2.create.invoke(context.Background(),
-			`{"plan":"valid","todos":[]}`, rt2)
+		_, err = pt2.run(pt2.create, `{"plan":"valid","todos":[]}`)
 		if err == nil || !strings.Contains(err.Error(), "at least one todo") {
 			t.Fatalf("empty todos err = %v", err)
 		}
 	})
 	t.Run("starts the first open todo and leaves the rest pending", func(t *testing.T) {
-		pt, rt := testPlanTools(), planRT()
-		_, err := pt.create.invoke(context.Background(),
-			`{"plan":"ship","todos":[{"title":"done","status":"completed","description":""},{"title":"next","status":"","description":"go"},{"title":"later","status":"","description":""}]}`, rt)
+		pt := testPlanTools()
+		_, err := pt.run(pt.create, `{"plan":"ship","todos":[{"title":"done","status":"completed","description":""},{"title":"next","status":"","description":"go"},{"title":"later","status":"","description":""}]}`)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -123,7 +122,7 @@ func TestEditPlanTool(t *testing.T) {
 				pt.store.setDocument("doc")
 			}
 
-			res, err := pt.edit.invoke(context.Background(), tc.args, planRT())
+			res, err := pt.run(pt.edit, tc.args)
 
 			titles := []string{}
 			for _, todo := range pt.store.Get() {
@@ -143,9 +142,7 @@ func TestEditPlanTool(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
-	sm := newSessionManager()
-	sm.round = newOpenRound(nil, []ToolCall{{ID: "tc_ask", CallID: "tc_ask", Name: "ask_user_choice"}})
-	rt := newToolRuntime(make(chan StreamEvent, 4), sm, nil).WithToolCallID("tc_ask")
+	rt := callRuntime(newSessionManager(), nil, "tc_ask")
 
 	args, _ := json.Marshal(map[string]any{
 		"question": "Which approach?",
@@ -168,7 +165,7 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 		t.Errorf("interrupt question = %+v", usi)
 	}
 	// Answer and run again, as the harness does after resume.
-	if err := sm.Resume("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
+	if err := rt.resume([]byte(`{"selectionIdx":1}`)); err != nil {
 		t.Fatal(err)
 	}
 	res, err := askUserChoiceTool.invoke(context.Background(), string(args), rt)
@@ -211,7 +208,7 @@ func TestCompleteTodoTool(t *testing.T) {
 			}
 			args, _ := json.Marshal(map[string]string{"title": tc.title})
 
-			res, err := pt.complete.invoke(context.Background(), string(args), planRT())
+			res, err := pt.run(pt.complete, string(args))
 
 			got := res.Output
 			if err != nil {
@@ -224,30 +221,42 @@ func TestCompleteTodoTool(t *testing.T) {
 	}
 }
 
-// TestPlanTools_concurrentChangesAllLand covers tool calls of one reply that
-// change the plan at once: every change lands.
-func TestPlanTools_concurrentChangesAllLand(t *testing.T) {
-	pt, rt := testPlanTools(), planRT()
-	const n = 32
+// TestPlanTools_changesOfCallsThatRanAtOnceAllLand: each call of a round
+// completes a todo from the same committed plan (as Tool steps that ran at
+// once do); the round's Commit replays each change in call order, so every
+// completion lands, and a change that no longer applies is skipped.
+func TestPlanTools_changesOfCallsThatRanAtOnceAllLand(t *testing.T) {
+	h := mustNewTurnManager(t, AgentOptions{sessionID: "plan-at-once", MaxWindowSize: 8192, Model: &scriptedModel{}})
+	t.Cleanup(h.Close)
+	const n = 4
 	todos := make([]Todo, n)
-	for i := range todos {
-		todos[i] = Todo{Title: fmt.Sprintf("t%d", i), Status: TodoStatusPending}
-	}
-	pt.store.set(todos)
-
-	var wg sync.WaitGroup
+	calls := make([]ToolCall, n, n+1)
 	for i := range n {
-		wg.Go(func() {
-			if _, err := pt.complete.invoke(context.Background(), fmt.Sprintf(`{"title":"t%d"}`, i), rt); err != nil {
-				t.Error(err)
-			}
-		})
+		todos[i] = Todo{Title: fmt.Sprintf("t%d", i), Status: TodoStatusPending}
+		calls[i] = toolCall(fmt.Sprintf("c%d", i), "complete_todo", fmt.Sprintf(`{"title":"t%d"}`, i))
 	}
-	wg.Wait()
+	// A second completion of t0 succeeded on the plan it ran against; at
+	// commit t0 is already completed, so that change is skipped.
+	calls = append(calls, toolCall("again", "complete_todo", `{"title":"t0"}`))
+	h.session.Plan.set(todos)
+	h.context.Restore([]*Message{userMsg("go")})
+	r := NewRound(Reply{Messages: []*Message{{Role: RoleAssistant, ToolCalls: calls}}, Calls: calls})
+	for i, call := range calls {
+		o, err := h.RunTool(t.Context(), ToolRun{Call: call}, drainEventCh())
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Outcomes[i] = o
+	}
 
-	for _, todo := range pt.store.Get() {
+	err := h.Commit(t.Context(), CommitIn{Round: r}, drainEventCh())
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, todo := range h.session.Plan.Get() {
 		if todo.Status != TodoStatusCompleted {
-			t.Errorf("todo %s is %s, want every concurrent completion to land", todo.Title, todo.Status)
+			t.Errorf("todo %s is %s, want every completion to land", todo.Title, todo.Status)
 		}
 	}
 }

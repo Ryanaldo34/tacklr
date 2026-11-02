@@ -1,50 +1,99 @@
 package tacklr
 
 import (
-	"context"
+	"encoding/json"
 )
 
-// InferenceStep is one model reply. Complete is a reply with no tool calls,
-// and Result is its text. Otherwise the reply opened a round.
-type InferenceStep struct {
-	Complete bool
-	Result   string
+// Reply is one model reply: its messages (text, reasoning, and the message
+// that carries its calls) and its calls. A reply without calls is complete,
+// and Result is its text.
+type Reply struct {
+	Messages []*Message `json:"messages"`
+	Calls    []ToolCall `json:"calls,omitempty"`
+	Result   string     `json:"result,omitempty"`
 }
 
-// ToolStep is one call RunTools ran. Interrupted means the call parked:
-// the runtime yields the turn and waits for Resume. AwaitJobID means the
-// call waits on that child session; RecordToolResult gives it its result.
-// Starts and Cancels are the children the runtime starts and cancels.
-type ToolStep struct {
-	Call          ToolCall
-	Interrupted   bool
-	InterruptID   string
-	InterruptData []byte
-	AwaitJobID    string
-	Starts        []JobStart
-	Cancels       []string
+// ChildResult is a blocking specialist's output for the call that waited
+// on it. Failed is a child that failed: Output is then its error.
+type ChildResult struct {
+	Output string `json:"output"`
+	Failed bool   `json:"failed,omitempty"`
 }
 
-// Engine is the session-runtime view of a TurnManager.
-type Engine interface {
-	// AbsorbUser commits a user message as a round. Calls of an open round
-	// without a result are cancelled first.
-	AbsorbUser(ctx context.Context, user *Message, out chan StreamEvent) error
-	// RunInference calls the model once. A reply with tool calls opens a
-	// round.
-	RunInference(ctx context.Context, out chan StreamEvent) (InferenceStep, error)
-	// RunTools is Tools step seq: it applies resume (the answers to a park),
-	// runs the open round's runnable calls concurrently, and records them in
-	// call order. It returns one step per call that step seq ran, from the
-	// round, so a retried step reports what the first attempt did. The
-	// first call in call order that parks parks the turn; any other parked
-	// call stays runnable and runs after resume. The round commits when each
-	// call has a result.
-	RunTools(ctx context.Context, seq int, resume map[string][]byte, state map[string]any, out chan StreamEvent) ([]ToolStep, error)
-	// RecordToolResult gives an awaited child's output to tc as its result,
-	// with status error when the child failed, and commits the round when
-	// that was its last result.
-	RecordToolResult(ctx context.Context, tc ToolCall, output string, failed bool, out chan StreamEvent) error
+// ToolRun is one run of one call. Prior is the call's last outcome, when it
+// parked or waited on a child: Answer is the answer to its park, Child the
+// result of its child.
+type ToolRun struct {
+	Call   ToolCall     `json:"call"`
+	Prior  *CallOutcome `json:"prior,omitempty"`
+	Answer []byte       `json:"answer,omitempty"`
+	Child  *ChildResult `json:"child,omitempty"`
+}
+
+// CallOutcome is what one run of a call produced: a result (Done), a park,
+// or a wait on a child (AwaitID), and the children it starts or cancels.
+// Record is the harness's own part (the result message, its window effect,
+// the park, completed OnCall layers, and the shared-state writes the call
+// made); only Commit and the call's next run read it.
+type CallOutcome struct {
+	Call    ToolCall        `json:"call"`
+	Done    bool            `json:"done,omitempty"`
+	Park    *Park           `json:"park,omitempty"`
+	AwaitID string          `json:"awaitId,omitempty"`
+	Starts  []JobStart      `json:"starts,omitempty"`
+	Cancels []string        `json:"cancels,omitempty"`
+	Record  json.RawMessage `json:"record,omitempty"`
+}
+
+// Park is a call's interrupt as the client sees it. InterruptID is the call
+// id; Resume answers it by that id.
+type Park struct {
+	InterruptID string `json:"interruptId"`
+	Data        []byte `json:"data,omitempty"`
+}
+
+// Round is a reply and an outcome per call, in call order. A round commits
+// when each call has its result; a call without one then is cancelled.
+type Round struct {
+	Reply    Reply         `json:"reply"`
+	Outcomes []CallOutcome `json:"outcomes,omitempty"`
+}
+
+// NewRound opens the round of a reply with calls.
+func NewRound(reply Reply) *Round {
+	return &Round{Reply: reply, Outcomes: make([]CallOutcome, len(reply.Calls))}
+}
+
+// Parked is the index of the call that waits on its park, or -1. A round
+// has at most one: when several calls of a reply park, the turn keeps the
+// first park in call order; the others keep no outcome and run again after
+// resume, so the user answers one interrupt at a time.
+func (r *Round) Parked() int {
+	for i, o := range r.Outcomes {
+		if o.Park != nil && !o.Done {
+			return i
+		}
+	}
+	return -1
+}
+
+// Complete reports whether each call has its result.
+func (r *Round) Complete() bool {
+	for _, o := range r.Outcomes {
+		if !o.Done {
+			return false
+		}
+	}
+	return true
+}
+
+// CommitIn is what one Commit writes, in this order: host state, a round
+// (its calls' state writes in call order), then user messages, each a round
+// of its own.
+type CommitIn struct {
+	State map[string]any `json:"state,omitempty"`
+	Round *Round         `json:"round,omitempty"`
+	Users []*Message     `json:"users,omitempty"`
 }
 
 const streamEventBuffer = 64
@@ -66,34 +115,4 @@ func PipeStreamEvents(emit func(StreamEvent)) (chan StreamEvent, func()) {
 		close(out)
 		<-done
 	}
-}
-
-// Action is the turn loop's next step.
-type Action int
-
-const (
-	ActionInfer Action = iota
-	ActionRunTools
-	ActionYield
-	ActionComplete
-	ActionWait
-)
-
-// Next chooses the turn loop's next step: run an open round's calls, yield
-// on a park, wait for jobs or complete once the model is done, else call the
-// model.
-func Next(runnable, parked, inferComplete, jobsRemain bool) Action {
-	if runnable {
-		return ActionRunTools
-	}
-	if parked {
-		return ActionYield
-	}
-	if inferComplete {
-		if jobsRemain {
-			return ActionWait
-		}
-		return ActionComplete
-	}
-	return ActionInfer
 }

@@ -111,7 +111,7 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 	optionsJSON := `{"question":"Pick a path","options":[{"title":"Option A","description":"First","isRecommended":true},{"title":"Option B","description":"Second","isRecommended":false}]}`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
 			intr, err := runtime.Park("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
@@ -322,7 +322,7 @@ func parkOnceStrategy(t *testing.T, name string) tacklr.InferenceStrategy {
 func selectionParkTool(payload string) *tacklr.Tool {
 	return tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
 			_, err := runtime.Park("user_selection_choice", []byte(payload))
 			return "", err
 		},
@@ -384,7 +384,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	t.Run("unknownInterruptParks", func(t *testing.T) {
 		waiting := tacklr.NewTool(tacklr.ToolConfig{
 			Name: "wait_child",
-			Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+			Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
 				_, err := runtime.Park("child_waiting", []byte(`{"kind":"child_waiting"}`))
 				return "", err
 			},

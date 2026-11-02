@@ -29,23 +29,35 @@ func ConstructTurn(ctx context.Context, agent tacklr.AgentOptions, threadID stri
 	return h, ms, nil
 }
 
-// RestoreTurn reloads a snapshot (if any) and applies host session state.
-func RestoreTurn(ctx context.Context, store session.SnapshotStore, id session.SessionID, h *tacklr.TurnManager, state map[string]any) (session.Revision, error) {
+// RestoreTurn loads the session's committed state into h, if a snapshot
+// exists, and returns its revision.
+func RestoreTurn(ctx context.Context, store session.SnapshotStore, id session.SessionID, h *tacklr.TurnManager) (session.Revision, error) {
 	cp, rev, err := store.Load(ctx, id)
 	switch {
 	case err == nil:
-		if err := h.RestoreCheckpoint(cp); err != nil {
-			return "", err
-		}
+		return rev, h.RestoreCheckpoint(cp)
 	case errors.Is(err, session.ErrSessionNotFound):
-		rev = ""
+		return "", nil
 	default:
 		return "", err
 	}
-	if err := h.ApplySessionState(state); err != nil {
+}
+
+// CommitTurn is the Commit step on a harness restored at rev: it applies in
+// and saves, unless the snapshot is already past base (an earlier attempt
+// of this Commit saved), and returns the snapshot's revision.
+func CommitTurn(ctx context.Context, store session.SnapshotStore, id session.SessionID, h *tacklr.TurnManager, rev, base session.Revision, in tacklr.CommitIn, out chan tacklr.StreamEvent) (session.Revision, error) {
+	if rev != base {
+		return rev, nil
+	}
+	if err := h.Commit(ctx, in, out); err != nil {
 		return "", err
 	}
-	return rev, nil
+	cp, err := h.Checkpoint()
+	if err != nil {
+		return "", err
+	}
+	return store.Save(ctx, id, cp, rev)
 }
 
 // AbandonTurn closes a harness and its turn-scoped trees after a failed construct.

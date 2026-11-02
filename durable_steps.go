@@ -8,57 +8,60 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
-	"sync"
 
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// absorbUser commits user as a round of its own, after the open round, if
-// any, ends with its calls cancelled.
-func (a *TurnManager) absorbUser(ctx context.Context, user *Message, out chan StreamEvent) error {
-	if bad := UnsupportedMIMEs(a.model, user.MIMETypes()); len(bad) > 0 {
-		return fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
-	}
-	if err := a.cancelOpenRound(ctx); err != nil {
-		return err
-	}
-	return a.commitRound(ctx, []*Message{user}, EffectNone)
-}
-
-// cancelOpenRound ends a round the user moved past with a new message: each
-// call without a result gets CancelledToolResultContent, the round commits,
-// and parks are dropped.
-func (a *TurnManager) cancelOpenRound(ctx context.Context) error {
-	sm := a.session
-	sm.mu.Lock()
-	if r := sm.round; r != nil {
-		for i := range r.Calls {
-			if c := &r.Calls[i]; c.Result == nil {
-				c.Result, _ = a.toolResultMessage(c.Call, CancelledToolResultContent, "error")
-				c.Park, c.AwaitID = nil, ""
-			}
+// Commit is the Commit step: it applies in to the committed state (host
+// state, then a round: each call's state writes in call order, then the
+// round's messages; then each user message as a round of its own). A call
+// of the round without its result is cancelled. The runtime saves the
+// session after it; it is the only step whose state is saved.
+func (a *TurnManager) Commit(ctx context.Context, in CommitIn, out chan StreamEvent) error {
+	a.session.setState(in.State)
+	if in.Round != nil {
+		if err := a.commitReplyRound(ctx, in.Round, out); err != nil {
+			return err
 		}
 	}
-	sm.mu.Unlock()
-	return a.commitOpenRound(ctx)
-}
-
-// ApplySessionState upserts host-owned userState after construct/restore.
-// Durable runtimes apply CreateSession/Prompt/Resume.State here so tools
-// see it via HarnessRuntime.StateGet.
-func (a *TurnManager) ApplySessionState(state map[string]any) error {
-	for key, value := range state {
-		if err := a.session.StateSet(key, value); err != nil {
+	for _, user := range in.Users {
+		if bad := UnsupportedMIMEs(a.model, user.MIMETypes()); len(bad) > 0 {
+			return fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
+		}
+		if err := a.commitRound(ctx, []*Message{user}, EffectNone); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// runInference calls the model on the committed window. A reply with no
-// calls commits as a round; a reply with calls opens one.
-func (a *TurnManager) runInference(ctx context.Context, out chan StreamEvent) (InferenceStep, error) {
+// commitReplyRound commits a reply and its calls' results.
+func (a *TurnManager) commitReplyRound(ctx context.Context, r *Round, out chan StreamEvent) error {
+	msgs := slices.Clone(r.Reply.Messages)
+	effect := EffectNone
+	for i, call := range r.Reply.Calls {
+		o := r.Outcomes[i]
+		rec, err := record(&o)
+		if err != nil {
+			return err
+		}
+		a.session.apply(rec.Writes)
+		a.emitPlanUpdate(out)
+		result := rec.Result
+		if !o.Done {
+			result, _ = a.toolResultMessage(call, CancelledToolResultContent, "error")
+		}
+		msgs = append(msgs, result)
+		effect = max(effect, rec.Effect) // installing a plan wins over a handoff
+	}
+	return a.commitRound(ctx, msgs, effect)
+}
+
+// Infer is the Infer step: one model request on the committed window. It
+// changes no session state: the reply commits as a round once its calls
+// have their results.
+func (a *TurnManager) Infer(ctx context.Context, out chan StreamEvent) (Reply, error) {
 	afterTools := a.afterTools()
 	turnCtx := ctx
 	if afterTools {
@@ -71,7 +74,7 @@ func (a *TurnManager) runInference(ctx context.Context, out chan StreamEvent) (I
 			outErr = fmt.Errorf("%w: %w", ErrModelAfterTools, err)
 		}
 		out <- StreamEvent{Type: StreamEventError, Error: outErr}
-		return InferenceStep{}, outErr
+		return Reply{}, outErr
 	}
 	asm := newStreamAssembler()
 	var reply []*Message
@@ -81,7 +84,7 @@ func (a *TurnManager) runInference(ctx context.Context, out chan StreamEvent) (I
 		var ok bool
 		select {
 		case <-ctx.Done():
-			return InferenceStep{}, ctx.Err()
+			return Reply{}, ctx.Err()
 		case chunk, ok = <-events:
 		}
 		if !ok {
@@ -93,9 +96,9 @@ func (a *TurnManager) runInference(ctx context.Context, out chan StreamEvent) (I
 		a.streamChunk(chunk, out)
 		if chunk.Type == StreamEventError || chunk.Error != nil {
 			if chunk.Error != nil {
-				return InferenceStep{}, chunk.Error
+				return Reply{}, chunk.Error
 			}
-			return InferenceStep{}, errors.New(chunk.Content)
+			return Reply{}, errors.New(chunk.Content)
 		}
 		asm.AddDelta(chunk)
 		if chunk.IsComplete {
@@ -106,24 +109,17 @@ func (a *TurnManager) runInference(ctx context.Context, out chan StreamEvent) (I
 			}
 		}
 	}
+	r := Reply{Messages: reply, Calls: toolCalls}
 	if len(toolCalls) == 0 {
-		if err := a.commitRound(ctx, reply, EffectNone); err != nil {
-			return InferenceStep{}, err
-		}
-		out <- StreamEvent{Type: StreamEventComplete}
-		step := InferenceStep{Complete: true}
 		for _, m := range reply {
 			if m.Role == RoleAssistant && m.Content != "" {
-				step.Result = m.Content
+				r.Result = m.Content
 			}
 		}
-		return step, nil
+		return r, nil
 	}
-	reply = append(reply, &Message{Role: RoleAssistant, ToolCalls: slices.Clone(toolCalls)})
-	a.session.mu.Lock()
-	a.session.round = newOpenRound(reply, toolCalls)
-	a.session.mu.Unlock()
-	return InferenceStep{}, nil
+	r.Messages = append(r.Messages, &Message{Role: RoleAssistant, ToolCalls: slices.Clone(toolCalls)})
+	return r, nil
 }
 
 // afterTools reports whether the model is answering tool results: the
@@ -133,109 +129,79 @@ func (a *TurnManager) afterTools() bool {
 	return len(window) > 0 && window[len(window)-1].Role == RoleTool
 }
 
-// maxParallelToolCalls bounds how many calls of one reply run at once, so a
-// reply with very many calls cannot start them all on one worker.
-const maxParallelToolCalls = 8
-
-// toolRun is one executed call before its result is recorded. A call that
-// neither parked nor awaits a child has a result.
+// toolRun is one executed call. A call that neither parked nor awaits a
+// child has a result.
 type toolRun struct {
-	step    ToolStep
-	jobs    *callJobs
-	content string // the model-visible result
-	status  string // "success" or "error"
+	interrupted   bool
+	interruptData []byte
+	content       string // the model-visible result
+	status        string // "success" or "error"
 	// effect is the window effect the call's outcome asked for.
 	effect ToolResultEffect
 	err    error // a failure that is not the model's to correct; logged
 }
 
-// runTools is Tools step seq. It applies resume, then runs the open round's
-// runnable calls concurrently, at most maxParallelToolCalls at a time, and
-// records them in call order: results and their client events, parks, and
-// awaits on the round, and the children each call starts or cancels in the
-// step's report. A tool sees the session's shared state (user state,
-// permissions, interrupts, search cursors) as it runs. The round commits
-// once each call has a result; until then the window does not change. A
-// tool's failure is its result, so the error is the step's: an unknown
-// resume id, or a failed commit. A retry of a step whose first attempt
-// saved runs no tool: it returns the saved report and only commits.
-func (a *TurnManager) runTools(ctx context.Context, seq int, resume map[string][]byte, state map[string]any, out chan StreamEvent) ([]ToolStep, error) {
-	sm := a.session
-	sm.mu.RLock()
-	retried := sm.report.Seq == seq
-	steps := sm.report.Steps
-	sm.mu.RUnlock()
-	if retried {
-		// The first attempt applied the host state and ran the tools, which
-		// may have changed it since; applying it again would undo that.
-		return steps, a.commitOpenRound(ctx)
+// RunTool is the Tool step: it runs one call of the open round from its
+// prior outcome. A child's result becomes the call's result; an answer
+// resumes its park; otherwise the call runs. It changes no session state:
+// the outcome carries the call's writes for Commit.
+func (a *TurnManager) RunTool(ctx context.Context, run ToolRun, out chan StreamEvent) (CallOutcome, error) {
+	o := CallOutcome{Call: run.Call}
+	prior, err := record(run.Prior)
+	if err != nil {
+		return o, err
 	}
-	if err := a.ApplySessionState(state); err != nil {
-		return nil, err
+	rec := callRecord{Layers: prior.Layers, Writes: prior.Writes}
+	if c := run.Child; c != nil {
+		status := "success"
+		if c.Failed {
+			status = "error"
+		} else {
+			a.keepSpecialistResult(ctx, c.Output)
+		}
+		rec.Result = a.emitToolResult(out, run.Call, c.Output, status)
+		return o.with(rec, true), nil
 	}
-	for id, payload := range resume {
-		if err := sm.Resume(id, payload); err != nil {
-			return nil, fmt.Errorf("return from interrupt %q: %w", id, err)
+	rt := newHarnessRuntime(out, a.jobHost, a.session, roundCall{Call: run.Call, Park: prior.Park, Layers: prior.Layers}, prior.Writes)
+	if run.Answer != nil {
+		if err := rt.resume(run.Answer); err != nil {
+			return o, fmt.Errorf("return from interrupt %q: %w", run.Call.Key(), err)
 		}
 	}
-	sm.mu.RLock()
-	idx := sm.round.runnable()
-	calls := make([]ToolCall, len(idx))
-	for k, i := range idx {
-		calls[k] = sm.round.Calls[i].Call
+	r := a.executeToolCall(ctx, rt)
+	rec.Layers, rec.Writes = rt.call.Layers, rt.writes
+	o.Starts, o.Cancels = rt.starts, rt.cancels
+	switch {
+	case r.interrupted:
+		rec.Park = rt.call.Park
+		o.Park = &Park{InterruptID: run.Call.Key(), Data: r.interruptData}
+		return o.with(rec, false), nil
+	case rt.await != "":
+		o.AwaitID = rt.await
+		return o.with(rec, false), nil
 	}
-	sm.mu.RUnlock()
-
-	runs := make([]toolRun, len(calls))
-	slots := make(chan struct{}, maxParallelToolCalls)
-	var wg sync.WaitGroup
-	for k, tc := range calls {
-		slots <- struct{}{}
-		wg.Go(func() {
-			defer func() { <-slots }()
-			runs[k] = a.executeToolCall(ctx, tc, out)
-		})
+	if r.err != nil {
+		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", run.Call.Name, "error", r.err)
 	}
-	wg.Wait()
-
-	steps = make([]ToolStep, len(runs))
-	parked := false
-	sm.mu.Lock()
-	for k, r := range runs {
-		c := &sm.round.Calls[idx[k]]
-		steps[k] = r.step
-		steps[k].Starts, steps[k].Cancels = r.jobs.starts, r.jobs.cancels
-		switch {
-		case r.step.Interrupted && parked:
-			// The turn parks on one interrupt. This call did not finish, so
-			// it drops its park and runs again after resume.
-			c.Park = nil
-			steps[k].Interrupted, steps[k].InterruptID, steps[k].InterruptData = false, "", nil
-		case r.step.Interrupted:
-			parked = true
-			out <- StreamEvent{Type: StreamEventInterrupt, MessageID: r.step.InterruptID, Data: r.step.InterruptData}
-		case r.jobs.await != "":
-			c.AwaitID, steps[k].AwaitJobID = r.jobs.await, r.jobs.await
-		default:
-			a.emitPlanUpdate(out)
-			c.Result = a.emitToolResult(out, c.Call, r.content, r.status)
-			sm.round.Effect = sm.round.Effect.merge(r.effect)
-			if r.err != nil {
-				slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", c.Call.Name, "error", r.err)
-			}
-		}
-	}
-	sm.report = stepReport{Seq: seq, Steps: steps}
-	sm.mu.Unlock()
-	return steps, a.commitOpenRound(ctx)
+	rec.Result, rec.Effect = a.emitToolResult(out, run.Call, r.content, r.status), r.effect
+	return o.with(rec, true), nil
 }
 
-// executeToolCall runs one call. It may park or wait on a child, but it
-// records nothing: runTools records every call in call order.
-func (a *TurnManager) executeToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) toolRun {
-	turnRT := newToolRuntime(out, a.session, a.jobHost)
+// with is o carrying rec, Done when the call has its result. A record
+// always encodes: its writes are JSON already and its park a registered
+// interrupt.
+func (o CallOutcome) with(rec callRecord, done bool) CallOutcome {
+	o.Done = done
+	o.Record, _ = json.Marshal(rec)
+	return o
+}
+
+// executeToolCall runs rt's call through the interceptor chain. It may park
+// or wait on a child.
+func (a *TurnManager) executeToolCall(ctx context.Context, rt *HarnessRuntime) toolRun {
+	tc := rt.call.Call
 	tcKey := tc.Key()
-	run := toolRun{step: ToolStep{Call: tc}, jobs: turnRT.jobs}
+	var run toolRun
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
@@ -244,15 +210,14 @@ func (a *TurnManager) executeToolCall(ctx context.Context, tc ToolCall, out chan
 		run.content, run.status = toolErr.Error(), "error"
 		return run
 	}
-	runtimeCopy := turnRT.WithToolCallID(tcKey)
 	outcome, err := a.toolRunner.Run(toolCtx, ToolInvocation{
 		Tool:     tool,
 		ArgsJSON: tc.Arguments,
-		Runtime:  runtimeCopy,
+		Runtime:  rt,
 	})
 	var parked Interrupt
 	if err != nil && !errors.As(err, &parked) && (errors.Is(err, ErrAuthExpired) || errors.Is(err, vfs.ErrAuthExpired)) {
-		err = a.session.Park(tcKey, &AuthExpired{Tool: tc.Name})
+		err = rt.park(&AuthExpired{Tool: tc.Name})
 	}
 	if errors.As(err, &parked) {
 		serialized, _ := parked.Serialize()
@@ -265,7 +230,7 @@ func (a *TurnManager) executeToolCall(ctx context.Context, tc ToolCall, out chan
 			toolCtx, telemetry.AgentIDFromContext(ctx), parked.TypeName(),
 		)
 		toolSpan.Finish("interrupt", nil)
-		run.step.Interrupted, run.step.InterruptID, run.step.InterruptData = true, tcKey, data
+		run.interrupted, run.interruptData = true, data
 		return run
 	}
 	if err != nil {
@@ -276,11 +241,10 @@ func (a *TurnManager) executeToolCall(ctx context.Context, tc ToolCall, out chan
 		}
 		return run
 	}
-	if turnRT.jobs.await != "" {
-		toolSpan.Finish("success", nil)
+	toolSpan.Finish("success", nil)
+	if rt.await != "" {
 		return run
 	}
-	toolSpan.Finish("success", nil)
 	run.content, run.status, run.effect = outcome.Output, "success", outcome.Effect
 	return run
 }

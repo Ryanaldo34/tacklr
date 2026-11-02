@@ -387,7 +387,7 @@ func gotText(t *testing.T, ms *vfs.MountSession, path string) string {
 	return doc.Text()
 }
 
-func requireWriteUnchanged(t *testing.T, ms *vfs.MountSession, write *Tool, rt HarnessRuntime, path, argsJSON, wantSubstr string) {
+func requireWriteUnchanged(t *testing.T, ms *vfs.MountSession, write *Tool, rt *HarnessRuntime, path, argsJSON, wantSubstr string) {
 	t.Helper()
 	before := gotText(t, ms, path)
 	_, err := write.invoke(context.Background(), argsJSON, rt)

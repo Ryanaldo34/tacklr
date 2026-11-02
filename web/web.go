@@ -64,7 +64,7 @@ func WebSearch(client *Exa) *tacklr.Tool {
 		Category:    tacklr.ToolCategorySearch,
 		Access:      tacklr.ToolReadAccess,
 		Timeout:     webSearchToolTimeout,
-		Handler: func(ctx context.Context, args webSearchArgs, runtime tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args webSearchArgs, runtime *tacklr.HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Searching the web…")
 			return runWebSearch(ctx, client, args)
 		},
@@ -396,7 +396,7 @@ func WebFetch(client *Exa) *tacklr.Tool {
 		Category:    tacklr.ToolCategoryFetch,
 		Access:      tacklr.ToolReadAccess,
 		Timeout:     webFetchToolTimeout,
-		Handler: func(ctx context.Context, args webFetchArgs, runtime tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args webFetchArgs, runtime *tacklr.HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Fetching page content…")
 			return runWebFetch(ctx, client, args)
 		},

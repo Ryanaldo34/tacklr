@@ -22,8 +22,8 @@ import (
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-// TurnManager is one session's harness for one step: the model call, the
-// open round's tools, and the window they commit to. Durable runtimes
+// TurnManager is one session's harness for one step: a model request, one
+// tool call, or a commit to the window. Durable runtimes
 // construct it for each step; hosts use session.Runtime.
 type TurnManager struct {
 	model                 InferenceStrategy
@@ -58,50 +58,6 @@ type TurnManager struct {
 // NewTurnManager. Nil: job methods fail.
 func (a *TurnManager) BindJobHost(host JobHost) {
 	a.jobHost = host
-}
-
-// recordToolResult gives an awaited specialist's output to tc as its
-// result, with status error when the specialist failed, and commits the
-// round when that was its last result. A successful result is kept as an
-// episode. A retry after the result committed finds no open call and does
-// nothing.
-func (a *TurnManager) recordToolResult(ctx context.Context, tc ToolCall, output string, failed bool, out chan StreamEvent) error {
-	status := "success"
-	if failed {
-		status = "error"
-	}
-	sm := a.session
-	sm.mu.Lock()
-	c := sm.round.call(tc.Key())
-	if c == nil || c.Result != nil {
-		sm.mu.Unlock()
-		return nil
-	}
-	c.Result, c.AwaitID = a.emitToolResult(out, tc, output, status), ""
-	sm.mu.Unlock()
-	if !failed {
-		a.keepSpecialistResult(ctx, output)
-	}
-	return a.commitOpenRound(ctx)
-}
-
-// commitOpenRound commits the open round when each of its calls has a
-// result. A failed commit keeps the round open: the window has none of it.
-func (a *TurnManager) commitOpenRound(ctx context.Context) error {
-	sm := a.session
-	sm.mu.RLock()
-	r := sm.round
-	sm.mu.RUnlock()
-	if r == nil || !r.complete() {
-		return nil
-	}
-	if err := a.commitRound(ctx, r.messages(), r.Effect); err != nil {
-		return err
-	}
-	sm.mu.Lock()
-	sm.round = nil
-	sm.mu.Unlock()
-	return nil
 }
 
 // commitRound appends one complete round to the window. A round with a
@@ -336,9 +292,6 @@ func (a *TurnManager) saveSessionMessages(ctx context.Context, window []*Message
 }
 
 func messageSearchText(m *Message) string {
-	if m == nil {
-		return ""
-	}
 	var b strings.Builder
 	b.WriteString(string(m.Role))
 	b.WriteByte('\n')
@@ -486,7 +439,7 @@ func (a *TurnManager) initMCP(ctx context.Context) {
 			Description: description,
 			Namespace:   namespace,
 			Schema:      schema,
-			Handler: func(ctx context.Context, args map[string]any, _ HarnessRuntime) (string, error) {
+			Handler: func(ctx context.Context, args map[string]any, _ *HarnessRuntime) (string, error) {
 				return handler(ctx, args)
 			},
 		})

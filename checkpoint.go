@@ -9,9 +9,10 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-// SessionCheckpoint is a session's durable state, encoded: the window, the
-// open round and the last Tools step's report, the plan, user state,
-// permission decisions, and search rests. A runtime stores it whole
+// SessionCheckpoint is a session's committed state, encoded: the window of
+// complete rounds, the plan, user state, permission decisions, and search
+// rests. A round in progress is not in it: the runtime records each step's
+// result and holds the open round. A runtime stores it whole
 // (session.SnapshotStore) and only the harness reads it. It is an encoding,
 // so it shares nothing with the live session it came from.
 type SessionCheckpoint struct {
@@ -36,7 +37,7 @@ func (c *SessionCheckpoint) UnmarshalJSON(b []byte) error {
 
 // checkpointVersion is the schema of checkpointState. A checkpoint of
 // another version fails to restore.
-const checkpointVersion = 4
+const checkpointVersion = 5
 
 // checkpointState is what a checkpoint encodes. Host configuration (the
 // search namespace and principals, AllowTools) is not in it: each step
@@ -44,8 +45,6 @@ const checkpointVersion = 4
 type checkpointState struct {
 	Version     int                           `json:"version"`
 	Window      []*Message                    `json:"window"`
-	Round       *openRound                    `json:"round,omitempty"`
-	Report      stepReport                    `json:"report,omitzero"`
 	Todos       []Todo                        `json:"todos,omitempty"`
 	Plan        string                        `json:"plan,omitempty"`
 	UserState   map[string]any                `json:"userState,omitempty"`
@@ -65,7 +64,7 @@ func (a *TurnManager) Checkpoint() (SessionCheckpoint, error) {
 	sm := a.session
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	st.Round, st.Report, st.UserState = sm.round, sm.report, sm.userState
+	st.UserState = sm.userState
 	data, err := json.Marshal(st)
 	if err != nil {
 		return SessionCheckpoint{}, fmt.Errorf("checkpoint: %w", err)
@@ -92,7 +91,6 @@ func (a *TurnManager) RestoreCheckpoint(cp SessionCheckpoint) error {
 	sm := a.session
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	sm.round, sm.report = st.Round, st.Report
 	sm.userState = maps.Clone(st.UserState)
 	if sm.userState == nil {
 		sm.userState = map[string]any{}

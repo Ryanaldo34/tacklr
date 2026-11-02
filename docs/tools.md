@@ -11,7 +11,7 @@ func NewSearchRecordsTool(store RecordStore) *tacklr.Tool {
 	return tacklr.NewTool(tacklr.ToolConfig{
 		Name:        "search_records",
 		Description: "Search operational records.",
-		Handler: func(ctx context.Context, args SearchArgs, rt tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args SearchArgs, rt *tacklr.HarnessRuntime) (string, error) {
 			return store.Search(ctx, args.Query, args.Limit)
 		},
 	})
@@ -31,11 +31,11 @@ opts := tacklr.AgentOptions{
 }
 ```
 
-Or invoke the tool directly with that constructor. You do not mock `HarnessRuntime` to inject the store.
+Or invoke the tool directly with that constructor. You do not mock `HarnessRuntime` to inject the store: it is a concrete type the harness makes for each call (`*tacklr.HarnessRuntime`), so tests run tools through a real harness.
 
 ### What `HarnessRuntime` is for
 
-Progress (`EmitUpdate`), park (`Park`), specialists (`RunSpecialist`), jobs (`Schedule` / `Jobs` / `CancelJob`), and session key-values (`StateGet` / `StateSet` / `StateDelete`). Hosts set those values on `CreateSession.State`, `Prompt.State`, or `Resume.State`. Close over clients in the constructor. Register named workers on `temporal.Config.Jobs`. Tools do not wait on jobs; a tool call already blocks the next model turn.
+Progress (`EmitUpdate`), park (`Park`), Runtime job workers (`Schedule`, with `Wait` to make the job's output the call's result; `Jobs`; `CancelJob`; specialists are the model's to start, through `spawn_specialist`), and session key-values (`StateGet` / `StateSet` / `StateDelete`). Hosts set those values on `CreateSession.State`, `Prompt.State`, or `Resume.State`. Close over clients in the constructor. Register named workers on `temporal.Config.Jobs`.
 
 ### Large results
 

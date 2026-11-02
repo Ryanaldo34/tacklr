@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
@@ -16,22 +15,6 @@ func OverlaySpecialist(parent tacklr.AgentOptions, specialist string) (tacklr.Ag
 	}
 	out := parent.WithSpecialist(spec)
 	return tacklr.BindTurn(out, "", nil), nil
-}
-
-// NormalizeSpawn trims spawn_specialist arguments.
-// Specialist is required; empty task allowed for idempotent retry of the same callID.
-func NormalizeSpawn(specialist, task string) (string, string, error) {
-	specialist = strings.TrimSpace(specialist)
-	task = strings.TrimSpace(task)
-	if specialist == "" {
-		return "", "", fmt.Errorf("specialist is required: %w", tacklr.ErrInvalid)
-	}
-	return specialist, task, nil
-}
-
-// HasSpecialist reports whether the agent defines this assistant.
-func HasSpecialist(agent tacklr.AgentOptions, name string) bool {
-	return tacklr.FindSpecialist(agent.Specialists, name) != nil
 }
 
 // JobSteer is the RoleUser inbox text when a non-blocking job reaches

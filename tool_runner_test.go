@@ -23,13 +23,13 @@ func TestOnCallMiddleware_permissionThenInvoke(t *testing.T) {
 			return "ok", nil
 		},
 	})
-	rt, sm := onCallRuntime()
-	runner := newToolRunner(onCallMiddleware(sm))
+	rt, _ := onCallRuntime()
+	runner := newToolRunner(onCallMiddleware)
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{"path":"/a"}`, Runtime: rt}
 
 	_, err := runner.Run(t.Context(), inv)
 	requireParked(t, err, "tool_permission")
-	if err := sm.Resume("c1", []byte(`{"optionId":"allow-once"}`)); err != nil {
+	if err := rt.resume([]byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runner.Run(t.Context(), inv)
@@ -55,14 +55,14 @@ func TestOnCallMiddleware_twoLayersParkOneAfterTheOther(t *testing.T) {
 		OnCall:  []OnCallFunc{ToolPermissionOnCall, choose},
 		Handler: func(context.Context) (string, error) { calls++; return "ok", nil },
 	})
-	rt, sm := onCallRuntime()
-	runner := newToolRunner(onCallMiddleware(sm))
+	rt, _ := onCallRuntime()
+	runner := newToolRunner(onCallMiddleware)
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt}
 
 	_, first := runner.Run(t.Context(), inv)
-	firstAnswer := sm.Resume("c1", []byte(`{"optionId":"allow-once"}`))
+	firstAnswer := rt.resume([]byte(`{"optionId":"allow-once"}`))
 	_, second := runner.Run(t.Context(), inv)
-	secondAnswer := sm.Resume("c1", []byte(`{"selectionIdx":1}`))
+	secondAnswer := rt.resume([]byte(`{"selectionIdx":1}`))
 	out, err := runner.Run(t.Context(), inv)
 
 	requireParked(t, first, "tool_permission")
@@ -82,45 +82,26 @@ func TestOnCallMiddleware_permissionAnswersWithoutAPark(t *testing.T) {
 		OnCall:  []OnCallFunc{ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) { calls++; return "secret", nil },
 	})
-	run := func(answer string, granted bool) (ToolOutcome, error) {
+	run := func(decision permissionDecision, granted bool) (ToolOutcome, error) {
 		rt, sm := onCallRuntime()
 		if granted {
 			sm.Permissions.granted = map[string]bool{"sensitive": true}
 		}
-		if answer != "" {
-			sm.Permissions.rememberAnswer(&ToolPermissionInterrupt{ToolName: "sensitive", SelectedKind: answer})
+		if decision != permNone {
+			sm.Permissions.set("sensitive", decision)
 		}
-		return newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt})
+		return newToolRunner(onCallMiddleware).Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt})
 	}
 
-	allowed, allowErr := run(PermissionAllowAlways, false)
-	grantedOut, grantErr := run("", true)
-	_, denyErr := run(PermissionRejectAlways, true)
+	allowed, allowErr := run(permAllowAlways, false)
+	grantedOut, grantErr := run(permNone, true)
+	_, denyErr := run(permDenyAlways, true)
 
 	if allowErr != nil || grantErr != nil || allowed.Output != "secret" || grantedOut.Output != "secret" || calls != 2 {
 		t.Fatalf("allow-always %v, granted %v, calls %d, want both to run", allowErr, grantErr, calls)
 	}
 	if !errors.Is(denyErr, ErrToolPermissionDenied) {
 		t.Fatalf("reject-always over a grant = %v, want denied", denyErr)
-	}
-}
-
-// TestOnCallMiddleware_requiresARuntimeAndAnOpenCall: OnCall layers need a
-// runtime, and a park needs the call in the open round.
-func TestOnCallMiddleware_requiresARuntimeAndAnOpenCall(t *testing.T) {
-	tool := NewTool(ToolConfig{
-		Name:    "gated",
-		OnCall:  []OnCallFunc{ToolPermissionOnCall},
-		Handler: func(ctx context.Context) (string, error) { return "x", nil },
-	})
-	rt, sm := onCallRuntime()
-
-	_, noRuntime := newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`})
-	_, noCall := newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt.WithToolCallID("other")})
-
-	var parked Interrupt
-	if !errors.Is(noRuntime, ErrFailed) || noCall == nil || errors.As(noCall, &parked) {
-		t.Fatalf("no runtime = %v, a call outside the round = %v", noRuntime, noCall)
 	}
 }
 
@@ -146,15 +127,9 @@ func TestToolInterceptor_changesTheOutcome(t *testing.T) {
 	}
 }
 
-func onCallRuntime() (toolRuntime, *sessionManager) {
+func onCallRuntime() (*HarnessRuntime, *sessionManager) {
 	sm := newSessionManager()
-	sm.round = newOpenRound(nil, []ToolCall{{ID: "c1", CallID: "c1"}})
-	ch := make(chan StreamEvent, 8)
-	go func() {
-		for range ch {
-		}
-	}()
-	return newToolRuntime(ch, sm, nil).WithToolCallID("c1"), sm
+	return callRuntime(sm, nil, "c1"), sm
 }
 
 func requireParked(t *testing.T, err error, kind string) {

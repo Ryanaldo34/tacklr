@@ -1,17 +1,18 @@
 package tacklr
 
 import (
-	"fmt"
+	"encoding/json"
+	"maps"
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// sessionManager is one session's state: plan, user tool state, permission
-// memory, search context, the open round (with each call's park and OnCall
-// layers), the last Tools step's report, and the workspace mount table.
-// Builtins close over it; user tools reach it through sessionRuntime.
+// sessionManager is one session's committed state: plan, user state,
+// permission memory, search context, and the workspace mount table. A tool
+// call reads it through its HarnessRuntime and writes only there; Commit
+// applies the writes here.
 type sessionManager struct {
 	mu          sync.RWMutex
 	Plan        *planStore
@@ -19,11 +20,6 @@ type sessionManager struct {
 	Permissions permissions
 	Search      *brain.SearchContext
 	VFS         *vfs.MountSession
-	// round is the reply whose calls do not all have results yet; nil when
-	// none is open. The window gets it whole when it commits.
-	round *openRound
-	// report is the last Tools step's report, for a retry of that step.
-	report stepReport
 }
 
 // newSessionManager returns an empty manager ready for use.
@@ -36,92 +32,41 @@ func newSessionManager() *sessionManager {
 	}
 }
 
-// StateGet returns a host/tool state value without a turn Runtime.
-func (s *sessionManager) StateGet(key string) (any, bool) {
+// state is the committed user-state value of key.
+func (s *sessionManager) state(key string) (any, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	v, ok := s.userState[key]
 	return v, ok
 }
 
-// StateSet stores a host/tool state value without a turn Runtime.
-func (s *sessionManager) StateSet(key string, value any) error {
+// setState upserts host values (CreateSession, Prompt, or Resume State).
+func (s *sessionManager) setState(state map[string]any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.userState[key] = value
-	return nil
+	maps.Copy(s.userState, state)
 }
 
-// StateDelete removes a host/tool state value without a turn Runtime.
-func (s *sessionManager) StateDelete(key string) {
+// apply applies one call's writes to the committed state.
+func (s *sessionManager) apply(w callWrites) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.userState, key)
-}
-
-// Park makes intr the park of the open round's call callID and returns it
-// as the error tools propagate (`return "", err`).
-func (s *sessionManager) Park(callID string, intr Interrupt) error {
-	if intr == nil {
-		return fmt.Errorf("park: interrupt is nil")
+	for _, sw := range w.State {
+		if sw.Deleted {
+			delete(s.userState, sw.Key)
+			continue
+		}
+		var v any
+		_ = json.Unmarshal(sw.Value, &v)
+		s.userState[sw.Key] = v
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c := s.round.call(callID)
-	if c == nil {
-		return fmt.Errorf("park: tool call %q is not in the open round", callID)
+	s.mu.Unlock()
+	for _, pw := range w.Permissions {
+		s.Permissions.set(pw.Tool, pw.Decision)
 	}
-	c.Park = &callPark{Interrupt: intr}
-	return intr
-}
-
-// Resume answers callID's park through Interrupt.Return. An invalid payload
-// leaves the park unanswered.
-func (s *sessionManager) Resume(callID string, payload []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c := s.round.call(callID)
-	if c == nil || c.Park == nil || c.Park.Answered {
-		return fmt.Errorf("interrupt %q: %w", callID, ErrInterruptNotFound)
+	for _, rw := range w.Rests {
+		s.Search.SetRest(rw.Key, rw.Rest)
 	}
-	if err := c.Park.Interrupt.Return(payload); err != nil {
-		return err
-	}
-	c.Park.Answered = true
-	return nil
-}
-
-// TakeAnswer removes and returns callID's answered park of typeName, for
-// the call's run after resume.
-func (s *sessionManager) TakeAnswer(callID, typeName string) (Interrupt, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c := s.round.call(callID)
-	if c == nil || c.Park == nil || !c.Park.Answered || c.Park.Interrupt.TypeName() != typeName {
-		return nil, false
-	}
-	intr := c.Park.Interrupt
-	c.Park = nil
-	return intr, true
-}
-
-// Layer is callID's completed OnCall layer of typeName.
-func (s *sessionManager) Layer(callID, typeName string) (onCallLayer, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	c := s.round.call(callID)
-	if c == nil {
-		return onCallLayer{}, false
-	}
-	return c.layer(typeName)
-}
-
-// RecordLayer stores a completed OnCall layer on callID, so its next run
-// skips it.
-func (s *sessionManager) RecordLayer(callID string, layer onCallLayer) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if c := s.round.call(callID); c != nil {
-		c.Layers = append(c.Layers, layer)
+	for _, op := range w.Plan {
+		s.replayPlanOp(op)
 	}
 }

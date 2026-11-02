@@ -10,7 +10,7 @@ import (
 // value JSON cannot hold fails the checkpoint instead of losing it.
 func TestCheckpoint_aValueThatCannotBeEncodedFailsTheCheckpoint(t *testing.T) {
 	h := mustNewTurnManager(t, AgentOptions{Model: &scriptedModel{}})
-	_ = h.session.StateSet("bad", make(chan int))
+	h.session.setState(map[string]any{"bad": make(chan int)})
 
 	_, err := h.Checkpoint()
 
