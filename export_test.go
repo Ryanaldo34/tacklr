@@ -39,12 +39,12 @@ func (m *scriptedModel) SupportsMIME(mimeType string) bool {
 }
 func (m *scriptedModel) MaxContextWindow() (int, error) { return 8192, nil }
 
-func (m *scriptedModel) CountTokens(ctx context.Context, msgs []*Message, tools []*Tool) (int, error) {
+func (m *scriptedModel) CountTokens(ctx context.Context, req ModelRequest) (int, error) {
 	if m.CountTokensFn != nil {
-		return m.CountTokensFn(ctx, msgs, tools)
+		return m.CountTokensFn(ctx, req.Messages, req.Tools)
 	}
 	n := 0
-	for _, msg := range msgs {
+	for _, msg := range req.Messages {
 		if msg != nil {
 			n += len(msg.Content)
 		}
@@ -52,7 +52,8 @@ func (m *scriptedModel) CountTokens(ctx context.Context, msgs []*Message, tools 
 	return n, nil
 }
 
-func (m *scriptedModel) Invoke(ctx context.Context, msgs []*Message, tools []*Tool, systemPrompt string) (chan LLMResponseChunk, error) {
+func (m *scriptedModel) Invoke(ctx context.Context, req ModelRequest) (chan LLMResponseChunk, error) {
+	msgs, tools, systemPrompt := req.Messages, req.Tools, req.SystemPrompt
 	if m.InvokeErr != nil {
 		return nil, m.InvokeErr
 	}
@@ -106,13 +107,13 @@ func reloadHarness(t *testing.T, h *TurnManager, opts AgentOptions) *TurnManager
 }
 
 // callRuntime is the runtime of one call, id, on sm (events drained).
-func callRuntime(sm *sessionManager, host JobHost, id string) *HarnessRuntime {
-	return newHarnessRuntime(drainEventCh(), host, sm, roundCall{Call: ToolCall{ID: id, CallID: id}}, callWrites{})
+func callRuntime(sm *sessionManager, id string) *HarnessRuntime {
+	return newHarnessRuntime(drainEventCh(), &TurnManager{session: sm}, nil, roundCall{Call: ToolCall{ID: id, CallID: id}}, callWrites{})
 }
 
 // turnRuntime is the runtime of one call on h.
 func turnRuntime(h *TurnManager) *HarnessRuntime {
-	return callRuntime(h.session, h.jobHost, "")
+	return newHarnessRuntime(drainEventCh(), h, nil, roundCall{}, callWrites{})
 }
 
 // commit applies what the call wrote to the committed state, as Commit does.

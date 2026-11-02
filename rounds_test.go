@@ -192,7 +192,7 @@ func TestRunTool_aChildResultIsTheCallsResultWhenItsEpisodeCannotBeKept(t *testi
 // gated tool runs without a prompt.
 func TestRunTool_aCallsWritesFromEachRunLandAtCommit(t *testing.T) {
 	note := NewTool(ToolConfig{Name: "note", Handler: func(_ context.Context, rt *HarnessRuntime) (string, error) {
-		if _, err := rt.Park("user_selection_choice", []byte(`[{"title":"A"},{"title":"B"}]`)); err != nil {
+		if _, err := rt.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}}); err != nil {
 			return "", errors.Join(rt.StateSet("k", "before"), err)
 		}
 		rt.StateDelete("old")

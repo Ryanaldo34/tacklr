@@ -35,7 +35,7 @@ Or invoke the tool directly with that constructor. You do not mock `HarnessRunti
 
 ### What `HarnessRuntime` is for
 
-Progress (`EmitUpdate`), park (`Park`), Runtime job workers (`Schedule`, with `Wait` to make the job's output the call's result; `Jobs`; `CancelJob`; specialists are the model's to start, through `spawn_specialist`), and session key-values (`StateGet` / `StateSet` / `StateDelete`). Hosts set those values on `CreateSession.State`, `Prompt.State`, or `Resume.State`. Close over clients in the constructor. Register named workers on `temporal.Config.Jobs`.
+Progress (`EmitUpdate`), park (`Park` with a typed interrupt such as `&UserSelectionInterrupt{…}`; a custom type is registered with `RegisterInterrupt` so a parked call can be read back), Runtime job workers (`Schedule`, with `Wait` to make the job's output the call's result; `Jobs`; `CancelJob`; specialists are the model's to start, through `spawn_specialist`), and session key-values (`StateGet` / `StateSet` / `StateDelete`). Hosts set those values on `CreateSession.State`, `Prompt.State`, or `Resume.State`. Close over clients in the constructor. Register named workers on `temporal.Config.Jobs`.
 
 ### Large results
 

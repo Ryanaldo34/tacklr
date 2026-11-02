@@ -86,7 +86,7 @@ func TestInvoke_truncatedStreamDoesNotCommitPartialAssistant(t *testing.T) {
 		WithApiKey("test-key").
 		WithModel("gpt-5.4").
 		WithURL(server.URL)
-	ch, err := strategy.Invoke(t.Context(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "hello"}}, nil, "")
+	ch, err := strategy.Invoke(t.Context(), tacklr.ModelRequest{Messages: []*tacklr.Message{{Role: tacklr.RoleUser, Content: "hello"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,9 +120,9 @@ func TestCountTokens_404WithoutLocalFallback_returnsAPIError(t *testing.T) {
 		WithModel("m").
 		WithURL(srv.URL)
 
-	_, err := s.CountTokens(context.Background(), []*tacklr.Message{
+	_, err := s.CountTokens(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{
 		{Role: tacklr.RoleUser, Content: "count these tokens please"},
-	}, nil)
+	}})
 	var apiErr *APIStatusError
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
 		t.Fatalf("want 404 API error, got %v", err)
@@ -142,9 +142,9 @@ func TestCountTokens_fallsBackToTiktokenOn404(t *testing.T) {
 		WithURL(srv.URL).
 		WithLocalTokenFallback()
 
-	n, err := s.CountTokens(context.Background(), []*tacklr.Message{
+	n, err := s.CountTokens(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{
 		{Role: tacklr.RoleUser, Content: "count these tokens please"},
-	}, nil)
+	}})
 	if err != nil {
 		t.Fatalf("CountTokens: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestInvoke_contextCancel_stopsStream(t *testing.T) {
 		WithURL(srv.URL)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	ch, err := s.Invoke(ctx, []*tacklr.Message{{Role: tacklr.RoleUser, Content: "hi"}}, nil, "")
+	ch, err := s.Invoke(ctx, tacklr.ModelRequest{Messages: []*tacklr.Message{{Role: tacklr.RoleUser, Content: "hi"}}})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestInvoke_namespacedToolCallOnTheWire(t *testing.T) {
 		Name: "greet", Namespace: "ado",
 		Handler: func(ctx context.Context) (string, error) { return "", nil },
 	})
-	ch, err := s.Invoke(context.Background(), []*tacklr.Message{
+	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{
 		{Role: tacklr.RoleUser, Content: "hi"},
 		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
 			{CallID: "call_1", Name: "greet", Namespace: "ado"},
@@ -248,7 +248,7 @@ func TestInvoke_namespacedToolCallOnTheWire(t *testing.T) {
 			Content:          "plan",
 		},
 		{Role: tacklr.RoleReasoning, MessageID: "rs_orphan", Content: "after"},
-	}, []*tacklr.Tool{tool}, "")
+	}, Tools: []*tacklr.Tool{tool}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,14 +281,14 @@ func TestInvoke_namespacedToolCallOnTheWire(t *testing.T) {
 
 func TestInvoke_requiresKeyAndModel(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(http.DefaultClient)
-	if _, err := s.Invoke(context.Background(), nil, nil, ""); !errors.Is(err, tacklr.ErrApiKeyNotSet) {
+	if _, err := s.Invoke(context.Background(), tacklr.ModelRequest{}); !errors.Is(err, tacklr.ErrApiKeyNotSet) {
 		t.Fatalf("%v", err)
 	}
 	s.WithApiKey("k")
-	if _, err := s.Invoke(context.Background(), nil, nil, ""); !errors.Is(err, tacklr.ErrModelNotSet) {
+	if _, err := s.Invoke(context.Background(), tacklr.ModelRequest{}); !errors.Is(err, tacklr.ErrModelNotSet) {
 		t.Fatalf("%v", err)
 	}
-	if _, err := s.CountTokens(context.Background(), nil, nil); !errors.Is(err, tacklr.ErrModelNotSet) {
+	if _, err := s.CountTokens(context.Background(), tacklr.ModelRequest{}); !errors.Is(err, tacklr.ErrModelNotSet) {
 		t.Fatalf("count: %v", err)
 	}
 }
@@ -313,13 +313,11 @@ func TestInvoke_promptCacheGrokCompat(t *testing.T) {
 		WithApiKey("k").
 		WithModel("grok-4.6").
 		WithURL(srv.URL)
-	s.CacheKey = "sess-grok-1"
-	s.SetSystemPrompt("stable system")
 
-	ch, err := s.Invoke(context.Background(), []*tacklr.Message{
+	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{
 		{Role: tacklr.RoleUser, Content: "ask"},
 		{Role: tacklr.RoleDeveloper, Content: "PROJECT PLAN\n────────────\nDo the work"},
-	}, nil, "")
+	}, SystemPrompt: "stable system", CacheKey: "sess-grok-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,18 +366,17 @@ func TestInvoke_promptCacheGPT56BreakpointsAndToolChoiceNone(t *testing.T) {
 		WithApiKey("k").
 		WithModel("gpt-5.6").
 		WithURL(srv.URL)
-	s.CacheKey = "sess-oai-1"
 	tool := tacklr.NewTool(tacklr.ToolConfig{Name: "echo", Handler: func(context.Context) (string, error) { return "ok", nil }})
 
 	ctx := tacklr.ContextWithToolChoiceNone(context.Background())
-	ch, err := s.Invoke(ctx, []*tacklr.Message{
+	ch, err := s.Invoke(ctx, tacklr.ModelRequest{Messages: []*tacklr.Message{
 		{Role: tacklr.RoleUser, Content: "ask"},
 		{Role: tacklr.RoleDeveloper, Content: "PROJECT PLAN\n────────────\nDo the work"},
 		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
 			{ID: "call_1", CallID: "call_1", Name: "echo", Arguments: "{}"},
 		}},
 		{Role: tacklr.RoleTool, ToolCallID: "call_1", Content: "tool-out"},
-	}, []*tacklr.Tool{tool}, "stable system")
+	}, Tools: []*tacklr.Tool{tool}, SystemPrompt: "stable system", CacheKey: "sess-oai-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,11 +428,10 @@ func TestInvoke_openRouterStrategySendsCacheKeyOnly(t *testing.T) {
 		WithApiKey("k").
 		WithModel("openai/gpt-5.6").
 		WithURL(srv.URL)
-	s.CacheKey = "sess-openrouter-1"
 
-	ch, err := s.Invoke(context.Background(), []*tacklr.Message{
+	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{
 		{Role: tacklr.RoleUser, Content: "ask"},
-	}, nil, "stable system")
+	}, SystemPrompt: "stable system", CacheKey: "sess-openrouter-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,9 +481,10 @@ func TestPromptCache_grokAndGPTShapes(t *testing.T) {
 	}
 
 	s := NewOpenAIInferenceStrategy(nil).WithModel("gpt-5.6-sol")
-	s.SetPromptCacheKey("  abc  ")
-	if s.CacheKey != "abc" {
-		t.Fatalf("CacheKey = %q", s.CacheKey)
+	req = &responsesRequest{}
+	s.promptCache("  abc  ").apply(req)
+	if req.PromptCacheKey != "abc" {
+		t.Fatalf("cache key = %q, want the request's key trimmed", req.PromptCacheKey)
 	}
 	n, err := s.MaxContextWindow()
 	if err != nil || n != 1000000 {
@@ -545,7 +542,7 @@ func collectSSE(t *testing.T, body string) []tacklr.LLMResponseChunk {
 		_, _ = io.WriteString(w, body)
 	}))
 	s := NewOpenAIInferenceStrategy(srv.Client()).WithApiKey("test-key").WithModel("gpt-4o").WithURL(srv.URL)
-	ch, err := s.Invoke(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "hi"}}, nil, "")
+	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{{Role: tacklr.RoleUser, Content: "hi"}}})
 	if err != nil {
 		return []tacklr.LLMResponseChunk{{Type: tacklr.StreamEventError, Error: err, Content: err.Error(), IsComplete: true}}
 	}

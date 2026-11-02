@@ -85,7 +85,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		}
 		return out, nil
 	})
-	return sess.Run(ex, ex, ex)
+	return sess.Run(ex)
 }
 
 func activityOptions(in workflowInput) workflow.ActivityOptions {
@@ -98,8 +98,7 @@ func activityOptions(in workflowInput) workflow.ActivityOptions {
 	}
 }
 
-// wfExec is the Temporal driver for one session. It implements session.Step,
-// session.Mailbox, and session.Ledger.
+// wfExec is the Temporal session.Driver for one session.
 //
 // Every wake arrives on wakeCh and moves into queue in arrival order. Readers
 // take from the front of queue, so a cancel sent before a prompt or resume is
@@ -119,11 +118,7 @@ type wfExec struct {
 	spawned     *[]childRun
 }
 
-var (
-	_ session.Step    = (*wfExec)(nil)
-	_ session.Mailbox = (*wfExec)(nil)
-	_ session.Ledger  = (*wfExec)(nil)
-)
+var _ session.Driver = (*wfExec)(nil)
 
 func (w *wfExec) Begin(kind string, promptLen, resumes int) {
 	if w.open {
@@ -196,10 +191,15 @@ func (w *wfExec) Tools(runs []tacklr.ToolRun) []session.ToolResult {
 	actCtx := workflow.WithActivityOptions(w.sessionCtx, w.opts)
 	cctx, cancelAct := workflow.WithCancel(actCtx)
 	defer cancelAct()
-	sess, children := w.stepSession(), w.IDs()
+	sess := w.stepSession()
+	children := make([]string, 0, len(*w.spawned))
+	for _, id := range w.Children() {
+		children = append(children, string(id))
+	}
 	futs := make([]workflow.Future, len(runs))
 	for i, run := range runs {
-		futs[i] = workflow.ExecuteActivity(cctx, act.Tool, toolInput{stepSession: sess, Children: children, Run: run})
+		run.Children = children
+		futs[i] = workflow.ExecuteActivity(cctx, act.Tool, toolInput{stepSession: sess, Run: run})
 	}
 	results := make([]session.ToolResult, len(runs))
 	done := make([]bool, len(runs))
@@ -403,7 +403,7 @@ func (w *wfExec) Wait() session.Wake {
 	}
 }
 
-func (w *wfExec) IDs() []session.SessionID {
+func (w *wfExec) Children() []session.SessionID {
 	out := make([]session.SessionID, len(*w.spawned))
 	for i, c := range *w.spawned {
 		out[i] = c.id

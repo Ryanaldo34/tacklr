@@ -162,7 +162,7 @@ func (a *TurnManager) RunTool(ctx context.Context, run ToolRun, out chan StreamE
 		rec.Result = a.emitToolResult(out, run.Call, c.Output, status)
 		return o.with(rec, true), nil
 	}
-	rt := newHarnessRuntime(out, a.jobHost, a.session, roundCall{Call: run.Call, Park: prior.Park, Layers: prior.Layers}, prior.Writes)
+	rt := newHarnessRuntime(out, a, run.Children, roundCall{Call: run.Call, Park: prior.Park, Layers: prior.Layers}, prior.Writes)
 	if run.Answer != nil {
 		if err := rt.resume(run.Answer); err != nil {
 			return o, fmt.Errorf("return from interrupt %q: %w", run.Call.Key(), err)

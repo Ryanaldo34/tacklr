@@ -53,15 +53,6 @@ func TestUserSelection_fullLifecycle(t *testing.T) {
 	if usi.ConfirmedChoice == nil || usi.ConfirmedChoice.Title != "B" {
 		t.Fatalf("choice = %+v", usi.ConfirmedChoice)
 	}
-
-	// InitFromPayload replaces options list.
-	fresh := &tacklr.UserSelectionInterrupt{}
-	if err := fresh.InitFromPayload([]byte(`[{"title":"only"}]`)); err != nil {
-		t.Fatal(err)
-	}
-	if len(fresh.Options) != 1 || fresh.Options[0].Title != "only" {
-		t.Fatalf("%+v", fresh.Options)
-	}
 }
 
 // TestToolPermission_allKinds covers init, validate, allow/reject, and unknown option.
@@ -80,32 +71,7 @@ func TestToolPermission_allKinds(t *testing.T) {
 		t.Fatal("error string")
 	}
 
-	// Empty / null payload → default options.
-	if err := p.InitFromPayload(nil); err != nil {
-		t.Fatal(err)
-	}
-	if len(p.Options) != 4 {
-		t.Fatalf("defaults = %d", len(p.Options))
-	}
-	if err := p.InitFromPayload([]byte("null")); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.InitFromPayload([]byte(`{`)); err == nil {
-		t.Fatal("bad init json")
-	}
-	if err := p.InitFromPayload([]byte(`{"toolName":"rm","options":[{"optionId":"custom","name":"C","kind":"allow_once"}]}`)); err != nil {
-		t.Fatal(err)
-	}
-	if p.ToolName != "rm" || len(p.Options) != 1 {
-		t.Fatalf("%+v", p)
-	}
-	// Empty options in payload → defaults again.
-	if err := p.InitFromPayload([]byte(`{"toolName":"x"}`)); err != nil {
-		t.Fatal(err)
-	}
-	if len(p.Options) != 4 {
-		t.Fatal("defaults after empty options")
-	}
+	p.Options = tacklr.DefaultPermissionOptions()
 
 	if err := p.Return([]byte(`x`)); err == nil {
 		t.Fatal("bad json")

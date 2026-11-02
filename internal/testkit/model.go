@@ -43,12 +43,12 @@ func (m *ScriptedModel) MaxContextWindow() (int, error) {
 	return 8192, nil
 }
 
-func (m *ScriptedModel) CountTokens(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
+func (m *ScriptedModel) CountTokens(ctx context.Context, req tacklr.ModelRequest) (int, error) {
 	if m.CountTokensFn != nil {
-		return m.CountTokensFn(ctx, msgs, tools)
+		return m.CountTokensFn(ctx, req.Messages, req.Tools)
 	}
 	n := 0
-	for _, msg := range msgs {
+	for _, msg := range req.Messages {
 		if msg != nil {
 			n += len(msg.Content)
 		}
@@ -56,7 +56,8 @@ func (m *ScriptedModel) CountTokens(ctx context.Context, msgs []*tacklr.Message,
 	return n, nil
 }
 
-func (m *ScriptedModel) Invoke(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, systemPrompt string) (chan tacklr.LLMResponseChunk, error) {
+func (m *ScriptedModel) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tacklr.LLMResponseChunk, error) {
+	msgs, tools, systemPrompt := req.Messages, req.Tools, req.SystemPrompt
 	if m.InvokeErr != nil {
 		return nil, m.InvokeErr
 	}

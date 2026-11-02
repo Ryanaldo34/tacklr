@@ -202,29 +202,6 @@ func (p *ToolPermissionInterrupt) Serialize() ([]byte, error) {
 	}{ToolName: p.ToolName, Title: p.Title, Options: p.Options})
 }
 
-func (p *ToolPermissionInterrupt) InitFromPayload(payload []byte) error {
-	if len(payload) == 0 || string(payload) == "null" {
-		p.Options = DefaultPermissionOptions()
-		return nil
-	}
-	var init struct {
-		ToolName string             `json:"toolName"`
-		Title    string             `json:"title"`
-		Options  []PermissionOption `json:"options"`
-	}
-	if err := json.Unmarshal(payload, &init); err != nil {
-		return err
-	}
-	p.ToolName = init.ToolName
-	p.Title = init.Title
-	if len(init.Options) == 0 {
-		p.Options = DefaultPermissionOptions()
-	} else {
-		p.Options = init.Options
-	}
-	return nil
-}
-
 func (p *ToolPermissionInterrupt) validatePayload(payload []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
@@ -313,23 +290,4 @@ func NewInterrupt(typeName string) (Interrupt, bool) {
 		return nil, false
 	}
 	return f(), true
-}
-
-// PayloadInitializer is an optional capability Interrupt types implement
-// to populate themselves from the raw payload provided to Park.
-type PayloadInitializer interface {
-	InitFromPayload([]byte) error
-}
-
-func (c *UserSelectionInterrupt) InitFromPayload(payload []byte) error {
-	var wrap struct {
-		Question string       `json:"question"`
-		Options  []UserChoice `json:"options"`
-	}
-	if err := json.Unmarshal(payload, &wrap); err == nil && len(wrap.Options) > 0 {
-		c.Question = wrap.Question
-		c.Options = wrap.Options
-		return nil
-	}
-	return json.Unmarshal(payload, &c.Options)
 }

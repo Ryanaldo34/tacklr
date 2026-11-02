@@ -1,9 +1,7 @@
 package temporal
 
 import (
-	"fmt"
 	"slices"
-	"strings"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/workflow"
@@ -94,42 +92,4 @@ func cancelOne(ctx workflow.Context, spawned *[]childRun, id session.SessionID) 
 		c.cancel()
 	}
 	dropChild(spawned, id)
-}
-
-// activityChildren is the Tool activity's JobHost: it resolves a job to
-// the child the workflow starts, with an id from the call id.
-type activityChildren struct {
-	parent session.SessionID
-	agent  tacklr.AgentOptions
-	jobs   map[string]session.JobHandler
-	known  []session.SessionID
-}
-
-func (a activityChildren) Resolve(job tacklr.JobRequest, callID string) (tacklr.JobStart, error) {
-	name, task := strings.TrimSpace(job.Name), strings.TrimSpace(job.Task)
-	if name == "" {
-		return tacklr.JobStart{}, fmt.Errorf("specialist is required: %w", tacklr.ErrInvalid)
-	}
-	specialist := tacklr.FindSpecialist(a.agent.Specialists, name) != nil
-	if !specialist {
-		if _, ok := a.jobs[name]; !ok {
-			return tacklr.JobStart{}, fmt.Errorf("%w: %s", tacklr.ErrNotFound, name)
-		}
-	}
-	if task == "" {
-		return tacklr.JobStart{}, fmt.Errorf("task is required: %w", tacklr.ErrInvalid)
-	}
-	id := session.JobID(a.parent, name, callID)
-	if specialist {
-		id = session.ChildSessionID(a.parent, name, callID)
-	}
-	return tacklr.JobStart{ID: string(id), Name: name, Task: task, Specialist: specialist}, nil
-}
-
-func (a activityChildren) Jobs() []tacklr.Job {
-	out := make([]tacklr.Job, len(a.known))
-	for i, id := range a.known {
-		out[i] = tacklr.Job{ID: string(id), State: tacklr.JobRunning}
-	}
-	return out
 }

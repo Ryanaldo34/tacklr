@@ -7,7 +7,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 )
 
-// Wake kinds from Mailbox. A prompt or resume is also the turn-span kind.
+// Wake kinds from the Driver mailbox. A prompt or resume is also the turn-span kind.
 const (
 	WakePrompt = "prompt"
 	WakeResume = "resume"
@@ -24,31 +24,6 @@ type Wake struct {
 	Child  *tacklr.Message
 }
 
-// Mailbox is the session mailbox.
-// Prompts and Ready return work that is already queued.
-// Recv blocks for the idle mailbox: prompt, resume, cancel, or close.
-// Wait blocks during a turn that is waiting on children: a prompt, a
-// finished child, or cancel.
-type Mailbox interface {
-	Prompts() []PromptIn
-	Ready() []*tacklr.Message
-	Recv() Wake
-	Wait() Wake
-}
-
-// Ledger is the child-session ledger. The session decides when to start,
-// wait, or cancel. The implementation starts and stops the child process.
-type Ledger interface {
-	IDs() []SessionID
-	// Start starts and cancels the children an outcome asks for. A child id
-	// comes from its call, so starting a running child again does nothing.
-	Start(tacklr.CallOutcome) error
-	// Await waits for a child and returns its output. failed is a child that
-	// failed; output is then its error.
-	Await(SessionID) (output string, failed bool, err error)
-	CancelAll()
-}
-
 // Session is one durable session lifetime.
 // Task is set when a child workflow is started with a prompt: that session
 // runs one turn and returns. A parent has an empty Task and waits until Close.
@@ -60,20 +35,20 @@ type Session struct {
 
 // Run drives the session until it returns. A parent returns when Close is
 // signaled. A child returns when its task turn is no longer parked.
-func (s *Session) Run(step Step, sig Mailbox, ledger Ledger) (string, error) {
+func (s *Session) Run(d Driver) (string, error) {
 	if s.Turn.Worker != "" && s.Task != "" {
-		s.runWorker(step, s.Task)
+		s.runWorker(d, s.Task)
 		return s.Turn.Result, s.Turn.Err
 	}
 	if s.Task != "" {
-		s.runTurn(step, sig, ledger, WakePrompt, UserMessage(s.Task, nil), nil, AuthContext{}, nil)
+		s.runTurn(d, WakePrompt, UserMessage(s.Task, nil), nil, AuthContext{}, nil)
 		for s.Turn.Yielded && !s.Closed {
-			s.dispatch(sig.Recv(), step, sig, ledger)
+			s.dispatch(d.Recv(), d)
 		}
 		return s.taskResult()
 	}
 	for !s.Closed {
-		s.dispatch(sig.Recv(), step, sig, ledger)
+		s.dispatch(d.Recv(), d)
 	}
 	return s.Turn.Result, nil
 }
@@ -88,13 +63,13 @@ func (s *Session) taskResult() (string, error) {
 	return "", errors.New("child failed")
 }
 
-func (s *Session) dispatch(w Wake, step Step, sig Mailbox, ledger Ledger) {
+func (s *Session) dispatch(w Wake, d Driver) {
 	switch w.Kind {
 	case WakeClose:
 		s.Turn.Yielded = false
 		s.Closed = true
 	case WakeCancel:
-		s.cancel(step, ledger)
+		s.cancel(d)
 	case WakePrompt:
 		if s.Turn.Yielded {
 			s.Turn.Steer(w.Prompt)
@@ -106,14 +81,14 @@ func (s *Session) dispatch(w Wake, step Step, sig Mailbox, ledger Ledger) {
 			if user != nil {
 				task = user.Content
 			}
-			s.runWorker(step, task)
+			s.runWorker(d, task)
 			return
 		}
 		s.applyQueued(w.Prompt)
-		s.runTurn(step, sig, ledger, WakePrompt, UserMessage(w.Prompt.Text, w.Prompt.UserMessage), nil, w.Prompt.Auth, w.Prompt.State)
+		s.runTurn(d, WakePrompt, UserMessage(w.Prompt.Text, w.Prompt.UserMessage), nil, w.Prompt.Auth, w.Prompt.State)
 	case WakeResume:
 		s.Turn.Yielded = false
-		s.runTurn(step, sig, ledger, WakeResume, nil, w.Resume.Responses, w.Resume.Auth, w.Resume.State)
+		s.runTurn(d, WakeResume, nil, w.Resume.Responses, w.Resume.Auth, w.Resume.State)
 	}
 }
 
@@ -131,8 +106,8 @@ func (s *Session) applyQueued(p PromptIn) {
 // cancel stops child sessions. Idle cancel does not emit: that event would
 // be the first record the next prompt's subscriber reads. Parked cancel
 // aborts the turn, so it does emit.
-func (s *Session) cancel(step Step, ledger Ledger) {
-	ledger.CancelAll()
+func (s *Session) cancel(d Driver) {
+	d.CancelAll()
 	s.Turn.Inbox = nil
 	s.Turn.NextMCP = nil
 	if !s.Turn.Yielded {
@@ -142,33 +117,33 @@ func (s *Session) cancel(step Step, ledger Ledger) {
 	s.Turn.State = nil
 	s.Turn.Terminal = SessionFailed
 	msg := context.Canceled.Error()
-	step.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})
+	d.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})
 }
 
-func (s *Session) runTurn(step Step, sig Mailbox, ledger Ledger, kind string, user *tacklr.Message, resume map[string][]byte, auth AuthContext, extra map[string]any) {
+func (s *Session) runTurn(d Driver, kind string, user *tacklr.Message, resume map[string][]byte, auth AuthContext, extra map[string]any) {
 	n := 0
 	if user != nil {
 		n = len(user.Content)
 	}
-	step.Begin(kind, n, len(resume))
-	s.Turn.Run(step, sig, ledger, user, resume, auth, extra)
-	step.End()
+	d.Begin(kind, n, len(resume))
+	s.Turn.Run(d, user, resume, auth, extra)
+	d.End()
 }
 
-func (s *Session) runWorker(step Step, task string) {
-	out, err := step.Job(s.Turn.Worker, task)
+func (s *Session) runWorker(d Driver, task string) {
+	out, err := d.Job(s.Turn.Worker, task)
 	if err != nil {
 		s.Turn.Err = err
 		s.Turn.Terminal = SessionFailed
 		msg := err.Error()
 		s.Turn.Result = msg
-		step.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})
+		d.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})
 		return
 	}
 	s.Turn.Err = nil
 	s.Turn.Result = out
 	s.Turn.Terminal = SessionComplete
-	step.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventComplete})
+	d.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventComplete})
 }
 
 // UserMessage is the prompt text, or the host-supplied user message.

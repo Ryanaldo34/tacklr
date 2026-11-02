@@ -13,7 +13,7 @@ import (
 func TestCall_readsItsOwnWritesAndCommitAppliesThem(t *testing.T) {
 	sm := newSessionManager()
 	sm.setState(map[string]any{"k": "committed", "gone": 1, "kept": true})
-	rt := callRuntime(sm, nil, "c1")
+	rt := callRuntime(sm, "c1")
 
 	setErr := rt.StateSet("k", "mine")
 	rt.StateDelete("gone")
@@ -40,7 +40,7 @@ func TestCall_readsItsOwnWritesAndCommitAppliesThem(t *testing.T) {
 // TestRuntime_emitUpdateNamesTheCallAndNeverBlocks covers EmitUpdate.
 func TestRuntime_emitUpdateNamesTheCallAndNeverBlocks(t *testing.T) {
 	ch := make(chan StreamEvent, 1)
-	rt := newHarnessRuntime(ch, nil, newSessionManager(), roundCall{Call: ToolCall{ID: "id1", CallID: "id1"}}, callWrites{})
+	rt := newHarnessRuntime(ch, &TurnManager{session: newSessionManager()}, nil, roundCall{Call: ToolCall{ID: "id1", CallID: "id1"}}, callWrites{})
 
 	rt.EmitUpdate("hello")
 	rt.EmitUpdate("dropped: the channel is full")
@@ -54,16 +54,16 @@ func TestRuntime_emitUpdateNamesTheCallAndNeverBlocks(t *testing.T) {
 // invalid answer leaves it unanswered, a valid one answers it, and the
 // call's next run takes the answer.
 func TestCall_parkResumeAndRunAgain(t *testing.T) {
-	rt := callRuntime(newSessionManager(), nil, "tc1")
+	rt := callRuntime(newSessionManager(), "tc1")
 
-	_, unknownType := rt.Park("nope", nil)
+	_, unknownType := rt.Park(&ChildWaiting{Kind: "nope"})
 	noPark := rt.resume([]byte(`{"selectionIdx":0}`))
-	_, parked := rt.Park("user_selection_choice", []byte(`[{"title":"A"},{"title":"B"}]`))
+	_, parked := rt.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}})
 	invalid := rt.resume([]byte(`{}`))
 	_, beforeAnswer := rt.takeAnswer("user_selection_choice")
 	answerErr := rt.resume([]byte(`{"selectionIdx":1}`))
 	twice := rt.resume([]byte(`{"selectionIdx":1}`))
-	got, runErr := rt.Park("user_selection_choice", []byte(`[{"title":"A"},{"title":"B"}]`))
+	got, runErr := rt.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}})
 
 	var intr Interrupt
 	if unknownType == nil || !errors.Is(noPark, ErrInterruptNotFound) || !errors.As(parked, &intr) {
@@ -82,7 +82,7 @@ func TestCall_parkResumeAndRunAgain(t *testing.T) {
 // once-answer is not remembered.
 func TestCall_readsItsOwnAnswersCursorsAndPlan(t *testing.T) {
 	sm := newSessionManager()
-	c := callRuntime(sm, nil, "c1")
+	c := callRuntime(sm, "c1")
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)

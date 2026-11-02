@@ -96,7 +96,7 @@ The worker registers `SessionWorkflow`, `Commit`, `Inference`, `Tool`, `EmitEven
 
 A child is a nested Runtime session, not a host-owned supervisor. Specialist ids are `{parent}/w/{specialist}/{call}`. Named worker ids are `{parent}/j/{name}/{call}`. Both are child sessions: `Runtime.Children` / `Runtime.Jobs` list them, `Status` reports them, Cancel/Close recurse. Specialists run the same wait loop with that specialist's model, tools, and instructions. Workers run `Config.Jobs[name]` instead of a model (Temporal: `RunJob` activity with the same retry policy as Inference/Tool). Tokens come from `SecretStorage` (child id, then parent id). Each specialist turn opens its own VFS (`OpenTurnVFS` on the child id). It does not reuse the parent’s live `MountSession`.
 
-Register specialists on `AgentOptions.Specialists`. The model sees three tools. Host tools schedule the same jobs through `HarnessRuntime.Schedule` / `Jobs` / `CancelJob`.
+Register specialists on `AgentOptions.Specialists`. The model sees three tools and is the only one that starts specialists, through `spawn_specialist`. Host tools start Runtime job workers through `HarnessRuntime.Schedule`, and list or stop jobs with `Jobs` / `CancelJob`. The harness resolves both itself: it checks the name against the agent's specialists and the runtime's registered workers, and derives the child id from the call (`tacklr.ChildID`).
 
 | Tool | Job |
 |------|-----|
@@ -153,6 +153,8 @@ A commit that fails (a token count, the session-message save, the summary reques
 
 ### Steps
 
+A runtime implements one interface, `session.Driver`: the steps below, the session mailbox (`Prompts`, `Ready`, `Recv`, `Wait`), and its children (`Children`, `Start`, `Await`, `CancelAll`). `Session.Run` and `Turn.Run` are the same for every runtime.
+
 Each non-deterministic action is one step, so a session replays safely: the runtime records each completed step and its result, and a replay returns the recorded result instead of running the step again. Neither the harness nor the snapshot records which steps ran.
 
 | Step | Does | Writes the snapshot |
@@ -161,7 +163,7 @@ Each non-deterministic action is one step, so a session replays safely: the runt
 | `Tool` | One tool call. Input: the call, and from its last outcome the answer to its park or its child's result. Returns the call's outcome: its result, a park, or a wait on a child, the children it starts or cancels, and the shared-state writes it made (user state, plan changes, permission decisions, search cursors). | No |
 | `Commit` | Host state, a complete round (each call's writes in call order, then its messages, then collapse or trim), and user messages. | Yes, the only one |
 
-The open round lives in workflow state (`session.Turn.Round`): the reply and each call's last outcome. `Turn.Run` runs every call without an outcome at once (`Step.Tools`: one `Tool` activity each on Temporal; goroutines in a simple runtime), keeps the outcomes in call order, starts the children they ask for (a child id comes from its call, so a child is started once), waits for blocking children and runs their calls again with the results, and commits the round once each call has its result. Plan changes are replayed at Commit (`planOp`), so plan changes of calls that ran at once all land.
+The open round lives in workflow state (`session.Turn.Round`): the reply and each call's last outcome. `Turn.Run` runs every call without an outcome at once (`Driver.Tools`: one `Tool` activity each on Temporal; goroutines in a simple runtime), keeps the outcomes in call order, starts the children they ask for (a child id comes from its call, so a child is started once), waits for blocking children and runs their calls again with the results, and commits the round once each call has its result. Plan changes are replayed at Commit (`planOp`), so plan changes of calls that ran at once all land.
 
 A runtime may run a step more than once before it records it (a worker dies before the step reports). `Infer` and `Tool` change nothing a later step reads, so that is safe; a tool with external side effects uses its call id (`HarnessRuntime.CurrentToolCallID`) as the idempotency key. `Commit` is idempotent: its `base` is the revision the last Commit returned, and a Commit that finds the snapshot past it already saved and applies nothing again. A cancel does not stop a Commit. Steps carry only what changes per step; the session's identity, MCP servers and children are the runtime's, which builds each step's world from them.
 

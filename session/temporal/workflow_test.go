@@ -430,7 +430,7 @@ func TestSessionWorkflow_asyncSpawnDoesNotWaitForChild(t *testing.T) {
 			sawScheduled = true
 		}
 	}
-	childGot := drainLog(t, fallback, session.ChildSessionID(id, "researcher", "sp1"))
+	childGot := drainLog(t, fallback, session.SessionID(tacklr.ChildID(string(id), "researcher", "sp1", true)))
 	var sawChild bool
 	for _, ev := range childGot {
 		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "async-child") {
@@ -456,7 +456,7 @@ func TestSessionWorkflow_listChildren(t *testing.T) {
 				return
 			}
 			if strings.Contains(last.Content, "Jobs:") {
-				childID := string(session.ChildSessionID("sess-list-children", "researcher", "sp1"))
+				childID := string(session.SessionID(tacklr.ChildID(string("sess-list-children"), "researcher", "sp1", true)))
 				ch <- tacklr.LLMResponseChunk{
 					Type: tacklr.StreamEventFunctionCall,
 					ToolCalls: []tacklr.ToolCall{{
@@ -564,7 +564,7 @@ func TestSessionWorkflow_cancelStopsAsyncChild(t *testing.T) {
 		childErr = err
 	})
 	id := session.SessionID("sess-cancel-child")
-	childID := session.ChildSessionID(id, "researcher", "sp1")
+	childID := session.SessionID(tacklr.ChildID(string(id), "researcher", "sp1", true))
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
 	}, time.Millisecond)
@@ -964,7 +964,7 @@ func TestSessionWorkflow_parkedParentLeavesAsyncChildRunning(t *testing.T) {
 	}
 	_, fallback := registerSession(env, agent)
 	id := session.SessionID("sess-park-child")
-	childID := session.ChildSessionID(id, "researcher", "sp1")
+	childID := session.SessionID(tacklr.ChildID(string(id), "researcher", "sp1", true))
 	var sawChild bool
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
@@ -1532,7 +1532,7 @@ func TestSessionWorkflow_aToolSchedulingAJobTwiceStartsItOnceAndListsIt(t *testi
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	want := fmt.Sprintf("same=true jobs=[%s]", session.JobID(id, "ci", "fc_twice"))
+	want := fmt.Sprintf("same=true jobs=[%s]", session.SessionID(tacklr.ChildID(string(id), "ci", "fc_twice", false)))
 	if listed != want || started.Load() != 1 {
 		t.Errorf("tool saw %q with %d children started, want %q and one child", listed, started.Load(), want)
 	}
@@ -1856,9 +1856,10 @@ func TestSessionWorkflow_jobRequestsTheRuntimeCannotServeFail(t *testing.T) {
 	})
 	jobs := tacklr.NewTool(tacklr.ToolConfig{Name: "jobs", Handler: func(ctx context.Context, rt *tacklr.HarnessRuntime) (string, error) {
 		_, specialist := rt.Schedule(ctx, tacklr.JobRequest{Name: "researcher", Task: "x"})
+		_, unknown := rt.Schedule(ctx, tacklr.JobRequest{Name: "nightly", Task: "x"})
 		_, emptyTask := rt.Schedule(ctx, tacklr.JobRequest{Name: "indexer", Task: " "})
 		_, emptyName := rt.Schedule(ctx, tacklr.JobRequest{Name: " ", Task: "x"})
-		return fmt.Sprintf("specialist=%v | cancel=%v | task=%v | name=%v", specialist, rt.CancelJob(ctx, "nope"), emptyTask, emptyName), nil
+		return fmt.Sprintf("specialist=%v | unknown=%v | cancel=%v | task=%v | name=%v", specialist, unknown, rt.CancelJob(ctx, "nope"), emptyTask, emptyName), nil
 	}})
 	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{jobs},
 		Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}}
@@ -1871,7 +1872,7 @@ func TestSessionWorkflow_jobRequestsTheRuntimeCannotServeFail(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"specialist=invalid: researcher is a specialist", `cancel=job "nope" is unknown`, "task=task is required"} {
+	for _, want := range []string{"specialist=invalid: researcher is a specialist", "unknown=not found: nightly is not a registered job", `cancel=job "nope" is unknown`, "task=task is required"} {
 		if !strings.Contains(seen, want) {
 			t.Errorf("tool saw %q, want %q", seen, want)
 		}
@@ -1930,7 +1931,7 @@ func TestSessionWorkflow_aJobFromAnEarlierReplyStaysListedWhileItRuns(t *testing
 		t.Fatal(err)
 	}
 	for _, call := range []string{"sp1", "sp2"} {
-		if child := string(session.ChildSessionID(id, "researcher", call)); !strings.Contains(listed, child) {
+		if child := string(session.SessionID(tacklr.ChildID(string(id), "researcher", call, true))); !strings.Contains(listed, child) {
 			t.Errorf("list_children = %q, want the running job %s", listed, child)
 		}
 	}
@@ -2155,7 +2156,7 @@ func TestSessionWorkflow_aParkedCallRunAgainDoesNotRestartItsRunningJob(t *testi
 		if _, err := rt.Schedule(ctx, tacklr.JobRequest{Name: "ci", Task: "child-task"}); err != nil {
 			return "", err
 		}
-		if _, err := rt.Park("user_selection_choice", []byte(`[{"title":"A"},{"title":"B"}]`)); err != nil {
+		if _, err := rt.Park(&tacklr.UserSelectionInterrupt{Options: []tacklr.UserChoice{{Title: "A"}, {Title: "B"}}}); err != nil {
 			return "", err
 		}
 		close(release)

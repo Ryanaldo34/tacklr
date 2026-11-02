@@ -69,10 +69,9 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 	}
 }
 
-// TestJobTools_correctAndFailClosed: spawn_specialist and cancel_child name
-// a missing argument for the model to correct, and fail closed in a turn
-// whose runtime offers no jobs.
-func TestJobTools_correctAndFailClosed(t *testing.T) {
+// TestJobTools_correctBadArguments: spawn_specialist and cancel_child name
+// a missing or unknown argument for the model to correct.
+func TestJobTools_correctBadArguments(t *testing.T) {
 	h := mustNewTurnManager(t, AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{},
 		Specialists: []*Specialist{{Name: "researcher", Model: &scriptedModel{}}}})
 	t.Cleanup(h.Close)
@@ -89,9 +88,8 @@ func TestJobTools_correctAndFailClosed(t *testing.T) {
 		"spawn with no task":       {call("spawn_specialist", `{"specialist":"researcher","task_description_and_context":" "}`), true, "task_description_and_context is required"},
 		"spawn with no specialist": {call("spawn_specialist", `{"specialist":"","task_description_and_context":"x"}`), true, "specialist is required"},
 		"cancel with no id":        {call("cancel_child", `{"child_id":""}`), true, "child_id is required"},
-		"a blocking spawn":         {call("spawn_specialist", `{"specialist":"researcher","task_description_and_context":"x"}`), false, "jobs are not available"},
-		"a background spawn":       {call("spawn_specialist", `{"specialist":"researcher","task_description_and_context":"x","block":false}`), false, "jobs are not available"},
-		"a cancel":                 {call("cancel_child", `{"child_id":"job-1"}`), false, "jobs are not available"},
+		"spawn of an unknown name": {call("spawn_specialist", `{"specialist":"nobody","task_description_and_context":"x"}`), true, "that specialist is not registered"},
+		"cancel of an unknown job": {call("cancel_child", `{"child_id":"job-1"}`), true, "that job is unknown"},
 	} {
 		if tc.err == nil || !strings.Contains(tc.err.Error(), tc.want) || errors.Is(tc.err, ErrCorrection) != tc.correction {
 			t.Errorf("%s = %v, want %q (correction %v)", name, tc.err, tc.want, tc.correction)

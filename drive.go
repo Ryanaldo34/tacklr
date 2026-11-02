@@ -28,6 +28,9 @@ type ToolRun struct {
 	Prior  *CallOutcome `json:"prior,omitempty"`
 	Answer []byte       `json:"answer,omitempty"`
 	Child  *ChildResult `json:"child,omitempty"`
+	// Children are the session's running children in start order. The
+	// runtime holds them and sets them before the run.
+	Children []string `json:"children,omitempty"`
 }
 
 // CallOutcome is what one run of a call produced: a result (Done), a park,

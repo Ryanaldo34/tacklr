@@ -3,6 +3,8 @@ package tacklr
 import (
 	"context"
 	"errors"
+
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // Shared errors and the inference contract for harness hosts.
@@ -55,20 +57,29 @@ func Network(err error) error {
 	return networkError{err}
 }
 
-// ProviderStatus supplies HTTP status and error code from a provider error.
-// Optional on InferenceStrategy errors for model-span attributes.
-type ProviderStatus interface {
-	ProviderHTTPStatus() int
-	ProviderErrorCode() string
+// ModelRequest is one model request. A strategy holds no per-request
+// state: everything a request needs is here, so one strategy is safe to
+// share across sessions and calls.
+type ModelRequest struct {
+	Messages     []*Message
+	Tools        []*Tool
+	SystemPrompt string
+	// CacheKey is the session id. A strategy may send it so the provider
+	// keeps the session's prompt prefix cached.
+	CacheKey string
 }
 
 // InferenceStrategy is the model provider interface used by the harness.
-// Fluent With* builders and SetSystemPrompt live on concrete providers
-// (for example *openai.OpenAIInferenceStrategy), not this interface.
+// Model and endpoint settings (the fluent With* builders) live on concrete
+// providers such as *openai.OpenAIInferenceStrategy; everything per request
+// is in ModelRequest.
 type InferenceStrategy interface {
-	Invoke(ctx context.Context, messages []*Message, tools []*Tool, systemPrompt string) (chan LLMResponseChunk, error)
-	CountTokens(context.Context, []*Message, []*Tool) (int, error)
+	Invoke(ctx context.Context, req ModelRequest) (chan LLMResponseChunk, error)
+	// CountTokens counts what Invoke would send for req.
+	CountTokens(ctx context.Context, req ModelRequest) (int, error)
 	MaxContextWindow() (int, error)
+	// ModelTelemetryIdentity names the provider and model for model spans.
+	ModelTelemetryIdentity() telemetry.ModelIdentity
 	// SupportsMIME reports whether the currently selected model accepts the
 	// given MIME type as user input. Empty and text/* are always true.
 	// Probe representatives for ads (e.g. image/png); do not enumerate all types.

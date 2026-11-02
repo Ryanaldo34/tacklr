@@ -20,12 +20,11 @@ import (
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
+// OpenAIInferenceStrategy holds only model and endpoint settings; each
+// request carries its own prompt and cache key, so one is safe to share.
 type OpenAIInferenceStrategy struct {
-	instructions string
-	apiKey       string
-	model        string
-	// CacheKey is prompt_cache_key (and x-grok-conv-id on xAI). Durable session id.
-	CacheKey string
+	apiKey string
+	model  string
 	// reasoning effort: "low" | "medium" | "high" (provider-specific).
 	reasoning string
 	// reasoningSummary: "auto" | "concise" | "detailed". Empty omits the field.
@@ -49,30 +48,15 @@ var (
 	_ tacklr.InferenceStrategy = (*OpenAIInferenceStrategy)(nil)
 )
 
-func (s *OpenAIInferenceStrategy) SetSystemPrompt(prompt string) {
-	s.instructions = prompt
-}
-
-// SetPromptCacheKey is the harness hook (tacklr cannot import this package).
-func (s *OpenAIInferenceStrategy) SetPromptCacheKey(key string) {
-	s.CacheKey = strings.TrimSpace(key)
-}
-
-// Clone returns a strategy the harness can mutate per turn. Parent and child
-// turns share the host strategy and run at the same time. The copy keeps the
-// HTTP client and model settings. Cache key and instructions stay on the copy.
-func (s *OpenAIInferenceStrategy) Clone() tacklr.InferenceStrategy {
-	cp := *s
-	return &cp
-}
-
-// promptCache resolves the cache profile for this strategy's model and endpoint.
-// The default is per-provider resolution; a strategy may pin its own profile.
-func (s *OpenAIInferenceStrategy) promptCache() promptCache {
+// promptCache resolves the cache profile for this strategy's model and
+// endpoint and the request's cache key (prompt_cache_key, and
+// x-grok-conv-id on xAI). A strategy may pin its own profile.
+func (s *OpenAIInferenceStrategy) promptCache(key string) promptCache {
+	key = strings.TrimSpace(key)
 	if s.promptCacheFor != nil {
-		return s.promptCacheFor(s.model, s.baseURL, s.CacheKey)
+		return s.promptCacheFor(s.model, s.baseURL, key)
 	}
-	return newPromptCache(s.model, s.baseURL, s.CacheKey)
+	return newPromptCache(s.model, s.baseURL, key)
 }
 
 func NewOpenAIInferenceStrategy(client *http.Client) *OpenAIInferenceStrategy {
@@ -95,8 +79,7 @@ func (s *OpenAIInferenceStrategy) WithModel(model string) *OpenAIInferenceStrate
 	return s
 }
 
-// ModelTelemetryIdentity implements the optional harness hook so model spans
-// get GenAI provider/model attrs without exporting raw config fields.
+// ModelTelemetryIdentity names the provider and model for model spans.
 func (s *OpenAIInferenceStrategy) ModelTelemetryIdentity() telemetry.ModelIdentity {
 	return telemetry.NewModelIdentity(s.model, s.baseURL)
 }
@@ -158,7 +141,7 @@ func (s *OpenAIInferenceStrategy) MaxContextWindow() (int, error) {
 	return 0, fmt.Errorf("max context window: unknown model %q: %w", s.model, tacklr.ErrUnknownModel)
 }
 
-func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
+func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, req tacklr.ModelRequest) (int, error) {
 	if s.apiKey == "" {
 		return 0, tacklr.ErrApiKeyNotSet
 	}
@@ -166,17 +149,16 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 		return 0, tacklr.ErrModelNotSet
 	}
 
-	cache := s.promptCache()
-	items := marshalMessagesToInput(messages, s.instructions, cache.breakpoints())
+	cache := s.promptCache(req.CacheKey)
+	items := marshalMessagesToInput(req.Messages, req.SystemPrompt, cache.breakpoints())
 	inputJSON, err := json.Marshal(items)
 	if err != nil {
 		return 0, fmt.Errorf("marshal token-count input: %w", err)
 	}
 
 	var toolsJSON json.RawMessage
-	if len(tools) > 0 {
-		toolsStr := tacklr.ToolsAsJson(tools)
-		toolsJSON = json.RawMessage(toolsStr)
+	if len(req.Tools) > 0 {
+		toolsJSON = json.RawMessage(tacklr.ToolsAsJson(req.Tools))
 	}
 
 	reqBody := countTokensRequest{
@@ -214,8 +196,9 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 			if err != nil {
 				return 0, fmt.Errorf("tiktoken count tokens: %w", err)
 			}
-			contents := make([]string, 0, len(messages))
-			for _, msg := range messages {
+			contents := make([]string, 0, len(req.Messages)+2)
+			contents = append(contents, req.SystemPrompt, string(toolsJSON))
+			for _, msg := range req.Messages {
 				contents = append(contents, msg.Content)
 			}
 			return len(tke.Encode(strings.Join(contents, "\n"), nil, nil)), nil
@@ -234,7 +217,7 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 	return countResp.InputTokens, nil
 }
 
-func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr.Message, tools []*tacklr.Tool, systemPrompt string) (chan tacklr.LLMResponseChunk, error) {
+func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tacklr.LLMResponseChunk, error) {
 	if s.apiKey == "" {
 		return nil, tacklr.ErrApiKeyNotSet
 	}
@@ -242,17 +225,12 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		return nil, tacklr.ErrModelNotSet
 	}
 
-	prompt := systemPrompt
-	if prompt == "" {
-		prompt = s.instructions
-	}
-	cache := s.promptCache()
-	items := marshalMessagesToInput(messages, prompt, cache.breakpoints())
+	cache := s.promptCache(req.CacheKey)
+	items := marshalMessagesToInput(req.Messages, req.SystemPrompt, cache.breakpoints())
 
 	var toolsJSON json.RawMessage
-	if len(tools) > 0 {
-		toolsStr := tacklr.ToolsAsJson(tools)
-		toolsJSON = json.RawMessage(toolsStr)
+	if len(req.Tools) > 0 {
+		toolsJSON = json.RawMessage(tacklr.ToolsAsJson(req.Tools))
 	}
 
 	inputJSON, err := json.Marshal(items)

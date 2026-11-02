@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/brain"
@@ -18,8 +19,10 @@ import (
 // goroutines. Only the harness makes one.
 type HarnessRuntime struct {
 	out     chan StreamEvent
-	host    JobHost
+	turn    *TurnManager
 	session *sessionManager
+	// running are the session's running children, from the run.
+	running []string
 	mu      sync.Mutex
 	// call is the call with its park and the OnCall layers it completed.
 	call   roundCall
@@ -39,8 +42,8 @@ type userValue struct {
 
 // newHarnessRuntime opens call's run on sm. prior is what the call's
 // earlier runs wrote (before a park), which this run reads and keeps.
-func newHarnessRuntime(out chan StreamEvent, host JobHost, sm *sessionManager, call roundCall, prior callWrites) *HarnessRuntime {
-	rt := &HarnessRuntime{out: out, host: host, session: sm, call: call, writes: prior, user: map[string]userValue{}}
+func newHarnessRuntime(out chan StreamEvent, turn *TurnManager, running []string, call roundCall, prior callWrites) *HarnessRuntime {
+	rt := &HarnessRuntime{out: out, turn: turn, session: turn.session, running: running, call: call, writes: prior, user: map[string]userValue{}}
 	for _, w := range prior.State {
 		v := userValue{deleted: w.Deleted}
 		// The value is JSON a StateSet of this call encoded.
@@ -98,19 +101,16 @@ func (rt *HarnessRuntime) StateDelete(key string) {
 	rt.writes.State = append(rt.writes.State, stateWrite{Key: key, Deleted: true})
 }
 
-// Park parks the call on an interrupt of kind and returns it as the error
-// the tool propagates. The call's run after resume gets the answered
-// interrupt and a nil error.
-func (rt *HarnessRuntime) Park(kind string, payload []byte) (Interrupt, error) {
-	if answered, ok := rt.takeAnswer(kind); ok {
+// Park parks the call on intr and returns it as the error the tool
+// propagates. The call's run after resume gets the answered interrupt of
+// intr's type and a nil error. intr's type must be registered
+// (RegisterInterrupt), so a parked call can be read back.
+func (rt *HarnessRuntime) Park(intr Interrupt) (Interrupt, error) {
+	if answered, ok := rt.takeAnswer(intr.TypeName()); ok {
 		return answered, nil
 	}
-	intr, ok := NewInterrupt(kind)
-	if !ok {
-		return nil, fmt.Errorf("%q is not a valid interrupt type", kind)
-	}
-	if init, ok := intr.(PayloadInitializer); ok {
-		_ = init.InitFromPayload(payload)
+	if _, ok := NewInterrupt(intr.TypeName()); !ok {
+		return nil, fmt.Errorf("interrupt type %q is not registered: %w", intr.TypeName(), ErrInvalid)
 	}
 	return nil, rt.park(intr)
 }
@@ -260,23 +260,24 @@ func (rt *HarnessRuntime) Schedule(_ context.Context, job JobRequest) (Job, erro
 // spawn_specialist starts specialists. With Wait the call waits for it and
 // the child's output is the call's result.
 func (rt *HarnessRuntime) startJob(job JobRequest, specialist bool) (Job, error) {
-	if rt.host == nil {
-		return Job{}, fmt.Errorf("jobs are not available: %w", ErrFailed)
-	}
-	s, err := rt.host.Resolve(job, rt.CurrentToolCallID())
-	if err != nil {
-		return Job{}, err
-	}
+	name, task := strings.TrimSpace(job.Name), strings.TrimSpace(job.Task)
+	isSpecialist := rt.turn.specialists[name] != nil
 	switch {
-	case s.Specialist && !specialist:
-		return Job{}, fmt.Errorf("%w: %s is a specialist; the model starts specialists with spawn_specialist", ErrInvalid, s.Name)
-	case !s.Specialist && specialist:
-		return Job{}, fmt.Errorf("%w: %s is not a specialist", ErrNotFound, s.Name)
+	case name == "":
+		return Job{}, fmt.Errorf("job name is required: %w", ErrInvalid)
+	case isSpecialist && !specialist:
+		return Job{}, fmt.Errorf("%w: %s is a specialist; the model starts specialists with spawn_specialist", ErrInvalid, name)
+	case !isSpecialist && specialist:
+		return Job{}, fmt.Errorf("%w: %s is not a specialist", ErrNotFound, name)
+	case !specialist && !slices.Contains(rt.turn.jobs, name):
+		return Job{}, fmt.Errorf("%w: %s is not a registered job", ErrNotFound, name)
+	case task == "":
+		return Job{}, fmt.Errorf("task is required: %w", ErrInvalid)
 	}
-	running := slices.ContainsFunc(rt.host.Jobs(), func(j Job) bool { return j.ID == s.ID })
+	s := JobStart{ID: ChildID(rt.turn.sessionId, name, rt.CurrentToolCallID(), specialist), Name: name, Task: task, Specialist: specialist}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if !running && !slices.ContainsFunc(rt.starts, func(o JobStart) bool { return o.ID == s.ID }) {
+	if !slices.Contains(rt.running, s.ID) && !slices.ContainsFunc(rt.starts, func(o JobStart) bool { return o.ID == s.ID }) {
 		rt.starts = append(rt.starts, s)
 	}
 	if job.Wait {
@@ -289,9 +290,9 @@ func (rt *HarnessRuntime) startJob(job JobRequest, specialist bool) (Job, error)
 // (a call records a start only for a child that is not running yet).
 // Waiting specialist children appear as running.
 func (rt *HarnessRuntime) Jobs() []Job {
-	var out []Job
-	if rt.host != nil {
-		out = rt.host.Jobs()
+	out := make([]Job, 0, len(rt.running))
+	for _, id := range rt.running {
+		out = append(out, Job{ID: id, State: JobRunning})
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
@@ -303,9 +304,6 @@ func (rt *HarnessRuntime) Jobs() []Job {
 
 // CancelJob stops one job of this session and drops it from Jobs.
 func (rt *HarnessRuntime) CancelJob(_ context.Context, id string) error {
-	if rt.host == nil {
-		return fmt.Errorf("jobs are not available: %w", ErrFailed)
-	}
 	if !slices.ContainsFunc(rt.Jobs(), func(j Job) bool { return j.ID == id }) {
 		return fmt.Errorf("job %q is unknown: %w", id, ErrNotFound)
 	}

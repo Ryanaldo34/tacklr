@@ -31,7 +31,7 @@ func testPlanTools() planToolsFixture {
 
 // run runs tool as one call and commits what it wrote.
 func (pt planToolsFixture) run(tool *Tool, args string) (ToolOutcome, error) {
-	rt := callRuntime(pt.sm, nil, "c1")
+	rt := callRuntime(pt.sm, "c1")
 	out, err := tool.invoke(context.Background(), args, rt)
 	rt.commit()
 	return out, err
@@ -142,7 +142,7 @@ func TestEditPlanTool(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
-	rt := callRuntime(newSessionManager(), nil, "tc_ask")
+	rt := callRuntime(newSessionManager(), "tc_ask")
 
 	args, _ := json.Marshal(map[string]any{
 		"question": "Which approach?",

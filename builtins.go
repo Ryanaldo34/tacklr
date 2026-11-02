@@ -2,7 +2,6 @@ package tacklr
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -71,15 +70,7 @@ var askUserChoiceTool = NewTool(ToolConfig{
 				IsRecommended: c.IsRecommended,
 			})
 		}
-		payload, err := json.Marshal(struct {
-			Question string       `json:"question"`
-			Options  []UserChoice `json:"options"`
-		}{Question: args.Question, Options: options})
-		if err != nil {
-			return "", fmt.Errorf("marshal choices: %w", err)
-		}
-
-		intr, err := runtime.Park("user_selection_choice", payload)
+		intr, err := runtime.Park(&UserSelectionInterrupt{Question: args.Question, Options: options})
 		if err != nil {
 			return "", err
 		}

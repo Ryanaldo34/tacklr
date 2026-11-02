@@ -129,7 +129,7 @@ func TestToolInterceptor_changesTheOutcome(t *testing.T) {
 
 func onCallRuntime() (*HarnessRuntime, *sessionManager) {
 	sm := newSessionManager()
-	return callRuntime(sm, nil, "c1"), sm
+	return callRuntime(sm, "c1"), sm
 }
 
 func requireParked(t *testing.T, err error, kind string) {

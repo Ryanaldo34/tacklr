@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -77,16 +79,14 @@ type stepSession struct {
 	MCPServers []mcp.MCPConfig
 }
 
-// toolInput is one Tool activity: one run of one call. Children are the
-// session's child ids in start order, for the job tools.
+// toolInput is one Tool activity: one run of one call.
 type toolInput struct {
 	stepSession
-	Children []session.SessionID
-	Run      tacklr.ToolRun
+	Run tacklr.ToolRun
 }
 
 // commitInput is one Commit activity. Base is the revision the previous
-// Commit returned (see session.Step).
+// Commit returned (see session.Driver).
 type commitInput struct {
 	stepSession
 	Base session.Revision
@@ -152,7 +152,6 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (tacklr.CallOutcome
 		return tacklr.CallOutcome{}, activityError(ctx, err)
 	}
 	defer adapter.AbandonTurn(h, ms)
-	h.BindJobHost(activityChildren{parent: in.SessionID, agent: a.Agent, jobs: a.Jobs, known: in.Children})
 	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	o, err := h.RunTool(ctx, in.Run, out)
@@ -218,7 +217,7 @@ func (a *activities) harness(ctx context.Context, id session.SessionID, rec sess
 		}
 		spec = over
 	}
-	h, ms, err := adapter.ConstructTurn(ctx, spec, string(id), session.BindingsForTurn(rec.Mounts, sec.Auth), a.Projection, extraMCP)
+	h, ms, err := adapter.ConstructTurn(ctx, spec, string(id), session.BindingsForTurn(rec.Mounts, sec.Auth), a.Projection, extraMCP, slices.Sorted(maps.Keys(a.Jobs)))
 	if err != nil {
 		return nil, nil, "", err
 	}

@@ -57,13 +57,6 @@ func (s *streamAssembler) MessageFromComplete(chunk LLMResponseChunk) *Message {
 	}
 }
 
-// modelIdentityProvider is optionally implemented by InferenceStrategy so model
-// spans can set static GenAI identity attrs at start without exposing provider
-// URL/model fields on the public InferenceStrategy interface.
-type modelIdentityProvider interface {
-	ModelTelemetryIdentity() telemetry.ModelIdentity
-}
-
 // invokeTurn calls the model on the committed window. The window changes
 // only when a round commits or a window effect applies, never here.
 func (a *TurnManager) invokeTurn(ctx context.Context) (<-chan LLMResponseChunk, error) {
@@ -74,7 +67,7 @@ func (a *TurnManager) invokeTurn(ctx context.Context) (<-chan LLMResponseChunk, 
 	a.modelSeq++
 	ctx = a.modelIdentity(ctx)
 	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, a.modelSeq, windowShape(msgs))
-	ch, err := a.model.Invoke(ctx, msgs, a.tools, a.constructSystemPrompt())
+	ch, err := a.model.Invoke(ctx, a.request(msgs))
 	if err != nil {
 		span.End(err, telemetry.TokenUsage{})
 		return nil, err
@@ -84,10 +77,13 @@ func (a *TurnManager) invokeTurn(ctx context.Context) (<-chan LLMResponseChunk, 
 
 // modelIdentity adds the model's static GenAI identity to ctx for spans.
 func (a *TurnManager) modelIdentity(ctx context.Context) context.Context {
-	if src, ok := a.model.(modelIdentityProvider); ok {
-		return telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
-	}
-	return ctx
+	return telemetry.ContextWithModelIdentity(ctx, a.model.ModelTelemetryIdentity())
+}
+
+// request is a model request on msgs with the turn's tools, system prompt
+// and cache key, so a token count measures exactly what a request sends.
+func (a *TurnManager) request(msgs []*Message) ModelRequest {
+	return ModelRequest{Messages: msgs, Tools: a.tools, SystemPrompt: a.constructSystemPrompt(), CacheKey: a.sessionId}
 }
 
 // handoff replaces the window with the plan document and a handoff the
@@ -106,7 +102,7 @@ func (a *TurnManager) handoff(ctx context.Context) error {
 		}
 	}
 	ctx, span := telemetry.StartHandoffSpan(ctx, open)
-	next, usedFallback, err := handoffGenerate(a.modelIdentity(ctx), window, plan, planDoc, a.model, a.tools, a.constructSystemPrompt())
+	next, usedFallback, err := a.handoffGenerate(a.modelIdentity(ctx), window, plan, planDoc)
 	if err != nil {
 		span.End(telemetry.HandoffOutcomeError, err)
 		return err
@@ -155,7 +151,7 @@ func (a *TurnManager) fit(ctx context.Context, round []*Message) error {
 }
 
 func (a *TurnManager) count(ctx context.Context, window, round []*Message) (int, error) {
-	n, err := a.model.CountTokens(ctx, slices.Concat(window, round), a.tools)
+	n, err := a.model.CountTokens(ctx, a.request(slices.Concat(window, round)))
 	if err != nil {
 		return 0, fmt.Errorf("count tokens: %w", err)
 	}
@@ -173,7 +169,7 @@ func (a *TurnManager) summarize(ctx context.Context, window []*Message) (*Messag
 	a.modelSeq++
 	invokeMsgs := slices.Concat(window, []*Message{{Role: RoleDeveloper, Content: summaryInstruction}})
 	mctx, mspan := telemetry.StartModelSpan(a.modelIdentity(ctx), telemetry.ModelPhaseCompress, a.modelSeq, windowShape(invokeMsgs))
-	events, err := a.model.Invoke(ContextWithToolChoiceNone(mctx), invokeMsgs, a.tools, a.constructSystemPrompt())
+	events, err := a.model.Invoke(ContextWithToolChoiceNone(mctx), a.request(invokeMsgs))
 	if err != nil {
 		mspan.End(err, telemetry.TokenUsage{})
 		return nil, fmt.Errorf("context compress invoke failed: %w", err)
@@ -267,15 +263,7 @@ func truncationNote(kept, total int, path string) string {
 	return fmt.Sprintf("\n\n[Output truncated to fit the context window: kept the first %d of %d bytes. The full output is at %s; read it with start and end.]", kept, total, path)
 }
 
-func handoffGenerate(
-	ctx context.Context,
-	window []*Message,
-	plan []Todo,
-	planDoc string,
-	model InferenceStrategy,
-	tools []*Tool,
-	systemPrompt string,
-) ([]*Message, bool, error) {
+func (a *TurnManager) handoffGenerate(ctx context.Context, window []*Message, plan []Todo, planDoc string) ([]*Message, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
@@ -317,7 +305,7 @@ Relevant Context for Remaining Todos: Only information the next todos are likely
 	// none prevents calls. On model failure, install a plan-derived handoff.
 	invokeWindow := append(slices.Clone(window), &Message{Role: RoleDeveloper, Content: prompt.String()})
 	mctx, mspan := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseHandoff, 0, windowShape(invokeWindow))
-	events, err := model.Invoke(ContextWithToolChoiceNone(mctx), invokeWindow, tools, systemPrompt)
+	events, err := a.model.Invoke(ContextWithToolChoiceNone(mctx), a.request(invokeWindow))
 	var lastCompletedMessage string
 	usedFallback := false
 	if err != nil {

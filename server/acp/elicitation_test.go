@@ -108,11 +108,14 @@ func (c *acpRPC) frame() map[string]any {
 // accepts a choice, harness resumes, tool result + final message stream, and
 // the prompt ends with stopReason end_turn.
 func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
-	optionsJSON := `{"question":"Pick a path","options":[{"title":"Option A","description":"First","isRecommended":true},{"title":"Option B","description":"Second","isRecommended":false}]}`
+	ask := &tacklr.UserSelectionInterrupt{Question: "Pick a path", Options: []tacklr.UserChoice{
+		{Title: "Option A", Description: "First", IsRecommended: true},
+		{Title: "Option B", Description: "Second"},
+	}}
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
-			intr, err := runtime.Park("user_selection_choice", []byte(optionsJSON))
+			intr, err := runtime.Park(ask)
 			if err != nil {
 				return "", err
 			}
@@ -319,21 +322,20 @@ func parkOnceStrategy(t *testing.T, name string) tacklr.InferenceStrategy {
 	})
 }
 
-func selectionParkTool(payload string) *tacklr.Tool {
+// selectionParkTool parks on a fresh question "Pick" with choices A and B.
+func selectionParkTool() *tacklr.Tool {
 	return tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
-			_, err := runtime.Park("user_selection_choice", []byte(payload))
+			_, err := runtime.Park(&tacklr.UserSelectionInterrupt{Question: "Pick", Options: []tacklr.UserChoice{{Title: "A"}, {Title: "B"}}})
 			return "", err
 		},
 	})
 }
 
 func TestACP_interruptClientOutcomes(t *testing.T) {
-	selectionJSON := `{"question":"Pick","options":[{"title":"A"},{"title":"B"}]}`
-
 	t.Run("httpInboundParksWithoutRPC", func(t *testing.T) {
-		r := newTestRuntime(t, parkOnceStrategy(t, "ask_user"), tacklr.AgentOptions{Tools: []*tacklr.Tool{selectionParkTool(selectionJSON)}})
+		r := newTestRuntime(t, parkOnceStrategy(t, "ask_user"), tacklr.AgentOptions{Tools: []*tacklr.Tool{selectionParkTool()}})
 		sid := acpSessionID(t, serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
 		rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sid+`","prompt":[{"type":"text","text":"x"}]}}`)
 		var msg string
@@ -348,7 +350,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	})
 
 	t.Run("formOffParksTurn", func(t *testing.T) {
-		r := newTestRuntime(t, parkOnceStrategy(t, "ask_user"), tacklr.AgentOptions{Tools: []*tacklr.Tool{selectionParkTool(selectionJSON)}})
+		r := newTestRuntime(t, parkOnceStrategy(t, "ask_user"), tacklr.AgentOptions{Tools: []*tacklr.Tool{selectionParkTool()}})
 		srv := server.NewServer(r.Runtime, r.Agent, acp.New(server.NewMemoryWireStore()))
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		defer cancel()
@@ -385,7 +387,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 		waiting := tacklr.NewTool(tacklr.ToolConfig{
 			Name: "wait_child",
 			Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
-				_, err := runtime.Park("child_waiting", []byte(`{"kind":"child_waiting"}`))
+				_, err := runtime.Park(&tacklr.ChildWaiting{Kind: tacklr.TypeChildWaiting})
 				return "", err
 			},
 		})
@@ -420,7 +422,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	})
 
 	t.Run("elicitationDeclineEndsTurn", func(t *testing.T) {
-		promptInterruptReply(t, selectionParkTool(selectionJSON), parkOnceStrategy(t, "ask_user"),
+		promptInterruptReply(t, selectionParkTool(), parkOnceStrategy(t, "ask_user"),
 			`{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}`,
 			"elicitation/create",
 			func(id any) map[string]any {
@@ -429,7 +431,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	})
 
 	t.Run("elicitationUnknownChoice", func(t *testing.T) {
-		promptInterruptReply(t, selectionParkTool(selectionJSON), parkOnceStrategy(t, "ask_user"),
+		promptInterruptReply(t, selectionParkTool(), parkOnceStrategy(t, "ask_user"),
 			`{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}`,
 			"elicitation/create",
 			func(id any) map[string]any {
@@ -440,7 +442,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	})
 
 	t.Run("elicitationBadJSON", func(t *testing.T) {
-		promptInterruptReply(t, selectionParkTool(selectionJSON), parkOnceStrategy(t, "ask_user"),
+		promptInterruptReply(t, selectionParkTool(), parkOnceStrategy(t, "ask_user"),
 			`{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}`,
 			"elicitation/create",
 			func(id any) map[string]any {
@@ -449,7 +451,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	})
 
 	t.Run("elicitationUnknownAction", func(t *testing.T) {
-		promptInterruptReply(t, selectionParkTool(selectionJSON), parkOnceStrategy(t, "ask_user"),
+		promptInterruptReply(t, selectionParkTool(), parkOnceStrategy(t, "ask_user"),
 			`{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}`,
 			"elicitation/create",
 			func(id any) map[string]any {
@@ -458,7 +460,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	})
 
 	t.Run("elicitationMissingChoice", func(t *testing.T) {
-		promptInterruptReply(t, selectionParkTool(selectionJSON), parkOnceStrategy(t, "ask_user"),
+		promptInterruptReply(t, selectionParkTool(), parkOnceStrategy(t, "ask_user"),
 			`{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}`,
 			"elicitation/create",
 			func(id any) map[string]any {
@@ -524,7 +526,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	})
 
 	t.Run("elicitationCallWriteFails", func(t *testing.T) {
-		interruptCallWriteFails(t, selectionParkTool(selectionJSON), parkOnceStrategy(t, "ask_user"), "elicitation/create", true)
+		interruptCallWriteFails(t, selectionParkTool(), parkOnceStrategy(t, "ask_user"), "elicitation/create", true)
 	})
 }
 

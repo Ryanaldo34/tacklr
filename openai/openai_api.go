@@ -7,9 +7,10 @@ import (
 	"strings"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-var _ tacklr.ProviderStatus = (*APIStatusError)(nil)
+var _ telemetry.ProviderStatus = (*APIStatusError)(nil)
 
 // APIStatusError conveys an HTTP error response from an upstream LLM API.
 // Use errors.As to extract structured status/body details from a wrapped chain.
@@ -33,7 +34,7 @@ func (e *APIStatusError) Error() string {
 	return fmt.Sprintf("provider HTTP %d: %s", e.Status, msg)
 }
 
-// ProviderHTTPStatus implements tacklr.ProviderStatus.
+// ProviderHTTPStatus implements telemetry.ProviderStatus.
 func (e *APIStatusError) ProviderHTTPStatus() int {
 	if e == nil {
 		return 0
@@ -41,7 +42,7 @@ func (e *APIStatusError) ProviderHTTPStatus() int {
 	return e.Status
 }
 
-// ProviderErrorCode implements tacklr.ProviderStatus.
+// ProviderErrorCode implements telemetry.ProviderStatus.
 func (e *APIStatusError) ProviderErrorCode() string {
 	if e == nil {
 		return ""

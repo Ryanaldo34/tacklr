@@ -35,8 +35,8 @@ type TurnManager struct {
 	maxWindowSize         int
 	session               *sessionManager
 	specialists           map[string]*Specialist
-	// jobHost, when set, is nested sessions and named workers. Nil: job methods fail.
-	jobHost         JobHost
+	// jobs are the Runtime job workers tools may Schedule.
+	jobs            []string
 	skillByName     map[string]skills.Skill
 	skillsLoader    skills.SkillLoader
 	brain           *brain.Engine
@@ -52,12 +52,6 @@ type TurnManager struct {
 	toolRunner   *toolRunner
 	// modelSeq counts model requests, for model span sequence numbers.
 	modelSeq int
-}
-
-// BindJobHost installs job operations. Durable runtimes call this after
-// NewTurnManager. Nil: job methods fail.
-func (a *TurnManager) BindJobHost(host JobHost) {
-	a.jobHost = host
 }
 
 // commitRound appends one complete round to the window. A round with a

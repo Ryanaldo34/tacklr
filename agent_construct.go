@@ -89,13 +89,18 @@ type AgentOptions struct {
 	// skipPlanningLock is set only by WithSpecialist. The parent session always
 	// gates write tools on an active plan.
 	skipPlanningLock bool
+	// jobs are the Runtime job workers the runtime registered. BindTurn
+	// sets them.
+	jobs []string
 }
 
-// BindTurn attaches the per-turn session id and the workspace tree.
-// Hosts set OpenVFS and SkillsPath. The session runtime calls BindTurn.
-func BindTurn(opts AgentOptions, id string, mount *vfs.MountSession) AgentOptions {
+// BindTurn attaches the per-turn session id, the workspace tree, and the
+// names of the Runtime job workers the runtime registered. Hosts set
+// OpenVFS and SkillsPath. The session runtime calls BindTurn.
+func BindTurn(opts AgentOptions, id string, mount *vfs.MountSession, jobs []string) AgentOptions {
 	opts.sessionID = id
 	opts.mountSession = mount
+	opts.jobs = jobs
 	return opts
 }
 
@@ -123,6 +128,7 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		brain:                 opts.Brain,
 		brainWriteKinds:       opts.BrainWriteKinds,
 		sessionId:             opts.sessionID,
+		jobs:                  opts.jobs,
 		specialists:           make(map[string]*Specialist),
 		context:               newModelContextManager(),
 		overflowPath:          opts.OverflowPath,
@@ -217,19 +223,7 @@ func (h *TurnManager) finishInit(ctx context.Context, opts AgentOptions) error {
 		h.indexer = &vfsindex.MountIndexer{VFS: h.session.VFS, Brain: h.brain, Scope: h.session.Search.Scope(), Readers: opts.IndexReaders}
 	}
 	h.injectBuiltinTools()
-	if err := h.grantTools(opts.AllowTools); err != nil {
-		return err
-	}
-	if c, ok := h.model.(interface{ Clone() InferenceStrategy }); ok {
-		h.model = c.Clone()
-	}
-	if s, ok := h.model.(interface{ SetPromptCacheKey(string) }); ok && h.sessionId != "" {
-		s.SetPromptCacheKey(h.sessionId)
-	}
-	if s, ok := h.model.(interface{ SetSystemPrompt(string) }); ok {
-		s.SetSystemPrompt(h.constructSystemPrompt())
-	}
-	return nil
+	return h.grantTools(opts.AllowTools)
 }
 
 // injectBuiltinTools registers the plan tools, the session-world VFS, brain

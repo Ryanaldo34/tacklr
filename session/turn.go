@@ -34,7 +34,11 @@ type ToolResult struct {
 	Err     error
 }
 
-// Step is the work of one turn. Each non-deterministic action is one step:
+// Driver is how one runtime runs a session: its steps, its mailbox and
+// its children. Every runtime implements it; Session.Run and Turn.Run are
+// the same for all of them.
+//
+// Steps. Each non-deterministic action is one step:
 // Infer is one model request, Tool one tool call, Job one worker body. A
 // runtime records each completed step and its result, and a replay returns
 // the recorded result instead of running the step again; neither the
@@ -52,11 +56,23 @@ type ToolResult struct {
 // all at once (the runtime decides how: one activity each, or goroutines),
 // and returns a result per run in run order.
 //
-// Steps take only what changes per step. The session's identity, MCP
+// Steps take only what changes per d. The session's identity, MCP
 // servers and children are the runtime's: it holds them for the session
-// and builds each step's world from them. Begin and End bracket Run so the
-// implementation can pin turn-scoped resources.
-type Step interface {
+// and builds each step's world from them. Begin and End bracket a turn so
+// the implementation can pin turn-scoped resources.
+//
+// Mailbox. Prompts and Ready return work that is already queued. Recv
+// blocks for the idle mailbox: prompt, resume, cancel, or close. Wait
+// blocks during a turn that is waiting on children: a prompt, a finished
+// child, or cancel.
+//
+// Children. The session decides when to start, wait for, or cancel a
+// child; the runtime starts and stops it. Children lists them in start
+// order. Start starts and cancels the children an outcome asks for: a
+// child id comes from its call, so starting a running child again does
+// nothing. Await waits for a child and returns its output; failed is a
+// child that failed, and output is then its error.
+type Driver interface {
 	Begin(kind string, promptLen, resumes int)
 	End()
 	Commit(base Revision, in tacklr.CommitIn) (Revision, error)
@@ -64,6 +80,16 @@ type Step interface {
 	Tools(runs []tacklr.ToolRun) []ToolResult
 	Emit(tacklr.StreamEvent)
 	Job(name, task string) (string, error)
+
+	Prompts() []PromptIn
+	Ready() []*tacklr.Message
+	Recv() Wake
+	Wait() Wake
+
+	Children() []SessionID
+	Start(tacklr.CallOutcome) error
+	Await(SessionID) (output string, failed bool, err error)
+	CancelAll()
 }
 
 // Turn is one session's scheduler state. The snapshot holds what committed;
@@ -92,7 +118,7 @@ type Turn struct {
 }
 
 // Run drives one turn. user is the prompt; resume, the answers to a park.
-func (t *Turn) Run(step Step, sig Mailbox, ledger Ledger, user *tacklr.Message, resume map[string][]byte, auth AuthContext, extra map[string]any) {
+func (t *Turn) Run(d Driver, user *tacklr.Message, resume map[string][]byte, auth AuthContext, extra map[string]any) {
 	t.queueState(extra)
 	t.Mounts = ApplyAuth(t.Mounts, auth)
 	t.Terminal = ""
@@ -108,13 +134,13 @@ func (t *Turn) Run(step Step, sig Mailbox, ledger Ledger, user *tacklr.Message, 
 			msg = context.Canceled.Error()
 			t.Inbox = nil
 			t.NextMCP = nil
-			ledger.CancelAll()
+			d.CancelAll()
 		}
-		step.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})
+		d.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})
 	}
 	commit := func(in tacklr.CommitIn) bool {
 		in.State = t.State
-		rev, err := step.Commit(t.Rev, in)
+		rev, err := d.Commit(t.Rev, in)
 		if err != nil {
 			fail(err)
 			return false
@@ -154,7 +180,7 @@ func (t *Turn) Run(step Step, sig Mailbox, ledger Ledger, user *tacklr.Message, 
 				return
 			}
 			if len(runs) == 0 {
-				runs, err = t.awaitChildren(r, ledger)
+				runs, err = t.awaitChildren(r, d)
 				if err != nil {
 					fail(err)
 					return
@@ -164,18 +190,18 @@ func (t *Turn) Run(step Step, sig Mailbox, ledger Ledger, user *tacklr.Message, 
 				// The round waits on its parked call.
 				t.Yielded = true
 				park := r.Outcomes[r.Parked()].Park
-				step.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventInterrupt, MessageID: park.InterruptID, Data: park.Data})
+				d.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventInterrupt, MessageID: park.InterruptID, Data: park.Data})
 				return
 			}
-			if err := t.record(r, step.Tools(runs), ledger); err != nil {
+			if err := t.record(r, d.Tools(runs), d); err != nil {
 				fail(err)
 				return
 			}
 			continue
 		}
-		t.Inbox = append(t.Inbox, sig.Ready()...)
+		t.Inbox = append(t.Inbox, d.Ready()...)
 		if user == nil {
-			for _, p := range sig.Prompts() {
+			for _, p := range d.Prompts() {
 				t.Steer(p)
 			}
 		}
@@ -189,12 +215,12 @@ func (t *Turn) Run(step Step, sig Mailbox, ledger Ledger, user *tacklr.Message, 
 			inferComplete = false
 		}
 		if inferComplete {
-			if len(ledger.IDs()) == 0 {
+			if len(d.Children()) == 0 {
 				t.Terminal = SessionComplete
-				step.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventComplete})
+				d.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventComplete})
 				return
 			}
-			switch w := sig.Wait(); w.Kind {
+			switch w := d.Wait(); w.Kind {
 			case WakePrompt:
 				t.Steer(w.Prompt)
 			case WakeChild:
@@ -207,7 +233,7 @@ func (t *Turn) Run(step Step, sig Mailbox, ledger Ledger, user *tacklr.Message, 
 			}
 			continue
 		}
-		reply, err := step.Infer()
+		reply, err := d.Infer()
 		if err != nil {
 			fail(err)
 			return
@@ -265,13 +291,13 @@ func unknownAnswer(resume map[string][]byte, id string) error {
 
 // awaitChildren waits for every child a call of r waits on and returns the
 // runs that give each call its child's result.
-func (t *Turn) awaitChildren(r *tacklr.Round, ledger Ledger) ([]tacklr.ToolRun, error) {
+func (t *Turn) awaitChildren(r *tacklr.Round, d Driver) ([]tacklr.ToolRun, error) {
 	var runs []tacklr.ToolRun
 	for i, o := range r.Outcomes {
 		if o.Done || o.AwaitID == "" {
 			continue
 		}
-		output, failed, err := ledger.Await(SessionID(o.AwaitID))
+		output, failed, err := d.Await(SessionID(o.AwaitID))
 		if err != nil {
 			return nil, err
 		}
@@ -285,7 +311,7 @@ func (t *Turn) awaitChildren(r *tacklr.Round, ledger Ledger) ([]tacklr.ToolRun, 
 // interrupt: a call that parks after the first, in call order, keeps no
 // outcome and runs again after resume. Every result is kept before a step
 // error fails the turn.
-func (t *Turn) record(r *tacklr.Round, results []ToolResult, ledger Ledger) error {
+func (t *Turn) record(r *tacklr.Round, results []ToolResult, d Driver) error {
 	var errs []error
 	for _, res := range results {
 		if res.Err != nil {
@@ -299,7 +325,7 @@ func (t *Turn) record(r *tacklr.Round, results []ToolResult, ledger Ledger) erro
 			continue
 		}
 		r.Outcomes[i] = o
-		if err := ledger.Start(o); err != nil {
+		if err := d.Start(o); err != nil {
 			errs = append(errs, err)
 		}
 	}
