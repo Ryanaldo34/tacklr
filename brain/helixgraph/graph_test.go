@@ -37,7 +37,10 @@ func TestHelixGraph_contract(t *testing.T) {
 
 func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
+	// Opens that should succeed get a deadline too: a Helix that is gone
+	// fails the test instead of leaving it waiting.
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
 	// Nothing listens on port 9 (discard), so every request fails to connect.
 	unreachable, err := helix.NewClient("http://127.0.0.1:9")
 	if err != nil {

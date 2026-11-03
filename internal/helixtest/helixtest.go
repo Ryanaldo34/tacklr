@@ -38,9 +38,6 @@ var (
 	graphErr       error
 )
 
-// containerName is the reusable container every test package attaches to.
-const containerName = "tacklr-helix-test"
-
 // URL returns the shared Helix server's base URL, starting it on first use.
 func URL(t testing.TB) string {
 	t.Helper()
@@ -49,7 +46,11 @@ func URL(t testing.TB) string {
 		ctr, err := testcontainers.Run(ctx, Image,
 			testcontainers.WithExposedPorts("8080/tcp"),
 			testcontainers.WithWaitStrategy(wait.ForHTTP("/readyz").WithPort("8080/tcp").WithStartupTimeout(2*time.Minute)),
-			testcontainers.WithReuseByName(containerName),
+			// One container per go test run: every package of the run shares
+			// it (testcontainers.SessionID is the run's), and another run
+			// never reuses it, so one run's reaper cannot remove it under
+			// another run.
+			testcontainers.WithReuseByName("tacklr-helix-"+testcontainers.SessionID()),
 		)
 		if err != nil {
 			serverStartErr = err
