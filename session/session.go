@@ -1,177 +1,32 @@
 package session
 
-import (
-	"context"
-	"errors"
-
-	"github.com/ryanaldo34/tacklr"
-)
-
-// Wake kinds from Mailbox. A prompt or resume is also the turn-span kind.
+// Wake kinds from the Driver mailbox. A prompt or resume is also the turn-span kind.
 const (
 	WakePrompt = "prompt"
 	WakeResume = "resume"
 	WakeCancel = "cancel"
 	WakeClose  = "close"
-	WakeChild  = "child"
+	// WakeJob is a job's end: its result.
+	WakeJob = "job"
+	// WakeSuspend stops a parent session so the runtime can restart it with
+	// the same state (on Temporal, continue-as-new to keep history small):
+	// when idle, or during a turn that waits on jobs. The session's state is
+	// plain data; the runtime carries it to the next run.
+	WakeSuspend = "suspend"
 )
 
-// Wake is one mailbox event. Child is set when Kind is WakeChild.
+// Wake is one mailbox event. Job is set when Kind is WakeJob. A zero Wake
+// (empty Kind) is Next's answer when nothing is queued and it must not
+// block.
 type Wake struct {
 	Kind   string
-	Prompt PromptIn
-	Resume ResumeIn
-	Child  *tacklr.Message
+	Prompt Prompt
+	Resume Resume
+	Job    JobEnd
 }
 
-// Mailbox is the session mailbox.
-// Prompts and Ready return work that is already queued.
-// Recv blocks for the idle mailbox: prompt, resume, cancel, or close.
-// Wait blocks during a turn that is waiting on children: a prompt, a
-// finished child, or cancel.
-type Mailbox interface {
-	Prompts() []PromptIn
-	Ready() []*tacklr.Message
-	Recv() Wake
-	Wait() Wake
-}
-
-// Ledger is the child-session ledger. The session decides when to start,
-// wait, or cancel. The implementation starts and stops the child process.
-type Ledger interface {
-	IDs() []SessionID
-	Start(ToolOutput) error
-	Await(SessionID) (string, error)
-	CancelAll()
-}
-
-// Session is one durable session lifetime.
-// Task is set when a child workflow is started with a prompt: that session
-// runs one turn and returns. A parent has an empty Task and waits until Close.
-type Session struct {
-	Turn   Turn
-	Task   string
-	Closed bool
-}
-
-// Run drives the session until it returns. A parent returns when Close is
-// signaled. A child returns when its task turn is no longer parked.
-func (s *Session) Run(step Step, sig Mailbox, ledger Ledger) (string, error) {
-	if s.Turn.Worker != "" && s.Task != "" {
-		s.runWorker(step, s.Task)
-		return s.Turn.Result, s.Turn.Err
-	}
-	if s.Task != "" {
-		s.runTurn(step, sig, ledger, WakePrompt, UserMessage(s.Task, nil), nil, AuthContext{}, nil)
-		for s.Turn.Yielded && !s.Closed {
-			s.dispatch(sig.Recv(), step, sig, ledger)
-		}
-		return s.taskResult()
-	}
-	for !s.Closed {
-		s.dispatch(sig.Recv(), step, sig, ledger)
-	}
-	return s.Turn.Result, nil
-}
-
-func (s *Session) taskResult() (string, error) {
-	if s.Turn.Terminal != SessionFailed {
-		return s.Turn.Result, nil
-	}
-	if s.Turn.Result != "" {
-		return s.Turn.Result, errors.New(s.Turn.Result)
-	}
-	return "", errors.New("child failed")
-}
-
-func (s *Session) dispatch(w Wake, step Step, sig Mailbox, ledger Ledger) {
-	switch w.Kind {
-	case WakeClose:
-		s.Turn.Yielded = false
-		s.Closed = true
-	case WakeCancel:
-		s.cancel(step, ledger)
-	case WakePrompt:
-		if s.Turn.Yielded {
-			s.Turn.Steer(w.Prompt, &s.Turn.Overlay)
-			return
-		}
-		if s.Turn.Worker != "" {
-			user := UserMessage(w.Prompt.Text, w.Prompt.UserMessage)
-			task := ""
-			if user != nil {
-				task = user.Content
-			}
-			s.runWorker(step, task)
-			return
-		}
-		s.applyQueued(w.Prompt)
-		s.runTurn(step, sig, ledger, WakePrompt, UserMessage(w.Prompt.Text, w.Prompt.UserMessage), nil, w.Prompt.Auth, w.Prompt.State)
-	case WakeResume:
-		s.Turn.Yielded = false
-		s.runTurn(step, sig, ledger, WakeResume, nil, w.Resume.Responses, w.Resume.Auth, w.Resume.State)
-	}
-}
-
-// applyQueued installs an MCP overlay on the next idle turn.
-// A prompt that arrives while the turn is parked stays on NextMCP until then.
-func (s *Session) applyQueued(p PromptIn) {
-	if p.MCPServers != nil {
-		s.Turn.MCP = p.MCPServers
-	} else if s.Turn.NextMCP != nil {
-		s.Turn.MCP = s.Turn.NextMCP
-	}
-	s.Turn.NextMCP = nil
-}
-
-// cancel stops child sessions. Idle cancel does not emit: that event would
-// be the first record the next prompt's subscriber reads. Parked cancel
-// aborts the turn, so it does emit.
-func (s *Session) cancel(step Step, ledger Ledger) {
-	ledger.CancelAll()
-	s.Turn.Inbox = nil
-	s.Turn.NextMCP = nil
-	if !s.Turn.Yielded {
-		return
-	}
-	s.Turn.Yielded = false
-	s.Turn.Parked = false
-	s.Turn.Overlay = nil
-	s.Turn.Terminal = SessionFailed
-	msg := context.Canceled.Error()
-	step.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})
-}
-
-func (s *Session) runTurn(step Step, sig Mailbox, ledger Ledger, kind string, user *tacklr.Message, resume map[string][]byte, auth AuthContext, extra map[string]any) {
-	n := 0
-	if user != nil {
-		n = len(user.Content)
-	}
-	step.Begin(kind, n, len(resume))
-	s.Turn.Run(step, sig, ledger, user, resume, auth, extra)
-	step.End()
-}
-
-func (s *Session) runWorker(step Step, task string) {
-	out, err := step.Job(s.Turn.Worker, task)
-	if err != nil {
-		s.Turn.Err = err
-		s.Turn.Terminal = SessionFailed
-		msg := err.Error()
-		s.Turn.Result = msg
-		step.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})
-		return
-	}
-	s.Turn.Err = nil
-	s.Turn.Result = out
-	s.Turn.Terminal = SessionComplete
-	step.Emit(tacklr.StreamEvent{Type: tacklr.StreamEventComplete})
-}
-
-// UserMessage is the prompt text, or the host-supplied user message.
-func UserMessage(text string, msg *tacklr.Message) *tacklr.Message {
-	if msg != nil {
-		return msg
-	}
-	return &tacklr.Message{Role: tacklr.RoleUser, Content: text}
+// JobEnd is how a job ended: its result, from the job itself.
+type JobEnd struct {
+	ID     ID
+	Result JobResult
 }

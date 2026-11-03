@@ -9,7 +9,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/mcp"
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/session"
 
@@ -18,11 +19,10 @@ import (
 
 // ACP stop reasons for session/prompt PromptResponse (spec Prompt Turn).
 const (
-	stopReasonEndTurn         = "end_turn"
-	stopReasonMaxTokens       = "max_tokens"
-	stopReasonMaxTurnRequests = "max_turn_requests"
-	stopReasonRefusal         = "refusal"
-	stopReasonCancelled       = "cancelled"
+	stopReasonEndTurn   = "end_turn"
+	stopReasonMaxTokens = "max_tokens"
+	stopReasonRefusal   = "refusal"
+	stopReasonCancelled = "cancelled"
 )
 
 // stopReasonFromError maps harness terminal errors to ACP stopReason values.
@@ -31,12 +31,10 @@ func stopReasonFromError(err error) (reason string, ok bool) {
 	switch {
 	case errors.Is(err, context.Canceled):
 		return stopReasonCancelled, true
-	case errors.Is(err, tacklr.ErrModelRefused):
+	case errors.Is(err, session.ErrModelRefused):
 		return stopReasonRefusal, true
-	case errors.Is(err, tacklr.ErrMaxTokens):
+	case errors.Is(err, session.ErrMaxTokens):
 		return stopReasonMaxTokens, true
-	case errors.Is(err, tacklr.ErrMaxTurnRequests):
-		return stopReasonMaxTurnRequests, true
 	default:
 		return "", false
 	}
@@ -159,7 +157,7 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 // parseACPPrompt maps an ACP content-block array into a user Message
 // (text Content + multimodal ContentParts). Does not check model MIME support.
 // Text-only prompts keep ContentParts empty so the OpenAI path stays string form.
-func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
+func parseACPPrompt(raw json.RawMessage) (*message.Message, error) {
 	var blocks []acpContentBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return nil, fmt.Errorf("invalid prompt array: %w", err)
@@ -168,7 +166,7 @@ func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 		return nil, fmt.Errorf("prompt must not be empty")
 	}
 	var textParts []string
-	var binary []tacklr.ContentPart
+	var binary []message.ContentPart
 	for i, b := range blocks {
 		switch b.Type {
 		case "text":
@@ -177,15 +175,15 @@ func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 			}
 			textParts = append(textParts, b.Text)
 		case "image":
-			mime := tacklr.NormalizeMIME(b.MimeType)
+			mime := message.NormalizeMIME(b.MimeType)
 			url, err := resolveImageURL(mime, b.Data, b.URI)
 			if !strings.HasPrefix(mime, "image/") || err != nil {
 				return nil, fmt.Errorf("image block %d is invalid", i)
 			}
-			binary = append(binary, tacklr.ContentPart{
-				Type:     tacklr.ContentTypeInputImage,
-				ImageURL: &tacklr.ImageURL{URL: url},
-				FileData: &tacklr.FileData{MIMEType: mime},
+			binary = append(binary, message.ContentPart{
+				Type:     message.ContentTypeInputImage,
+				ImageURL: &message.ImageURL{URL: url},
+				FileData: &message.FileData{MIMEType: mime},
 			})
 		case "resource":
 			part, text, err := parseACPResource(i, b.Resource)
@@ -212,8 +210,8 @@ func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 			return nil, fmt.Errorf("unsupported content block type %q at index %d", b.Type, i)
 		}
 	}
-	msg := &tacklr.Message{
-		Role:    tacklr.RoleUser,
+	msg := &message.Message{
+		Role:    message.RoleUser,
 		Content: strings.Join(textParts, "\n\n"),
 	}
 	if len(binary) > 0 {
@@ -222,7 +220,7 @@ func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 	return msg, nil
 }
 
-func parseACPResource(i int, r *acpResource) (*tacklr.ContentPart, string, error) {
+func parseACPResource(i int, r *acpResource) (*message.ContentPart, string, error) {
 	if r == nil {
 		return nil, "", fmt.Errorf("resource block %d is invalid", i)
 	}
@@ -231,9 +229,9 @@ func parseACPResource(i int, r *acpResource) (*tacklr.ContentPart, string, error
 	if !hasBlob && !hasText {
 		return nil, "", fmt.Errorf("resource block %d is invalid", i)
 	}
-	var part *tacklr.ContentPart
+	var part *message.ContentPart
 	if hasBlob {
-		mime := tacklr.NormalizeMIME(r.MimeType)
+		mime := message.NormalizeMIME(r.MimeType)
 		if mime != "application/pdf" {
 			return nil, "", fmt.Errorf("resource block %d is invalid", i)
 		}
@@ -241,10 +239,10 @@ func parseACPResource(i int, r *acpResource) (*tacklr.ContentPart, string, error
 		if base := path.Base(strings.TrimSpace(r.URI)); base != "" && base != "." && base != "/" {
 			filename = base
 		}
-		part = &tacklr.ContentPart{
-			Type: tacklr.ContentTypeInputFile,
-			FileData: &tacklr.FileData{
-				Data:     tacklr.DataURL(mime, r.Blob),
+		part = &message.ContentPart{
+			Type: message.ContentTypeInputFile,
+			FileData: &message.FileData{
+				Data:     message.DataURL(mime, r.Blob),
 				MIMEType: mime,
 				Filename: filename,
 			},
@@ -257,7 +255,7 @@ func resolveImageURL(mime, data, uri string) (string, error) {
 	data = strings.TrimSpace(data)
 	uri = strings.TrimSpace(uri)
 	if data != "" {
-		return tacklr.DataURL(mime, data), nil
+		return message.DataURL(mime, data), nil
 	}
 	if strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "https://") || strings.HasPrefix(uri, "http://") {
 		return uri, nil
@@ -312,20 +310,20 @@ func acpTextChunk(threadID, messageID, sessionUpdate, text string) []byte {
 	})
 }
 
-func presentationToACP(threadID string, ev tacklr.StreamEvent) [][]byte {
-	presented := presentStreamEvent(ev)
+func presentationToACP(threadID string, ev session.Event) [][]byte {
+	presented := presentEvent(ev)
 	switch presented.Type {
-	case string(tacklr.StreamEventMessage):
+	case string(session.EventMessage):
 		if presented.Content == "" {
 			return nil
 		}
 		return [][]byte{acpTextChunk(threadID, presented.MessageID, "agent_message_chunk", presented.Content)}
-	case string(tacklr.StreamEventReasoning):
+	case string(session.EventReasoning):
 		if presented.Content == "" {
 			return nil
 		}
 		return [][]byte{acpTextChunk(threadID, presented.MessageID, "agent_thought_chunk", presented.Content)}
-	case string(tacklr.StreamEventFunctionCall):
+	case string(session.EventFunctionCall):
 		var toStream [][]byte
 		if presented.Content != "" {
 			toStream = append(toStream, acpTextChunk(threadID, presented.MessageID, "agent_message_chunk", presented.Content))
@@ -334,14 +332,14 @@ func presentationToACP(threadID string, ev tacklr.StreamEvent) [][]byte {
 			toStream = append(toStream, acpUpdateFrame(threadID, acpToolCallUpdate(toolCall, "tool_call", "in_progress", "")))
 		}
 		return toStream
-	case string(tacklr.StreamEventToolUpdate):
+	case string(session.EventToolUpdate):
 		return [][]byte{acpUpdateFrame(threadID, map[string]any{
 			"sessionUpdate": "tool_call_update",
 			"toolCallId":    presented.MessageID,
 			"status":        "in_progress",
 			"content":       acpToolCallContent(presented.Content),
 		})}
-	case string(tacklr.StreamEventPlanUpdate):
+	case string(session.EventPlanUpdate):
 		var todos []tacklr.Todo
 		_ = json.Unmarshal(presented.Data, &todos)
 		entries := make([]map[string]any, 0, len(todos))
@@ -353,7 +351,7 @@ func presentationToACP(threadID string, ev tacklr.StreamEvent) [][]byte {
 			})
 		}
 		return [][]byte{acpUpdateFrame(threadID, map[string]any{"sessionUpdate": "plan", "entries": entries})}
-	case string(tacklr.StreamEventToolResult):
+	case string(session.EventToolResult):
 		tc := presented.ToolCalls[0]
 		status := "completed"
 		if tc.Status == "error" {
@@ -364,12 +362,12 @@ func presentationToACP(threadID string, ev tacklr.StreamEvent) [][]byte {
 			update["rawOutput"] = map[string]any{"output": presented.Content}
 		}
 		return [][]byte{acpUpdateFrame(threadID, update)}
-	case string(tacklr.StreamEventComplete):
+	case string(session.EventComplete):
 		b, _ := json.Marshal(map[string]any{
 			"jsonrpc": "2.0", "id": presented.TurnID, "result": acpPromptResult(stopReasonEndTurn),
 		})
 		return [][]byte{b}
-	case string(tacklr.StreamEventError):
+	case string(session.EventError):
 		if reason, ok := stopReasonFromError(presented.Error); ok {
 			b, _ := json.Marshal(map[string]any{
 				"jsonrpc": "2.0", "id": presented.TurnID, "result": acpPromptResult(reason),
@@ -392,7 +390,7 @@ func presentationToACP(threadID string, ev tacklr.StreamEvent) [][]byte {
 
 // acpToolCallUpdate builds the common tool_call / tool_call_update body.
 // Title is the human label; name is the programmatic tool id (ACP RFD-aligned).
-func acpToolCallUpdate(tc tacklr.ToolCall, sessionUpdate, status, content string) map[string]any {
+func acpToolCallUpdate(tc message.ToolCall, sessionUpdate, status, content string) map[string]any {
 	title := tc.Title
 	if title == "" {
 		title = tc.Name
@@ -430,19 +428,19 @@ func acpToolCallContent(text string) []map[string]any {
 
 // presentationEvent is the protocol-neutral client-facing meaning of one
 // harness event. server.Protocol serializers may reshape it, but semantic conversion
-// from tacklr.StreamEvent happens only in presentStreamEvent.
+// from session.Event happens only in presentEvent.
 type presentationEvent struct {
-	Type      string            `json:"type"`
-	TurnID    string            `json:"turn_id,omitempty"`
-	MessageID string            `json:"message_id,omitempty"`
-	Content   string            `json:"content,omitempty"`
-	Data      json.RawMessage   `json:"data,omitempty"`
-	ToolCalls []tacklr.ToolCall `json:"tool_calls,omitempty"`
-	ErrorText string            `json:"error,omitempty"`
-	Error     error             `json:"-"`
+	Type      string             `json:"type"`
+	TurnID    string             `json:"turn_id,omitempty"`
+	MessageID string             `json:"message_id,omitempty"`
+	Content   string             `json:"content,omitempty"`
+	Data      json.RawMessage    `json:"data,omitempty"`
+	ToolCalls []message.ToolCall `json:"tool_calls,omitempty"`
+	ErrorText string             `json:"error,omitempty"`
+	Error     error              `json:"-"`
 }
 
-func presentStreamEvent(event tacklr.StreamEvent) presentationEvent {
+func presentEvent(event session.Event) presentationEvent {
 	presented := presentationEvent{
 		Type:      string(event.Type),
 		TurnID:    event.TurnID,
@@ -460,25 +458,6 @@ func presentStreamEvent(event tacklr.StreamEvent) presentationEvent {
 	return presented
 }
 
-// ConfigOption describes a selectable session configuration option returned by
-// session/new and session/load.
-type ConfigOption struct {
-	ID           string              `json:"id"`
-	Name         string              `json:"name"`
-	Description  string              `json:"description,omitempty"`
-	Category     string              `json:"category"`
-	Type         string              `json:"type"`
-	CurrentValue string              `json:"currentValue"`
-	Options      []ConfigOptionValue `json:"options"`
-}
-
-// ConfigOptionValue is one choice within a select-type ConfigOption.
-type ConfigOptionValue struct {
-	Value       string `json:"value"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-}
-
 // parsedRequest is retained for ACP parse helpers and tests that assert on
 // validated request fields.
 type parsedRequest struct {
@@ -486,7 +465,7 @@ type parsedRequest struct {
 	Prompt   string
 	// UserMessage is set for multimodal ACP prompts (Content + ContentParts).
 	// When non-nil, runHarness prefers RunMessage over Prompt string.
-	UserMessage *tacklr.Message
+	UserMessage *message.Message
 	Responses   map[string]json.RawMessage
 
 	// ACP JSON-RPC envelope
@@ -498,7 +477,7 @@ type parsedRequest struct {
 
 	// ACP session lifecycle (validated view of Params)
 	CWD        string
-	MCPServers []mcp.MCPConfig
+	MCPServers []session.MCPServer
 
 	// ACP session/set_config_option
 	ConfigID    string

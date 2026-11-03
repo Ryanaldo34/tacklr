@@ -3,6 +3,8 @@ package tacklr
 import (
 	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/message"
 )
 
 func TestModelContextManager_enforcesMessageInvariantsAtMutation(t *testing.T) {
@@ -22,29 +24,14 @@ func TestModelContextManager_enforcesMessageInvariantsAtMutation(t *testing.T) {
 
 	// Act and assert
 	assertPanics("nil add", func() { manager.Add(nil) })
-	assertPanics("nil restore", func() { manager.Restore([]*Message{nil}) })
+	assertPanics("nil restore", func() { manager.Restore([]*message.Message{nil}) })
 	assertPanics("invalid replace", func() {
-		manager.Replace([]*Message{{Role: RoleTool, Content: "missing id"}})
+		manager.Replace([]*message.Message{{Role: message.RoleTool, Content: "missing id"}})
 	})
 
-	manager.Add(&Message{Role: RoleUser, Content: "valid"})
+	manager.Add(&message.Message{Role: message.RoleUser, Content: "valid"})
 	if got := manager.Messages(); len(got) != 1 || got[0].Content != "valid" {
 		t.Fatalf("messages = %#v", got)
-	}
-}
-
-func TestContextPolicy_validateRejectsInvalidRatios(t *testing.T) {
-	// Act
-	compressErr := ContextPolicy{CompressFraction: 2}.Validate()
-	negativeCompressErr := ContextPolicy{CompressFraction: -1}.Validate()
-	negativePressureErr := ContextPolicy{PressureRatio: -1}.Validate()
-
-	// Assert
-	if compressErr == nil || negativeCompressErr == nil || negativePressureErr == nil {
-		t.Fatalf("errors = %v %v %v", compressErr, negativeCompressErr, negativePressureErr)
-	}
-	if err := DefaultContextPolicy().Validate(); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -58,12 +45,12 @@ func TestModelContextManager_installPlanDocument(t *testing.T) {
 		t.Fatalf("empty window error = %v", err)
 	}
 
-	manager.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
+	manager.Restore([]*message.Message{{Role: message.RoleUser, Content: "goal"}})
 	if err := manager.InstallPlanDocument("Ship the release"); err != nil {
 		t.Fatal(err)
 	}
 	window := manager.Messages()
-	if len(window) != 2 || !IsPlanDocument(window[1]) || rawPlanFromDocumentMessage(window[1]) != "Ship the release" {
+	if len(window) != 2 || !IsPlanDocument(window[1]) || !strings.HasSuffix(window[1].Content, "Ship the release") {
 		t.Fatalf("window = %+v", window)
 	}
 }

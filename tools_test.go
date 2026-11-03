@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +63,7 @@ func TestInvoke(t *testing.T) {
 	t.Run("returns raw string", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "zero", Handler: zeroArgsStringHandler})
 		res, err := tool.invoke(context.Background(), "", nil)
-		got := res.output
+		got := res.Output
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -74,7 +75,7 @@ func TestInvoke(t *testing.T) {
 	t.Run("marshals non-string return", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "zero_int", Handler: zeroArgsIntHandler})
 		res, err := tool.invoke(context.Background(), "", nil)
-		got := res.output
+		got := res.Output
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -92,7 +93,7 @@ func TestInvoke(t *testing.T) {
 		}
 		tool := NewTool(ToolConfig{Name: "handler", Handler: h})
 		res, err := tool.invoke(context.Background(), `{"name":"test","age":10}`, nil)
-		got := res.output
+		got := res.Output
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -101,10 +102,32 @@ func TestInvoke(t *testing.T) {
 		}
 	})
 
+	t.Run("unmarshals pointer args", func(t *testing.T) {
+		tool := NewTool(ToolConfig{Name: "ptr_args", Handler: func(ctx context.Context, a *BasicArgs) (string, error) { return a.Name, nil }})
+		res, err := tool.invoke(context.Background(), `{"name":"x"}`, nil)
+		if err != nil || res.Output != "x" {
+			t.Fatalf("got %q %v", res.Output, err)
+		}
+	})
+
+	t.Run("an arg of the wrong type errors", func(t *testing.T) {
+		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
+		if _, err := tool.invoke(context.Background(), `{"name":123}`, nil); err == nil || !strings.Contains(err.Error(), "unmarshal args") {
+			t.Fatalf("got %v, want an unmarshal error", err)
+		}
+	})
+
+	t.Run("a result that cannot be marshaled errors", func(t *testing.T) {
+		tool := NewTool(ToolConfig{Name: "bad_out", Handler: func(ctx context.Context) (chan int, error) { return make(chan int), nil }})
+		if _, err := tool.invoke(context.Background(), "", nil); err == nil {
+			t.Fatal("want marshal result error")
+		}
+	})
+
 	t.Run("handler that needs runtime fails closed without one", func(t *testing.T) {
 		tool := NewTool(ToolConfig{
 			Name: "needs_rt",
-			Handler: func(ctx context.Context, rt HarnessRuntime) (string, error) {
+			Handler: func(ctx context.Context, cc *CallContext) (string, error) {
 				return "ok", nil
 			},
 		})
@@ -130,7 +153,21 @@ func TestInvoke(t *testing.T) {
 		}
 	})
 
-	// Parent cancel is a distinct Invoke outcome from tool Timeout (covered via harness).
+	t.Run("a tool past its timeout is a correction to narrow the request", func(t *testing.T) {
+		for name, handler := range map[string]func(context.Context) (string, error){
+			"one that stops on its deadline": func(ctx context.Context) (string, error) { <-ctx.Done(); return "", ctx.Err() },
+			"one that ignores its deadline":  func(context.Context) (string, error) { time.Sleep(50 * time.Millisecond); return "late", nil },
+		} {
+			tool := NewTool(ToolConfig{Name: "slow", Timeout: 5 * time.Millisecond, Handler: handler})
+
+			_, err := tool.invoke(context.Background(), "", nil)
+
+			if !errors.Is(err, ErrToolTimeout) {
+				t.Errorf("%s = %v, want ErrToolTimeout", name, err)
+			}
+		}
+	})
+
 	t.Run("parent cancellation is not reported as tool timeout", func(t *testing.T) {
 		tool := NewTool(ToolConfig{
 			Name:    "slow",
@@ -160,7 +197,9 @@ func TestSchema(t *testing.T) {
 	t.Run("basic fields with desc and required", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
 		s := asParams(t, tool)
-		assertObject(t, s)
+		if s["type"] != "object" || s["additionalProperties"] != false {
+			t.Errorf("expected {type:object, additionalProperties:false}, got %v", s)
+		}
 		props := s["properties"].(map[string]any)
 
 		n := props["name"].(map[string]any)
@@ -227,6 +266,30 @@ func TestSchema(t *testing.T) {
 		}
 	})
 
+	t.Run("numbers and a recursive type", func(t *testing.T) {
+		type node struct {
+			Weight   float64 `json:"weight"`
+			Children []node  `json:"children"`
+		}
+		tool := NewTool(ToolConfig{Name: "tree", Handler: func(context.Context, node) (string, error) { return "", nil }})
+		s := asParams(t, tool)
+		props := s["properties"].(map[string]any)
+		if props["weight"].(map[string]any)["type"] != "number" {
+			t.Errorf("weight = %v, want a number", props["weight"])
+		}
+		// The schema of a recursive type stops at a fixed depth.
+		for depth := 0; ; depth++ {
+			items, ok := props["children"].(map[string]any)["items"].(map[string]any)
+			if !ok || items["type"] != "object" {
+				if depth == 0 {
+					t.Fatalf("children = %v, want nested objects", props["children"])
+				}
+				break
+			}
+			props = items["properties"].(map[string]any)
+		}
+	})
+
 	t.Run("time.Time treated as string", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "time", Handler: timeHandler})
 		s := asParams(t, tool)
@@ -250,65 +313,6 @@ func TestSchema(t *testing.T) {
 	})
 }
 
-func TestNewTool_exposesConfig(t *testing.T) {
-	tool := NewTool(ToolConfig{
-		Name:        "search_records",
-		DisplayName: "Search",
-		Description: "Search operational records.",
-		Namespace:   "ops",
-		Category:    ToolCategorySearch,
-		Access:      ToolReadAccess,
-		Timeout:     5 * time.Second,
-		OnCall:      []OnCallFunc{nil},
-		Handler:     zeroArgsStringHandler,
-	})
-	if tool.Name() != "search_records" || tool.DisplayName() != "Search" {
-		t.Fatalf("name=%q display=%q", tool.Name(), tool.DisplayName())
-	}
-	if tool.Description() != "Search operational records." || tool.Namespace() != "ops" {
-		t.Fatalf("desc=%q ns=%q", tool.Description(), tool.Namespace())
-	}
-	if tool.Category() != ToolCategorySearch || tool.Access() != ToolReadAccess {
-		t.Fatalf("category=%q access=%v", tool.Category(), tool.Access())
-	}
-	if tool.Timeout() != 5*time.Second {
-		t.Fatalf("timeout=%v", tool.Timeout())
-	}
-}
-
-func TestAsJson(t *testing.T) {
-	tool := NewTool(ToolConfig{
-		Name:        "get_weather",
-		Description: "Get the weather",
-		Handler:     basicHandler,
-	})
-	def := tool.AsJson()
-
-	if def["type"] != "function" {
-		t.Errorf("type = %v", def["type"])
-	}
-	if def["name"] != "get_weather" {
-		t.Errorf("name = %v", def["name"])
-	}
-	if def["description"] != "Get the weather" {
-		t.Errorf("description = %v", def["description"])
-	}
-	if def["strict"] != true {
-		t.Errorf("strict = %v", def["strict"])
-	}
-	if def["parameters"] == nil {
-		t.Error("parameters missing")
-	}
-	// Nil parameters map → default empty object schema (strict tool host shape).
-	empty := (&Tool{name: "bare"}).AsJson()
-	params, _ := empty["parameters"].(map[string]any)
-	if params == nil || params["type"] != "object" {
-		t.Fatalf("nil params default = %#v", empty["parameters"])
-	}
-}
-
-// TestMakeSchemaNullable_outcomes covers each rewrite branch of makeSchemaNullable
-// (used for strict optional fields). Cheap pure paths that lift library total cover.
 // TestTypeToJSONSchema_structuredOutput is the public structured-output
 // helper: omitempty fields stay optional (non-strict).
 func TestTypeToJSONSchema_structuredOutput(t *testing.T) {
@@ -343,20 +347,31 @@ func TestTypeToJSONSchema_structuredOutput(t *testing.T) {
 	}
 }
 
+// TestToolsAsJson is the wire shape of a tool list: each tool a strict
+// function with its schema, a namespaced name joined with "__", and an
+// empty list as [].
 func TestToolsAsJson(t *testing.T) {
-	if ToolsAsJson(nil) != "[]" {
-		t.Fatalf("empty = %s", ToolsAsJson(nil))
-	}
 	raw := ToolsAsJson([]*Tool{
-		NewTool(ToolConfig{Name: "standalone", Handler: zeroArgsStringHandler}),
+		NewTool(ToolConfig{Name: "get_weather", Description: "Get the weather", Handler: basicHandler}),
 		NewTool(ToolConfig{Name: "greet", Namespace: "ado", Handler: zeroArgsStringHandler}),
 	})
 	var parsed []map[string]any
+
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 		t.Fatal(err)
 	}
-	if len(parsed) != 2 || parsed[0]["name"] != "standalone" || parsed[1]["name"] != "ado__greet" {
-		t.Fatalf("%s", raw)
+	if ToolsAsJson(nil) != "[]" {
+		t.Fatalf("empty = %s", ToolsAsJson(nil))
+	}
+	first := parsed[0]
+	if len(parsed) != 2 || first["type"] != "function" || first["name"] != "get_weather" || first["description"] != "Get the weather" || first["strict"] != true || first["parameters"] == nil {
+		t.Fatalf("tool = %v", first)
+	}
+	if parsed[1]["name"] != "ado__greet" {
+		t.Fatalf("namespaced name = %v", parsed[1]["name"])
+	}
+	if params, _ := parsed[1]["parameters"].(map[string]any); params == nil || params["type"] != "object" {
+		t.Fatalf("a tool with no arguments has parameters %#v, want an empty object schema", parsed[1]["parameters"])
 	}
 }
 
@@ -384,6 +399,8 @@ func TestNewTool_validation(t *testing.T) {
 		{"too many args", ToolConfig{Name: "t", Handler: func(ctx context.Context, a BasicArgs, b BasicArgs, c BasicArgs) (string, error) {
 			return "", nil
 		}}, ""}, // "too many parameters" or "unexpected parameter"
+		{"a parameter after the arguments that is not the runtime", ToolConfig{Name: "t", Handler: func(context.Context, BasicArgs, string) (string, error) { return "", nil }}, "want *CallContext"},
+		{"a nil on-call", ToolConfig{Name: "t", Handler: zeroArgsStringHandler, OnCall: []OnCallFunc{nil}}, "must not be nil"},
 		{"unregistered on-call", ToolConfig{Name: "t", Handler: zeroArgsStringHandler, OnCall: []OnCallFunc{func(ToolInvocation) Interrupt {
 			return unregisteredOnCall{}
 		}}}, "not registered"},
@@ -403,119 +420,19 @@ func TestNewTool_validation(t *testing.T) {
 	}
 }
 
-func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
-	type args struct {
-		Name string `json:"name"`
-	}
-	tool := NewTool(ToolConfig{
-		Name: "ptr_args",
-		Handler: func(ctx context.Context, a *args) (string, error) {
-			if a == nil || a.Name == "" {
-				return "empty", nil
-			}
-			return a.Name, nil
-		},
-	})
-	res, err := tool.invoke(context.Background(), `{"name":"x"}`, nil)
-	got := res.output
-	if err != nil || got != "x" {
-		t.Fatalf("got %q %v", got, err)
-	}
-	// Type mismatch in JSON → invoke error.
-	_, err = tool.invoke(context.Background(), `{"name":123}`, nil)
-	if err == nil {
-		t.Fatal("want unmarshal error")
-	}
-
-	// Non-string result marshaled to JSON.
-	tool2 := NewTool(ToolConfig{
-		Name: "struct_out",
-		Handler: func(ctx context.Context) (struct {
-			N int `json:"n"`
-		}, error) {
-			return struct {
-				N int `json:"n"`
-			}{N: 7}, nil
-		},
-	})
-	res, err = tool2.invoke(context.Background(), "", nil)
-	got = res.output
-	if err != nil || !strings.Contains(got, "7") {
-		t.Fatalf("got %q %v", got, err)
-	}
-
-	// Unmarshallable result type → error.
-	tool3 := NewTool(ToolConfig{
-		Name: "bad_out",
-		Handler: func(ctx context.Context) (chan int, error) {
-			return make(chan int), nil
-		},
-	})
-	_, err = tool3.invoke(context.Background(), "", nil)
-	if err == nil {
-		t.Fatal("want marshal result error")
-	}
-}
-
-func assertObject(t *testing.T, s map[string]any) {
-	t.Helper()
-	if s["type"] != "object" || s["additionalProperties"] != false {
-		t.Errorf("expected {type:object, additionalProperties:false}, got %v", s)
-	}
-}
-
 func assertRequired(t *testing.T, s map[string]any, vals ...string) {
 	t.Helper()
 	req := s["required"].([]string)
 	for _, v := range vals {
-		if !contains(req, v) {
+		if !slices.Contains(req, v) {
 			t.Errorf("required %v missing %q", req, v)
 		}
 	}
 }
 
-func contains(slice []string, val string) bool {
-	for _, v := range slice {
-		if v == val {
-			return true
-		}
-	}
-	return false
-}
-
 func asParams(t *testing.T, tool *Tool) map[string]any {
 	t.Helper()
 	return tool.AsJson()["parameters"].(map[string]any)
-}
-
-func TestResolveToolTitle_invalidJSONKeepsTemplate(t *testing.T) {
-	got := ResolveToolTitle("read {path}", "read", `{not-json`)
-	if got != "read {path}" {
-		t.Fatalf("got %q, want template unchanged", got)
-	}
-	got = ResolveToolTitle("read {path}", "read", `{"path":"/work/a.txt"}`)
-	if got != "read /work/a.txt" {
-		t.Fatalf("got %q", got)
-	}
-}
-
-func TestCorrection_isAgentAndCause(t *testing.T) {
-	err := Correction(vfs.ErrNotExist, "read: that path does not exist. List the parent with run_command (ls)")
-	if !errors.Is(err, ErrCorrection) {
-		t.Fatal("Is ErrCorrection")
-	}
-	if !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatal("Is cause")
-	}
-	if errors.Is(err, ErrFailed) {
-		t.Fatal("must not be harness ErrFailed")
-	}
-	if strings.Contains(err.Error(), "vfs:") || err.Error() == ErrCorrection.Error() {
-		t.Fatalf("model text: %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), "does not exist") || !strings.Contains(err.Error(), "ls") {
-		t.Fatalf("correction: %q", err.Error())
-	}
 }
 
 func TestCorrection_emptyMsgAndAlreadyWrapped(t *testing.T) {

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
@@ -60,11 +62,11 @@ func (b brainTools) ref(ctx context.Context, scope brain.Scope, idOrPath, field 
 
 // page returns the next page of the tool's previous call when more is set,
 // else runs call, and keeps the page's rest for the next more.
-func (b brainTools) page(ctx context.Context, tool string, scope brain.Scope, more bool, limit int, call func() (brain.Page, error)) (string, error) {
+func (b brainTools) page(ctx context.Context, cc *CallContext, tool string, scope brain.Scope, more bool, limit int, call func() (brain.Page, error)) (string, error) {
 	var page brain.Page
 	var err error
 	if more {
-		rest := b.sc.Rest(tool)
+		rest := cc.rest(tool)
 		if rest.Empty() {
 			return "", fmt.Errorf("no more results; call %s again without more", tool)
 		}
@@ -75,7 +77,7 @@ func (b brainTools) page(ctx context.Context, tool string, scope brain.Scope, mo
 	if err != nil {
 		return "", err
 	}
-	b.sc.SetRest(tool, page.Rest)
+	cc.setRest(tool, page.Rest)
 	return formatBrainJSON(page)
 }
 
@@ -96,11 +98,11 @@ func (b brainTools) newSearchTool() *Tool {
 		Description: `Search saved records, indexed files, links between records, and earlier messages of this session. Call when you need facts for the task.
 
 Returns one ranked list. Each result is an object (with evidence snippets when its parts matched, and vfs_path for a file) or a link whose note matched (with both ends). With within, each result is a part of that record with the snippet that matched. Without a query, a kind or filters list the matching records, newest first. facets count the kinds and field values among the results: narrow a second search with them. more is true when another page exists. Fails on an unknown kind or filter, with the valid choices.`,
-		Category: ToolCategorySearch,
+		Category: message.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
-		Handler: func(ctx context.Context, args searchArgs, runtime HarnessRuntime) (string, error) {
-			runtime.EmitUpdate("Searching knowledge…")
+		Handler: func(ctx context.Context, args searchArgs, cc *CallContext) (string, error) {
+			cc.EmitUpdate("Searching knowledge…")
 			scope, err := b.scope(args.Namespace)
 			if err != nil {
 				return "", fmt.Errorf("search: %w", err)
@@ -109,7 +111,7 @@ Returns one ranked list. Each result is an object (with evidence snippets when i
 			if err != nil {
 				return "", fmt.Errorf("search: %w", err)
 			}
-			out, err := b.page(ctx, "search", scope, args.More, args.Limit, func() (brain.Page, error) {
+			out, err := b.page(ctx, cc, "search", scope, args.More, args.Limit, func() (brain.Page, error) {
 				req := brain.SearchRequest{Query: args.Query, Kind: args.Kind, Filters: filters, Limit: args.Limit}
 				if strings.TrimSpace(args.Within) != "" {
 					if req.Within, err = b.ref(ctx, scope, args.Within, "within"); err != nil {
@@ -140,11 +142,11 @@ func (b brainTools) newOpenTool() *Tool {
 		Description: `Open one record, part, indexed file or earlier message of this session in full. Call when a search or related result needs its whole content, or to learn its kind's fields before filtering.
 
 Returns the object with its content, its kind (with the fields a search can filter on), and its first children. Fails if ref is not visible in this session.`,
-		Category: ToolCategoryRead,
+		Category: message.ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
-		Handler: func(ctx context.Context, args openArgs, runtime HarnessRuntime) (string, error) {
-			runtime.EmitUpdate("Opening knowledge…")
+		Handler: func(ctx context.Context, args openArgs, cc *CallContext) (string, error) {
+			cc.EmitUpdate("Opening knowledge…")
 			scope, err := b.scope(args.Namespace)
 			if err != nil {
 				return "", fmt.Errorf("open: %w", err)
@@ -178,16 +180,16 @@ func (b brainTools) newRelatedTool() *Tool {
 		Description: `List what is related to one record: its children (or a part's parent and nearby parts) and the records its links reach. Call when you have a record and need its context.
 
 Returns one list; each result's relation says how it is related (child, parent, sibling, or a link's relation, direction, depth and note). more is true when another page exists. Fails if ref is not visible in this session.`,
-		Category: ToolCategoryFetch,
+		Category: message.ToolCategoryFetch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
-		Handler: func(ctx context.Context, args relatedArgs, runtime HarnessRuntime) (string, error) {
-			runtime.EmitUpdate("Listing related knowledge…")
+		Handler: func(ctx context.Context, args relatedArgs, cc *CallContext) (string, error) {
+			cc.EmitUpdate("Listing related knowledge…")
 			scope, err := b.scope(args.Namespace)
 			if err != nil {
 				return "", fmt.Errorf("related: %w", err)
 			}
-			out, err := b.page(ctx, "related", scope, args.More, args.Limit, func() (brain.Page, error) {
+			out, err := b.page(ctx, cc, "related", scope, args.More, args.Limit, func() (brain.Page, error) {
 				id, err := b.ref(ctx, scope, args.Ref, "ref")
 				if err != nil {
 					return brain.Page{}, err
@@ -219,11 +221,11 @@ func (b brainTools) newSaveTool(kinds []string) *Tool {
 		Description: `Save a finding, fact or memory as a durable record that later steps and sessions can search. Call when something you learned should survive this step.
 
 Returns the saved record. Fails if title is empty, kind is not one of the kinds you may save, or a field is invalid (the error names the valid choices).`,
-		Category: ToolCategoryEdit,
+		Category: message.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
-		Handler: func(ctx context.Context, args saveArgs, runtime HarnessRuntime) (string, error) {
-			runtime.EmitUpdate("Saving knowledge…")
+		Handler: func(ctx context.Context, args saveArgs, cc *CallContext) (string, error) {
+			cc.EmitUpdate("Saving knowledge…")
 			kind := strings.TrimSpace(args.Kind)
 			if !slices.Contains(kinds, kind) {
 				return "", fmt.Errorf("save: kind %q cannot be saved; kinds: %s", kind, strings.Join(kinds, ", "))
@@ -283,11 +285,11 @@ func (b brainTools) newLinkTool() *Tool {
 		Description: `Create, update or remove a relationship between two records. Call to record how they relate, so related and search can follow it.
 
 Linking the same pair again updates the note. Removing a link that is absent succeeds. Fails if an end is missing or is a part rather than a record.`,
-		Category: ToolCategoryEdit,
+		Category: message.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
-		Handler: func(ctx context.Context, args linkArgs, runtime HarnessRuntime) (string, error) {
-			runtime.EmitUpdate("Linking knowledge…")
+		Handler: func(ctx context.Context, args linkArgs, cc *CallContext) (string, error) {
+			cc.EmitUpdate("Linking knowledge…")
 			scope, err := b.scope(args.Namespace)
 			if err != nil {
 				return "", fmt.Errorf("link: %w", err)
@@ -328,10 +330,8 @@ func setEnum(t *Tool, prop string, values []string) {
 }
 
 func formatBrainJSON(v any) (string, error) {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("brain tool: marshal result: %w", err)
-	}
+	// Every result is brain data or a plain struct: it always encodes.
+	b, _ := json.MarshalIndent(v, "", "  ")
 	return string(b), nil
 }
 

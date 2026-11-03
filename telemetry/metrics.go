@@ -9,8 +9,7 @@ import (
 	"go.opentelemetry.io/otel/metric/noop"
 )
 
-// meterContextKey carries an optional Meter (or pre-built Instruments) on the turn context.
-type meterContextKey struct{}
+// instrumentsContextKey carries pre-built Instruments on the turn context.
 type instrumentsContextKey struct{}
 
 // SetMeterProvider installs mp as the process-wide MeterProvider and rebuilds
@@ -35,23 +34,6 @@ func MeterFromProvider(mp metric.MeterProvider) metric.Meter {
 		return Meter()
 	}
 	return mp.Meter(InstrumentationName)
-}
-
-// ContextWithMeter attaches m for MeterFromContext. Prefer ContextWithInstruments
-// when instruments are pre-built for a registry.
-func ContextWithMeter(ctx context.Context, m metric.Meter) context.Context {
-	if m == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, meterContextKey{}, m)
-}
-
-// MeterFromContext returns a context meter or the global Meter.
-func MeterFromContext(ctx context.Context) metric.Meter {
-	if m, ok := ctx.Value(meterContextKey{}).(metric.Meter); ok && m != nil {
-		return m
-	}
-	return Meter()
 }
 
 // ContextWithInstruments attaches pre-built Instruments for the turn (and children).

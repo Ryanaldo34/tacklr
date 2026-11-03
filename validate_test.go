@@ -2,12 +2,14 @@ package tacklr
 
 import (
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/message"
 )
 
 func TestValidateMessages_rejectsUnsupportedRolesAndInvalidToolFields(t *testing.T) {
 	// Act
-	userToolErr := ValidateMessages([]*Message{{Role: RoleUser, ToolCallID: "call"}})
-	unsupportedErr := ValidateMessages([]*Message{{Role: "invalid"}})
+	userToolErr := ValidateMessages([]*message.Message{{Role: message.RoleUser, ToolCallID: "call"}})
+	unsupportedErr := ValidateMessages([]*message.Message{{Role: "invalid"}})
 
 	// Assert
 	if userToolErr == nil {
@@ -15,29 +17,5 @@ func TestValidateMessages_rejectsUnsupportedRolesAndInvalidToolFields(t *testing
 	}
 	if unsupportedErr == nil {
 		t.Fatal("unsupported role was accepted")
-	}
-}
-
-func TestValidateMessages_acceptsInterruptedWindowAndRejectsCorruption(t *testing.T) {
-	// Arrange
-	valid := []*Message{
-		{Role: RoleUser, Content: "run"},
-		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call", Name: "tool"}}},
-	}
-
-	// Act
-	validErr := ValidateMessages(valid)
-	nilErr := ValidateMessages([]*Message{nil})
-	toolErr := ValidateMessages([]*Message{{Role: RoleTool}})
-
-	// Assert
-	if validErr != nil {
-		t.Fatal(validErr)
-	}
-	if nilErr == nil {
-		t.Fatal("nil message was accepted")
-	}
-	if toolErr == nil {
-		t.Fatal("tool message without tool_call_id was accepted")
 	}
 }

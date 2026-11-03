@@ -13,6 +13,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/brain/storetest"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
@@ -36,7 +39,7 @@ type memFiles struct {
 	unversioned bool
 }
 
-func (m *memFiles) open(context.Context, string, vfs.Binding) (vfs.Provider, error) { return m, nil }
+func (m *memFiles) open(context.Context, string, mount.Binding) (vfs.Provider, error) { return m, nil }
 
 func (m *memFiles) put(name, body string) {
 	m.mu.Lock()
@@ -138,52 +141,25 @@ func (f *slowFile) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// countEmbedder counts the texts it embeds.
-type countEmbedder struct {
-	mu    sync.Mutex
-	texts int
-}
-
-func (e *countEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.texts += len(texts)
-	out := make([][]float32, len(texts))
-	for i := range out {
-		out[i] = []float32{1, 0}
-	}
-	return out, nil
-}
-
-func (*countEmbedder) Model() string { return "count-model" }
-
-func (e *countEmbedder) take() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	n := e.texts
-	e.texts = 0
-	return n
-}
-
 // memHarness indexes a memFiles mount into a fresh engine.
 type memHarness struct {
 	idx   *vfsindex.MountIndexer
 	eng   *brain.Engine
 	store *brain.MemoryStore
-	emb   *countEmbedder
+	emb   *storetest.Embedder
 }
 
 // memIndexer mounts files at /workspace/raw and indexes into a fresh engine.
 func memIndexer(t *testing.T, files *memFiles) memHarness {
 	t.Helper()
 	ms := treeLocal(t, vfs.At("raw", files.open))
-	emb := &countEmbedder{}
+	emb := &storetest.Embedder{}
 	store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb}))
 	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: mustNS(t, "id", uuid.NewString())})
+	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: storetest.Namespace(t, "id", uuid.NewString())})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,12 +184,12 @@ func TestMountIndexer_anEditReembedsOnlyTheChunksAroundIt(t *testing.T) {
 	if _, err := idx.IndexPath(ctx, vpath); err != nil {
 		t.Fatal(err)
 	}
-	first := emb.take()
+	first := emb.Take()
 	edited := "inserted-needle line at the top\n" + body
 	files.put("big.txt", edited)
 
 	_, err := idx.IndexPath(ctx, vpath)
-	second := emb.take()
+	second := emb.Take()
 	kidsTree, _ := store.GetTree(ctx, idx.Scope, idx.DocumentID(vpath), 0)
 	kids := kidsTree.Parts
 	page, _ := eng.Search(ctx, idx.Scope, brain.SearchRequest{Query: "inserted-needle"})
@@ -246,7 +222,7 @@ func TestMountIndexer_anUnchangedVersionSkipsTheFileUnreadAndANewVersionOfTheSam
 		t.Fatal(err)
 	}
 	opens := files.openCount()
-	emb.take()
+	emb.Take()
 
 	same, sameErr := idx.IndexPath(ctx, vpath)
 	reads := files.openCount() - opens
@@ -256,7 +232,7 @@ func TestMountIndexer_anUnchangedVersionSkipsTheFileUnreadAndANewVersionOfTheSam
 	if sameErr != nil || same != vfsindex.PathSkipped || reads != 0 {
 		t.Errorf("same version = %q %v after %d opens, want skipped unread", same, sameErr, reads)
 	}
-	if touchErr != nil || touched != vfsindex.PathIndexed || emb.take() != 1 {
+	if touchErr != nil || touched != vfsindex.PathIndexed || emb.Take() != 1 {
 		t.Errorf("new version, same text = %q %v, want indexed with only the parent embedded", touched, touchErr)
 	}
 }
@@ -270,10 +246,10 @@ func TestMountIndexer_aBackendWithoutVersionsOrDocumentsRereadsButRewritesNothin
 	if _, err := h.idx.IndexPath(ctx, vpath); err != nil {
 		t.Fatal(err)
 	}
-	h.emb.take()
+	h.emb.Take()
 
 	again, err := h.idx.IndexPath(ctx, vpath)
-	embedded := h.emb.take()
+	embedded := h.emb.Take()
 	page, _ := h.eng.Search(ctx, h.idx.Scope, brain.SearchRequest{Query: "unversioned-token"})
 
 	if err != nil || again != vfsindex.PathIndexed || embedded != 1 {
@@ -376,7 +352,7 @@ func TestMountIndexer_anAuditFailureOnTheVersionCheckFailsTheIndex(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: mustNS(t, "id", uuid.NewString())})
+	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: storetest.Namespace(t, "id", uuid.NewString())})
 	if err != nil {
 		t.Fatal(err)
 	}

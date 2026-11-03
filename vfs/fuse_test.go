@@ -9,12 +9,11 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 func TestFuseMount_hostSeesDirtyText(t *testing.T) {
-	if err := FuseProbe(t.TempDir()); err != nil {
-		t.Skip(err.Error())
-	}
 	ctx := t.Context()
 	ms := mustTree(t, At("work", Local(t.TempDir())))
 
@@ -112,9 +111,6 @@ func TestFuseMount_hostSeesDirtyText(t *testing.T) {
 }
 
 func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
-	if err := FuseProbe(t.TempDir()); err != nil {
-		t.Skip(err.Error())
-	}
 	ctx := t.Context()
 	ms := mustTree(t, At("work", Local(t.TempDir())))
 
@@ -288,10 +284,6 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 // TestFuseMount_projectedTextualReadOnly: a non-identity codec still projects
 // ReadText to the kernel (cat/rg); kernel writes stay EROFS.
 func TestFuseMount_projectedTextualReadOnly(t *testing.T) {
-	if err := FuseProbe(t.TempDir()); err != nil {
-		t.Skip(err.Error())
-	}
-
 	ctx := t.Context()
 	ms := mustTree(t, At("work", Local(t.TempDir())))
 
@@ -380,14 +372,14 @@ func TestFuseMount_requiresDir(t *testing.T) {
 	}
 	dir := t.TempDir()
 	if err := empty.FuseMount(dir); err != nil {
-		t.Skip(err.Error())
+		t.Fatal(err)
 	}
 	_ = empty.Close()
 }
 
 func TestMount_rejectsBadProviderAndDuplicate(t *testing.T) {
 	ctx := t.Context()
-	p, err := Local(t.TempDir())(ctx, "s", Binding{})
+	p, err := Local(t.TempDir())(ctx, "s", mount.Binding{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,10 +390,10 @@ func TestMount_rejectsBadProviderAndDuplicate(t *testing.T) {
 	if err := ms.mount(ctx, MountSpec{Point: "/x"}, p); !errors.Is(err, ErrInvalidProvider) {
 		t.Fatalf("empty profile: %v", err)
 	}
-	if err := ms.mount(ctx, MountSpec{Point: WorkspacePoint, Profile: "workspace"}, p); err != nil {
+	if err := ms.mount(ctx, MountSpec{Point: mount.WorkspacePoint, Profile: "workspace"}, p); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.mount(ctx, MountSpec{Point: WorkspacePoint, Profile: "workspace"}, p); !errors.Is(err, ErrAlreadyMounted) {
+	if err := ms.mount(ctx, MountSpec{Point: mount.WorkspacePoint, Profile: "workspace"}, p); !errors.Is(err, ErrAlreadyMounted) {
 		t.Fatalf("dup mount: %v", err)
 	}
 	if err := ms.mount(ctx, MountSpec{Point: "/z", Profile: "z"}, nil); err == nil {
@@ -413,7 +405,7 @@ func TestMount_rejectsBadProviderAndDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms2.mount(cctx, MountSpec{Point: WorkspacePoint, Profile: "workspace"}, p); !errors.Is(err, context.Canceled) {
+	if err := ms2.mount(cctx, MountSpec{Point: mount.WorkspacePoint, Profile: "workspace"}, p); !errors.Is(err, context.Canceled) {
 		t.Fatalf("mount cancel: %v", err)
 	}
 }

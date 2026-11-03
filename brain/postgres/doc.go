@@ -1,8 +1,9 @@
 // Package postgres is the optional Postgres implementation of brain.Store.
 //
-// Hosts open a Store with Open(ctx, connString, Options) and inject it into
-// brain.NewEngine. Every connection's search_path is the tacklr schema, then
-// public, with a server-side statement_timeout (Options).
+// The host owns the connection pool: Configure sets what each connection
+// needs on the host's pgxpool.Config (the search_path is the tacklr schema,
+// then public, with a server-side statement_timeout), and Open takes the
+// pool with the same Options. Inject the Store into brain.NewEngine.
 // A transaction-mode pooler must support prepared statements and forward
 // those startup parameters. Run Setup on each deploy: its schema script is
 // idempotent, and concurrent runs wait for each other on an advisory lock.

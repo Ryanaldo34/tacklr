@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // GitRepo configures one git remote as a host-owned mount.
@@ -38,11 +40,11 @@ type GitRepo struct {
 //
 //	vfs.Tree(vfs.At("api", vfs.Git(api)), vfs.At("docs", vfs.Git(docs)).ReadOnly())
 func Git(repo GitRepo) Open {
-	return func(ctx context.Context, sessionID string, b Binding) (Provider, error) {
+	return func(ctx context.Context, sessionID string, b mount.Binding) (Provider, error) {
 		if strings.TrimSpace(repo.URL) == "" || strings.TrimSpace(repo.Dir) == "" {
 			return nil, errors.New("vfs: git URL and Dir are required")
 		}
-		name := b.Params[ParamName]
+		name := b.Params[mount.ParamName]
 		if err := errors.Join(safeSegment(sessionID), safeSegment(name)); err != nil {
 			return nil, err
 		}

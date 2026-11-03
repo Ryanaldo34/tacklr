@@ -6,26 +6,28 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-var _ tacklr.InferenceStrategy = (*ScriptedModel)(nil)
+var _ tacklr.Model = (*ScriptedModel)(nil)
 
-// ScriptedModel is a cancel-aware InferenceStrategy for tests.
+// ScriptedModel is a cancel-aware Model for tests.
 // Default CountTokens is sum of message content lengths (not zero), so window-pressure
 // paths can fire when MaxWindowSize is small. Override CountTokensFn to customize.
 type ScriptedModel struct {
-	InvokeFn       func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)
+	InvokeFn       func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)
 	InvokeErr      error
-	InvokeErrFn    func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) error
-	CountTokensFn  func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error)
+	InvokeErrFn    func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool) error
+	CountTokensFn  func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool) (int, error)
 	SupportsMIMEFn func(string) bool
 
 	CallNum         atomic.Int64
 	mu              sync.Mutex
 	SystemPrompts   []string
-	LastInvokeMsgs  []*tacklr.Message
+	LastInvokeMsgs  []*message.Message
 	LastInvokeTools []*tacklr.Tool
 }
 
@@ -43,12 +45,12 @@ func (m *ScriptedModel) MaxContextWindow() (int, error) {
 	return 8192, nil
 }
 
-func (m *ScriptedModel) CountTokens(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
+func (m *ScriptedModel) CountTokens(ctx context.Context, req tacklr.ModelRequest) (int, error) {
 	if m.CountTokensFn != nil {
-		return m.CountTokensFn(ctx, msgs, tools)
+		return m.CountTokensFn(ctx, req.Messages, req.Tools)
 	}
 	n := 0
-	for _, msg := range msgs {
+	for _, msg := range req.Messages {
 		if msg != nil {
 			n += len(msg.Content)
 		}
@@ -56,7 +58,8 @@ func (m *ScriptedModel) CountTokens(ctx context.Context, msgs []*tacklr.Message,
 	return n, nil
 }
 
-func (m *ScriptedModel) Invoke(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, systemPrompt string) (chan tacklr.LLMResponseChunk, error) {
+func (m *ScriptedModel) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tacklr.LLMResponseChunk, error) {
+	msgs, tools, systemPrompt := req.Messages, req.Tools, req.SystemPrompt
 	if m.InvokeErr != nil {
 		return nil, m.InvokeErr
 	}
@@ -96,7 +99,7 @@ func (m *ScriptedModel) LastSystemPrompt() string {
 }
 
 // ContentTokenEstimate is a shared length-based token stand-in for pressure tests.
-func ContentTokenEstimate(msgs []*tacklr.Message) int {
+func ContentTokenEstimate(msgs []*message.Message) int {
 	n := 0
 	for _, m := range msgs {
 		if m != nil {

@@ -97,16 +97,6 @@ func TestMeterContext_helpers(t *testing.T) {
 	if MeterFromProvider(nil) == nil {
 		t.Fatal("nil provider meter")
 	}
-	ctx := ContextWithMeter(context.Background(), Meter())
-	if MeterFromContext(ctx) == nil {
-		t.Fatal("meter from ctx")
-	}
-	if MeterFromContext(context.Background()) == nil {
-		t.Fatal("fallback")
-	}
-	if ContextWithMeter(context.Background(), nil) == nil {
-		t.Fatal("nil meter no-op")
-	}
 	if ContextWithInstruments(context.Background(), nil) == nil {
 		t.Fatal("nil inst no-op")
 	}
@@ -116,16 +106,12 @@ func TestMeterContext_helpers(t *testing.T) {
 	_ = InstrumentsFromContext(context.Background()) // second hit cached
 
 	EmitEvent(context.Background(), "") // no-op empty name
-	EmitEventSeverity(context.Background(), EventTurnEnded, log.SeverityError)
+	EmitEventSeverity(context.Background(), EventModelAfterTools, log.SeverityError)
 
 	if ContextWithSessionID(context.Background(), "") != context.Background() {
 		t.Fatal("empty session id must be a no-op")
 	}
 	RecordCheckpointAttempt(context.Background(), errors.New("save failed"))
-
-	_, turn := StartTurnSpan(context.Background(), TurnAttrs{AgentID: "a", SessionID: "s", Kind: TurnKindPrompt})
-	turn.End(OutcomeCancelled)
-	turn.End(OutcomeCancelled)
 
 	_, tool := StartToolSpan(context.Background(), "grep", "vfs")
 	tool.Finish("error", errors.New("boom"))

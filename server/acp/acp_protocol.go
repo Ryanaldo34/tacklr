@@ -29,7 +29,7 @@ const (
 )
 
 // acpProtocol is the native server.Protocol implementation for the Agent Client server.Protocol.
-// Wire session state (cwd, mcp, config) lives here — not on SnapshotStore.
+// Wire session state (cwd, mcp, config) lives here — not on session.Store.
 type acpProtocol struct {
 	mu       sync.Mutex
 	sessions map[string]*acpWireSession
@@ -138,7 +138,7 @@ func (p *acpProtocol) handleACPWebSocket(env server.ProtocolEnv, w http.Response
 				SetSecurity: acpConn.SetSecurityContext,
 			}
 			reqEnv := server.ProtocolEnv{
-				Runtime:     env.Runtime,
+				Client:      env.Client,
 				Agent:       env.Agent,
 				Conn:        reqConn,
 				Security:    env.Security,
@@ -193,7 +193,7 @@ func (p *acpProtocol) handleNotification(ctx context.Context, env server.Protoco
 		return
 	}
 	if _, err := p.resolveOwnedWireSession(ctx, env, pr.ThreadID, actionSessionPrompt); err == nil {
-		_ = env.Runtime.Cancel(ctx, session.SessionID(pr.ThreadID))
+		_ = env.Client.Cancel(ctx, session.ID(pr.ThreadID))
 	}
 }
 
@@ -231,7 +231,7 @@ func (p *acpProtocol) dispatch(ctx context.Context, env server.ProtocolEnv, pr *
 		if _, err := p.resolveOwnedWireSession(ctx, env, pr.ThreadID, actionSessionPrompt); err != nil {
 			return nil, err
 		}
-		_ = env.Runtime.Cancel(ctx, session.SessionID(pr.ThreadID))
+		_ = env.Client.Cancel(ctx, session.ID(pr.ThreadID))
 		return map[string]any{}, nil
 	case methodVFSBind:
 		return p.handleVFSBind(ctx, env, pr)
@@ -320,12 +320,12 @@ func (p *acpProtocol) handleSessionTurn(ctx context.Context, env server.Protocol
 	return reply(env.Conn.Writer, pr.ID, nil, err)
 }
 
-func (p *acpProtocol) OnStreamEvent(ctx context.Context, env server.ProtocolEnv, threadID string, ev tacklr.StreamEvent, reqID json.RawMessage) server.StreamControl {
-	if ev.Type == tacklr.StreamEventInterrupt && env.Conn != nil && env.Conn.Ask != nil {
+func (p *acpProtocol) OnEvent(ctx context.Context, env server.ProtocolEnv, threadID string, ev session.Event, reqID json.RawMessage) server.StreamControl {
+	if ev.Type == session.EventInterrupt && env.Conn != nil && env.Conn.Ask != nil {
 		resume, err := resolveInterruptViaACP(ctx, env, threadID, &ev)
 		if err != nil {
-			frames := injectReqID(presentationToACP(threadID, tacklr.StreamEvent{
-				Type:  tacklr.StreamEventError,
+			frames := injectReqID(presentationToACP(threadID, session.Event{
+				Type:  session.EventError,
 				Error: err,
 			}), reqID, true)
 			return server.StreamControl{Frames: frames, Finished: true}
@@ -335,15 +335,15 @@ func (p *acpProtocol) OnStreamEvent(ctx context.Context, env server.ProtocolEnv,
 		}
 	}
 
-	if ev.Type == tacklr.StreamEventError && errors.Is(ev.Error, context.Canceled) {
+	if ev.Type == session.EventError && errors.Is(ev.Error, context.Canceled) {
 		if env.Conn != nil && env.Conn.Writer != nil && len(reqID) > 0 {
 			_ = env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
 		}
 		return server.StreamControl{Finished: true}
 	}
 	frames := presentationToACP(threadID, ev)
-	terminal := ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError
-	park := ev.Type == tacklr.StreamEventInterrupt
+	terminal := ev.Type == session.EventComplete || ev.Type == session.EventError
+	park := ev.Type == session.EventInterrupt
 	frames = injectReqID(frames, reqID, terminal)
 	if park && len(reqID) > 0 && env.Conn != nil && env.Conn.Writer != nil {
 		_ = env.Conn.Writer.WriteError(reqID, server.Errorf(server.ErrInvalidRequest,
@@ -376,7 +376,7 @@ func injectReqID(frames [][]byte, reqID json.RawMessage, terminal bool) [][]byte
 // resolveInterruptViaACP handles mid-turn interrupts over client RPC.
 // Returns (nil, nil) when this interrupt kind cannot be resolved mid-turn
 // (caller parks the turn). Returns (events, nil) on successful resume.
-func resolveInterruptViaACP(ctx context.Context, env server.ProtocolEnv, threadID string, ev *tacklr.StreamEvent) (map[string][]byte, error) {
+func resolveInterruptViaACP(ctx context.Context, env server.ProtocolEnv, threadID string, ev *session.Event) (map[string][]byte, error) {
 	var envl InterruptEventEnvelope
 	_ = json.Unmarshal(ev.Data, &envl)
 	switch envl.Type {

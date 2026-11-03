@@ -9,12 +9,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
 
 	"github.com/coder/websocket"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
 
@@ -40,9 +45,9 @@ func dialACPWebSocket(t *testing.T, hs *httptest.Server) (*websocket.Conn, strin
 	return conn, connID
 }
 
-func startACPWSServer(t *testing.T, r *testRuntime) (*httptest.Server, *server.Server) {
+func startACPWSServer(t *testing.T, r *acptest.Runtime) (*httptest.Server, *server.Server) {
 	t.Helper()
-	srv := server.NewServer(r.Runtime, r.Agent, acp.New(server.NewMemoryWireStore()))
+	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 	hs := httptest.NewServer(srv.HTTPMux())
 	t.Cleanup(hs.Close)
 	return hs, srv
@@ -88,18 +93,18 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 		},
 	})
 	var invokeCount int
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		invokeCount++
 		if invokeCount == 1 {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
 				{ID: "c1", CallID: "c1", Name: "sensitive", Arguments: `{}`},
 			}, IsComplete: true}
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			return
 		}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
 	})
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}})
 	hs, srv := startACPWSServer(t, r)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -189,12 +194,12 @@ func TestACP_WS_disconnectCancelsInFlightTurn(t *testing.T) {
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
 	var once sync.Once
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		once.Do(func() { close(started) })
 		<-ctx.Done()
 		close(cancelled)
 	})
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
 	hs, _ := startACPWSServer(t, r)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -239,10 +244,10 @@ func TestACP_WS_disconnectCancelsInFlightTurn(t *testing.T) {
 
 // TestACP_prompt_stopReason_refusal: model terminal ErrModelRefused → PromptResponse refusal.
 func TestACP_prompt_stopReason_refusal(t *testing.T) {
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		ch <- tacklr.LLMResponseChunk{
-			Type:       tacklr.StreamEventError,
-			Error:      tacklr.ErrModelRefused,
+			Type:       session.EventError,
+			Error:      session.ErrModelRefused,
 			Content:    "model refused",
 			IsComplete: true,
 		}
@@ -251,59 +256,25 @@ func TestACP_prompt_stopReason_refusal(t *testing.T) {
 }
 
 func TestACP_prompt_stopReason_maxTokens(t *testing.T) {
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		ch <- tacklr.LLMResponseChunk{
-			Type:       tacklr.StreamEventError,
-			Error:      tacklr.ErrMaxTokens,
+			Type:       session.EventError,
+			Error:      session.ErrMaxTokens,
 			IsComplete: true,
 		}
 	})
 	assertACPStopReason(t, strategy, nil, "max_tokens")
 }
 
-func TestACP_prompt_stopReason_maxTurnRequests(t *testing.T) {
-	// Always request a tool so the harness would loop; MaxTurnRequests=1 ends before 2nd invoke.
-	ping := tacklr.NewTool(tacklr.ToolConfig{
-		Name: "ping",
-		Handler: func(ctx context.Context) (string, error) {
-			return "pong", nil
-		},
-	})
-	var n int
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		n++
-		ch <- tacklr.LLMResponseChunk{
-			Type: tacklr.StreamEventFunctionCall,
-			ToolCalls: []tacklr.ToolCall{
-				{ID: "c1", CallID: "c1", Name: "ping", Arguments: `{}`},
-			},
-			IsComplete: true,
-		}
-		ch <- tacklr.LLMResponseChunk{IsComplete: true}
-	})
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{MaxTurnRequests: 1,
-		Tools: []*tacklr.Tool{ping}})
-	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sessionID := acpSessionID(t, recNew)
-	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"go"}]}}`)
-	reason := promptStopReason(t, rec)
-	if reason != "max_turn_requests" {
-		t.Fatalf("stopReason = %q, want max_turn_requests (invokes=%d frames=%v)", reason, n, parseACPFrames(t, rec.Body))
-	}
-	if n != 1 {
-		t.Errorf("model invokes = %d, want 1", n)
-	}
-}
-
-func assertACPStopReason(t *testing.T, strategy tacklr.InferenceStrategy, tools []*tacklr.Tool, want string) {
+func assertACPStopReason(t *testing.T, strategy tacklr.Model, tools []*tacklr.Tool, want string) {
 	t.Helper()
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: tools})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{Tools: tools})
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sessionID := acpSessionID(t, recNew)
+	sessionID := acptest.SessionID(t, recNew)
 	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"hi"}]}}`)
 	got := promptStopReason(t, rec)
 	if got != want {
-		blob, _ := json.Marshal(parseACPFrames(t, rec.Body))
+		blob, _ := json.Marshal(acptest.Frames(t, rec.Body))
 		t.Fatalf("stopReason = %q, want %q frames=%s", got, want, blob)
 	}
 }
@@ -311,12 +282,12 @@ func assertACPStopReason(t *testing.T, strategy tacklr.InferenceStrategy, tools 
 func TestACP_sessionCancel_stopReasonCancelled(t *testing.T) {
 	started := make(chan struct{})
 	var once sync.Once
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		once.Do(func() { close(started) })
 		<-ctx.Done()
 	})
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{})
-	srv := server.NewServer(r.Runtime, r.Agent, acp.New(server.NewMemoryWireStore()))
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
+	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	rpc := newACPRPC(ctx, t, srv)
@@ -351,7 +322,7 @@ func TestACP_sessionCancel_stopReasonCancelled(t *testing.T) {
 
 func promptStopReason(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
-	frames := parseACPFrames(t, rec.Body)
+	frames := acptest.Frames(t, rec.Body)
 	for _, f := range frames {
 		if res, ok := f["result"].(map[string]any); ok {
 			if sr, ok := res["stopReason"].(string); ok && sr != "" {

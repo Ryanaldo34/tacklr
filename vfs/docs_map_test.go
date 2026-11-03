@@ -2,7 +2,6 @@ package vfs
 
 import (
 	"errors"
-	"strings"
 	"testing"
 
 	"google.golang.org/api/docs/v1"
@@ -66,67 +65,6 @@ func TestParagraphInsertIndex_skipsSectionBreak(t *testing.T) {
 	}
 	if got := paragraphAppendIndex(after, ""); got != 40 {
 		t.Fatalf("append after table %d", got)
-	}
-}
-
-func TestSplitInsertHead_tableBoundary(t *testing.T) {
-	blocks := []Block{
-		{Kind: BlockKindHeading, Text: "H"},
-		{Kind: BlockKindParagraph, Text: "P"},
-		{Kind: BlockKindTable, Text: "A\tB"},
-		{Kind: BlockKindParagraph, Text: "After"},
-	}
-	head, rest := splitInsertHead(blocks)
-	if len(head) != 2 || head[0].Text != "H" || len(rest) != 2 || rest[0].Kind != BlockKindTable {
-		t.Fatalf("prefix head=%+v rest=%+v", head, rest)
-	}
-	head, rest = splitInsertHead(rest)
-	if len(head) != 1 || head[0].Kind != BlockKindTable || len(rest) != 1 || rest[0].Text != "After" {
-		t.Fatalf("table head=%+v rest=%+v", head, rest)
-	}
-	head, rest = splitInsertHead(rest)
-	if len(head) != 1 || head[0].Text != "After" || rest != nil {
-		t.Fatalf("tail head=%+v rest=%+v", head, rest)
-	}
-}
-
-func TestMapInsertBlocks_stripsMarksAndEmitsTextStyle(t *testing.T) {
-	chunks, _, err := mapInsertBlocks([]Block{
-		{Kind: BlockKindParagraph, Text: "See **x** and [Maya](mailto:maya)"},
-		{Kind: BlockKindHeading, Text: "**Title**", Style: StyleMeta{Level: 1}},
-		{Kind: BlockKindListItem, Text: "**item**", Style: StyleMeta{Level: 1}},
-	}, 1, "t")
-	if err != nil || len(chunks) != 1 {
-		t.Fatalf("chunks=%d err=%v", len(chunks), err)
-	}
-	var inserted []string
-	var bold, link int
-	for _, r := range chunks[0].reqs {
-		if r.InsertText != nil {
-			inserted = append(inserted, r.InsertText.Text)
-		}
-		if st := r.UpdateTextStyle; st != nil && st.TextStyle != nil {
-			if st.TextStyle.Bold {
-				bold++
-			}
-			if st.TextStyle.Link != nil && st.TextStyle.Link.Url == "mailto:maya" {
-				link++
-			}
-		}
-	}
-	if strings.Contains(strings.Join(inserted, ""), "**") {
-		t.Fatalf("insert kept markdown: %q", inserted)
-	}
-	if bold < 3 || link < 1 {
-		t.Fatalf("styles bold=%d link=%d inserts=%q reqs=%+v", bold, link, inserted, chunks[0].reqs)
-	}
-}
-
-func TestEncodeDocument_richFallsBackToHTML(t *testing.T) {
-	rd := NewRichDocument("/Spec", mimeGoogleDocument, []Block{{Kind: BlockKindParagraph, Text: "**Hi**"}})
-	data, err := EncodeDocument(t.Context(), rd)
-	if err != nil || !strings.Contains(string(data), "<strong>Hi</strong>") {
-		t.Fatalf("encode = %q err=%v", data, err)
 	}
 }
 

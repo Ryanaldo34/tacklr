@@ -24,18 +24,17 @@ const (
 
 // Span and log attribute keys (static identifiers only).
 const (
-	AttrArea        = "tacklr.area"
-	AttrSessionID   = "tacklr.session_id"
-	AttrAgentID     = "tacklr.agent_id"
-	AttrThreadID    = "tacklr.thread_id"
-	AttrTurnKind    = "tacklr.turn.kind" // prompt | resume
-	AttrLoadSession = "tacklr.load_session"
-	AttrRuntime     = "tacklr.runtime" // embed | temporal
-	AttrToolName    = "tacklr.tool.name"
-	AttrToolNS      = "tacklr.tool.namespace"
-	AttrToolStatus  = "tacklr.tool.status" // success | error | interrupt | …
-	AttrOpenTodos   = "tacklr.open_todos"  // remaining todos at handoff
-	AttrOutcome     = "tacklr.outcome"     // ok | error | cancelled | fallback
+	AttrArea       = "tacklr.area"
+	AttrSessionID  = "tacklr.session_id"
+	AttrAgentID    = "tacklr.agent_id"
+	AttrThreadID   = "tacklr.thread_id"
+	AttrTurnKind   = "tacklr.turn.kind" // prompt | resume
+	AttrRuntime    = "tacklr.runtime"   // temporal
+	AttrToolName   = "tacklr.tool.name"
+	AttrToolNS     = "tacklr.tool.namespace"
+	AttrToolStatus = "tacklr.tool.status" // success | error | interrupt | …
+	AttrOpenTodos  = "tacklr.open_todos"  // remaining todos at handoff
+	AttrOutcome    = "tacklr.outcome"     // ok | error | cancelled | fallback
 
 	// Model invoke (tacklr.model) — start attrs where possible.
 	AttrModelPhase       = "tacklr.model.phase" // turn | handoff | compress
@@ -58,16 +57,9 @@ const (
 	AttrGenAICacheWriteTokens = "gen_ai.usage.cache_write_tokens"
 )
 
-// Turn kind values for AttrTurnKind (closed enum).
-const (
-	TurnKindPrompt = "prompt"
-	TurnKindResume = "resume"
-)
-
 // Runtime values for AttrRuntime (closed enum). Durable backends that are not
 // Temporal should pick a stable id of their own rather than overloading these.
 const (
-	RuntimeEmbed    = "embed"
 	RuntimeTemporal = "temporal"
 )
 
@@ -106,26 +98,16 @@ const (
 
 // Log event names (OTel Logs API Record.SetEventName).
 const (
-	EventPromptReceived  = "prompt.received"
-	EventResumeReceived  = "resume.received"
-	EventTurnEnded       = "turn.ended"
-	EventTurnYielded     = "turn.yielded"
-	EventChildSpawned    = "workflow.child_spawned"
 	EventProviderFailed  = "provider.failed"
 	EventModelAfterTools = "model.after_tools"
 	EventFuseMount       = "vfs.fuse.mount"
-	EventFuseMountError  = "vfs.fuse.mount_error"
 	EventFuseUnmount     = "vfs.fuse.unmount"
-	EventFuseUnavailable = "vfs.fuse.unavailable"
 )
 
 // Event attribute keys on log-based events.
 const (
-	EventAttrPromptLen            = "prompt_len"
-	EventAttrResumeInterruptCount = "resume_interrupt_count"
-	EventAttrOutcome              = "outcome"
-	EventAttrBodySnip             = "body_snip"
-	EventAttrInputItems           = "input_items"
+	EventAttrOutcome    = "outcome"
+	EventAttrInputItems = "input_items"
 )
 
 // Area values for AttrArea.
@@ -134,7 +116,6 @@ const (
 	AreaHarness    = "harness"
 	AreaModelTasks = "model_tasks"
 	AreaContext    = "context"
-	AreaInference  = "inference"
 )
 
 // Outcome values for AttrOutcome / EventAttrOutcome.

@@ -12,7 +12,6 @@ import (
 const (
 	MetricTurnDuration    = "tacklr.turn.duration"
 	MetricTurnTotal       = "tacklr.turn.total"
-	MetricTurnActive      = "tacklr.turn.active"
 	MetricToolCalls       = "tacklr.tool.calls"
 	MetricToolDuration    = "tacklr.tool.duration"
 	MetricInterruptTotal  = "tacklr.interrupt.total"
@@ -45,7 +44,6 @@ const (
 type Instruments struct {
 	turnDuration    metric.Float64Histogram
 	turnTotal       metric.Int64Counter
-	turnActive      metric.Int64UpDownCounter
 	toolCalls       metric.Int64Counter
 	toolDuration    metric.Float64Histogram
 	interruptTotal  metric.Int64Counter
@@ -71,9 +69,6 @@ func MustInstruments(m metric.Meter) *Instruments {
 	)
 	i.turnTotal, _ = m.Int64Counter(MetricTurnTotal,
 		metric.WithDescription("Total agent turns by outcome"),
-	)
-	i.turnActive, _ = m.Int64UpDownCounter(MetricTurnActive,
-		metric.WithDescription("In-flight agent turns"),
 	)
 	i.toolCalls, _ = m.Int64Counter(MetricToolCalls,
 		metric.WithDescription("Tool invocations by name and status"),
@@ -119,18 +114,7 @@ func MustInstruments(m metric.Meter) *Instruments {
 	return i
 }
 
-func (i *Instruments) RecordTurnStart(ctx context.Context, agentID string) {
-	i.turnActive.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelAgentID, agentID)))
-}
-
-func (i *Instruments) RecordTurnEnd(ctx context.Context, agentID, turnKind, outcome string, d time.Duration) {
-	i.turnActive.Add(ctx, -1, metric.WithAttributes(attribute.String(LabelAgentID, agentID)))
-	i.RecordTurnOutcome(ctx, agentID, turnKind, outcome, d)
-}
-
-// RecordTurnOutcome increments turn totals and duration without touching the
-// in-flight gauge. Temporal workflows use this: replay would double-count
-// RecordTurnStart/RecordTurnEnd on the active gauge.
+// RecordTurnOutcome increments turn totals and duration.
 func (i *Instruments) RecordTurnOutcome(ctx context.Context, agentID, turnKind, outcome string, d time.Duration) {
 	attrs := metric.WithAttributes(
 		attribute.String(LabelAgentID, agentID),
@@ -211,9 +195,8 @@ func (i *Instruments) RecordCheckpointSave(ctx context.Context, outcome string) 
 
 // Fuse mount outcomes for RecordFuseMount (closed enum).
 const (
-	FuseMountOutcomeOK          = "ok"
-	FuseMountOutcomeError       = "error"
-	FuseMountOutcomeUnavailable = "unavailable"
+	FuseMountOutcomeOK    = "ok"
+	FuseMountOutcomeError = "error"
 )
 
 // RecordFuseMount increments tacklr.fuse.mount.total{outcome=...}.

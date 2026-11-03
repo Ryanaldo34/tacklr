@@ -1,16 +1,21 @@
-// Package tacklr is the stable harness SDK facade.
-//
-// The root package owns agent construction, turn execution, tool
-// registration, conversation types (Message, StreamEvent, Todo), and
-// the session checkpoint blob. Domain packages:
-//   - brain owns knowledge retrieval. brain/postgres, brain/helixgraph, and
-//     brain/postgres and brain/helixgraph are the store and graph adapters.
-//   - vfs owns virtual filesystem mounts and the backend constructors.
+// Package tacklr is the harness: Harness runs one session's steps (a
+// model request through Model, a tool call with its CallContext, a commit
+// into the window), and the root package owns tool registration, the
+// window and plan, the checkpoint encoding, and the VFS, brain and MCP
+// wiring. Other packages:
+//   - message holds the conversation data (Message, ContentPart, ToolCall).
+//   - session is the client contract (Client, Store, Event); session/loop
+//     runs the session loop over a loop.Executor; session/temporal is the
+//     Temporal client and session/temporal/worker its worker.
+//   - brain owns knowledge retrieval; brain/postgres and brain/helixgraph
+//     are the store and graph adapters.
+//   - vfs owns virtual filesystem mounts and the backend constructors;
+//     vfs/mount holds the mount bindings a client sends.
 //   - openai, email, and web are optional host tools and the model client.
 //   - mcp owns MCP connection configuration.
 //
-// Process-wide registrations (built-in interrupts, common VFS codecs, the
-// session driver adapter) run in this package's init. Hosts import tacklr
+// Process-wide registrations (built-in interrupts, common VFS codecs) run
+// in this package's init. Hosts import tacklr
 // once; they do not register those defaults themselves.
 //
 // New APIs should use the canonical domain packages and must not add server

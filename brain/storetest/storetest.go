@@ -63,6 +63,9 @@ func (*Embedder) Model() string { return "storetest-synonyms" }
 // Texts is how many texts e has embedded.
 func (e *Embedder) Texts() int { return int(e.texts.Load()) }
 
+// Take is the texts embedded since the last Take, and starts the count again.
+func (e *Embedder) Take() int { return int(e.texts.Swap(0)) }
+
 // Run runs the contract. newStore returns an empty store for each case,
 // which embeds with emb (nil: lexical only).
 func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Store) {
@@ -619,4 +622,44 @@ func must(t *testing.T, err error) {
 func treeParts(ctx context.Context, s brain.Store, scope brain.Scope, id uuid.UUID) []brain.Object {
 	t, _ := s.GetTree(ctx, scope, id, 0)
 	return t.Parts
+}
+
+// Namespace parses nv into a namespace, failing the test when it is invalid.
+func Namespace(t testing.TB, nv ...string) brain.Namespace {
+	t.Helper()
+	ns, err := brain.ParseNamespace(nv...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ns
+}
+
+// Filter decodes m into a filter, failing the test when it is invalid.
+func Filter(t testing.TB, m map[string]any) brain.Filter {
+	t.Helper()
+	f, err := brain.DecodeFilter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// Put writes obj straight to s under obj's own namespace, indexed by its text.
+func Put(s brain.Store, obj brain.Object) error {
+	_, err := s.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, brain.Indexed{Object: obj, Text: obj.IndexText()})
+	return err
+}
+
+// Kind is the registered kind named name in s, or brain.ErrNotFound.
+func Kind(ctx context.Context, s brain.Store, name string) (brain.ObjectKind, error) {
+	kinds, err := s.ListKinds(ctx)
+	if err != nil {
+		return brain.ObjectKind{}, err
+	}
+	for _, k := range kinds {
+		if k.Kind == name {
+			return k, nil
+		}
+	}
+	return brain.ObjectKind{}, brain.ErrNotFound
 }

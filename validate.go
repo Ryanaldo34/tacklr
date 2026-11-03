@@ -1,26 +1,30 @@
 package tacklr
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/ryanaldo34/tacklr/message"
+)
 
 // ValidateMessages validates structural invariants shared by live context and
 // durable checkpoints. Open assistant tool calls are valid while interrupted;
 // pairing is repaired by the harness before the next model invocation.
-func ValidateMessages(messages []*Message) error {
-	for i, message := range messages {
-		if message == nil {
+func ValidateMessages(messages []*message.Message) error {
+	for i, m := range messages {
+		if m == nil {
 			return fmt.Errorf("message %d is nil", i)
 		}
-		switch message.Role {
-		case RoleUser, RoleAssistant, RoleReasoning, RoleSystem, RoleDeveloper:
-			if message.ToolCallID != "" {
-				return fmt.Errorf("message %d: role %q cannot have tool_call_id", i, message.Role)
+		switch m.Role {
+		case message.RoleUser, message.RoleAssistant, message.RoleReasoning, message.RoleSystem, message.RoleDeveloper:
+			if m.ToolCallID != "" {
+				return fmt.Errorf("message %d: role %q cannot have tool_call_id", i, m.Role)
 			}
-		case RoleTool:
-			if message.ToolCallID == "" {
+		case message.RoleTool:
+			if m.ToolCallID == "" {
 				return fmt.Errorf("message %d: tool message requires tool_call_id", i)
 			}
 		default:
-			return fmt.Errorf("message %d: unsupported role %q", i, message.Role)
+			return fmt.Errorf("message %d: unsupported role %q", i, m.Role)
 		}
 	}
 	return nil

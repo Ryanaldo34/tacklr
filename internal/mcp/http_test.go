@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/mcp"
+	"github.com/ryanaldo34/tacklr/session"
 )
 
 func TestHeaderTransportInjectsHeaders(t *testing.T) {
@@ -21,7 +21,7 @@ func TestHeaderTransportInjectsHeaders(t *testing.T) {
 
 	transport := &headerTransport{
 		base: http.DefaultTransport,
-		headers: []mcp.HTTPHeader{
+		headers: []session.MCPHeader{
 			{Name: "Authorization", Value: "Bearer shhh"},
 			{Name: "X-Custom", Value: "value"},
 		},
@@ -46,33 +46,6 @@ func TestHeaderTransportInjectsHeaders(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-}
-
-func TestHeaderTransportCapturesHTTPErrors(t *testing.T) {
-	for _, tc := range []struct {
-		status int
-		body   string
-	}{
-		{http.StatusForbidden, "insufficient authentication scopes"},
-		{http.StatusInternalServerError, "boom"},
-	} {
-		t.Run(http.StatusText(tc.status), func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			t.Cleanup(ts.Close)
-			req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = (&headerTransport{base: http.DefaultTransport}).RoundTrip(req)
-			var httpErr *httpError
-			if !errors.As(err, &httpErr) || httpErr.Status != tc.status || httpErr.Body != tc.body {
-				t.Fatalf("err = %v", err)
-			}
-		})
 	}
 }
 

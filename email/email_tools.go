@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr"
 )
 
@@ -40,7 +42,7 @@ func ReadInbox(provider EmailProvider) *tacklr.Tool {
 		Name:        "read_inbox",
 		DisplayName: "Read Email Inbox",
 		Description: "Read and search messages in the configured email inbox.",
-		Category:    tacklr.ToolCategoryRead,
+		Category:    message.ToolCategoryRead,
 		Access:      tacklr.ToolReadAccess,
 		Handler: func(ctx context.Context, args readInboxArgs) (Inbox, error) {
 			return runReadInbox(ctx, provider, args)
@@ -57,7 +59,7 @@ func SendEmail(provider EmailProvider) *tacklr.Tool {
 		Name:        "send_email",
 		DisplayName: "Send Email: {subject}",
 		Description: "Send an email through the configured email account. Confirm recipients and content before sending.",
-		Category:    tacklr.ToolCategoryEdit,
+		Category:    message.ToolCategoryEdit,
 		Access:      tacklr.ToolWriteAccess,
 		OnCall:      []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
 		Handler: func(ctx context.Context, args sendEmailArgs) (SentEmail, error) {

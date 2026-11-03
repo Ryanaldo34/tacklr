@@ -17,11 +17,13 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // DefaultRoot is the virtual directory the loader walks when Root is empty.
-const DefaultRoot = vfs.WorkspacePoint + "/skills"
+const DefaultRoot = mount.WorkspacePoint + "/skills"
 
 type Skill struct {
 	Name         string

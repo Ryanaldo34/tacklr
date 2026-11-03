@@ -30,13 +30,6 @@ type Interrupt interface {
 	Error() string
 }
 
-// PayloadValidator is an optional capability Interrupt types may implement
-// for standalone payload checks. Session Resume calls Return only; types that
-// still need field-presence checks do that inside Return.
-type PayloadValidator interface {
-	ValidatePayload([]byte) error
-}
-
 type UserChoice struct {
 	Title         string `json:"title"`
 	Description   string `json:"description"`
@@ -62,7 +55,7 @@ func (c *UserSelectionInterrupt) Serialize() ([]byte, error) {
 	return json.Marshal(c)
 }
 
-func (c *UserSelectionInterrupt) ValidatePayload(payload []byte) error {
+func (c *UserSelectionInterrupt) validatePayload(payload []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return fmt.Errorf("%w: invalid JSON: %w", ErrInvalidPayload, err)
@@ -81,7 +74,7 @@ func (c *UserSelectionInterrupt) ValidatePayload(payload []byte) error {
 }
 
 func (c *UserSelectionInterrupt) Return(payload []byte) error {
-	if err := c.ValidatePayload(payload); err != nil {
+	if err := c.validatePayload(payload); err != nil {
 		return err
 	}
 	var selection UserSelectionPayload
@@ -93,40 +86,6 @@ func (c *UserSelectionInterrupt) Return(payload []byte) error {
 func (c *UserSelectionInterrupt) Error() string {
 	b, _ := json.Marshal(c) // value type always marshals
 	return string(b)
-}
-
-// TypeChildWaiting is kept for old checkpoints. A blocking specialist now
-// reports its child id on the tool step, and the session loop waits.
-// The payload is forwarded to the child session; Return is a no-op.
-const TypeChildWaiting = "child_waiting"
-
-// ChildWaiting accepts any resume payload (child HITL forwarded
-// through the parent session).
-type ChildWaiting struct {
-	Kind    string `json:"kind"`
-	Message string `json:"message,omitempty"`
-}
-
-func (p *ChildWaiting) TypeName() string {
-	if p != nil && p.Kind != "" {
-		return p.Kind
-	}
-	return TypeChildWaiting
-}
-
-func (p *ChildWaiting) Serialize() ([]byte, error) {
-	return json.Marshal(p)
-}
-
-func (p *ChildWaiting) ValidatePayload([]byte) error { return nil }
-
-func (p *ChildWaiting) Return([]byte) error { return nil }
-
-func (p *ChildWaiting) Error() string {
-	if p != nil && p.Message != "" {
-		return p.Message
-	}
-	return "child session awaiting input"
 }
 
 // TypeAuthExpired parks a tool call until the host rebinds credentials on Resume.Auth.
@@ -144,8 +103,6 @@ func (p *AuthExpired) TypeName() string { return TypeAuthExpired }
 func (p *AuthExpired) Serialize() ([]byte, error) {
 	return json.Marshal(p)
 }
-
-func (p *AuthExpired) ValidatePayload([]byte) error { return nil }
 
 func (p *AuthExpired) Return([]byte) error { return nil }
 
@@ -194,9 +151,10 @@ type ToolPermissionInterrupt struct {
 	Title    string             `json:"title,omitempty"` // human-readable invocation label
 	Options  []PermissionOption `json:"options"`
 
-	// Set by Return after the consumer selects an option. Checkpointed so a
-	// later activity can TakeResolved and see the decision. Serialize omits
-	// these so the client park payload stays unresolved.
+	// Set by Return after the consumer selects an option. The checkpoint
+	// keeps them on the call's park, so the call's run after resume sees the
+	// decision. Serialize omits them so the client park payload stays
+	// unanswered.
 	SelectedOptionID string `json:"selectedOptionId,omitempty"`
 	SelectedKind     string `json:"selectedKind,omitempty"`
 	Allowed          bool   `json:"allowed,omitempty"`
@@ -212,30 +170,7 @@ func (p *ToolPermissionInterrupt) Serialize() ([]byte, error) {
 	}{ToolName: p.ToolName, Title: p.Title, Options: p.Options})
 }
 
-func (p *ToolPermissionInterrupt) InitFromPayload(payload []byte) error {
-	if len(payload) == 0 || string(payload) == "null" {
-		p.Options = DefaultPermissionOptions()
-		return nil
-	}
-	var init struct {
-		ToolName string             `json:"toolName"`
-		Title    string             `json:"title"`
-		Options  []PermissionOption `json:"options"`
-	}
-	if err := json.Unmarshal(payload, &init); err != nil {
-		return err
-	}
-	p.ToolName = init.ToolName
-	p.Title = init.Title
-	if len(init.Options) == 0 {
-		p.Options = DefaultPermissionOptions()
-	} else {
-		p.Options = init.Options
-	}
-	return nil
-}
-
-func (p *ToolPermissionInterrupt) ValidatePayload(payload []byte) error {
+func (p *ToolPermissionInterrupt) validatePayload(payload []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return fmt.Errorf("%w: invalid JSON: %w", ErrInvalidPayload, err)
@@ -256,7 +191,7 @@ func (p *ToolPermissionInterrupt) ValidatePayload(payload []byte) error {
 }
 
 func (p *ToolPermissionInterrupt) Return(payload []byte) error {
-	if err := p.ValidatePayload(payload); err != nil {
+	if err := p.validatePayload(payload); err != nil {
 		return err
 	}
 	var res ToolPermissionPayload
@@ -298,21 +233,10 @@ var (
 // a checkpoint can rehydrate before any tool runs.
 func RegisterDefaults() {
 	defaultsOnce.Do(func() {
-		registerInterrupt(func() Interrupt { return &UserSelectionInterrupt{} })
-		registerInterrupt(func() Interrupt { return &ToolPermissionInterrupt{} })
-		registerInterrupt(func() Interrupt { return &ChildWaiting{Kind: TypeChildWaiting} })
-		registerInterrupt(func() Interrupt { return &AuthExpired{} })
+		RegisterInterrupt(func() Interrupt { return &UserSelectionInterrupt{} })
+		RegisterInterrupt(func() Interrupt { return &ToolPermissionInterrupt{} })
+		RegisterInterrupt(func() Interrupt { return &AuthExpired{} })
 	})
-}
-
-// registerInterrupt adds a factory under the interrupt's TypeName.
-func registerInterrupt(factory func() Interrupt) {
-	intr := factory()
-	name := intr.TypeName()
-	if _, ok := interruptFactories[name]; ok {
-		panic(fmt.Sprintf("interrupt type %q registered twice", name))
-	}
-	interruptFactories[name] = factory
 }
 
 // NewInterrupt returns a fresh Interrupt for a registered type name.
@@ -323,42 +247,4 @@ func NewInterrupt(typeName string) (Interrupt, bool) {
 		return nil, false
 	}
 	return f(), true
-}
-
-// Clone returns a deep copy via JSON for checkpoint snapshots.
-func CloneInterrupt(intr Interrupt) (Interrupt, error) {
-	if intr == nil {
-		return nil, nil
-	}
-	cp, ok := NewInterrupt(intr.TypeName())
-	if !ok {
-		return nil, fmt.Errorf("interrupt: unknown type %q", intr.TypeName())
-	}
-	data, err := json.Marshal(intr)
-	if err != nil {
-		return nil, fmt.Errorf("interrupt: clone %s: %w", intr.TypeName(), err)
-	}
-	if err := json.Unmarshal(data, cp); err != nil {
-		return nil, fmt.Errorf("interrupt: clone %s: %w", intr.TypeName(), err)
-	}
-	return cp, nil
-}
-
-// PayloadInitializer is an optional capability Interrupt types implement
-// to populate themselves from the raw payload provided to Park.
-type PayloadInitializer interface {
-	InitFromPayload([]byte) error
-}
-
-func (c *UserSelectionInterrupt) InitFromPayload(payload []byte) error {
-	var wrap struct {
-		Question string       `json:"question"`
-		Options  []UserChoice `json:"options"`
-	}
-	if err := json.Unmarshal(payload, &wrap); err == nil && len(wrap.Options) > 0 {
-		c.Question = wrap.Question
-		c.Options = wrap.Options
-		return nil
-	}
-	return json.Unmarshal(payload, &c.Options)
 }

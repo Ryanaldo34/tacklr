@@ -261,7 +261,7 @@ func (ms *MountSession) applyBlock(ctx context.Context, p string, mut Mutation) 
 	}
 	bl, ok := FindBlock(blocks, mut.BlockID)
 	if !ok {
-		return ApplyResult{}, fmt.Errorf("unknown block_id %q; read with outline=true and use an id from that outline", mut.BlockID)
+		return ApplyResult{}, fmt.Errorf("%w %q; read with outline=true and use an id from that outline", ErrUnknownBlock, mut.BlockID)
 	}
 	if mut.TabID != "" && bl.Style.Attributes != nil {
 		if got := bl.Style.Attributes["tab_id"]; got != "" && got != mut.TabID {
@@ -289,7 +289,7 @@ func (ms *MountSession) applyTabularBlock(ctx context.Context, td *IR, g *gridBo
 	sheetKey, a1 := SplitSheetAddr(mut.BlockID)
 	idx, ok := g.findSheet(sheetKey)
 	if !ok {
-		return ApplyResult{}, fmt.Errorf("unknown block_id %q; read with outline=true and use an id from that outline", mut.BlockID)
+		return ApplyResult{}, fmt.Errorf("%w %q; read with outline=true and use an id from that outline", ErrUnknownBlock, mut.BlockID)
 	}
 	if mut.TabID != "" && g.sheets[idx].ID != "" && g.sheets[idx].ID != mut.TabID {
 		return ApplyResult{}, fmt.Errorf("vfs: tab_id %q does not match block %q", mut.TabID, g.sheets[idx].ID)

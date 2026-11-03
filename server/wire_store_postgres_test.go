@@ -7,21 +7,25 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/acptest"
+	"github.com/ryanaldo34/tacklr/internal/pgtest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/server"
 )
 
-const wirePgImage = "tacklr-pg-brain:test"
-
 var (
-	wireOnce sync.Once
-	wirePool *pgxpool.Pool
-	wireErr  error
-	wireSkip string
+	wireOnce     sync.Once
+	wirePool     *pgxpool.Pool
+	wireErr      error
+	wireStartErr string
 )
 
 // TestPostgresWireStore_putGetDelete is the real-Postgres outcome for protocol
@@ -87,27 +91,27 @@ func TestPostgresWireStore_acpLoadAfterRestart(t *testing.T) {
 	conn := wireConn(t)
 	wire := server.NewPostgresWireStore(conn, "acp")
 
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok", IsComplete: true}
 	})
 
-	r1 := newTestRuntime(t, strategy, tacklr.AgentOptions{})
-	s1 := newACPTestServerWithWire(t, r1, wire)
-	rec1 := s1.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj"}}`)
-	sessionID, _ := acpRPCResult(t, rec1)["sessionId"].(string)
+	r1 := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
+	s1 := acptest.NewServer(t, r1, wire)
+	rec1 := s1.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj"}}`)
+	sessionID, _ := acptest.Result(t, rec1)["sessionId"].(string)
 	if sessionID == "" {
 		t.Fatal("missing sessionId")
 	}
 
-	s2 := newACPTestServerWithWire(t, r1, wire)
-	rec2 := s2.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/proj"}}`)
-	if acpRPCResult(t, rec2)["sessionId"] != sessionID {
+	s2 := acptest.NewServer(t, r1, wire)
+	rec2 := s2.RPC(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/proj"}}`)
+	if acptest.Result(t, rec2)["sessionId"] != sessionID {
 		t.Fatalf("load: %s", rec2.Body.String())
 	}
 
-	rec3 := s2.rpc(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`)
+	rec3 := s2.RPC(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`)
 	var endTurn bool
-	for _, f := range parseACPFrames(t, rec3.Body) {
+	for _, f := range acptest.Frames(t, rec3.Body) {
 		if res, ok := f["result"].(map[string]any); ok && res["stopReason"] == "end_turn" {
 			endTurn = true
 		}
@@ -124,7 +128,7 @@ func wireConn(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
 	wireOnce.Do(func() {
-		ctr, err := postgres.Run(ctx, wirePgImage,
+		ctr, err := postgres.Run(ctx, pgtest.Image,
 			postgres.WithDatabase("wire"),
 			postgres.WithUsername("wire"),
 			postgres.WithPassword("wire"),
@@ -132,7 +136,7 @@ func wireConn(t *testing.T) *pgxpool.Pool {
 			postgres.WithSQLDriver("pgx"),
 		)
 		if err != nil {
-			wireSkip = err.Error() + " (make brain-pg-image)"
+			wireStartErr = err.Error()
 			return
 		}
 		url, err := ctr.ConnectionString(ctx, "sslmode=disable")
@@ -150,8 +154,8 @@ func wireConn(t *testing.T) *pgxpool.Pool {
 			wirePool = pool
 		}
 	})
-	if wireSkip != "" {
-		t.Skipf("postgres unavailable: %s", wireSkip)
+	if wireStartErr != "" {
+		t.Fatalf("postgres: %s", wireStartErr)
 	}
 	if wireErr != nil {
 		t.Fatal(wireErr)

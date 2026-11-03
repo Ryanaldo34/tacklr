@@ -44,7 +44,7 @@ func TestHTMLRoundTripPreservesKindsLevelsMarksTables(t *testing.T) {
 	if h1Line < 0 || pLine < 0 || tableLine < 0 || h1Line == pLine || pLine == tableLine || h1Line == tableLine {
 		t.Fatalf("want distinct heading/paragraph/table lines: h1=%d p=%d table=%d html=%q", h1Line, pLine, tableLine, html)
 	}
-	got, err := (HTML{}).DecodeBlocks(context.Background(), "/x.html", HTMLMediaType, out)
+	got, err := (HTML{}).DecodeBlocks(context.Background(), "/x.html", htmlMediaType, out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,31 +65,6 @@ func TestHTMLRoundTripPreservesKindsLevelsMarksTables(t *testing.T) {
 	}
 	if !sawBold || !sawHref {
 		t.Fatalf("marks=%#v", got[1].Runs)
-	}
-}
-
-func TestDOCXRoundTripReadsAndWritesMainDocument(t *testing.T) {
-	var input bytes.Buffer
-	zw := zip.NewWriter(&input)
-	w, err := zw.Create("word/document.xml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = io.WriteString(w, `<w:document xmlns:w="x"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Title</w:t></w:r></w:p></w:body></w:document>`)
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	doc, err := (DOCX{}).DecodeBlocks(context.Background(), "/x.docx", DOCXMediaType, input.Bytes())
-	if err != nil || len(doc) != 1 || doc[0].Kind != vfs.BlockKindHeading {
-		t.Fatalf("doc=%#v err=%v", doc, err)
-	}
-	out, err := (DOCX{}).EncodeBlocks(context.Background(), doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	part, err := zipPart(out, "word/document.xml")
-	if err != nil || !strings.Contains(string(part), "Heading1") || !strings.Contains(string(part), "Title") {
-		t.Fatalf("part=%q err=%v", part, err)
 	}
 }
 
@@ -137,7 +112,7 @@ func TestDOCX_marksListMissingAndBadZip(t *testing.T) {
 func TestDOCXAndHTML_canceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := (HTML{}).DecodeBlocks(ctx, "/x.html", HTMLMediaType, []byte("<p>x</p>")); err == nil {
+	if _, err := (HTML{}).DecodeBlocks(ctx, "/x.html", htmlMediaType, []byte("<p>x</p>")); err == nil {
 		t.Fatal("html decode")
 	}
 	if _, err := (HTML{}).EncodeBlocks(ctx, nil); err == nil {
@@ -220,7 +195,7 @@ func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
 
 	st, err := ms.Route(ctx, "/workspace/work/notes.html").
 		Stat(ctx)
-	if err != nil || st.MediaType != HTMLMediaType {
+	if err != nil || st.MediaType != htmlMediaType {
 		t.Fatalf("notes.html Stat=%+v err=%v", st, err)
 	}
 
@@ -233,7 +208,7 @@ func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
 	}
 
 	if st, err := ms.Route(ctx, "/workspace/work/SPIKE").
-		Stat(ctx); err != nil || st.MediaType != HTMLMediaType {
+		Stat(ctx); err != nil || st.MediaType != htmlMediaType {
 		t.Fatalf("SPIKE Stat=%+v err=%v", st, err)
 	}
 

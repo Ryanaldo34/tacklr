@@ -5,65 +5,28 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/ryanaldo34/tacklr/message"
 )
 
-// ContextPolicy controls window compress under pressure (used by ModelTasks.Absorb).
-type ContextPolicy struct {
-	// PressureRatio is the max-size fraction that triggers compress (for example 0.85).
-	PressureRatio float64
-	// CompressFraction seeds how much of the window to summarize.
-	CompressFraction float64
-	// StreamFitSummary streams compress summary chunks to the client when true.
-	StreamFitSummary bool
-}
+// pressureRatio is the fraction of MaxWindowSize a commit may fill before
+// the window collapses into one summary. A collapse leaves the window small,
+// so the exact value matters little.
+const pressureRatio = 0.85
 
-// Validate checks non-zero context policy overrides.
-func (p ContextPolicy) Validate() error {
-	if p.PressureRatio < 0 || p.PressureRatio > 1 {
-		return fmt.Errorf("tacklr: ContextPolicy.PressureRatio must be zero or in (0, 1]")
-	}
-	if p.CompressFraction < 0 || p.CompressFraction > 1 {
-		return fmt.Errorf("tacklr: ContextPolicy.CompressFraction must be zero or in (0, 1]")
-	}
-	return nil
-}
-
-// DefaultContextPolicy is the product default pressure and compress settings.
-func DefaultContextPolicy() ContextPolicy {
-	return ContextPolicy{
-		PressureRatio:    0.85,
-		CompressFraction: 0.25,
-		StreamFitSummary: true,
-	}
-}
-
-// contextManager owns the conversation window structure only (no inference).
-// modelTasks does model work and applies results with Replace or InstallPlanDocument.
-// Messages must be safe while another path Absorbs or Replaces after resume.
-type contextManager interface {
-	// Messages returns a retainable snapshot of the live window (also used for checkpoints).
-	Messages() []*Message
-	// Restore copies window into storage (caller keeps its slice).
-	Restore(window []*Message)
-	// Replace takes ownership of window; do not reuse the slice after.
-	Replace(window []*Message)
-	// Add appends without pressure fitting (streamed assistant/reasoning).
-	Add(msg *Message)
-	// InstallPlanDocument sets the window to [user, plan document].
-	InstallPlanDocument(planRaw string) error
-}
-
-// modelContextManager is the default contextManager (name is historical).
+// modelContextManager holds the context window: committed rounds only.
+// Harness commits rounds into it; window effects replace it.
 type modelContextManager struct {
 	mu     sync.RWMutex
-	window []*Message
+	window []*message.Message
 }
 
 func newModelContextManager() *modelContextManager {
 	return &modelContextManager{}
 }
 
-func (m *modelContextManager) Messages() []*Message {
+// Messages returns a retainable snapshot of the window (also used for checkpoints).
+func (m *modelContextManager) Messages() []*message.Message {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if len(m.window) == 0 {
@@ -72,7 +35,8 @@ func (m *modelContextManager) Messages() []*Message {
 	return slices.Clone(m.window)
 }
 
-func (m *modelContextManager) Restore(window []*Message) {
+// Restore copies window into storage (caller keeps its slice).
+func (m *modelContextManager) Restore(window []*message.Message) {
 	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -83,28 +47,32 @@ func (m *modelContextManager) Restore(window []*Message) {
 	m.window = slices.Clone(window)
 }
 
-func (m *modelContextManager) Replace(window []*Message) {
+// Replace takes ownership of window; do not reuse the slice after.
+func (m *modelContextManager) Replace(window []*message.Message) {
 	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.window = window
 }
 
-func (m *modelContextManager) Add(msg *Message) {
-	if err := ValidateMessages([]*Message{msg}); err != nil {
+// Add appends a round without fitting it, for a round whose window effect
+// replaces the window next.
+func (m *modelContextManager) Add(round ...*message.Message) {
+	if err := ValidateMessages(round); err != nil {
 		panic("tacklr: invalid context message: " + err.Error())
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.window = append(m.window, msg)
+	m.window = append(m.window, round...)
 }
 
-func assertValidContextWindow(window []*Message) {
+func assertValidContextWindow(window []*message.Message) {
 	if err := ValidateMessages(window); err != nil {
 		panic("tacklr: invalid context window: " + err.Error())
 	}
 }
 
+// InstallPlanDocument sets the window to [user, plan document].
 func (m *modelContextManager) InstallPlanDocument(planRaw string) error {
 	if planRaw == "" {
 		return fmt.Errorf("install plan document: no plan document")
@@ -114,16 +82,17 @@ func (m *modelContextManager) InstallPlanDocument(planRaw string) error {
 	if len(m.window) == 0 || m.window[0] == nil {
 		return fmt.Errorf("install plan document: empty window")
 	}
-	m.window = []*Message{m.window[0], buildPlanDocumentMessage(planRaw)}
+	m.window = []*message.Message{m.window[0], buildPlanDocumentMessage(planRaw)}
 	return nil
 }
 
-// protectedPrefixLen is the Absorb keep-prefix: [0] user; [1] plan document if present.
-func protectedPrefixLen(window []*Message) int {
+// protectedPrefixLen is what a collapse keeps: the first user message, and
+// the plan document after it.
+func protectedPrefixLen(window []*message.Message) int {
 	if len(window) > 1 && IsPlanDocument(window[1]) {
 		return 2
 	}
-	return 1
+	return min(len(window), 1)
 }
 
 // continuePlanNudge is appended after handoff when todos remain so the next
@@ -139,24 +108,20 @@ func planHasOpenTodos(plan []Todo) bool {
 	return false
 }
 
-// planDocumentPrefix identifies durable plan messages so Absorb can protect them.
+// planDocumentPrefix identifies durable plan messages so compression keeps them.
 const planDocumentPrefix = "PROJECT PLAN\n────────────\n"
 
 // IsPlanDocument reports the durable PROJECT PLAN developer message.
-func IsPlanDocument(m *Message) bool {
+func IsPlanDocument(m *message.Message) bool {
 	return m != nil && strings.HasPrefix(m.Content, planDocumentPrefix)
 }
 
-func rawPlanFromDocumentMessage(m *Message) string {
-	if m == nil {
-		return ""
-	}
-	return strings.TrimPrefix(m.Content, planDocumentPrefix)
-}
-
-func buildPlanDocumentMessage(raw string) *Message {
-	return &Message{
-		Role:    RoleDeveloper,
+func buildPlanDocumentMessage(raw string) *message.Message {
+	return &message.Message{
+		Role:    message.RoleDeveloper,
 		Content: planDocumentPrefix + raw,
 	}
 }
+
+// contextSummaryPrefix heads the summary a collapse writes.
+const contextSummaryPrefix = "CONVERSATION SUMMARY\n────────────\n"

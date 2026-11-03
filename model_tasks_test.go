@@ -4,9 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
-	"time"
+	"unicode/utf8"
+
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
 
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
@@ -16,23 +21,23 @@ func TestStreamAssembler_accumulatesDeltasAndBuildsMessages(t *testing.T) {
 	asm := newStreamAssembler()
 
 	// Act
-	asm.AddDelta(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1", Content: "hel"})
-	asm.AddDelta(LLMResponseChunk{Type: StreamEventReasoning, MessageId: "r1", Content: "think"})
-	asm.AddDelta(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1", Content: "lo"})
-	asm.AddDelta(LLMResponseChunk{Type: StreamEventFunctionCall, MessageId: "x", Content: "ignored"})
+	asm.AddDelta(LLMResponseChunk{Type: session.EventMessage, MessageId: "m1", Content: "hel"})
+	asm.AddDelta(LLMResponseChunk{Type: session.EventReasoning, MessageId: "r1", Content: "think"})
+	asm.AddDelta(LLMResponseChunk{Type: session.EventMessage, MessageId: "m1", Content: "lo"})
+	asm.AddDelta(LLMResponseChunk{Type: session.EventFunctionCall, MessageId: "x", Content: "ignored"})
 	completed := asm.MessageFromComplete(LLMResponseChunk{
-		Type: StreamEventReasoning, MessageId: "r1", IsComplete: true,
+		Type: session.EventReasoning, MessageId: "r1", IsComplete: true,
 		EncryptedContent: "gAAAAABasm",
 	})
 
 	// Assert
-	if got := asm.CompleteContent(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1"}); got != "hello" {
+	if got := asm.CompleteContent(LLMResponseChunk{Type: session.EventMessage, MessageId: "m1"}); got != "hello" {
 		t.Fatalf("message content = %q", got)
 	}
-	if got := asm.CompleteContent(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1", Content: "explicit"}); got != "explicit" {
+	if got := asm.CompleteContent(LLMResponseChunk{Type: session.EventMessage, MessageId: "m1", Content: "explicit"}); got != "explicit" {
 		t.Fatalf("explicit content = %q", got)
 	}
-	if completed.Role != RoleReasoning || completed.Content != "think" {
+	if completed.Role != message.RoleReasoning || completed.Content != "think" {
 		t.Fatalf("reasoning message = %+v", completed)
 	}
 	if completed.EncryptedContent != "gAAAAABasm" {
@@ -40,322 +45,155 @@ func TestStreamAssembler_accumulatesDeltasAndBuildsMessages(t *testing.T) {
 	}
 }
 
-func TestDefaultModelTasks_respectsCancelledContext(t *testing.T) {
-	// Arrange
-	ctx, cancel := context.WithCancel(context.Background())
+// TestHandoff_fallsBackWhenTheModelGivesNoHandoff: a failed request, an
+// empty stream, and a stream error each install the plan-derived handoff.
+func TestHandoff_fallsBackWhenTheModelGivesNoHandoff(t *testing.T) {
+	pending := Todo{Title: "Ship", Description: "finish", Status: TodoStatusPending}
+	for name, model := range map[string]Model{
+		// A model without a telemetry identity: spans start without one.
+		"a failed request": struct{ Model }{&scriptedModel{InvokeErr: errors.New("handoff invoke failed")}},
+		"an empty stream":  &scriptedModel{InvokeFn: func(context.Context, []*message.Message, []*Tool, chan<- LLMResponseChunk) {}},
+		"a stream error": &scriptedModel{InvokeFn: func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{Type: session.EventError, Content: "handoff stream failed"}
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := windowHarness(t, model, 8192, userMsg("goal"))
+			h.session.Plan.set([]Todo{pending})
+
+			err := h.handoff(t.Context())
+
+			window := h.context.Messages()
+			if err != nil || len(window) != 3 || !strings.Contains(window[1].Content, "[pending] Ship: finish") {
+				t.Fatalf("handoff = %v, window %+v, want the goal, the fallback handoff and the continue nudge", err, window)
+			}
+		})
+	}
+}
+
+func TestHandoff_failsOnACancelledContext(t *testing.T) {
+	h := windowHarness(t, &scriptedModel{}, 8192, userMsg("goal"))
+	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	tasks := newDefaultModelTasks(&scriptedModel{}, newModelContextManager(), DefaultContextPolicy(), 100)
 
-	// Act
-	_, turnErr := tasks.Turn(ctx, nil, "")
-	_, absorbErr := tasks.Absorb(ctx, &Message{Role: RoleUser, Content: "x"}, nil, "")
-	handoffErr := tasks.Handoff(ctx, nil, "", nil, "")
-
-	// Assert
-	if turnErr == nil || absorbErr == nil || handoffErr == nil {
-		t.Fatalf("errors = %v %v %v", turnErr, absorbErr, handoffErr)
+	if err := h.handoff(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("handoff = %v, want the cancel", err)
 	}
 }
 
-func TestDefaultModelTasks_absorbFitReportsCountTokenErrors(t *testing.T) {
-	// Arrange
-	model := &scriptedModel{
-		CountTokensFn: func(context.Context, []*Message, []*Tool) (int, error) {
-			return 0, fmt.Errorf("count failed")
-		},
-	}
-	tasks := newDefaultModelTasks(model, newModelContextManager(), DefaultContextPolicy(), 100)
-	ctxMgr := newModelContextManager()
-	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
-	tasks.context = ctxMgr
-
-	// Act
-	_, err := tasks.Absorb(context.Background(), &Message{Role: RoleUser, Content: "next"}, nil, "")
-
-	// Assert
-	if err == nil || !strings.Contains(err.Error(), "count tokens") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestDefaultModelTasks_absorbFitSkipsCompressWhenOnlyProtectedPrefix(t *testing.T) {
-	// Arrange
-	model := &scriptedModel{
-		CountTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
-			return len(msgs) * 50, nil
-		},
-	}
-	tasks := newDefaultModelTasks(model, newModelContextManager(), ContextPolicy{
-		PressureRatio:    0.5,
-		CompressFraction: 0.25,
-	}, 40)
-	ctxMgr := newModelContextManager()
-	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: strings.Repeat("x", 40)}})
-	tasks.context = ctxMgr
-
-	// Act
-	result, err := tasks.Absorb(context.Background(), &Message{Role: RoleAssistant, Content: "reply"}, nil, "")
-
-	// Assert
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(result.SummaryChunks) != 0 {
-		t.Fatalf("summary chunks = %d", len(result.SummaryChunks))
-	}
-	if len(tasks.context.Messages()) != 2 {
-		t.Fatalf("window = %+v", tasks.context.Messages())
-	}
-}
-
-func TestDefaultModelTasks_absorbFitCompressesOverMaxWindow(t *testing.T) {
-	// Arrange
-	var compressInvoked bool
-	model := &scriptedModel{
-		CountTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
-			total := 0
-			for _, msg := range msgs {
-				if msg != nil {
-					total += len(msg.Content)
-				}
+// TestWatchModelStream_aCancelEndsTheStreamAndFreesTheProvider: after a
+// cancel the watched stream closes and the provider is not left blocked,
+// whether the reader is waiting for a chunk or has stopped reading.
+func TestWatchModelStream_aCancelEndsTheStreamAndFreesTheProvider(t *testing.T) {
+	for name, unread := range map[string]int{"a reader waiting for a chunk": 0, "a reader that stopped reading": 17} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			in := make(chan LLMResponseChunk, 32)
+			_, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, 1, telemetry.WindowShape{})
+			out := watchModelStream(ctx, span, in)
+			for range unread + 3 {
+				in <- LLMResponseChunk{Type: session.EventMessage, Content: "partial"}
 			}
-			return total, nil
-		},
-		InvokeFn: func(_ context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			if len(msgs) > 0 && msgs[len(msgs)-1] != nil && strings.Contains(msgs[len(msgs)-1].Content, "Summarize the entire message history") {
-				compressInvoked = true
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "summary", IsComplete: true}
-				return
+			// The watcher holds one chunk it cannot hand on: out is full.
+			for unread > 0 && len(in) > 3 {
+				runtime.Gosched()
 			}
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "unexpected", IsComplete: true}
-		},
-	}
-	tasks := newDefaultModelTasks(model, newModelContextManager(), ContextPolicy{
-		PressureRatio:    0.5,
-		CompressFraction: 0.5,
-		StreamFitSummary: true,
-	}, 20)
-	ctxMgr := newModelContextManager()
-	ctxMgr.Restore([]*Message{
-		{Role: RoleUser, Content: "goal"},
-		{Role: RoleAssistant, Content: strings.Repeat("a", 30)},
-	})
-	tasks.context = ctxMgr
 
-	// Act
-	result, err := tasks.Absorb(context.Background(), &Message{Role: RoleUser, Content: "follow-up"}, nil, "")
-
-	// Assert
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !compressInvoked {
-		t.Fatal("expected compression invoke")
-	}
-	if len(result.SummaryChunks) == 0 {
-		t.Fatal("expected streamed summary chunks")
-	}
-	if !result.Compressed || result.Summary == "" || len(result.Discarded) == 0 {
-		t.Fatalf("absorb residue = compressed=%v summary=%q discarded=%d", result.Compressed, result.Summary, len(result.Discarded))
-	}
-	window := tasks.context.Messages()
-	if len(window) < 3 || !strings.Contains(window[1].Content, "summary") {
-		t.Fatalf("compressed window = %+v", window)
-	}
-}
-
-func TestDefaultModelTasks_absorbFitReturnsCompressStreamErrors(t *testing.T) {
-	// Arrange
-	model := &scriptedModel{
-		CountTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
-			return len(msgs) * 100, nil
-		},
-		InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventError, Error: errors.New("compress stream failed")}
-		},
-	}
-	tasks := newDefaultModelTasks(model, newModelContextManager(), ContextPolicy{
-		PressureRatio:    0.5,
-		CompressFraction: 0.5,
-	}, 50)
-	ctxMgr := newModelContextManager()
-	ctxMgr.Restore([]*Message{
-		{Role: RoleUser, Content: "goal"},
-		{Role: RoleAssistant, Content: strings.Repeat("x", 80)},
-	})
-	tasks.context = ctxMgr
-
-	// Act
-	_, err := tasks.Absorb(context.Background(), &Message{Role: RoleUser, Content: "more"}, nil, "")
-
-	// Assert
-	if err == nil || !strings.Contains(err.Error(), "compress stream failed") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestDefaultModelTasks_handoffUsesFallbackWhenModelFails(t *testing.T) {
-	// Arrange
-	model := &scriptedModel{
-		InvokeErr: errors.New("handoff invoke failed"),
-	}
-	tasks := newDefaultModelTasks(model, newModelContextManager(), DefaultContextPolicy(), 8192)
-	ctxMgr := newModelContextManager()
-	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
-	tasks.context = ctxMgr
-	plan := []Todo{{Title: "Ship", Description: "finish", Status: TodoStatusPending}}
-
-	// Act
-	err := tasks.Handoff(context.Background(), plan, "plan body", nil, "")
-
-	// Assert
-	if err != nil {
-		t.Fatal(err)
-	}
-	window := tasks.context.Messages()
-	if len(window) < 3 || !strings.Contains(window[len(window)-2].Content, "fallback") {
-		t.Fatalf("handoff window = %+v", window)
-	}
-}
-
-func TestDefaultModelTasks_handoffUsesFallbackOnEmptyStream(t *testing.T) {
-	// Arrange
-	model := &scriptedModel{
-		InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, _ chan<- LLMResponseChunk) {
-			// Leave the stream empty; ScriptedModel closes the channel after InvokeFn returns.
-		},
-	}
-	tasks := newDefaultModelTasks(model, newModelContextManager(), DefaultContextPolicy(), 8192)
-	ctxMgr := newModelContextManager()
-	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
-	tasks.context = ctxMgr
-
-	// Act
-	err := tasks.Handoff(context.Background(), []Todo{{Title: "T", Status: TodoStatusCompleted}}, "", nil, "")
-
-	// Assert
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tasks.context.Messages()) != 2 || !strings.Contains(tasks.context.Messages()[1].Content, "fallback") {
-		t.Fatalf("window = %+v", tasks.context.Messages())
-	}
-}
-
-func TestHandoffGenerate_rejectsEmptyWindow(t *testing.T) {
-	// Act
-	_, _, err := handoffGenerate(context.Background(), nil, nil, "", &scriptedModel{}, nil, "")
-
-	// Assert
-	if err == nil || !strings.Contains(err.Error(), "empty window") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestWatchModelStream_cancelsAndDrainsProviderChunks(t *testing.T) {
-	// Arrange
-	ctx, cancel := context.WithCancel(context.Background())
-	in := make(chan LLMResponseChunk, 8)
-	_, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, 1, telemetry.WindowShape{})
-
-	// Act
-	out := watchModelStream(ctx, span, in)
-	in <- LLMResponseChunk{Type: StreamEventMessage, Content: "partial"}
-	cancel()
-	close(in)
-	for range out {
-	}
-
-	// Assert — no hang; span ended via drain path.
-}
-
-func TestWatchModelStream_forwardBlockedByCancelledContext(t *testing.T) {
-	// Arrange
-	ctx, cancel := context.WithCancel(context.Background())
-	in := make(chan LLMResponseChunk)
-	_, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, 1, telemetry.WindowShape{})
-	out := watchModelStream(ctx, span, in)
-
-	// Act
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-		in <- LLMResponseChunk{Type: StreamEventMessage, Content: "late"}
-		close(in)
-	}()
-	for range out {
-	}
-}
-
-func TestDefaultModelTasks_handoffUsesFallbackOnStreamContentError(t *testing.T) {
-	// Arrange
-	model := &scriptedModel{
-		InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventError, Content: "handoff stream failed"}
-		},
-	}
-	tasks := newDefaultModelTasks(model, newModelContextManager(), DefaultContextPolicy(), 8192)
-	ctxMgr := newModelContextManager()
-	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
-	tasks.context = ctxMgr
-
-	// Act
-	err := tasks.Handoff(context.Background(), []Todo{{Title: "T", Status: TodoStatusPending}}, "", nil, "")
-
-	// Assert
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(tasks.context.Messages()[1].Content, "fallback") {
-		t.Fatalf("window = %+v", tasks.context.Messages())
-	}
-}
-
-func TestDefaultModelTasks_absorbFitProgressiveCountFailure(t *testing.T) {
-	// Arrange
-	model := &scriptedModel{
-		CountTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
-			if len(msgs) > 3 {
-				return 0, fmt.Errorf("count failed")
+			cancel()
+			got := 0
+			for range out {
+				got++
 			}
-			total := 0
-			for _, msg := range msgs {
-				if msg != nil {
-					total += len(msg.Content)
-				}
+
+			if got > 16 || len(in) != 0 {
+				t.Fatalf("read %d chunks, %d left with the provider; want the stream closed and the provider's chunks drained", got, len(in))
 			}
-			return total, nil
-		},
-	}
-	tasks := newDefaultModelTasks(model, newModelContextManager(), ContextPolicy{
-		PressureRatio:    0.5,
-		CompressFraction: 0.5,
-	}, 25)
-	ctxMgr := newModelContextManager()
-	ctxMgr.Restore([]*Message{
-		{Role: RoleUser, Content: "goal"},
-		{Role: RoleAssistant, Content: strings.Repeat("x", 15)},
-		{Role: RoleAssistant, Content: strings.Repeat("y", 15)},
-	})
-	tasks.context = ctxMgr
-
-	// Act
-	_, err := tasks.Absorb(context.Background(), &Message{Role: RoleUser, Content: "more"}, nil, "")
-
-	// Assert
-	if err == nil || !strings.Contains(err.Error(), "count tokens") {
-		t.Fatalf("error = %v", err)
+		})
 	}
 }
 
-func TestFallbackHandoffContent_listsRemainingTodos(t *testing.T) {
-	// Act
-	content := fallbackHandoffContent([]Todo{
-		{Title: "A", Description: "alpha", Status: TodoStatusPending},
-	})
+// contentTokens counts a message's content length as its tokens.
+func contentTokens(_ context.Context, msgs []*message.Message, _ []*Tool) (int, error) {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Content)
+	}
+	return n, nil
+}
 
-	// Assert
-	if !strings.Contains(content, "[pending] A: alpha") {
-		t.Fatalf("content = %q", content)
+func userMsg(content string) *message.Message {
+	return &message.Message{Role: message.RoleUser, Content: content}
+}
+
+// windowHarness is a turn whose window holds window, with a MaxWindowSize
+// of size.
+func windowHarness(t *testing.T, model Model, size uint, window ...*message.Message) *Harness {
+	t.Helper()
+	h := mustNewHarness(t, AgentOptions{MaxWindowSize: size, Model: model})
+	h.context.Restore(window)
+	return h
+}
+
+// TestCommitRound_fails covers each way a commit fails: a token count
+// (first, after the summary, during a trim), the summary request or its
+// stream, and a round too large with nothing to trim. The window keeps its
+// committed rounds.
+func TestCommitRound_fails(t *testing.T) {
+	big := strings.Repeat("x", 80)
+	failCount := func(after int) func(context.Context, []*message.Message, []*Tool) (int, error) {
+		calls := 0
+		return func(ctx context.Context, msgs []*message.Message, tools []*Tool) (int, error) {
+			if calls++; calls > after {
+				return 0, errors.New("count failed")
+			}
+			return contentTokens(ctx, msgs, tools)
+		}
+	}
+	summary := func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+		ch <- LLMResponseChunk{Type: session.EventMessage, Content: "s", IsComplete: true}
+	}
+	cases := []struct {
+		name   string
+		model  *scriptedModel
+		window []*message.Message
+		round  []*message.Message
+		want   string
+	}{
+		{"the first count", &scriptedModel{CountTokensFn: failCount(0)}, []*message.Message{userMsg("goal")}, []*message.Message{userMsg("x")}, "count tokens"},
+		{"after the summary", &scriptedModel{CountTokensFn: failCount(1), InvokeFn: summary}, []*message.Message{userMsg("goal"), userMsg(big)}, []*message.Message{userMsg(big)}, "count tokens"},
+		{"during a trim", &scriptedModel{CountTokensFn: failCount(1)}, []*message.Message{userMsg("goal")}, []*message.Message{{Role: message.RoleTool, ToolCallID: "c1", Content: big + big}}, "count tokens"},
+		{"the summary request", &scriptedModel{CountTokensFn: contentTokens, InvokeErr: errors.New("invoke failed")}, []*message.Message{userMsg("goal"), userMsg(big)}, []*message.Message{userMsg(big)}, "invoke failed"},
+		{"the summary stream", &scriptedModel{CountTokensFn: contentTokens, InvokeFn: func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{Type: session.EventError, Error: fmt.Errorf("%w: stream failed", ErrNetwork)}
+		}}, []*message.Message{userMsg("goal"), userMsg(big)}, []*message.Message{userMsg(big)}, "stream failed"},
+		{"a summary stream error without an error value", &scriptedModel{CountTokensFn: contentTokens, InvokeFn: func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{Type: session.EventError, Content: "provider said no"}
+		}}, []*message.Message{userMsg("goal"), userMsg(big)}, []*message.Message{userMsg(big)}, "provider said no"},
+		{"nothing to trim", &scriptedModel{CountTokensFn: contentTokens}, []*message.Message{userMsg("goal")}, []*message.Message{userMsg(big + big)}, "the round needs 164 tokens"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := windowHarness(t, tc.model, 100, tc.window...)
+
+			err := h.commitRound(t.Context(), tc.round, EffectNone)
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) || len(h.context.Messages()) != len(tc.window) {
+				t.Fatalf("commit = %v with window %d, want %q and the window unchanged", err, len(h.context.Messages()), tc.want)
+			}
+		})
+	}
+}
+
+// TestCommitRound_cutsAResultOnARuneBoundary: a cut result stays valid
+// UTF-8 and says the full output was not kept.
+func TestCommitRound_cutsAResultOnARuneBoundary(t *testing.T) {
+	h := windowHarness(t, &scriptedModel{CountTokensFn: contentTokens}, 400, userMsg("goal"))
+
+	err := h.commitRound(t.Context(), []*message.Message{{Role: message.RoleTool, ToolCallID: "c1", Content: strings.Repeat("─", 400)}}, EffectNone)
+
+	window := h.context.Messages()
+	got := window[len(window)-1].Content
+	if err != nil || !utf8.ValidString(got) || !strings.HasPrefix(got, "─") || !strings.Contains(got, "The full output was not kept.") {
+		t.Fatalf("cut result = %q %v, want valid UTF-8 cut on a rune", got, err)
 	}
 }

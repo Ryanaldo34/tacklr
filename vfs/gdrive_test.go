@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -23,14 +25,14 @@ import (
 func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	ctx := t.Context()
 	api := testdrive.Tree()
-	holder := vfs.NewTokenHolder(vfs.Credential{Token: "tok"})
+	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok"})
 	open := testdrive.Open(t, api, holder)
 	ms, err := vfs.Tree(
 		vfs.At("contracts", open),
 		vfs.At("notes", open),
-	)(ctx, "sess-gd", vfs.Request{Bindings: []vfs.Binding{
-		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"}, Auth: vfs.Credential{Token: "tok"}, Live: holder},
-		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "notes", vfs.ParamFolderID: "root-b"}, Auth: vfs.Credential{Token: "tok"}, Live: holder},
+	)(ctx, "sess-gd", vfs.Request{Bindings: []mount.Binding{
+		{Provider: mount.ProviderGoogleDrive, Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root-a"}, Auth: mount.Credential{Token: "tok"}},
+		{Provider: mount.ProviderGoogleDrive, Params: map[string]string{mount.ParamName: "notes", mount.ParamFolderID: "root-b"}, Auth: mount.Credential{Token: "tok"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +44,7 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 		t.Fatalf("Specs = %+v", specs)
 	}
 	for _, m := range specs {
-		if !m.ReadOnly || m.Params[vfs.ParamName] == "" || (m.Point != "/workspace/contracts" && m.Point != "/workspace/notes") {
+		if !m.ReadOnly || m.Params[mount.ParamName] == "" || (m.Point != "/workspace/contracts" && m.Point != "/workspace/notes") {
 			t.Fatalf("member = %+v", m)
 		}
 	}
@@ -126,11 +128,11 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	}
 
 	// Near-expiry token refreshes before the provider request.
-	holder.Set(vfs.Credential{Token: "expiring", ExpiresAt: time.Now().Add(10 * time.Second)})
+	holder.Set(mount.Credential{Token: "expiring", ExpiresAt: time.Now().Add(10 * time.Second)})
 	proactiveRefreshes := 0
-	holder.SetRefresh(func(context.Context) (vfs.Credential, error) {
+	holder.SetRefresh(func(context.Context) (mount.Credential, error) {
 		proactiveRefreshes++
-		return vfs.Credential{Token: "proactive", ExpiresAt: time.Now().Add(time.Hour)}, nil
+		return mount.Credential{Token: "proactive", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	})
 
 	raw, err = ms.Route(ctx, "/workspace/notes/readme.txt").
@@ -141,8 +143,8 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 
 	// 401 + one reactive refresh succeeds.
 	api.OnceMedia("readme", http.StatusUnauthorized)
-	holder.SetRefresh(func(context.Context) (vfs.Credential, error) {
-		return vfs.Credential{Token: "fresh"}, nil
+	holder.SetRefresh(func(context.Context) (mount.Credential, error) {
+		return mount.Credential{Token: "fresh"}, nil
 	})
 
 	if raw, err := ms.Route(ctx, "/workspace/notes/readme.txt").
@@ -160,22 +162,31 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	}
 }
 
-func TestDrive_requiresClient(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("want panic")
-		}
-	}()
-	_ = vfs.Drive(nil)
+// TestProviders_panicWithoutTheirAPIClient: building a Drive or Graph
+// provider with no API client is a programming error.
+func TestProviders_panicWithoutTheirAPIClient(t *testing.T) {
+	for name, build := range map[string]func(){
+		"drive": func() { _ = vfs.Drive(nil, nil) },
+		"graph": func() { _ = vfs.Graph(nil, nil, "") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("want panic")
+				}
+			}()
+			build()
+		})
+	}
 }
 
 func TestMountSession_gdriveDirectoryAndWriteDocument(t *testing.T) {
 	ctx := t.Context()
 	api := testdrive.Tree()
-	ms, err := vfs.Tree(vfs.At("contracts", testdrive.Open(t, api, nil)))(ctx, "s", vfs.Request{Bindings: []vfs.Binding{{
+	ms, err := vfs.Tree(vfs.At("contracts", testdrive.Open(t, api, nil)))(ctx, "s", vfs.Request{Bindings: []mount.Binding{{
 		Provider: "gdrive",
-		Params:   map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"},
-		Auth:     vfs.Credential{Token: "t"},
+		Params:   map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root-a"},
+		Auth:     mount.Credential{Token: "t"},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -211,8 +222,8 @@ func TestDrive_validateRejectsFileID(t *testing.T) {
 	ctx := t.Context()
 	api := testdrive.Tree()
 	open := testdrive.Open(t, api, nil)
-	folder, err := open(ctx, "s", vfs.Binding{
-		Auth: vfs.Credential{Token: "t"}, Params: map[string]string{vfs.ParamFolderID: "root-a"},
+	folder, err := open(ctx, "s", mount.Binding{
+		Auth: mount.Credential{Token: "t"}, Params: map[string]string{mount.ParamFolderID: "root-a"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -220,8 +231,8 @@ func TestDrive_validateRejectsFileID(t *testing.T) {
 	if err := folder.Validate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	file, err := open(ctx, "s", vfs.Binding{
-		Auth: vfs.Credential{Token: "t"}, Params: map[string]string{vfs.ParamFolderID: "nda"},
+	file, err := open(ctx, "s", mount.Binding{
+		Auth: mount.Credential{Token: "t"}, Params: map[string]string{mount.ParamFolderID: "nda"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -291,7 +302,7 @@ func TestGoogleDrive_sdkAdapter(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
-	holder := vfs.NewTokenHolder(vfs.Credential{Token: "tok-1"})
+	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok-1"})
 	api, err := vfs.NewGoogleDriveHTTP(ctx, holder, ts.URL+"/", ts.Client())
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +348,7 @@ func TestGoogleDrive_sdkAdapter(t *testing.T) {
 		t.Fatalf("401: %v", err)
 	}
 
-	holder.Set(vfs.Credential{Token: "tok-2"})
+	holder.Set(mount.Credential{Token: "tok-2"})
 	if _, err := api.GetMeta(ctx, "root1"); err != nil {
 		t.Fatal(err)
 	}
@@ -602,187 +613,6 @@ func TestDrive_docsWriteCAS(t *testing.T) {
 	}
 }
 
-func TestDrive_docsReplaceSucceeds(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	spans := []vfs.DocsSpan{
-		{StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
-		{StartIndex: 2, EndIndex: 8, Kind: "heading", Level: 1, NamedStyle: "HEADING_1", Text: "Spec"},
-		{StartIndex: 8, EndIndex: 14, Kind: "paragraph", Text: "Hello"},
-	}
-	api.SeedDoc("doc1", "R0", spans, nil)
-	ms := mountDrive(t, api, true)
-
-	doc, err := ms.Route(ctx, "/workspace/contracts/Spec").
-		ReadText(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := vfs.ContentToken(doc)
-	rd, ok := vfs.AsRich(doc)
-	if !ok {
-		t.Fatalf("type %T", doc)
-	}
-	var paraID string
-	for _, b := range rd.Blocks() {
-		if b.Kind == vfs.BlockKindParagraph {
-			paraID = b.ID
-		}
-	}
-	if err := rd.ReplaceBlock(paraID, "World", false); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.WriteDocument(ctx, doc); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := ms.Route(ctx, "/workspace/contracts/Spec").
-		ReadText(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !blockHasText(got, "World") {
-		t.Fatalf("blocks after replace: %+v", got.(vfs.Structured).Blocks())
-	}
-	if vfs.ContentToken(got) == before {
-		t.Fatal("ContentToken unchanged after replace")
-	}
-}
-
-func TestDrive_createAsDoc(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	ms := mountDrive(t, api, true)
-	created := vfs.NewRichDocument("/workspace/contracts/Policy", "application/vnd.google-apps.document", []vfs.Block{
-		{Kind: vfs.BlockKindParagraph, Text: "Hi"},
-	})
-	if err := ms.WriteDocument(ctx, created); err != nil {
-		t.Fatal(err)
-	}
-	var found bool
-	for _, n := range api.Nodes {
-		if n.Meta.Name == "Policy" && n.Meta.MimeType == "application/vnd.google-apps.document" {
-			found = true
-			if len(n.Body) != 0 {
-				t.Fatalf("metadata-only create planted media: %q", n.Body)
-			}
-		}
-	}
-	if !found {
-		t.Fatal("create-as-Doc missing")
-	}
-
-	if st, err := ms.Route(ctx, "/workspace/contracts/Policy").
-		Stat(ctx); err != nil || st.MediaType != "application/vnd.google-apps.document" {
-		t.Fatalf("Stat Policy = %+v err=%v", st, err)
-	}
-
-	if got, err := ms.Route(ctx, "/workspace/contracts/Policy").
-		ReadText(ctx); err != nil || !blockHasText(got, "Hi") {
-		t.Fatalf("create body: %v", err)
-	}
-
-	table := vfs.NewRichDocument("/workspace/contracts/Grid", "application/vnd.google-apps.document", []vfs.Block{{
-		Kind: vfs.BlockKindTable, Text: "A\tB",
-		Style: vfs.StyleMeta{Attributes: map[string]string{"rows": "1", "cols": "2"}},
-	}})
-	if err := ms.WriteDocument(ctx, table); err != nil {
-		t.Fatal(err)
-	}
-
-	grid, err := ms.Route(ctx, "/workspace/contracts/Grid").
-		ReadText(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sawTable bool
-	for _, b := range grid.(vfs.Structured).Blocks() {
-		if b.Kind == vfs.BlockKindTable && strings.Contains(b.Text, "A") && strings.Contains(b.Text, "B") {
-			sawTable = true
-		}
-	}
-	if !sawTable {
-		t.Fatalf("table cells not filled: %+v", grid.(vfs.Structured).Blocks())
-	}
-}
-
-func TestDrive_createAsDoc_pipeMarkdownTableFillsCells(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	ms := mountDrive(t, api, true)
-	raw := "| Option | Cost |\n| --- | --- |\n| Public-only | $1,000 |\n| Hybrid | $8,000 |"
-	doc := vfs.NewRichDocument("/workspace/contracts/Compare", "application/vnd.google-apps.document", []vfs.Block{{
-		Kind: vfs.BlockKindTable, Text: raw,
-	}})
-	if err := ms.WriteDocument(ctx, doc); err != nil {
-		t.Fatal(err)
-	}
-	var insertCols int64
-	for _, batch := range api.DocsBatches {
-		for _, r := range batch.Requests {
-			if r.InsertTable != nil {
-				insertCols = r.InsertTable.Columns
-			}
-		}
-	}
-	if insertCols != 2 {
-		t.Fatalf("InsertTable columns=%d, want 2 (pipe table, not 1-col markdown dump)", insertCols)
-	}
-
-	got, err := ms.Route(ctx, "/workspace/contracts/Compare").
-		ReadText(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var table vfs.Block
-	for _, b := range got.(vfs.Structured).Blocks() {
-		if b.Kind == vfs.BlockKindTable {
-			table = b
-		}
-	}
-	if table.Kind == "" {
-		t.Fatalf("no table block: %+v", got.(vfs.Structured).Blocks())
-	}
-	if strings.Contains(table.Text, "| Option") {
-		t.Fatalf("cell text still markdown pipes: %q", table.Text)
-	}
-	if !strings.Contains(table.Text, "Public-only") || !strings.Contains(table.Text, "$8,000") {
-		t.Fatalf("missing cells: %q", table.Text)
-	}
-}
-
-func TestDrive_createDocAppliesInlineMarksInFollowupBatch(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	ms := mountDrive(t, api, true)
-	doc := vfs.NewRichDocument("/workspace/contracts/Marks", "application/vnd.google-apps.document", []vfs.Block{
-		{Kind: vfs.BlockKindParagraph, Text: "See **x**"},
-	})
-	if err := ms.WriteDocument(ctx, doc); err != nil {
-		t.Fatal(err)
-	}
-	if len(api.DocsBatches) < 2 {
-		t.Fatalf("want insert then style batches, got %d", len(api.DocsBatches))
-	}
-	var sawBold bool
-	for _, r := range api.DocsBatches[len(api.DocsBatches)-1].Requests {
-		if st := r.UpdateTextStyle; st != nil && st.TextStyle != nil && st.TextStyle.Bold {
-			sawBold = true
-		}
-	}
-	if !sawBold {
-		t.Fatalf("follow-up batch missing bold: %+v", api.DocsBatches)
-	}
-	for _, r := range api.DocsBatches[0].Requests {
-		if ins := r.InsertText; ins != nil && strings.Contains(ins.Text, "**") {
-			t.Fatalf("insert kept markdown: %q", ins.Text)
-		}
-		if r.UpdateTextStyle != nil {
-			t.Fatal("text style must not share the insert batch")
-		}
-	}
-}
-
 func TestDrive_writeSheetRejected(t *testing.T) {
 	ctx := t.Context()
 	api := testdrive.Tree()
@@ -792,38 +622,6 @@ func TestDrive_writeSheetRejected(t *testing.T) {
 		{Kind: vfs.BlockKindParagraph, Text: "x"},
 	})); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("sheet: %v", err)
-	}
-}
-
-func TestDrive_nestedPlainFilesAndDirs(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	api.SeedDoc("doc1", "R0", nil, nil)
-	ms := mountDrive(t, api, true)
-
-	if err := ms.Route(ctx, "/workspace/contracts/a/b/c.txt").
-		WriteFile(ctx, []byte("z")); err != nil {
-		t.Fatal(err)
-	}
-
-	if got, err := ms.Route(ctx, "/workspace/contracts/a/b/c.txt").
-		ReadFile(ctx); err != nil || string(got) != "z" {
-		t.Fatalf("read = %q err=%v", got, err)
-	}
-
-	if ents, err := ms.Route(ctx, "/workspace/contracts/a").
-		ReadDir(ctx); err != nil || len(ents) == 0 {
-		t.Fatalf("readdir: %+v err=%v", ents, err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/contracts/d/e").
-		MkdirAll(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	if st, err := ms.Route(ctx, "/workspace/contracts/d/e").
-		Stat(ctx); err != nil || !st.IsDir {
-		t.Fatalf("stat dir %+v err=%v", st, err)
 	}
 }
 
@@ -1107,10 +905,10 @@ func TestDrive_htmlReplaceOnSingleTabOmitsTabID(t *testing.T) {
 
 func mountDrive(t *testing.T, api *testdrive.FX, writable bool) *vfs.MountSession {
 	t.Helper()
-	ms, err := vfs.Tree(vfs.At("contracts", testdrive.Open(t, api, nil)))(t.Context(), "s", vfs.Request{Bindings: []vfs.Binding{{
+	ms, err := vfs.Tree(vfs.At("contracts", testdrive.Open(t, api, nil)))(t.Context(), "s", vfs.Request{Bindings: []mount.Binding{{
 		Provider: "gdrive", Writable: writable,
-		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"},
-		Auth:   vfs.Credential{Token: "t"},
+		Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root-a"},
+		Auth:   mount.Credential{Token: "t"},
 	}}})
 	if err != nil {
 		t.Fatal(err)

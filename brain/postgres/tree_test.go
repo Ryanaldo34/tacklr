@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
 func TestStore_aTreeCommitThatCannotFinishLeavesThePreviousTree(t *testing.T) {
@@ -18,7 +19,7 @@ func TestStore_aTreeCommitThatCannotFinishLeavesThePreviousTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
+	scope := brain.Scope{Namespace: storetest.Namespace(t, "org", "a")}
 	doc, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "v1"}, brain.Parts(brain.Object{Kind: "Chunk", Content: "kept"}))
 	if err != nil {
 		t.Fatal(err)

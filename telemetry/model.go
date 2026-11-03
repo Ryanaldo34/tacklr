@@ -60,8 +60,9 @@ func modelIdentityFromContext(ctx context.Context) ModelIdentity {
 	return id
 }
 
-// providerStatus is optional HTTP metadata on provider errors (errors.As in ModelSpan.End).
-type providerStatus interface {
+// ProviderStatus is HTTP metadata a provider error may carry. A model span
+// reads it with errors.As when the request fails.
+type ProviderStatus interface {
 	ProviderHTTPStatus() int
 	ProviderErrorCode() string
 }
@@ -164,7 +165,7 @@ func StartModelSpan(ctx context.Context, phase string, seq int, shape WindowShap
 }
 
 // End ends the model span with outcome, usage, and metrics.
-// HTTP status and code come from err when it implements providerStatus.
+// HTTP status and code come from err when it implements ProviderStatus.
 func (m *ModelSpan) End(err error, usage TokenUsage) {
 	if m.finished {
 		return
@@ -173,7 +174,7 @@ func (m *ModelSpan) End(err error, usage TokenUsage) {
 
 	httpStatus, errorCode := 0, ""
 	if err != nil {
-		var ps providerStatus
+		var ps ProviderStatus
 		if errors.As(err, &ps) {
 			httpStatus = ps.ProviderHTTPStatus()
 			errorCode = ps.ProviderErrorCode()

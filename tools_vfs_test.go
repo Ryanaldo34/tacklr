@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -17,14 +21,14 @@ import (
 func TestVFSTools_readWrite(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
-	ms := mustMountTree(t, "tools-vfs", vfs.At("work", vfs.Local(base)))
+	ms := mustMountTree(t, "tools-vfs", vfs.Request{}, vfs.At("work", vfs.Local(base)), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
 
 	if err := ms.Route(ctx, "/workspace/work/a.go").
 		WriteFile(ctx, []byte("package a\n// old\nfunc A() {}\n")); err != nil {
 		t.Fatal(err)
 	}
 
-	h := mustNewTurnManager(t, AgentOptions{
+	h := mustNewHarness(t, AgentOptions{
 		sessionID:    "tools-vfs",
 		mountSession: ms,
 		Model:        &scriptedModel{},
@@ -38,9 +42,9 @@ func TestVFSTools_readWrite(t *testing.T) {
 			t.Fatalf("missing tool %q", name)
 		}
 	}
-	rt := turnRuntime(h)
+	cc := turnRuntime(h)
 
-	if _, err := tools["run_command"].invoke(ctx, `{"command":"ls workspace/work"}`, rt); !errors.Is(err, vfs.ErrFuseNotMounted) {
+	if _, err := tools["run_command"].invoke(ctx, `{"command":"ls workspace/work"}`, cc); !errors.Is(err, vfs.ErrFuseNotMounted) {
 		t.Fatalf("run_command without HostDir: %v", err)
 	}
 
@@ -54,26 +58,26 @@ func TestVFSTools_readWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := tools["read"].invoke(ctx, `{"path":"/workspace/work/page.txt"}`, rt)
+	res, err := tools["read"].invoke(ctx, `{"path":"/workspace/work/page.txt"}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fieldKV(res.output, "media_type") == "" ||
-		fieldKV(res.output, "start") != "1" ||
-		fieldKV(res.output, "end") != fmt.Sprintf("%d", 1+vfs.MaxLinesPerWindow) ||
-		fieldKV(res.output, "returned") != fmt.Sprintf("%d", vfs.MaxLinesPerWindow) ||
-		fieldKV(res.output, "eof") != "false" ||
-		fieldKV(res.output, "next_start") != "501" ||
-		!strings.Contains(res.output, "   500|500") {
-		t.Fatalf("path-only first page: %s", res.output)
+	if fieldKV(res.Output, "media_type") == "" ||
+		fieldKV(res.Output, "start") != "1" ||
+		fieldKV(res.Output, "end") != fmt.Sprintf("%d", 1+vfs.MaxLinesPerWindow) ||
+		fieldKV(res.Output, "returned") != fmt.Sprintf("%d", vfs.MaxLinesPerWindow) ||
+		fieldKV(res.Output, "eof") != "false" ||
+		fieldKV(res.Output, "next_start") != "501" ||
+		!strings.Contains(res.Output, "   500|500") {
+		t.Fatalf("path-only first page: %s", res.Output)
 	}
 
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/a.go","start":1,"end":10}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/a.go","start":1,"end":10}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.output, "1|package a") {
-		t.Fatalf("read window: %s", res.output)
+	if !strings.Contains(res.Output, "1|package a") {
+		t.Fatalf("read window: %s", res.Output)
 	}
 
 	if err := ms.Route(ctx, "/workspace/work/a.go").
@@ -81,7 +85,7 @@ func TestVFSTools_readWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/a.go","start":2,"end":3,"lines":["// x"]}`, rt)
+	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/a.go","start":2,"end":3,"lines":["// x"]}`, cc)
 	if !errors.Is(err, vfs.ErrStaleContent) || !strings.Contains(err.Error(), "changed since you last read") {
 		t.Fatalf("stale write: %v", err)
 	}
@@ -94,12 +98,12 @@ func TestVFSTools_readWrite(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"path": "/workspace/work/a.go", "start": 2, "end": 3, "lines": []string{"// new"},
 	})
-	res, err = tools["write"].invoke(ctx, string(body), rt)
+	res, err = tools["write"].invoke(ctx, string(body), cc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fieldKV(res.output, "path") != "/workspace/work/a.go" || fieldKV(res.output, "line_count") == "" {
-		t.Fatalf("write lines: %s", res.output)
+	if fieldKV(res.Output, "path") != "/workspace/work/a.go" || fieldKV(res.Output, "line_count") == "" {
+		t.Fatalf("write lines: %s", res.Output)
 	}
 
 	got, err := ms.Route(ctx, "/workspace/work/a.go").
@@ -111,9 +115,9 @@ func TestVFSTools_readWrite(t *testing.T) {
 	body, _ = json.Marshal(map[string]any{
 		"path": "/workspace/work/a.go", "old": "func A() {}", "new": "func A() { return }",
 	})
-	res, err = tools["write"].invoke(ctx, string(body), rt)
-	if err != nil || !strings.Contains(res.output, "replacements=1") {
-		t.Fatalf("write substring: %q err=%v", res.output, err)
+	res, err = tools["write"].invoke(ctx, string(body), cc)
+	if err != nil || !strings.Contains(res.Output, "replacements=1") {
+		t.Fatalf("write substring: %q err=%v", res.Output, err)
 	}
 
 	got, err = ms.Route(ctx, "/workspace/work/a.go").
@@ -130,9 +134,9 @@ func TestVFSTools_readWrite(t *testing.T) {
 	body, _ = json.Marshal(map[string]any{
 		"path": "/workspace/work/dup.txt", "old": "aa", "new": "bb", "replace_all": true,
 	})
-	res, err = tools["write"].invoke(ctx, string(body), rt)
-	if err != nil || !strings.Contains(res.output, "replacements=2") {
-		t.Fatalf("replace_all: %q err=%v", res.output, err)
+	res, err = tools["write"].invoke(ctx, string(body), cc)
+	if err != nil || !strings.Contains(res.Output, "replacements=2") {
+		t.Fatalf("replace_all: %q err=%v", res.Output, err)
 	}
 
 	got, err = ms.Route(ctx, "/workspace/work/dup.txt").
@@ -146,7 +150,7 @@ func TestVFSTools_readWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/cas.txt"}`, rt); err != nil {
+	if _, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/cas.txt"}`, cc); err != nil {
 		t.Fatal(err)
 	}
 
@@ -158,46 +162,46 @@ func TestVFSTools_readWrite(t *testing.T) {
 	body, _ = json.Marshal(map[string]any{
 		"path": "/workspace/work/cas.txt", "old": "keep-me", "new": "kept",
 	})
-	res, err = tools["write"].invoke(ctx, string(body), rt)
-	if err != nil || !strings.Contains(res.output, "replacements=1") {
-		t.Fatalf("old/new against live file: %q err=%v", res.output, err)
+	res, err = tools["write"].invoke(ctx, string(body), cc)
+	if err != nil || !strings.Contains(res.Output, "replacements=1") {
+		t.Fatalf("old/new against live file: %q err=%v", res.Output, err)
 	}
 	if gotText(t, ms, "/workspace/work/cas.txt") != "kept\nchanged\n" {
 		t.Fatalf("old/new live body: %q", gotText(t, ms, "/workspace/work/cas.txt"))
 	}
 
-	res, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/a.go","content":"package a\n"}`, rt)
-	if err != nil || fieldKV(res.output, "path") != "/workspace/work/a.go" {
-		t.Fatalf("write full: %q err=%v", res.output, err)
+	res, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/a.go","content":"package a\n"}`, cc)
+	if err != nil || fieldKV(res.Output, "path") != "/workspace/work/a.go" {
+		t.Fatalf("write full: %q err=%v", res.Output, err)
 	}
 	if gotText(t, ms, "/workspace/work/a.go") != "package a\n" {
 		t.Fatalf("full write body: %q", gotText(t, ms, "/workspace/work/a.go"))
 	}
 
-	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/b.go","content":"package b\n"}`, rt); err != nil {
+	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/b.go","content":"package b\n"}`, cc); err != nil {
 		t.Fatal(err)
 	}
 	if gotText(t, ms, "/workspace/work/b.go") != "package b\n" {
 		t.Fatalf("create b.go: %q", gotText(t, ms, "/workspace/work/b.go"))
 	}
 
-	_, err = tools["read"].invoke(ctx, "{\"path\":\"/workspace/work/has\\u0000x\"}", rt)
+	_, err = tools["read"].invoke(ctx, "{\"path\":\"/workspace/work/has\\u0000x\"}", cc)
 	if !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("nul path: %v", err)
 	}
 
-	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/missing-span.txt","start":1,"end":2,"lines":["x"]}`, rt)
+	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/missing-span.txt","start":1,"end":2,"lines":["x"]}`, cc)
 	if !errors.Is(err, vfs.ErrNotExist) || !strings.Contains(err.Error(), "that path does not exist. List the parent") {
 		t.Fatalf("non-full missing: %v", err)
 	}
-	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/missing-span.txt","content":"created\n"}`, rt); err != nil {
+	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/missing-span.txt","content":"created\n"}`, cc); err != nil {
 		t.Fatal(err)
 	}
 	if gotText(t, ms, "/workspace/work/missing-span.txt") != "created\n" {
 		t.Fatalf("create after missing-span: %q", gotText(t, ms, "/workspace/work/missing-span.txt"))
 	}
 
-	requireWriteUnchanged(t, ms, tools["write"], rt, "/workspace/work/a.go",
+	requireWriteUnchanged(t, ms, tools["write"], cc, "/workspace/work/a.go",
 		`{"path":"/workspace/work/a.go","old":"","new":"y"}`, "old is required")
 
 	md := "# Hello\n\n## Install\n\nold\n"
@@ -207,43 +211,43 @@ func TestVFSTools_readWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/README.md","outline":true}`, rt)
-	if err != nil || !strings.Contains(res.output, "outline:") ||
-		!strings.Contains(res.output, "hello/install") || !strings.Contains(res.output, "kind=heading") ||
-		!strings.Contains(res.output, "media_type=") {
-		t.Fatalf("outline: %q err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/README.md","outline":true}`, cc)
+	if err != nil || !strings.Contains(res.Output, "outline:") ||
+		!strings.Contains(res.Output, "hello/install") || !strings.Contains(res.Output, "kind=heading") ||
+		!strings.Contains(res.Output, "media_type=") {
+		t.Fatalf("outline: %q err=%v", res.Output, err)
 	}
 
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/README.md","outline":true,"start":1,"end":4}`, rt)
-	if err != nil || !strings.Contains(res.output, "# Hello") ||
-		!strings.Contains(res.output, "## Install") {
-		t.Fatalf("outline+range: %q err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/README.md","outline":true,"start":1,"end":4}`, cc)
+	if err != nil || !strings.Contains(res.Output, "# Hello") ||
+		!strings.Contains(res.Output, "## Install") {
+		t.Fatalf("outline+range: %q err=%v", res.Output, err)
 	}
 
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/README.md","outline":true,"start":1,"end":999}`, rt)
-	if err != nil || !strings.Contains(res.output, "eof=true") || !strings.Contains(res.output, "# Hello") {
-		t.Fatalf("outline clamp: %q err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/README.md","outline":true,"start":1,"end":999}`, cc)
+	if err != nil || !strings.Contains(res.Output, "eof=true") || !strings.Contains(res.Output, "# Hello") {
+		t.Fatalf("outline clamp: %q err=%v", res.Output, err)
 	}
-	_, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/README.md","outline":true,"start":999,"end":1000}`, rt)
+	_, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/README.md","outline":true,"start":999,"end":1000}`, cc)
 	if !errors.Is(err, vfs.ErrLineOutOfRange) {
 		t.Fatalf("outline past EOF: %v", err)
 	}
 
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/README.md","block_id":"hello/install"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/README.md","block_id":"hello/install"}`, cc)
 	if err != nil {
 		t.Fatalf("read block_id: %v", err)
 	}
-	if !strings.Contains(res.output, "block_id=hello/install") ||
-		!strings.Contains(res.output, "## Install") || !strings.Contains(res.output, "old") {
-		t.Fatalf("read block_id: %q", res.output)
+	if !strings.Contains(res.Output, "block_id=hello/install") ||
+		!strings.Contains(res.Output, "## Install") || !strings.Contains(res.Output, "old") {
+		t.Fatalf("read block_id: %q", res.Output)
 	}
 
 	body, _ = json.Marshal(map[string]any{
 		"path": "/workspace/work/README.md", "old": "old", "new": "new body",
 	})
-	res, err = tools["write"].invoke(ctx, string(body), rt)
+	res, err = tools["write"].invoke(ctx, string(body), cc)
 	if err != nil {
-		t.Fatalf("replace markdown body: %v out=%s", err, res.output)
+		t.Fatalf("replace markdown body: %v out=%s", err, res.Output)
 	}
 
 	got, err = ms.Route(ctx, "/workspace/work/README.md").
@@ -251,7 +255,7 @@ func TestVFSTools_readWrite(t *testing.T) {
 	if err != nil || !strings.Contains(got.Text(), "new body") || !strings.Contains(got.Text(), "## Install") {
 		t.Fatalf("after markdown replace: %q err=%v", got.Text(), err)
 	}
-	requireWriteUnchanged(t, ms, tools["write_document"], rt, "/workspace/work/README.md",
+	requireWriteUnchanged(t, ms, tools["write_document"], cc, "/workspace/work/README.md",
 		`{"path":"/workspace/work/README.md","content":"<p>x</p>"}`,
 		"Use write")
 
@@ -283,25 +287,25 @@ func TestVFSTools_readWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/plain.txt","outline":true}`, rt)
-	if err != nil || !strings.Contains(res.output, "media_type=") ||
-		!strings.Contains(res.output, "line_count=") {
-		t.Fatalf("outline on plain text: %q err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/plain.txt","outline":true}`, cc)
+	if err != nil || !strings.Contains(res.Output, "media_type=") ||
+		!strings.Contains(res.Output, "line_count=") {
+		t.Fatalf("outline on plain text: %q err=%v", res.Output, err)
 	}
-	requireWriteUnchanged(t, ms, tools["write"], rt, "/workspace/work/plain.txt",
+	requireWriteUnchanged(t, ms, tools["write"], cc, "/workspace/work/plain.txt",
 		`{"path":"/workspace/work/plain.txt","old":"zzz-missing","new":"y"}`,
 		"old text was not found")
-	requireWriteUnchanged(t, ms, tools["write"], rt, "/workspace/work/plain.txt",
+	requireWriteUnchanged(t, ms, tools["write"], cc, "/workspace/work/plain.txt",
 		`{"path":"/workspace/work/plain.txt","old":"t","new":"y"}`,
 		"occurs")
 
-	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/new.txt","content":"a\nb\n"}`, rt); err != nil {
+	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/new.txt","content":"a\nb\n"}`, cc); err != nil {
 		t.Fatal(err)
 	}
-	requireWriteUnchanged(t, ms, tools["write"], rt, "/workspace/work/new.txt",
+	requireWriteUnchanged(t, ms, tools["write"], cc, "/workspace/work/new.txt",
 		`{"path":"/workspace/work/new.txt","start":1,"lines":["x"]}`,
 		"invalid range")
-	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/new.txt","start":99,"end":100,"lines":["x"]}`, rt)
+	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/new.txt","start":99,"end":100,"lines":["x"]}`, cc)
 	if !errors.Is(err, vfs.ErrLineOutOfRange) {
 		t.Fatalf("lines past EOF: %v", err)
 	}
@@ -309,7 +313,7 @@ func TestVFSTools_readWrite(t *testing.T) {
 		t.Fatalf("body after past-EOF write: %q", gotText(t, ms, "/workspace/work/new.txt"))
 	}
 
-	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/empty.txt","content":""}`, rt); err != nil {
+	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/empty.txt","content":""}`, cc); err != nil {
 		t.Fatal(err)
 	}
 	if gotText(t, ms, "/workspace/work/empty.txt") != "" {
@@ -322,7 +326,7 @@ func TestVFSTools_readWrite(t *testing.T) {
 	}
 
 	bodyEmpty, _ := json.Marshal(map[string]any{"path": "/workspace/work/empty.txt", "content": ""})
-	if _, err = tools["write"].invoke(ctx, string(bodyEmpty), rt); err != nil {
+	if _, err = tools["write"].invoke(ctx, string(bodyEmpty), cc); err != nil {
 		t.Fatal(err)
 	}
 	if gotText(t, ms, "/workspace/work/empty.txt") != "" {
@@ -337,30 +341,30 @@ func TestVFSTools_readWrite(t *testing.T) {
 	bodyNilNew, _ := json.Marshal(map[string]any{
 		"path": "/workspace/work/cut.txt", "old": " UNIQUE-CUT",
 	})
-	if _, err = tools["write"].invoke(ctx, string(bodyNilNew), rt); err != nil {
+	if _, err = tools["write"].invoke(ctx, string(bodyNilNew), cc); err != nil {
 		t.Fatal(err)
 	}
 	if gotText(t, ms, "/workspace/work/cut.txt") != "keep rest\n" {
 		t.Fatalf("nil new: %q", gotText(t, ms, "/workspace/work/cut.txt"))
 	}
 
-	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/new.txt"}`, rt); err == nil || !strings.Contains(err.Error(), "nothing to change") {
+	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/new.txt"}`, cc); err == nil || !strings.Contains(err.Error(), "nothing to change") {
 		t.Fatalf("no mutation: %v", err)
 	}
-	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/new.txt","content":"x","old":"a"}`, rt)
+	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/new.txt","content":"x","old":"a"}`, cc)
 	if err == nil || !strings.Contains(err.Error(), "only one change") {
 		t.Fatalf("mixed mode: %v", err)
 	}
 
-	_, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/plain.txt","start":5,"end":3}`, rt)
+	_, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/plain.txt","start":5,"end":3}`, cc)
 	if err == nil || !strings.Contains(err.Error(), "invalid range") {
 		t.Fatalf("inverted range: %v", err)
 	}
-	_, err = tools["read"].invoke(ctx, `{"path":"work/plain.txt"}`, rt)
+	_, err = tools["read"].invoke(ctx, `{"path":"work/plain.txt"}`, cc)
 	if !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("relative path: %v", err)
 	}
-	_, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/plain.txt","block_id":"nope"}`, rt)
+	_, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/plain.txt","block_id":"nope"}`, cc)
 	if err == nil || !strings.Contains(err.Error(), "no structured blocks") {
 		t.Fatalf("block on plain: %v", err)
 	}
@@ -373,6 +377,39 @@ func TestVFSTools_readWrite(t *testing.T) {
 	revBin, err := ms.ContentRev(ctx, "/workspace/work/pic.bin")
 	if err != nil || revBin.Hash == "" {
 		t.Fatalf("binary ContentRev: %+v err=%v", revBin, err)
+	}
+
+	// Each mistake comes back as a correction naming what to fix, and none
+	// names a host path.
+	if err := ms.Route(ctx, "/workspace/work/notes.md").WriteFile(ctx, []byte("# A\n\nbody\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "locked.txt"), []byte("x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		tool, args string
+		want       error
+	}{
+		"a directory":                        {"read", `{"path":"/workspace/work"}`, vfs.ErrIsDir},
+		"a read-only mount":                  {"write", `{"path":"/workspace/ro/x.txt","content":"x"}`, vfs.ErrReadOnly},
+		"a line with a newline":              {"write", `{"path":"/workspace/work/a.go","start":1,"end":2,"lines":["a\nb"]}`, vfs.ErrInvalidLine},
+		"a heading the file lacks":           {"read", `{"path":"/workspace/work/notes.md","block_id":"nope"}`, vfs.ErrUnknownBlock},
+		"a relative path to write":           {"write", `{"path":"work/x.txt","content":"x"}`, vfs.ErrInvalidPath},
+		"a relative path to a document":      {"write_document", `{"path":"work/x.docx","content":"<p>x</p>"}`, vfs.ErrInvalidPath},
+		"a window past the end":              {"read", `{"path":"/workspace/work/a.go","start":50,"end":60}`, vfs.ErrLineOutOfRange},
+		"an outline window past the end":     {"read", `{"path":"/workspace/work/notes.md","outline":true,"start":50,"end":60}`, vfs.ErrLineOutOfRange},
+		"a path under a file":                {"read", `{"path":"/workspace/work/a.go/x"}`, vfs.ErrNotDir},
+		"a path under a file to write":       {"write", `{"path":"/workspace/work/a.go/x","content":"x"}`, vfs.ErrNotDir},
+		"a relative path to a spreadsheet":   {"write_spreadsheet", `{"path":"work/x.xlsx","content":"a"}`, vfs.ErrInvalidPath},
+		"a spreadsheet write to a text file": {"write_spreadsheet", `{"path":"/workspace/work/a.go","block_id":"A!A1","body":"x"}`, vfs.ErrProjected},
+		"a file the host locked":             {"read", `{"path":"/workspace/work/locked.txt"}`, vfs.ErrPermission},
+		"blocks of a binary file":            {"read", `{"path":"/workspace/work/pic.bin","block_id":"x"}`, vfs.ErrNotTextual},
+	} {
+		_, err := tools[tc.tool].invoke(ctx, tc.args, cc)
+		if !errors.Is(err, ErrCorrection) || !errors.Is(err, tc.want) || strings.Contains(err.Error(), base) {
+			t.Errorf("%s = %v, want a correction for %v", name, err, tc.want)
+		}
 	}
 }
 
@@ -387,10 +424,10 @@ func gotText(t *testing.T, ms *vfs.MountSession, path string) string {
 	return doc.Text()
 }
 
-func requireWriteUnchanged(t *testing.T, ms *vfs.MountSession, write *Tool, rt HarnessRuntime, path, argsJSON, wantSubstr string) {
+func requireWriteUnchanged(t *testing.T, ms *vfs.MountSession, write *Tool, cc *CallContext, path, argsJSON, wantSubstr string) {
 	t.Helper()
 	before := gotText(t, ms, path)
-	_, err := write.invoke(context.Background(), argsJSON, rt)
+	_, err := write.invoke(context.Background(), argsJSON, cc)
 	if err == nil || !strings.Contains(err.Error(), wantSubstr) {
 		t.Fatalf("write %s: want %q, got %v", argsJSON, wantSubstr, err)
 	}
@@ -409,69 +446,69 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 		{TabID: "t.b", StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
 		{TabID: "t.b", StartIndex: 2, EndIndex: 8, Kind: "paragraph", Text: "Other"},
 	}, []vfs.DocTab{{ID: "t.a", Title: "Intro", Index: 0}, {ID: "t.b", Title: "Appendix", Index: 1}})
-	ms := mustMountTreeReq(t, "tools-docs", vfs.Request{Bindings: []vfs.Binding{{
-		Provider: vfs.ProviderGoogleDrive, Writable: true,
-		Auth:   vfs.Credential{Token: "t"},
-		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root"},
+	ms := mustMountTree(t, "tools-docs", vfs.Request{Bindings: []mount.Binding{{
+		Provider: mount.ProviderGoogleDrive, Writable: true,
+		Auth:   mount.Credential{Token: "t"},
+		Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root"},
 	}}}, vfs.At("contracts", testdrive.Open(t, api, nil)))
-	h := mustNewTurnManager(t, AgentOptions{
+	h := mustNewHarness(t, AgentOptions{
 		sessionID: "tools-docs", mountSession: ms, Model: &scriptedModel{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
 		tools[tool.name] = tool
 	}
-	rt := turnRuntime(h)
+	cc := turnRuntime(h)
 
-	res, err := tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
+	res, err := tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.output, "<h1") || !strings.Contains(res.output, "<p>") ||
-		!strings.Contains(res.output, "   1|") || !strings.Contains(res.output, "media_type=") {
-		t.Fatalf("default read HTML: %s", res.output)
+	if !strings.Contains(res.Output, "<h1") || !strings.Contains(res.Output, "<p>") ||
+		!strings.Contains(res.Output, "   1|") || !strings.Contains(res.Output, "media_type=") {
+		t.Fatalf("default read HTML: %s", res.Output)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","outline":true}`, rt)
-	if err != nil || !strings.Contains(res.output, "outline:") ||
-		!strings.Contains(res.output, "intro/p-1") ||
-		!strings.Contains(res.output, "media_type=application/vnd.google-apps.document") {
-		t.Fatalf("outline: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","outline":true}`, cc)
+	if err != nil || !strings.Contains(res.Output, "outline:") ||
+		!strings.Contains(res.Output, "intro/p-1") ||
+		!strings.Contains(res.Output, "media_type=application/vnd.google-apps.document") {
+		t.Fatalf("outline: %s err=%v", res.Output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","block_id":"intro/p-1"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=Hello") {
-		t.Fatalf("block_id IR: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","block_id":"intro/p-1"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "text=Hello") {
+		t.Fatalf("block_id IR: %s err=%v", res.Output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","start":1,"end":6}`, rt)
-	if err != nil || !strings.Contains(res.output, "<html>") || !strings.Contains(res.output, "<h1") ||
-		!strings.Contains(res.output, "media_type=") {
-		t.Fatalf("HTML line window: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","start":1,"end":6}`, cc)
+	if err != nil || !strings.Contains(res.Output, "<html>") || !strings.Contains(res.Output, "<h1") ||
+		!strings.Contains(res.Output, "media_type=") {
+		t.Fatalf("HTML line window: %s err=%v", res.Output, err)
 	}
 
-	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Spec","content":"plain text"}`, rt)
+	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Spec","content":"plain text"}`, cc)
 	if err == nil || !errors.Is(err, vfs.ErrProjected) || !strings.Contains(err.Error(), "write_document") {
 		t.Fatalf("write on Doc: %v", err)
 	}
-	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
+	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, cc)
 	if err == nil || !strings.Contains(err.Error(), "nothing to change") {
 		t.Fatalf("write_document empty: %v", err)
 	}
-	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec","content":"<p>x</p>","block_id":"intro/p-1"}`, rt)
+	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec","content":"<p>x</p>","block_id":"intro/p-1"}`, cc)
 	if err == nil || !strings.Contains(err.Error(), "only one change") {
 		t.Fatalf("write_document mixed: %v", err)
 	}
-	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec","content":"plain text"}`, rt)
+	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec","content":"plain text"}`, cc)
 	if err == nil || !errors.Is(err, vfs.ErrUseHTML) {
 		t.Fatalf("non-HTML content on Doc: %v", err)
 	}
-	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec","content":"<p>nope</p>"}`, rt)
+	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec","content":"<p>nope</p>"}`, cc)
 	if err == nil || !errors.Is(err, vfs.ErrTabIDRequired) {
 		t.Fatalf("HTML without tab_id: %v", err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
-	if err != nil || !strings.Contains(res.output, "Other") {
-		t.Fatalf("sibling tab after missing tab_id: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "Other") {
+		t.Fatalf("sibling tab after missing tab_id: %s err=%v", res.Output, err)
 	}
-	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Spec","old":"Hello"}`, rt)
+	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Spec","old":"Hello"}`, cc)
 	if !errors.Is(err, vfs.ErrProjected) || !strings.Contains(err.Error(), "Use write_document") {
 		t.Fatalf("substring write on Doc: %v", err)
 	}
@@ -493,16 +530,16 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{
 		"path": "/workspace/contracts/Spec", "block_id": "intro/p-1", "body": "World",
 	})
-	res, err = tools["write_document"].invoke(ctx, string(body), rt)
-	if err != nil || !strings.Contains(res.output, "outline:") || !strings.Contains(res.output, "intro/p-1") {
-		t.Fatalf("block write: %q err=%v", res.output, err)
+	res, err = tools["write_document"].invoke(ctx, string(body), cc)
+	if err != nil || !strings.Contains(res.Output, "outline:") || !strings.Contains(res.Output, "intro/p-1") {
+		t.Fatalf("block write: %q err=%v", res.Output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","block_id":"intro/p-1"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=World") {
-		t.Fatalf("block_id after write: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","block_id":"intro/p-1"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "text=World") {
+		t.Fatalf("block_id after write: %s err=%v", res.Output, err)
 	}
 
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -511,25 +548,25 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("tab blocks write: %v", err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.output, "Replaced") || !strings.Contains(res.output, "Other") {
-		t.Fatalf("tab merge outline: %s", res.output)
+	if !strings.Contains(res.Output, "Replaced") || !strings.Contains(res.Output, "Other") {
+		t.Fatalf("tab merge outline: %s", res.Output)
 	}
 	api.FailNextDocWrites(1)
-	if _, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec","tab_id":"t.a","content":"<h1>Retry</h1>\n<p>Ok</p>"}`, rt); err != nil {
+	if _, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec","tab_id":"t.a","content":"<h1>Retry</h1>\n<p>Ok</p>"}`, cc); err != nil {
 		t.Fatalf("persist retry: %v", err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
-	if err != nil || !strings.Contains(res.output, "Retry") || !strings.Contains(res.output, "Ok") ||
-		!strings.Contains(res.output, "Other") {
-		t.Fatalf("body after persist retry: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "Retry") || !strings.Contains(res.Output, "Ok") ||
+		!strings.Contains(res.Output, "Other") {
+		t.Fatalf("body after persist retry: %s err=%v", res.Output, err)
 	}
 
 	mdHTML := "<h1>not a doc</h1>"
-	if _, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/workspace/contracts/notes.md","content":%q}`, mdHTML), rt); err != nil {
+	if _, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/workspace/contracts/notes.md","content":%q}`, mdHTML), cc); err != nil {
 		t.Fatal(err)
 	}
 
@@ -568,7 +605,7 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	if err != nil || st.MediaType != "application/vnd.google-apps.document" {
 		t.Fatalf("Lifted Stat = %+v err=%v", st, err)
 	}
-	if _, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/CRESPIKE","content":"<h1>CRE SPIKE</h1><p>Intro</p>"}`, rt); err != nil {
+	if _, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/CRESPIKE","content":"<h1>CRE SPIKE</h1><p>Intro</p>"}`, cc); err != nil {
 		t.Fatalf("extensionless HTML create: %v", err)
 	}
 
@@ -577,11 +614,11 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 		t.Fatalf("CRESPIKE Stat = %+v err=%v", st, err)
 	}
 	api.FailDocBatch()
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec","tab_id":"t.a","content":"<p>x</p>"}`, rt)
+	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec","tab_id":"t.a","content":"<p>x</p>"}`, cc)
 	if err == nil || !errors.Is(err, vfs.ErrInvalidWrite) ||
 		!strings.Contains(err.Error(), "was not saved") ||
 		!strings.Contains(err.Error(), "write the full HTML again") ||
@@ -614,15 +651,15 @@ func fieldKV(s, key string) string {
 func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
-	ms := mustMountTree(t, "tools-docx", vfs.At("work", vfs.Local(base)))
-	h := mustNewTurnManager(t, AgentOptions{
+	ms := mustMountTree(t, "tools-docx", vfs.Request{}, vfs.At("work", vfs.Local(base)))
+	h := mustNewHarness(t, AgentOptions{
 		sessionID: "tools-docx", mountSession: ms, Model: &scriptedModel{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
 		tools[tool.name] = tool
 	}
-	rt := turnRuntime(h)
+	cc := turnRuntime(h)
 	mt := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	applied, err := ms.Apply(ctx, "/workspace/work/note.docx", vfs.Mutation{
 		MediaType: mt,
@@ -634,14 +671,14 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := toolCallResult{output: applied.String()}
-	if !strings.Contains(res.output, "rev=") {
-		t.Fatalf("create: %s", res.output)
+	res := ToolOutcome{Output: applied.String()}
+	if !strings.Contains(res.Output, "rev=") {
+		t.Fatalf("create: %s", res.Output)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/note.docx"}`, rt)
-	if err != nil || !strings.Contains(res.output, "<strong>Title</strong>") ||
-		!strings.Contains(res.output, "See x") {
-		t.Fatalf("read HTML: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/note.docx"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "<strong>Title</strong>") ||
+		!strings.Contains(res.Output, "See x") {
+		t.Fatalf("read HTML: %s err=%v", res.Output, err)
 	}
 	liftDocx := "Hello **x**"
 	_, err = ms.Apply(ctx, "/workspace/work/lift.docx", vfs.Mutation{
@@ -650,17 +687,21 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/lift.docx"}`, rt)
-	if err != nil || !strings.Contains(res.output, "Hello") || !strings.Contains(res.output, "<strong>x</strong>") {
-		t.Fatalf("lift HTML: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/lift.docx"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "Hello") || !strings.Contains(res.Output, "<strong>x</strong>") {
+		t.Fatalf("lift HTML: %s err=%v", res.Output, err)
 	}
-	res, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/work/note.docx","block_id":"p-1","body":"_hi_"}`, rt)
+	res, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/work/note.docx","block_id":"p-1","body":"_hi_"}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/note.docx"}`, rt)
-	if err != nil || !strings.Contains(res.output, "<em>hi</em>") {
-		t.Fatalf("italic body: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/note.docx"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "<em>hi</em>") {
+		t.Fatalf("italic body: %s err=%v", res.Output, err)
+	}
+	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/work/note.docx","content":"<div></div>"}`, cc)
+	if !errors.Is(err, ErrCorrection) || !errors.Is(err, vfs.ErrEmptyReplace) {
+		t.Fatalf("empty body = %v, want a correction for %v", err, vfs.ErrEmptyReplace)
 	}
 }
 
@@ -683,55 +724,55 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 			}},
 		},
 	})
-	ms := mustMountTreeReq(t, "tools-sheets", vfs.Request{Bindings: []vfs.Binding{{
-		Provider: vfs.ProviderGoogleDrive, Writable: true,
-		Auth:   vfs.Credential{Token: "t"},
-		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root"},
+	ms := mustMountTree(t, "tools-sheets", vfs.Request{Bindings: []mount.Binding{{
+		Provider: mount.ProviderGoogleDrive, Writable: true,
+		Auth:   mount.Credential{Token: "t"},
+		Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root"},
 	}}}, vfs.At("contracts", testdrive.Open(t, api, nil)))
-	h := mustNewTurnManager(t, AgentOptions{
+	h := mustNewHarness(t, AgentOptions{
 		sessionID: "tools-sheets", mountSession: ms, Model: &scriptedModel{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
 		tools[tool.name] = tool
 	}
-	rt := turnRuntime(h)
+	cc := turnRuntime(h)
 
-	res, err := tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget"}`, rt)
+	res, err := tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget"}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.output, "outline:") || !strings.Contains(res.output, "kind=sheet") ||
-		!strings.Contains(res.output, "named_ranges:") || !strings.Contains(res.output, "Total") {
-		t.Fatalf("default read outline: %s", res.output)
+	if !strings.Contains(res.Output, "outline:") || !strings.Contains(res.Output, "kind=sheet") ||
+		!strings.Contains(res.Output, "named_ranges:") || !strings.Contains(res.Output, "Total") {
+		t.Fatalf("default read outline: %s", res.Output)
 	}
-	if !strings.Contains(res.output, "sheet_count=2") || !strings.Contains(res.output, "media_type=") {
-		t.Fatalf("sheet header: %s", res.output)
+	if !strings.Contains(res.Output, "sheet_count=2") || !strings.Contains(res.Output, "media_type=") {
+		t.Fatalf("sheet header: %s", res.Output)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!B2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=42") ||
-		!strings.Contains(res.output, "format=number=$#,##0.00,bold") {
-		t.Fatalf("cell format: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!B2"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "text=42") ||
+		!strings.Contains(res.Output, "format=number=$#,##0.00,bold") {
+		t.Fatalf("cell format: %s err=%v", res.Output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!A1:C2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "Date") || !strings.Contains(res.output, "42") ||
-		!strings.Contains(res.output, "B2 format=number=$#,##0.00,bold") {
-		t.Fatalf("range: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!A1:C2"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "Date") || !strings.Contains(res.Output, "42") ||
+		!strings.Contains(res.Output, "B2 format=number=$#,##0.00,bold") {
+		t.Fatalf("range: %s err=%v", res.Output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget"}`, rt)
-	if err != nil || !strings.Contains(res.output, "sheet=Budget") || !strings.Contains(res.output, "42") {
-		t.Fatalf("sheet rows: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "sheet=Budget") || !strings.Contains(res.Output, "42") {
+		t.Fatalf("sheet rows: %s err=%v", res.Output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget","start":2,"end":3}`, rt)
-	if err != nil || !strings.Contains(res.output, "   2|") || !strings.Contains(res.output, "42") {
-		t.Fatalf("row window: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget","start":2,"end":3}`, cc)
+	if err != nil || !strings.Contains(res.Output, "   2|") || !strings.Contains(res.Output, "42") {
+		t.Fatalf("row window: %s err=%v", res.Output, err)
 	}
-	_, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","start":1,"end":3}`, rt)
+	_, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","start":1,"end":3}`, cc)
 	if !errors.Is(err, vfs.ErrProjected) {
 		t.Fatalf("line read: %v", err)
 	}
 
-	_, err = tools["write_spreadsheet"].invoke(ctx, `{"path":"/workspace/contracts/Budget","content":"A\tB\n1\t2"}`, rt)
+	_, err = tools["write_spreadsheet"].invoke(ctx, `{"path":"/workspace/contracts/Budget","content":"A\tB\n1\t2"}`, cc)
 	if err == nil || !strings.Contains(err.Error(), "cannot replace an existing sheet") {
 		t.Fatalf("in-place sheet content: %v", err)
 	}
@@ -740,13 +781,13 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		"path": "/workspace/contracts/Budget", "block_id": "Budget!B2",
 		"body": "99", "format": map[string]any{"italic": true},
 	})
-	if _, err = tools["write_spreadsheet"].invoke(ctx, string(body), rt); err != nil {
+	if _, err = tools["write_spreadsheet"].invoke(ctx, string(body), cc); err != nil {
 		t.Fatalf("overlay: %v", err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!B2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=99") ||
-		!strings.Contains(res.output, "italic") || !strings.Contains(res.output, "bold") {
-		t.Fatalf("after overlay: %s err=%v", res.output, err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!B2"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "text=99") ||
+		!strings.Contains(res.Output, "italic") || !strings.Contains(res.Output, "bold") {
+		t.Fatalf("after overlay: %s err=%v", res.Output, err)
 	}
 
 	if _, err = ms.Apply(ctx, "/workspace/contracts/Ledger", vfs.Mutation{
@@ -764,7 +805,7 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		t.Fatalf("create-as-Sheet Stat = %+v err=%v", st, err)
 	}
 
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget"}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -773,87 +814,49 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	snap := api.SheetSnap("sheet1")
 	snap.Sheets[0].Cells[0][0] = vfs.Cell{Input: "Changed", Value: "Changed"}
 	api.SeedSheet("sheet1", snap)
-	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Budget","content":"x"}`, rt)
+	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Budget","content":"x"}`, cc)
 	if err == nil || !strings.Contains(err.Error(), "write_spreadsheet") {
 		t.Fatalf("write on sheet: %v", err)
 	}
-	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Budget","content":"<p>x</p>"}`, rt)
+	_, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Budget","content":"<p>x</p>"}`, cc)
 	if err == nil || !strings.Contains(err.Error(), "write_spreadsheet") {
 		t.Fatalf("write_document on sheet: %v", err)
 	}
 	_, err = tools["write_spreadsheet"].invoke(ctx,
-		`{"path":"/workspace/contracts/Budget","block_id":"Budget!B2","body":"0"}`, rt)
+		`{"path":"/workspace/contracts/Budget","block_id":"Budget!B2","body":"0"}`, cc)
 	if !errors.Is(err, vfs.ErrStaleContent) {
 		t.Fatalf("stale: %v", err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!B2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=99") {
-		t.Fatalf("body after stale: %s err=%v", res.output, err)
-	}
-}
-
-// TestVFSTools_runCommandLiveNames: host ls/find on a FUSE tree match session ReadDir.
-func TestVFSTools_runCommandLiveNames(t *testing.T) {
-	if err := vfs.FuseProbe(t.TempDir()); err != nil {
-		t.Skip(err.Error())
-	}
-	ctx := context.Background()
-	base := t.TempDir()
-	ms := mustMountTree(t, "live-names", vfs.At("work", vfs.Local(base)))
-
-	if err := ms.Route(ctx, "/workspace/work/sub").
-		MkdirAll(ctx); err != nil {
-		t.Fatal(err)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!B2"}`, cc)
+	if err != nil || !strings.Contains(res.Output, "text=99") {
+		t.Fatalf("body after stale: %s err=%v", res.Output, err)
 	}
 
-	if err := ms.Route(ctx, "/workspace/work/a.go").
-		WriteFile(ctx, []byte("package a\n")); err != nil {
-		t.Fatal(err)
+	holder := vfs.NewTokenHolder(mount.Credential{Token: "t"})
+	expired := mustMountTree(t, "tools-sheets-expired", vfs.Request{}, vfs.At("contracts", testdrive.Open(t, api, holder)))
+	holder.Set(mount.Credential{})
+	_, err = vfsTools{ms: expired}.newRead().invoke(ctx, `{"path":"/workspace/contracts/Budget"}`, cc)
+	if !errors.Is(err, vfs.ErrAuthExpired) {
+		t.Fatalf("expired token read = %v, want %v", err, vfs.ErrAuthExpired)
 	}
 
-	if err := ms.Route(ctx, "/workspace/work/sub/b.go").
-		WriteFile(ctx, []byte("package b\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/readme.md").
-		WriteFile(ctx, []byte("# r\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ms.FuseMount(t.TempDir()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ms.Close() })
-
-	h := mustNewTurnManager(t, AgentOptions{
-		sessionID:    "live-names",
-		mountSession: ms, Model: &scriptedModel{},
-	})
-	tool := h.findTool("run_command", "")
-	if tool == nil {
-		t.Fatal("run_command required")
-	}
-
-	ents, err := ms.Route(ctx, "/workspace/work").
-		ReadDir(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ls, err := tool.invoke(ctx, `{"command":"ls workspace/work"}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range ents {
-		if !strings.Contains(ls.output, e.Name) {
-			t.Fatalf("ls missing %q: %s", e.Name, ls.output)
+	// Each sheet mistake comes back as a correction naming what to fix.
+	for name, tc := range map[string]struct {
+		tool, args string
+		want       error
+	}{
+		"an address that is not A1":        {"read", `{"path":"/workspace/contracts/Budget","block_id":"Budget!1A"}`, vfs.ErrInvalidA1},
+		"a cell of a sheet it lacks":       {"read", `{"path":"/workspace/contracts/Budget","block_id":"Nope!A1"}`, vfs.ErrUnknownBlock},
+		"a range of a sheet it lacks":      {"read", `{"path":"/workspace/contracts/Budget","block_id":"Nope!A1:B2"}`, vfs.ErrUnknownBlock},
+		"the rows of a sheet it lacks":     {"read", `{"path":"/workspace/contracts/Budget","block_id":"Nope"}`, vfs.ErrUnknownBlock},
+		"an inverted window":               {"read", `{"path":"/workspace/contracts/Budget","block_id":"Budget","start":3,"end":1}`, vfs.ErrLineOutOfRange},
+		"content and a cell at once":       {"write_spreadsheet", `{"path":"/workspace/contracts/Budget","content":"a","block_id":"Budget!A1"}`, ErrInvalid},
+		"a new sheet without content":      {"write_spreadsheet", `{"path":"/workspace/contracts/New"}`, ErrInvalid},
+		"an existing sheet with no change": {"write_spreadsheet", `{"path":"/workspace/contracts/Budget"}`, ErrInvalid},
+	} {
+		_, err := tools[tc.tool].invoke(ctx, tc.args, cc)
+		if !errors.Is(err, ErrCorrection) || !errors.Is(err, tc.want) {
+			t.Errorf("%s = %v, want a correction for %v", name, err, tc.want)
 		}
-	}
-	found, err := tool.invoke(ctx, `{"command":"find workspace/work -name '*.go'"}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(found.output, "workspace/work/a.go") || !strings.Contains(found.output, "workspace/work/sub/b.go") {
-		t.Fatalf("find *.go: %s", found.output)
 	}
 }

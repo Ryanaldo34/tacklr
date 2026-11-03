@@ -10,6 +10,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // GraphAPI is the OneDrive/SharePoint subset. Hosts call NewGraph
@@ -41,27 +43,24 @@ func Graph(api GraphAPI, holder *TokenHolder, account string) Open {
 	if api == nil {
 		panic("vfs: Graph requires a GraphAPI client")
 	}
-	return func(ctx context.Context, _ string, b Binding) (Provider, error) {
+	return func(ctx context.Context, _ string, b mount.Binding) (Provider, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		h := b.Live
-		if h == nil {
-			h = holder
-		}
+		h := holder
 		if h == nil && strings.TrimSpace(b.Auth.Token) != "" {
 			h = NewTokenHolder(b.Auth)
 		}
 		if h == nil || h.Current().Token == "" {
 			return nil, fmt.Errorf("vfs: msgraph access token required")
 		}
-		acct, err := graphAccount(account, b.Params[ParamAccount])
+		acct, err := graphAccount(account, b.Params[mount.ParamAccount])
 		if err != nil {
 			return nil, err
 		}
-		driveID := strings.TrimSpace(b.Params[ParamDriveID])
-		itemID := strings.TrimSpace(b.Params[ParamItemID])
-		siteID := strings.TrimSpace(b.Params[ParamSiteID])
+		driveID := strings.TrimSpace(b.Params[mount.ParamDriveID])
+		itemID := strings.TrimSpace(b.Params[mount.ParamItemID])
+		siteID := strings.TrimSpace(b.Params[mount.ParamSiteID])
 		if acct == AccountOrganization && driveID == "" && siteID == "" {
 			return nil, fmt.Errorf("vfs: msgraph organization account requires siteId or driveId")
 		}
@@ -137,10 +136,8 @@ func (p *graphProvider) listChildren(ctx context.Context, id string) ([]graphIte
 	return kids, err
 }
 
+// getByPath is the item at rel, a non-empty path under id.
 func (p *graphProvider) getByPath(ctx context.Context, id, rel string) (graphItem, error) {
-	if rel == "" {
-		return p.getItem(ctx, id)
-	}
 	var item graphItem
 	err := p.call(ctx, func() error {
 		var err error
@@ -364,13 +361,11 @@ func (p *graphProvider) MkdirAll(ctx context.Context, name string, perm fs.FileM
 	return err
 }
 
+// ensureDir makes every directory of rel, a non-empty path under the root.
 func (p *graphProvider) ensureDir(ctx context.Context, rel string) (graphItem, error) {
 	root, err := p.getItem(ctx, p.rootID)
 	if err != nil {
 		return graphItem{}, err
-	}
-	if rel == "" {
-		return root, nil
 	}
 	parentID := root.ID
 	var cur graphItem
@@ -402,14 +397,10 @@ func (p *graphProvider) ensureDir(ctx context.Context, rel string) (graphItem, e
 	return cur, nil
 }
 
+// parentAndLeaf is name's parent folder, made if missing, and its last
+// element. The caller resolved name, so it is clean and not the root.
 func (p *graphProvider) parentAndLeaf(ctx context.Context, name string) (parentID, leaf string, err error) {
-	rel, err := cleanRel(name)
-	if err != nil {
-		return "", "", err
-	}
-	if rel == "" {
-		return "", "", ErrInvalidPath
-	}
+	rel, _ := cleanRel(name)
 	dir, leaf := path.Split(rel)
 	dir = strings.TrimSuffix(dir, "/")
 	if dir == "" {

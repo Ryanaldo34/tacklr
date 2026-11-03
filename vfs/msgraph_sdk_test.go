@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/internal/testhttp"
 )
 
@@ -83,7 +85,7 @@ func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 		}
 	}))
 
-	holder := NewTokenHolder(Credential{Token: "tok-1"})
+	holder := NewTokenHolder(mount.Credential{Token: "tok-1"})
 	api, err := newGraphSDK(holder, srv.URL, &http.Client{Timeout: time.Second, Transport: srv.Client().Transport})
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +156,7 @@ func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 		t.Fatalf("no token: %v", err)
 	}
 
-	holder.Set(Credential{Token: "tok-2"})
+	holder.Set(mount.Credential{Token: "tok-2"})
 	if _, err := api.GetItem(ctx, "drv", "root"); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +178,7 @@ func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 	if _, err := api.ListChildren(ctx, "drv", "paged"); err == nil {
 		t.Fatal("paged iterate")
 	}
-	holder.Set(Credential{})
+	holder.Set(mount.Credential{})
 	if _, err := api.GetItem(ctx, "drv", "root"); !errors.Is(err, ErrAuthExpired) {
 		t.Fatalf("empty token: %v", err)
 	}
@@ -207,7 +209,7 @@ func TestGraphSDK_ResolveRootRejectsFileAndMissingDrive(t *testing.T) {
 		}
 	}))
 
-	api, err := newGraphSDK(NewTokenHolder(Credential{Token: "tok"}), srv.URL, srv.Client())
+	api, err := newGraphSDK(NewTokenHolder(mount.Credential{Token: "tok"}), srv.URL, srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +333,7 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 		}
 	}))
 
-	holder := NewTokenHolder(Credential{Token: "tok"})
+	holder := NewTokenHolder(mount.Credential{Token: "tok"})
 	sdk, err := newGraphSDK(holder, srv.URL, srv.Client())
 	if err != nil {
 		t.Fatal(err)
@@ -375,8 +377,8 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 	if err != nil || !st.IsDir {
 		t.Fatalf("stat root = %+v err=%v", st, err)
 	}
-	if _, err := p.resolve(ctx, ".."); err == nil {
-		t.Fatal("resolve dirty")
+	if _, err := p.Stat(ctx, ".."); err == nil {
+		t.Fatal("stat outside the drive root")
 	}
 	bare, err := p.Stat(ctx, "bare.bin")
 	if err != nil || bare.MediaType == "" {
@@ -397,23 +399,22 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 	if _, err := p.OpenFile(ctx, "a.txt", os.O_WRONLY, 0); !errors.Is(err, ErrNotSupported) {
 		t.Fatalf("write open: %v", err)
 	}
-	p.writable = false
-	if _, err := p.OpenFile(ctx, "a.txt", os.O_WRONLY, 0); !errors.Is(err, ErrReadOnly) {
+	ro := &graphProvider{api: sdk, driveID: "drv", rootID: "root", holder: holder}
+	if _, err := ro.OpenFile(ctx, "a.txt", os.O_WRONLY, 0); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("ro open: %v", err)
 	}
-	if err := p.Remove(ctx, "a.txt"); !errors.Is(err, ErrReadOnly) {
+	if err := ro.Remove(ctx, "a.txt"); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("ro remove: %v", err)
 	}
-	if err := p.MkdirAll(ctx, "sub", fs.ModeDir); !errors.Is(err, ErrReadOnly) {
+	if err := ro.MkdirAll(ctx, "sub", fs.ModeDir); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("ro mkdir: %v", err)
 	}
-	if err := p.PutFile(ctx, "a.txt", bytes.NewReader([]byte("x")), 1); !errors.Is(err, ErrReadOnly) {
+	if err := ro.PutFile(ctx, "a.txt", bytes.NewReader([]byte("x")), 1); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("ro put: %v", err)
 	}
-	if err := p.WriteDocument(ctx, "a.txt", NewTextDocument("a.txt", "text/plain", "utf-8", "x")); !errors.Is(err, ErrReadOnly) {
+	if err := ro.WriteDocument(ctx, "a.txt", NewTextDocument("a.txt", "text/plain", "utf-8", "x")); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("ro writedoc: %v", err)
 	}
-	p.writable = true
 	if err := p.Remove(ctx, ""); !errors.Is(err, ErrInvalidPath) {
 		t.Fatalf("remove root: %v", err)
 	}
@@ -433,23 +434,11 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 	if err != nil || len(ents) < 2 {
 		t.Fatalf("readdir root = %+v err=%v", ents, err)
 	}
-	if _, err := p.ensureDir(ctx, ""); err != nil {
-		t.Fatalf("ensureDir root: %v", err)
-	}
-	if _, _, err := p.parentAndLeaf(ctx, ""); !errors.Is(err, ErrInvalidPath) {
-		t.Fatalf("parentAndLeaf empty: %v", err)
-	}
-	if _, _, err := p.parentAndLeaf(ctx, ".."); err == nil {
-		t.Fatal("parentAndLeaf dirty")
-	}
 	if err := p.MkdirAll(ctx, "deny.txt/x", 0); !errors.Is(err, ErrPermission) {
 		t.Fatalf("mkdir through denied: %v", err)
 	}
 	if err := p.WriteDocument(ctx, "a.txt", nil); !errors.Is(err, ErrNotTextual) {
 		t.Fatalf("writedoc nil: %v", err)
-	}
-	if _, err := p.getByPath(ctx, "root", ""); err != nil {
-		t.Fatalf("getByPath empty: %v", err)
 	}
 	if _, err := p.ReadDir(ctx, "missing"); !errors.Is(err, ErrNotExist) {
 		t.Fatalf("readdir missing: %v", err)
@@ -512,7 +501,7 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 		t.Fatalf("validate file: %v", err)
 	}
 
-	holder.Set(Credential{Token: "stale"})
+	holder.Set(mount.Credential{Token: "stale"})
 	stale, err := p.OpenFile(ctx, "a.txt", os.O_RDONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -521,7 +510,7 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 		t.Fatalf("refresh missing: %v", err)
 	}
 	_ = stale.Close()
-	holder.Set(Credential{})
+	holder.Set(mount.Credential{})
 	if _, err := p.Stat(ctx, "a.txt"); !errors.Is(err, ErrAuthExpired) {
 		t.Fatalf("ensure valid: %v", err)
 	}

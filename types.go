@@ -3,10 +3,14 @@ package tacklr
 import (
 	"context"
 	"errors"
+	"fmt"
+
+	"github.com/ryanaldo34/tacklr/message"
+
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-// Shared errors and the inference contract for harness hosts.
-// Message, StreamEvent, Todo, and related conversation types live in this package.
+// Shared errors and the inference contract (Model) for harness hosts.
 
 // Coarse categories for errors.Is. Wrap a specific message at the call site
 // (fmt.Errorf("tool %q: %w", name, ErrNotFound)) instead of a sentinel per
@@ -25,9 +29,6 @@ var (
 )
 
 var (
-	ErrModelRefused         = errors.New("model refused")
-	ErrMaxTokens            = errors.New("max tokens reached")
-	ErrMaxTurnRequests      = errors.New("max turn model requests exceeded")
 	ErrModelAfterTools      = errors.New("model request failed after tools completed")
 	ErrApiKeyNotSet         = errors.New("api key not set")
 	ErrModelNotSet          = errors.New("model not set")
@@ -56,20 +57,29 @@ func Network(err error) error {
 	return networkError{err}
 }
 
-// ProviderStatus supplies HTTP status and error code from a provider error.
-// Optional on InferenceStrategy errors for model-span attributes.
-type ProviderStatus interface {
-	ProviderHTTPStatus() int
-	ProviderErrorCode() string
+// ModelRequest is one model request. A strategy holds no per-request
+// state: everything a request needs is here, so one strategy is safe to
+// share across sessions and calls.
+type ModelRequest struct {
+	Messages     []*message.Message
+	Tools        []*Tool
+	SystemPrompt string
+	// CacheKey is the session id. A strategy may send it so the provider
+	// keeps the session's prompt prefix cached.
+	CacheKey string
 }
 
-// InferenceStrategy is the model provider interface used by the harness.
-// Fluent With* builders and SetSystemPrompt live on concrete providers
-// (for example *openai.OpenAIInferenceStrategy), not this interface.
-type InferenceStrategy interface {
-	Invoke(ctx context.Context, messages []*Message, tools []*Tool, systemPrompt string) (chan LLMResponseChunk, error)
-	CountTokens(context.Context, []*Message, []*Tool) (int, error)
+// Model is the model provider interface used by the harness.
+// Model and endpoint settings (the fluent With* builders) live on concrete
+// providers such as *openai.Model; everything per request
+// is in ModelRequest.
+type Model interface {
+	Invoke(ctx context.Context, req ModelRequest) (chan LLMResponseChunk, error)
+	// CountTokens counts what Invoke would send for req.
+	CountTokens(ctx context.Context, req ModelRequest) (int, error)
 	MaxContextWindow() (int, error)
+	// ModelTelemetryIdentity names the provider and model for model spans.
+	ModelTelemetryIdentity() telemetry.ModelIdentity
 	// SupportsMIME reports whether the currently selected model accepts the
 	// given MIME type as user input. Empty and text/* are always true.
 	// Probe representatives for ads (e.g. image/png); do not enumerate all types.
@@ -92,14 +102,14 @@ func ToolChoiceNone(ctx context.Context) bool {
 }
 
 // UnsupportedMIMEs returns mimes for which s.SupportsMIME is false (first-seen order).
-func UnsupportedMIMEs(s InferenceStrategy, mimes []string) []string {
+func UnsupportedMIMEs(s Model, mimes []string) []string {
 	if s == nil || len(mimes) == 0 {
 		return nil
 	}
 	var bad []string
 	seen := make(map[string]struct{}, len(mimes))
 	for _, m := range mimes {
-		m = NormalizeMIME(m)
+		m = message.NormalizeMIME(m)
 		if _, ok := seen[m]; ok {
 			continue
 		}
@@ -109,13 +119,6 @@ func UnsupportedMIMEs(s InferenceStrategy, mimes []string) []string {
 		}
 	}
 	return bad
-}
-
-// AgentWatchDog records assistant output and tool results for a turn.
-// Nil on AgentOptions means no watchdog.
-type AgentWatchDog interface {
-	RecordOutput(*Message) error
-	RecordToolResult(*Message) error
 }
 
 // Job is one background job of the current session as tools may see it.
@@ -128,64 +131,27 @@ type Job struct {
 	Result string
 }
 
-// JobRequest is Schedule input. Name is a specialist or a Runtime job worker.
+// JobRequest is Schedule input. Name is a Runtime job worker.
 type JobRequest struct {
 	Name string
 	Task string
+	// Wait makes the call wait for the job: the job's output is the call's
+	// result. Without it the call goes on, and the output arrives later as
+	// an inbox message.
+	Wait bool
 }
 
-// Parent-facing job states. A specialist child waiting for input stays running.
-const (
-	JobRunning     = "running"
-	JobCompleted   = "completed"
-	JobFailed      = "failed"
-	ChildRunning   = JobRunning
-	ChildCompleted = JobCompleted
-	ChildFailed    = JobFailed
-)
-
-// HarnessRuntime is the tool-facing hook for one harness turn.
-// Tools emit progress, read/write user session state, Park, and
-// run specialists or schedule jobs of this session. Session modules (plan,
-// permissions, on-call) are not on this interface.
-//
-// Built-in spawn_specialist / list_children / cancel_child call these.
-// Host tools may call them too. The loop never matches those tool names.
-type HarnessRuntime interface {
-	EmitUpdate(message string)
-	StateGet(key string) (any, bool)
-	StateSet(key string, value any) error
-	StateDelete(key string)
-	// Park writes pending for this tool call and returns the interrupt as
-	// error. After Resume it returns the resolved interrupt and a nil error.
-	Park(kind string, payload []byte) (Interrupt, error)
-	CurrentToolCallID() string
-
-	// RunSpecialist queues a blocking specialist session.
-	// WaitFor is the child session the caller must wait on. Output is the
-	// child's text when the host already finished that session. A host sets
-	// one of them. This is not a background job: no inbox message.
-	RunSpecialist(ctx context.Context, name, task string) (SpecialistResult, error)
-	// Schedule starts a job of this session. It does not wait.
-	// Name is a registered specialist or Runtime job worker. The result
-	// arrives later as an inbox message. Pass the id to Jobs or CancelJob.
-	Schedule(ctx context.Context, job JobRequest) (Job, error)
-	// Jobs lists this session's jobs. Waiting specialist children appear as running.
-	Jobs() []Job
-	// CancelJob stops one job of this session and drops it from Jobs.
-	CancelJob(ctx context.Context, id string) error
-}
-
-// SpecialistResult is the outcome of a blocking specialist request.
-// WaitFor means the child session is not finished. The session loop waits
-// for that id, then records the tool result. Output is set when the child
-// already finished inside the call.
-type SpecialistResult struct {
-	Output  string
-	WaitFor string
-}
+// JobRunning is a listed job's state. Jobs lists only running jobs: a
+// finished one leaves the list when its result arrives. A specialist child
+// waiting for input stays running.
+const JobRunning = "running"
 
 // RegisterInterrupt registers a custom interrupt factory for session rehydrate.
 func RegisterInterrupt(factory func() Interrupt) {
-	registerInterrupt(factory)
+	intr := factory()
+	name := intr.TypeName()
+	if _, ok := interruptFactories[name]; ok {
+		panic(fmt.Sprintf("interrupt type %q registered twice", name))
+	}
+	interruptFactories[name] = factory
 }

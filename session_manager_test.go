@@ -1,553 +1,127 @@
 package tacklr
 
 import (
-	"encoding/json"
-	"strings"
+	"errors"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/brain/storetest"
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
+	"github.com/ryanaldo34/tacklr/brain"
 )
 
-// TestCheckpointer_roundTrip is the durable session outcome: plan, user state,
-// and window survive Capture → Apply on a fresh manager.
-func TestCheckpointer_roundTrip(t *testing.T) {
+// TestCall_readsItsOwnWritesAndCommitAppliesThem: a call sees its own state
+// writes over the committed state, the committed state does not change
+// until its writes are applied, and a value JSON cannot encode is refused.
+func TestCall_readsItsOwnWritesAndCommitAppliesThem(t *testing.T) {
 	sm := newSessionManager()
-	sm.Plan.SetDocument("plan")
-	sm.Plan.Set([]Todo{{Title: "A", Status: TodoStatusPending}})
-	rt := newSessionRuntime(func() chan StreamEvent {
-		c := make(chan StreamEvent, 8)
-		go func() {
-			for range c {
-			}
-		}()
-		return c
-	}(), sm)
-	rt.StateSet("k", "v")
+	sm.setState(map[string]any{"k": "committed", "gone": 1, "kept": true})
+	cc := callRuntime(sm, "c1")
 
-	cp, err := captureCheckpoint(
-		[]*Message{{Role: RoleUser, Content: "hi"}},
-		sm,
-		map[string]PendingToolCall{},
-	)
-	if err != nil {
-		t.Fatal(err)
+	setErr := cc.StateSet("k", "mine")
+	cc.StateDelete("gone")
+	badErr := cc.StateSet("fn", func() {})
+	mine, _ := cc.StateGet("k")
+	_, gone := cc.StateGet("gone")
+	kept, _ := cc.StateGet("kept")
+	before, _ := sm.state("k")
+	cc.commit()
+	after, _ := sm.state("k")
+	_, goneAfter := sm.state("gone")
+
+	if setErr != nil || mine != "mine" || gone || kept != true {
+		t.Fatalf("the call read k=%v gone=%v kept=%v (set %v), want its own writes over the committed state", mine, gone, kept, setErr)
 	}
-	sm2 := newSessionManager()
-	applied, err := applyCheckpoint(*cp, sm2)
-	if err != nil {
-		t.Fatal(err)
+	if badErr == nil {
+		t.Fatal("a value JSON cannot encode was stored")
 	}
-	if len(applied.Window) != 1 {
-		t.Fatalf("window=%d", len(applied.Window))
-	}
-	if sm2.Plan.Document() != "plan" {
-		t.Fatal("plan doc")
-	}
-	rt2 := newSessionRuntime(func() chan StreamEvent {
-		c := make(chan StreamEvent, 8)
-		go func() {
-			for range c {
-			}
-		}()
-		return c
-	}(), sm2)
-	if v, ok := rt2.StateGet("k"); !ok || v != "v" {
-		t.Fatalf("state %v %v", v, ok)
+	if before != "committed" || after != "mine" || goneAfter {
+		t.Fatalf("committed k = %v before and %v after, gone after = %v, want the writes applied only at commit", before, after, goneAfter)
 	}
 }
 
-// TestCheckpointer_resolvedToolPermissionKeepsAllowed: Temporal reconstructs
-// the harness between ApplyResume and RunToolCall; Allowed must survive.
-func TestCheckpointer_resolvedToolPermissionKeepsAllowed(t *testing.T) {
-	sm := newSessionManager()
-	parked := &ToolPermissionInterrupt{
-		ToolName: "sensitive",
-		Options:  DefaultPermissionOptions(),
-	}
-	if err := sm.Park("call_sens", parked); err == nil {
-		t.Fatal("park should return interrupt as error")
-	}
-	if _, err := sm.Resume("call_sens", []byte(`{"optionId":"allow-once"}`)); err != nil {
-		t.Fatal(err)
-	}
+// TestRuntime_emitUpdateNamesTheCallAndNeverBlocks covers EmitUpdate.
+func TestRuntime_emitUpdateNamesTheCallAndNeverBlocks(t *testing.T) {
+	ch := make(chan session.Event, 1)
+	cc := newCallContext(ch, &Harness{session: newSessionManager()}, ToolRun{}, roundCall{Call: message.ToolCall{ID: "id1", CallID: "id1"}}, callWrites{})
 
-	cp, err := captureCheckpoint(
-		[]*Message{{Role: RoleUser, Content: "run"}},
-		sm,
-		map[string]PendingToolCall{
-			"call_sens": {ToolCall: &ToolCall{ID: "call_sens", Name: "sensitive"}, InterruptActive: false},
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sm2 := newSessionManager()
-	applied, err := applyCheckpoint(*cp, sm2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ptc, ok := applied.PendingToolCalls["call_sens"]
-	if !ok || ptc.InterruptActive || ptc.ToolCall == nil {
-		t.Fatalf("pending after apply: %+v", applied.PendingToolCalls)
-	}
-	got, ok := sm2.TakeResolved("call_sens")
-	if !ok {
-		t.Fatal("re-entry TakeResolved")
-	}
-	perm, ok := got.(*ToolPermissionInterrupt)
-	if !ok || !perm.Allowed || perm.SelectedOptionID != "allow-once" {
-		t.Fatalf("Allowed lost across checkpoint: %+v", got)
-	}
-}
+	cc.EmitUpdate("hello")
+	cc.EmitUpdate("dropped: the channel is full")
 
-func TestCheckpointer_rejectsCorruptWindowBeforeApplyingState(t *testing.T) {
-	// Arrange
-	sm := newSessionManager()
-	if err := sm.StateSet("existing", "kept"); err != nil {
-		t.Fatal(err)
-	}
-	checkpoint := SessionCheckpoint{
-		ContextWindow: []*Message{nil},
-	}
-
-	// Act
-	_, err := applyCheckpoint(checkpoint, sm)
-
-	// Assert
-	if err == nil || !strings.Contains(err.Error(), "invalid context window") {
-		t.Fatalf("Apply error = %v", err)
-	}
-	if value, ok := sm.StateGet("existing"); !ok || value != "kept" {
-		t.Fatalf("state changed after rejected checkpoint: %v %v", value, ok)
-	}
-}
-
-// TestCheckpointer_nilManager_errors is the Capture/Apply guard outcome.
-func TestCheckpointer_nilManager_errors(t *testing.T) {
-	if _, err := captureCheckpoint(nil, nil, nil); err == nil {
-		t.Fatal("want capture error")
-	}
-	if _, err := applyCheckpoint(SessionCheckpoint{}, nil); err == nil {
-		t.Fatal("want apply error")
-	}
-}
-
-func TestCheckpointer_rejectsInvalidWindowOnCapture(t *testing.T) {
-	// Arrange
-	sm := newSessionManager()
-
-	// Act
-	_, err := captureCheckpoint(
-		[]*Message{nil},
-		sm,
-		nil,
-	)
-
-	// Assert
-	if err == nil || !strings.Contains(err.Error(), "invalid context window") {
-		t.Fatalf("Capture error = %v", err)
-	}
-}
-
-func TestCheckpointer_captureRejectsUnmarshallableUserState(t *testing.T) {
-	sm := newSessionManager()
-	if err := sm.StateSet("bad", make(chan int)); err != nil {
-		t.Fatal(err)
-	}
-	_, err := captureCheckpoint(
-		[]*Message{{Role: RoleUser, Content: "go"}},
-		sm,
-		nil,
-	)
-	if err == nil || !strings.Contains(err.Error(), "checkpoint user state") {
-		t.Fatalf("Capture error = %v", err)
-	}
-}
-
-func TestCheckpointer_applyRejectsUnsupportedVersion(t *testing.T) {
-	// Arrange
-	sm := newSessionManager()
-	checkpoint := SessionCheckpoint{
-		ContextWindow: []*Message{{Role: RoleUser, Content: "x"}},
-		state:         sessionState{Version: CheckpointVersion + 1},
-	}
-
-	// Act
-	_, err := applyCheckpoint(checkpoint, sm)
-
-	// Assert
-	if err == nil || !strings.Contains(err.Error(), "unsupported checkpoint version") {
-		t.Fatalf("Apply error = %v", err)
-	}
-}
-
-// TestCheckpointer_applyNilMaps_defaults empty pending/interrupt maps.
-func TestCheckpointer_applyNilMaps_defaults(t *testing.T) {
-	sm := newSessionManager()
-	checkpoint := SessionCheckpoint{
-		ContextWindow: []*Message{{Role: RoleUser, Content: "x"}},
-		state:         sessionState{Version: CheckpointVersion},
-	}
-	applied, err := applyCheckpoint(checkpoint, sm)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if applied.PendingToolCalls == nil {
-		t.Fatal("expected non-nil pending map")
-	}
-}
-
-// TestPlanStore_lifecycle covers set/get/document/updated/export/load outcomes.
-func TestPlanStore_lifecycle(t *testing.T) {
-	p := newPlanStore()
-	if p.HasActive() {
-		t.Fatal("empty has active")
-	}
-	p.Set([]Todo{{Title: "t1", Status: TodoStatusPending}})
-	if !p.HasActive() || len(p.Get()) != 1 {
-		t.Fatal("set/get")
-	}
-	todos, ok := p.ConsumeTodosUpdated()
-	if !ok || len(todos) != 1 || todos[0].Title != "t1" {
-		t.Fatalf("todos updated = %#v ok=%v", todos, ok)
-	}
-	if _, ok := p.ConsumeTodosUpdated(); ok {
-		t.Fatal("consume clears todos flag")
-	}
-	p.SetDocument("first")
-	if p.ConsumeDocumentUpdated() {
-		t.Fatal("initial document should not mark updated")
-	}
-	p.SetDocument("second")
-	if !p.ConsumeDocumentUpdated() {
-		t.Fatal("edit should mark updated")
-	}
-	if p.ConsumeDocumentUpdated() {
-		t.Fatal("consume clears flag")
-	}
-
-	p.Set(nil)
-	if p.Get() != nil {
-		t.Fatal("clear plan")
-	}
-	if cleared, ok := p.ConsumeTodosUpdated(); !ok || cleared != nil {
-		t.Fatalf("clear should notify, got %#v ok=%v", cleared, ok)
-	}
-}
-
-func TestSessionManager_stateAndPlanAreIsolated(t *testing.T) {
-	sm := newSessionManager()
-	rt := newSessionRuntime(func() chan StreamEvent {
-		c := make(chan StreamEvent, 8)
-		go func() {
-			for range c {
-			}
-		}()
-		return c
-	}(), sm)
-	if err := rt.StateSet("_plan", "host value"); err != nil {
-		t.Fatal(err)
-	}
-	if value, ok := rt.StateGet("_plan"); !ok || value != "host value" {
-		t.Fatal("host state was not stored independently")
-	}
-	if err := rt.StateSet("ok", 1); err != nil {
-		t.Fatal(err)
-	}
-	if v, ok := rt.StateGet("ok"); !ok || v != 1 {
-		t.Fatal("user state")
-	}
-	rt.StateDelete("ok")
-	if _, ok := rt.StateGet("ok"); ok {
-		t.Fatal("deleted")
-	}
-	rt.StateDelete("_plan")
-	if sm.Plan.HasActive() {
-		t.Fatal("no plan yet")
-	}
-	sm.Plan.Set([]Todo{{Title: "x", Status: TodoStatusPending}})
-	if !sm.Plan.HasActive() {
-		t.Fatal("active plan")
-	}
-}
-
-// TestSession_interrupts_parkResumeReentry is the interrupt lifecycle:
-// Park writes pending; invalid payload leaves the park; Resume then TakeResolved.
-func TestSession_interrupts_parkResumeReentry(t *testing.T) {
-	sm := newSessionManager()
-	ch := make(chan StreamEvent, 4)
-	rt := newSessionRuntime(ch, sm)
-	rt = rt.WithToolCallID("tc1")
-
-	// Unknown type.
-	if _, err := rt.Park("nope", nil); err == nil {
-		t.Fatal("want unknown type error")
-	}
-
-	_, err := rt.Park("user_selection_choice", []byte(`[{"title":"A"},{"title":"B"}]`))
-	if err == nil {
-		t.Fatal("park returns interrupt as error")
-	}
-	if !sm.HasPendingInterrupt() {
-		t.Fatal("Park must write pending")
-	}
-
-	// Invalid payload leaves the park in place.
-	if _, err := sm.Resume("tc1", []byte(`{}`)); err == nil {
-		t.Fatal("want invalid payload")
-	}
-	if !sm.HasPendingInterrupt() {
-		t.Fatal("invalid payload must leave park")
-	}
-	if _, err := sm.Resume("missing", []byte(`{"selectionIdx":0}`)); err == nil {
-		t.Fatal("want not found")
-	}
-
-	// Valid resume → resolved.
-	got, err := sm.Resume("tc1", []byte(`{"selectionIdx":1}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	usi, ok := got.(*UserSelectionInterrupt)
-	if !ok || usi.ConfirmedChoice == nil || usi.ConfirmedChoice.Title != "B" {
-		t.Fatalf("choice = %+v", got)
-	}
-	resolved, ok := sm.TakeResolved("tc1")
-	if !ok || resolved == nil {
-		t.Fatal("take resolved")
-	}
-	if _, ok := sm.TakeResolved("tc1"); ok {
-		t.Fatal("already taken")
-	}
-
-	// Park after resolve short-circuits with resolved value (re-entry).
-	rt = rt.WithToolCallID("tc2")
-	_, err = rt.Park("user_selection_choice", []byte(`[{"title":"X"}]`))
-	if err == nil {
-		t.Fatal("park")
-	}
-	if _, err := sm.Resume("tc2", []byte(`{"selectionIdx":0}`)); err != nil {
-		t.Fatal(err)
-	}
-	intr, err := rt.Park("user_selection_choice", []byte(`[{"title":"Y"}]`))
-	if err != nil || intr == nil {
-		t.Fatalf("want resolved return, err=%v intr=%v", err, intr)
-	}
-
-	parked := &UserSelectionInterrupt{Options: []UserChoice{{Title: "Z"}}}
-	if err = sm.Park("tc3", parked); err == nil {
-		t.Fatal("Park returns interrupt as error")
-	}
-	if err := sm.Park("tc3", nil); err == nil {
-		t.Fatal("nil park")
-	}
-	if err := sm.Park("", parked); err == nil {
-		t.Fatal("empty tool call id")
-	}
-	if _, err := sm.Resume("tc3", []byte(`{"selectionIdx":0}`)); err != nil {
-		t.Fatal(err)
-	}
-	got, ok = sm.TakeResolved("tc3")
-	if !ok || got == nil {
-		t.Fatalf("TakeResolved after resume got=%v", got)
-	}
-
-	// Tool permission park + resume.
-	rt = rt.WithToolCallID("perm")
-	_, err = rt.Park("tool_permission", []byte(`{"toolName":"rm"}`))
-	if err == nil {
-		t.Fatal("park permission")
-	}
-	if _, err := sm.Resume("perm", []byte(`{"optionId":"allow-once"}`)); err != nil {
-		t.Fatal(err)
-	}
-
-	sm.ClearInterrupts()
-	rt = rt.WithToolCallID("sm1")
-	_, err = rt.Park("tool_permission", []byte(`{"toolName":"ls"}`))
-	if err == nil {
-		t.Fatal("park after ClearInterrupts")
-	}
-	if !sm.HasPendingInterrupt() {
-		t.Fatal("pending after Park")
-	}
-	if _, err := sm.Resume("sm1", []byte(`{"optionId":"allow-once"}`)); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestRuntime_emitAndState_channels covers EmitUpdate and session State.
-func TestRuntime_emitAndState_channels(t *testing.T) {
-	ch := make(chan StreamEvent, 2)
-	sm := newSessionManager()
-	rt := newSessionRuntime(ch, sm)
-	rt = rt.WithToolCallID("id1")
-	rt.EmitUpdate("hello")
-	ev := <-ch
-	if ev.Type != StreamEventToolUpdate || ev.Content != "hello" || ev.MessageID != "id1" {
+	if ev := <-ch; ev.Type != session.EventToolUpdate || ev.Content != "hello" || ev.MessageID != "id1" {
 		t.Fatalf("update = %+v", ev)
 	}
-
-	// Full channel drops non-blocking.
-	full := make(chan StreamEvent)
-	rtFull := newSessionRuntime(full, sm)
-	rtFull.EmitUpdate("drop")
-
-	// SessionManager state without a turn bus.
-	if err := sm.StateSet("z", true); err != nil {
-		t.Fatal(err)
-	}
-	if v, ok := sm.StateGet("z"); !ok || v != true {
-		t.Fatal("session state")
-	}
-	sm.StateDelete("z")
 }
 
-func TestSessionManager_checkpointInterruptsRoundTrip(t *testing.T) {
-	sm := newSessionManager()
-	rt := newSessionRuntime(func() chan StreamEvent {
-		c := make(chan StreamEvent, 8)
-		go func() {
-			for range c {
-			}
-		}()
-		return c
-	}(), sm)
-	rt = rt.WithToolCallID("c1")
-	_, parkErr := rt.Park("user_selection_choice", []byte(`[{"title":"A"}]`))
-	if parkErr == nil {
-		t.Fatal("park")
-	}
-	rt.StateSet("u", "v")
-	sm.Plan.SetDocument("doc")
-	sm.Plan.Set([]Todo{{Title: "T", Status: TodoStatusPending}})
+// TestCall_parkResumeAndRunAgain is a call's park lifecycle: park, an
+// invalid answer leaves it unanswered, a valid one answers it, and the
+// call's next run takes the answer.
+func TestCall_parkResumeAndRunAgain(t *testing.T) {
+	cc := callRuntime(newSessionManager(), "tc1")
 
-	checkpoint, err := captureCheckpoint(
-		[]*Message{{Role: RoleUser, Content: "go"}},
-		sm,
-		nil,
-	)
+	_, unknownType := cc.Park(unregisteredOnCall{})
+	noPark := cc.resume([]byte(`{"selectionIdx":0}`))
+	_, parked := cc.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}})
+	invalid := cc.resume([]byte(`{}`))
+	_, beforeAnswer := cc.takeAnswer("user_selection_choice")
+	answerErr := cc.resume([]byte(`{"selectionIdx":1}`))
+	twice := cc.resume([]byte(`{"selectionIdx":1}`))
+	got, runErr := cc.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}})
+
+	var intr Interrupt
+	if unknownType == nil || !errors.Is(noPark, ErrInterruptNotFound) || !errors.As(parked, &intr) {
+		t.Fatalf("unknown type %v, answer with no park %v, park %v", unknownType, noPark, parked)
+	}
+	if invalid == nil || beforeAnswer || answerErr != nil || !errors.Is(twice, ErrInterruptNotFound) {
+		t.Fatalf("invalid %v, taken before an answer %v, answer %v, twice %v", invalid, beforeAnswer, answerErr, twice)
+	}
+	_, again := cc.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}})
+	if usi, ok := got.(*UserSelectionInterrupt); runErr != nil || !ok || usi.ConfirmedChoice.Title != "B" || !errors.As(again, &intr) {
+		t.Fatalf("run after resume = %+v %v, then a park %v; want the answer taken once", got, runErr, again)
+	}
+}
+
+// TestCall_readsItsOwnAnswersCursorsAndPlan: a call reads back its own
+// permission answer, search cursor and plan changes before they commit; a
+// once-answer is not remembered.
+func TestCall_readsItsOwnAnswersCursorsAndPlan(t *testing.T) {
+	sm := newSessionManager()
+	c := callRuntime(sm, "c1")
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	sm2 := newSessionManager()
-	if _, err := applyCheckpoint(*checkpoint, sm2); err != nil {
-		t.Fatal(err)
-	}
-	if sm2.Plan.Document() != "doc" {
-		t.Fatal("plan doc reload")
-	}
-	rt2 := newSessionRuntime(func() chan StreamEvent {
-		c := make(chan StreamEvent, 8)
-		go func() {
-			for range c {
-			}
-		}()
-		return c
-	}(), sm2)
-	if v, ok := rt2.StateGet("u"); !ok || v != "v" {
-		t.Fatal("user state reload")
-	}
-	if !sm2.HasPendingInterrupt() {
-		t.Fatal("pending reload")
-	}
-
-	// A checkpoint whose interrupts do not decode is not applied.
-	for name, state := range map[string]sessionState{
-		"pending":  {Version: CheckpointVersion, PendingInterrupts: []byte(`{`)},
-		"resolved": {Version: CheckpointVersion, ResolvedInterrupts: []byte(`{`)},
-	} {
-		if _, err := applyCheckpoint(SessionCheckpoint{state: state}, newSessionManager()); err == nil {
-			t.Errorf("apply with bad %s interrupts succeeded", name)
+	scope := brain.Scope{Namespace: storetest.Namespace(t, "org", "acme")}
+	for _, title := range []string{"one fact", "two fact"} {
+		if _, err := eng.Save(t.Context(), scope, brain.Object{Kind: "Fact", Title: title}); err != nil {
+			t.Fatal(err)
 		}
 	}
-}
-
-// TestInterruptMap_unknownType_errors on polymorphic unmarshal.
-func TestInterruptMap_unknownType_errors(t *testing.T) {
-	// Capture with a real interrupt then corrupt type via raw JSON.
-	sm := newSessionManager()
-	rt := newSessionRuntime(func() chan StreamEvent {
-		c := make(chan StreamEvent, 8)
-		go func() {
-			for range c {
-			}
-		}()
-		return c
-	}(), sm)
-	rt = rt.WithToolCallID("x")
-	_, parkErr := rt.Park("tool_permission", []byte(`{"toolName":"t"}`))
-	if parkErr == nil {
-		t.Fatal("park")
-	}
-	// Build envelope with unknown type.
-	bad, _ := json.Marshal(map[string]any{
-		"x": map[string]any{"type": "not_registered", "data": map[string]any{}},
-	})
-	apply := func(pending []byte) error {
-		_, err := applyCheckpoint(SessionCheckpoint{state: sessionState{Version: CheckpointVersion, PendingInterrupts: pending}}, newSessionManager())
-		return err
-	}
-	if err := apply(bad); err == nil {
-		t.Fatal("want unknown type")
-	}
-	// Bad data body for known type.
-	badData, _ := json.Marshal(map[string]any{
-		"x": map[string]any{"type": "tool_permission", "data": "not-an-object"},
-	})
-	if err := apply(badData); err == nil {
-		t.Fatal("want data unmarshal error")
-	}
-}
-
-// TestCheckpointer_withPendingToolMaps_roundTrip keeps park maps.
-func TestCheckpointer_withPendingToolMaps_roundTrip(t *testing.T) {
-	sm := newSessionManager()
-	ptc := map[string]PendingToolCall{
-		"t1": {ToolCall: &ToolCall{ID: "t1", Name: "x"}, InterruptActive: true},
-	}
-	cp, err := captureCheckpoint(nil, sm, ptc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sm2 := newSessionManager()
-	applied, err := applyCheckpoint(*cp, sm2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !applied.PendingToolCalls["t1"].InterruptActive {
-		t.Fatalf("%+v", applied)
-	}
-}
-
-type ghostInterrupt struct{}
-
-func (ghostInterrupt) TypeName() string           { return "not_registered_ghost" }
-func (ghostInterrupt) Serialize() ([]byte, error) { return []byte(`{}`), nil }
-func (ghostInterrupt) Return([]byte) error        { return nil }
-func (ghostInterrupt) Error() string              { return "ghost" }
-
-func TestCheckpointer_uncloneableInterruptFailsSnapshot(t *testing.T) {
-	window := []*Message{{Role: RoleUser, Content: "hi"}}
-
-	pending := newSessionManager()
-	if err := pending.Park("tc1", ghostInterrupt{}); err == nil {
-		t.Fatal("park returns the interrupt")
-	}
-	if !pending.HasPendingInterrupt() {
-		t.Fatal("a park JSON clone cannot copy is still pending")
-	}
-	if _, err := captureCheckpoint(window, pending, nil); err == nil || !strings.Contains(err.Error(), "pending interrupts") {
-		t.Fatalf("pending clone: %v", err)
+	page, err := eng.Search(t.Context(), scope, brain.SearchRequest{Query: "fact", Limit: 1})
+	if err != nil || page.Rest.Empty() {
+		t.Fatalf("search = %+v %v, want a page with more", page, err)
 	}
 
-	resolved := newSessionManager()
-	if err := resolved.Park("tc1", ghostInterrupt{}); err == nil {
-		t.Fatal("park returns the interrupt")
+	c.rememberAnswer(&ToolPermissionInterrupt{ToolName: "once", SelectedKind: PermissionAllowOnce})
+	c.rememberAnswer(&ToolPermissionInterrupt{ToolName: "w", SelectedKind: PermissionRejectAlways})
+	c.rememberAnswer(&ToolPermissionInterrupt{ToolName: "w", SelectedKind: PermissionAllowAlways})
+	c.setRest("search", page.Rest)
+	created, createErr := c.changePlan(planOp{Create: &createTodosArgs{Plan: "p", Todos: []Todo{{Title: "a"}, {Title: "b"}}}})
+	completed, completeErr := c.changePlan(planOp{Complete: &completeTodoArgs{Title: "a"}})
+	todos, doc := c.plan()
+
+	if c.decision("w") != permAllowAlways || c.decision("once") != permNone || sm.Permissions.Decision("w") != permNone {
+		t.Fatalf("decisions w=%v once=%v committed w=%v, want the call's last always-answer and nothing committed", c.decision("w"), c.decision("once"), sm.Permissions.Decision("w"))
 	}
-	if _, err := resolved.Resume("tc1", nil); err != nil {
-		t.Fatal(err)
+	if c.rest("search").Empty() || !sm.Search.Rest("search").Empty() {
+		t.Fatal("rest: want the call's own cursor, and none committed")
 	}
-	if _, err := captureCheckpoint(window, resolved, nil); err == nil || !strings.Contains(err.Error(), "resolved interrupts") {
-		t.Fatalf("resolved clone: %v", err)
+	if createErr != nil || completeErr != nil || created.Effect != EffectInstallPlanDocument || completed.Effect != EffectHandoff {
+		t.Fatalf("plan changes = %+v %v, %+v %v", created, createErr, completed, completeErr)
+	}
+	if doc != "p" || len(todos) != 2 || todos[0].Status != TodoStatusCompleted || todos[1].Status != TodoStatusInProgress || sm.Plan.HasActive() {
+		t.Fatalf("plan the call sees = %+v %q, committed active %v, want both changes on top of an empty committed plan", todos, doc, sm.Plan.HasActive())
 	}
 }

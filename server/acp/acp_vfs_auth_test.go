@@ -8,10 +8,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -21,24 +26,24 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		if n := len(msgs); n > 0 {
 			last := msgs[n-1]
-			if last != nil && last.Role == tacklr.RoleTool {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: last.Content, IsComplete: true}
+			if last != nil && last.Role == message.RoleTool {
+				ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: last.Content, IsComplete: true}
 				return
 			}
 		}
 		ch <- tacklr.LLMResponseChunk{
-			Type: tacklr.StreamEventFunctionCall,
-			ToolCalls: []tacklr.ToolCall{{
+			Type: session.EventFunctionCall,
+			ToolCalls: []message.ToolCall{{
 				ID: "read-1", CallID: "read-1", Name: "read",
 				Arguments: `{"path":"/workspace/docs/hello.txt"}`,
 			}},
 			IsComplete: true,
 		}
 	})
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{OpenVFS: func(ctx context.Context, sid string, req vfs.Request) (*vfs.MountSession, error) {
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{OpenVFS: func(ctx context.Context, sid string, req vfs.Request) (*vfs.MountSession, error) {
 		if _, ok := vfs.BindingByName(req.Bindings, "docs"); !ok {
 			if _, ok := vfs.BindingByName(req.Bindings, "local"); !ok {
 				return vfs.Tree()(ctx, sid, req)
@@ -48,13 +53,13 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	}})
 
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sessionID := acpRPCResult(t, recNew)["sessionId"].(string)
+	sessionID := acptest.Result(t, recNew)["sessionId"].(string)
 
 	w := &recordingMessageWriter{}
 	bridge := acp.NewClientBridge(w)
 	bridge.SetCaps(acp.ClientCapabilities{VFSTokenRefresh: true})
 	proto := acpProtocolFor(r)
-	env := server.ProtocolEnv{Runtime: r.Runtime, Agent: r.Agent, Conn: &server.Conn{Writer: w, Ask: bridge}}
+	env := server.ProtocolEnv{Client: r.Client, Agent: r.Agent, Conn: &server.Conn{Writer: w, Ask: bridge}}
 	bind := `{"jsonrpc":"2.0","id":2,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[{"provider":"local","params":{"name":"docs"},"auth":{"token":"tok1"}}]}}`
 	if err := proto.HandleInbound(t.Context(), env, []byte(bind)); err != nil {
 		t.Fatal(err)
@@ -84,19 +89,19 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	if err := proto.HandleInbound(t.Context(), env, []byte(withExpiry)); err != nil {
 		t.Fatal(err)
 	}
-	emptyBackends := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":32,"method":"_tacklr/vfs/bind","params":{"sessionId":"`+sessionID+`","backends":[]}}`)
+	emptyBackends := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":32,"method":"_tacklr/vfs/bind","params":{"sessionId":"`+sessionID+`","backends":[]}}`)
 	if emptyBackends == nil {
 		t.Fatal("want backends required")
 	}
-	missingRefresh := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":33,"method":"_tacklr/vfs/refresh","params":{"sessionId":"`+sessionID+`","provider":"ghost","auth":{"token":"x"}}}`)
+	missingRefresh := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":33,"method":"_tacklr/vfs/refresh","params":{"sessionId":"`+sessionID+`","provider":"ghost","auth":{"token":"x"}}}`)
 	if missingRefresh == nil {
 		t.Fatal("want no vfs binding")
 	}
-	noProvider := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":34,"method":"_tacklr/vfs/refresh","params":{"sessionId":"`+sessionID+`"}}`)
+	noProvider := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":34,"method":"_tacklr/vfs/refresh","params":{"sessionId":"`+sessionID+`"}}`)
 	if noProvider == nil {
 		t.Fatal("want provider required")
 	}
-	noSession := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":35,"method":"_tacklr/vfs/unbind","params":{}}`)
+	noSession := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":35,"method":"_tacklr/vfs/unbind","params":{}}`)
 	if noSession == nil {
 		t.Fatal("want sessionId required")
 	}

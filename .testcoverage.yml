@@ -34,13 +34,13 @@ override:
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/brain$
     threshold: 85
-  # Live Testcontainers Helix (CI pulls enterprise-dev).
+  # Live Testcontainers Helix.
   - path: github.com/ryanaldo34/tacklr/brain/helixgraph$
     threshold: 90
-  # Live Testcontainers Postgres (CI builds tacklr-pg-brain).
+  # Live Testcontainers Postgres (pgvector).
   - path: github.com/ryanaldo34/tacklr/brain/postgres$
     threshold: 95
-  # VFS including MinIO/Azurite Testcontainers.
+  # VFS including S3 (RustFS) and Azurite Testcontainers.
   - path: github.com/ryanaldo34/tacklr/vfs$
     threshold: 85
   - path: github.com/ryanaldo34/tacklr/vfsindex$
@@ -48,16 +48,17 @@ override:
 
 exclude:
   # Repo-relative paths (matched as regexes against file paths).
-  # cmd/*: mains / local harnesses. testkit/durtest/livesess: test doubles.
+  # cmd/*: mains / local harnesses. testkit/livesess: test doubles.
   paths:
     - cmd/
     - internal/testkit
     - internal/testdrive
     - internal/testhttp
-    - internal/durtest
     - internal/livesess
+    - internal/acptest
     # Store isolation contract, run from each store's tests.
     - brain/storetest
+    - session/storetest
     - vfs/internal/vfstest
     - brain/graphtest
     # In-process git host (HTTP + SSH) for vfs.Git tests.
@@ -66,6 +67,7 @@ exclude:
     # container runtime, not a product outcome.
     - internal/temporaldocker
     - internal/helixtest
+    - internal/s3test
     # Exporter constructors, not product outcomes.
     - telemetry/otel.go
 

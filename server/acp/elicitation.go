@@ -102,7 +102,7 @@ func ElicitationResultToSelectionPayload(raw json.RawMessage, opts []tacklr.User
 	return action, resolution, err
 }
 
-// InterruptEventEnvelope is the harness StreamEventInterrupt Data shape.
+// InterruptEventEnvelope is the harness session.EventInterrupt Data shape.
 type InterruptEventEnvelope struct {
 	InterruptId string          `json:"interruptId"`
 	Type        string          `json:"type"`

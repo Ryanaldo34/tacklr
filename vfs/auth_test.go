@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -18,19 +20,19 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 	_ = ctx
 	auth := vfs.NewSessionAuth()
 	tok := "secret-access-token-xyz"
-	if err := auth.Bind("sess-1", vfs.Binding{
-		Provider: vfs.ProviderGoogleDrive,
+	if err := auth.Bind("sess-1", mount.Binding{
+		Provider: mount.ProviderGoogleDrive,
 		Point:    "/contracts",
-		Auth:     vfs.Credential{Token: tok},
-		Params:   map[string]string{vfs.ParamFolderID: "fld-a"},
+		Auth:     mount.Credential{Token: tok},
+		Params:   map[string]string{mount.ParamFolderID: "fld-a"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := auth.Bind("sess-1", vfs.Binding{
-		Provider: vfs.ProviderGoogleDrive,
+	if err := auth.Bind("sess-1", mount.Binding{
+		Provider: mount.ProviderGoogleDrive,
 		Point:    "/notes",
-		Auth:     vfs.Credential{Token: tok},
-		Params:   map[string]string{vfs.ParamFolderID: "fld-b"},
+		Auth:     mount.Credential{Token: tok},
+		Params:   map[string]string{mount.ParamFolderID: "fld-b"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -44,13 +46,13 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 		if b.Auth.Token != "" {
 			t.Fatalf("Bindings leaked token: %+v", b)
 		}
-		if b.Provider != vfs.ProviderGoogleDrive {
+		if b.Provider != mount.ProviderGoogleDrive {
 			t.Fatalf("provider = %q", b.Provider)
 		}
-		if b.Point != vfs.WorkspacePoint {
+		if b.Point != mount.WorkspacePoint {
 			t.Fatalf("point = %q", b.Point)
 		}
-		aliases[b.Params[vfs.ParamName]] = true
+		aliases[b.Params[mount.ParamName]] = true
 		raw, err := json.Marshal(b)
 		if err != nil {
 			t.Fatal(err)
@@ -63,20 +65,20 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 		t.Fatalf("aliases = %v", aliases)
 	}
 
-	c, ok := auth.Credential("sess-1", vfs.ProviderGoogleDrive)
+	c, ok := auth.Credential("sess-1", mount.ProviderGoogleDrive)
 	if !ok || c.Token != tok {
 		t.Fatalf("Credential = %+v ok=%v", c, ok)
 	}
-	h1 := auth.Holder("sess-1", vfs.ProviderGoogleDrive)
+	h1 := auth.Holder("sess-1", mount.ProviderGoogleDrive)
 	if h1 == nil {
 		t.Fatal("missing holder")
 	}
 
-	next := vfs.Credential{Token: "rotated-token"}
-	if err := auth.Refresh("sess-1", vfs.ProviderGoogleDrive, next); err != nil {
+	next := mount.Credential{Token: "rotated-token"}
+	if err := auth.Refresh("sess-1", mount.ProviderGoogleDrive, next); err != nil {
 		t.Fatal(err)
 	}
-	if auth.Holder("sess-1", vfs.ProviderGoogleDrive) != h1 {
+	if auth.Holder("sess-1", mount.ProviderGoogleDrive) != h1 {
 		t.Fatal("refresh must keep the shared holder")
 	}
 	if got := h1.Current().Token; got != "rotated-token" {
@@ -89,7 +91,7 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 	if !auth.HasBindings("sess-1") {
 		t.Fatal("notes should remain")
 	}
-	if _, ok := auth.Credential("sess-1", vfs.ProviderGoogleDrive); !ok {
+	if _, ok := auth.Credential("sess-1", mount.ProviderGoogleDrive); !ok {
 		t.Fatal("token should remain while notes is bound")
 	}
 	if err := auth.Unbind("sess-1", "/notes"); err != nil {
@@ -98,14 +100,14 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 	if auth.HasBindings("sess-1") {
 		t.Fatal("expected empty session")
 	}
-	if _, ok := auth.Credential("sess-1", vfs.ProviderGoogleDrive); ok {
+	if _, ok := auth.Credential("sess-1", mount.ProviderGoogleDrive); ok {
 		t.Fatal("holder should be gone after last unbind")
 	}
 
-	if err := auth.Bind("sess-2", vfs.Binding{
+	if err := auth.Bind("sess-2", mount.Binding{
 		Provider: "gdrive",
-		Auth:     vfs.Credential{Token: "t"},
-		Params:   map[string]string{vfs.ParamName: "legal"},
+		Auth:     mount.Credential{Token: "t"},
+		Params:   map[string]string{mount.ParamName: "legal"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -117,16 +119,16 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 
 func TestTokenHolder_proactiveRefreshCoalescesConcurrentCallers(t *testing.T) {
 	// Arrange
-	holder := vfs.NewTokenHolder(vfs.Credential{
+	holder := vfs.NewTokenHolder(mount.Credential{
 		Token:     "expiring",
 		ExpiresAt: time.Now().Add(10 * time.Second),
 	})
 	release := make(chan struct{})
 	var calls atomic.Int32
-	holder.SetRefresh(func(context.Context) (vfs.Credential, error) {
+	holder.SetRefresh(func(context.Context) (mount.Credential, error) {
 		calls.Add(1)
 		<-release
-		return vfs.Credential{
+		return mount.Credential{
 			Token:     "fresh",
 			ExpiresAt: time.Now().Add(time.Hour),
 		}, nil
@@ -166,20 +168,20 @@ func TestTokenHolder_proactiveRefreshCoalescesConcurrentCallers(t *testing.T) {
 
 func TestSessionAuth_bindRejects(t *testing.T) {
 	auth := vfs.NewSessionAuth()
-	tok := vfs.Credential{Token: "t"}
+	tok := mount.Credential{Token: "t"}
 	cases := []struct {
 		name string
 		sid  string
-		b    vfs.Binding
+		b    mount.Binding
 		want error
 	}{
-		{"empty session", "", vfs.Binding{Provider: "gdrive", Point: "/a", Auth: tok}, vfs.ErrInvalidPath},
-		{"empty token", "s", vfs.Binding{Provider: "gdrive", Point: "/a"}, nil},
-		{"empty provider", "s", vfs.Binding{Point: "/a", Auth: tok}, nil},
-		{"multi segment", "s", vfs.Binding{Provider: "gdrive", Point: "/a/b", Auth: tok}, vfs.ErrInvalidPath},
-		{"relative point", "s", vfs.Binding{Provider: "gdrive", Point: "contracts", Auth: tok}, vfs.ErrInvalidPath},
-		{"workspace without name", "s", vfs.Binding{Provider: "gdrive", Point: vfs.WorkspacePoint, Auth: tok}, nil},
-		{"reserved alias", "s", vfs.Binding{Provider: "gdrive", Auth: tok, Params: map[string]string{vfs.ParamName: "work"}}, vfs.ErrInvalidPath},
+		{"empty session", "", mount.Binding{Provider: "gdrive", Point: "/a", Auth: tok}, vfs.ErrInvalidPath},
+		{"empty token", "s", mount.Binding{Provider: "gdrive", Point: "/a"}, nil},
+		{"empty provider", "s", mount.Binding{Point: "/a", Auth: tok}, nil},
+		{"multi segment", "s", mount.Binding{Provider: "gdrive", Point: "/a/b", Auth: tok}, vfs.ErrInvalidPath},
+		{"relative point", "s", mount.Binding{Provider: "gdrive", Point: "contracts", Auth: tok}, vfs.ErrInvalidPath},
+		{"workspace without name", "s", mount.Binding{Provider: "gdrive", Point: mount.WorkspacePoint, Auth: tok}, nil},
+		{"reserved alias", "s", mount.Binding{Provider: "gdrive", Auth: tok, Params: map[string]string{mount.ParamName: "work"}}, vfs.ErrInvalidPath},
 	}
 	for _, tc := range cases {
 		err := auth.Bind(tc.sid, tc.b)
@@ -193,14 +195,14 @@ func TestSessionAuth_bindRejects(t *testing.T) {
 }
 
 func TestTokenHolder_refreshOnce(t *testing.T) {
-	h := vfs.NewTokenHolder(vfs.Credential{Token: "old"})
+	h := vfs.NewTokenHolder(mount.Credential{Token: "old"})
 	if err := h.RefreshOnce(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("no refresh func: %v", err)
 	}
 	n := 0
-	h.SetRefresh(func(ctx context.Context) (vfs.Credential, error) {
+	h.SetRefresh(func(ctx context.Context) (mount.Credential, error) {
 		n++
-		return vfs.Credential{Token: "new"}, nil
+		return mount.Credential{Token: "new"}, nil
 	})
 	if err := h.RefreshOnce(t.Context()); err != nil {
 		t.Fatal(err)
@@ -213,14 +215,14 @@ func TestTokenHolder_refreshOnce(t *testing.T) {
 		t.Fatalf("oauth token = %+v err=%v", tok, err)
 	}
 
-	h.SetRefresh(func(context.Context) (vfs.Credential, error) {
-		return vfs.Credential{}, vfs.ErrAuthExpired
+	h.SetRefresh(func(context.Context) (mount.Credential, error) {
+		return mount.Credential{}, vfs.ErrAuthExpired
 	})
 	if err := h.RefreshOnce(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("refresh expired: %v", err)
 	}
-	h.SetRefresh(func(context.Context) (vfs.Credential, error) {
-		return vfs.Credential{}, errors.New("client down")
+	h.SetRefresh(func(context.Context) (mount.Credential, error) {
+		return mount.Credential{}, errors.New("client down")
 	})
 	if err := h.RefreshOnce(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("wrap client error: %v", err)
@@ -230,19 +232,19 @@ func TestTokenHolder_refreshOnce(t *testing.T) {
 	if err := h.RefreshOnce(canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled refresh: %v", err)
 	}
-	empty := vfs.NewTokenHolder(vfs.Credential{})
+	empty := vfs.NewTokenHolder(mount.Credential{})
 	if _, err := empty.Token(); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("empty token: %v", err)
 	}
-	h.SetRefresh(func(context.Context) (vfs.Credential, error) {
-		return vfs.Credential{Token: "   "}, nil
+	h.SetRefresh(func(context.Context) (mount.Credential, error) {
+		return mount.Credential{Token: "   "}, nil
 	})
 	if err := h.RefreshOnce(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("empty token: %v", err)
 	}
 
 	var nilH *vfs.TokenHolder
-	nilH.Set(vfs.Credential{Token: "x"})
+	nilH.Set(mount.Credential{Token: "x"})
 	nilH.SetRefresh(nil)
 	if nilH.Current().Token != "" {
 		t.Fatal("nil holder Current")
@@ -257,28 +259,28 @@ func TestTokenHolder_refreshOnce(t *testing.T) {
 
 func TestSessionAuth_replaceAndUnbindProvider(t *testing.T) {
 	auth := vfs.NewSessionAuth()
-	first := vfs.Binding{
+	first := mount.Binding{
 		Provider: "gdrive", Point: "/contracts",
-		Auth: vfs.Credential{Token: "t1"}, Params: map[string]string{vfs.ParamFolderID: "a"},
+		Auth: mount.Credential{Token: "t1"}, Params: map[string]string{mount.ParamFolderID: "a"},
 	}
 	if err := auth.Bind("s", first); err != nil {
 		t.Fatal(err)
 	}
-	if err := auth.Bind("s", vfs.Binding{
+	if err := auth.Bind("s", mount.Binding{
 		Provider: "gdrive", Point: "/contracts",
-		Auth: vfs.Credential{Token: "t2"}, Params: map[string]string{vfs.ParamFolderID: "b"},
+		Auth: mount.Credential{Token: "t2"}, Params: map[string]string{mount.ParamFolderID: "b"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	got := auth.Bindings("s")
-	if len(got) != 1 || got[0].Params[vfs.ParamFolderID] != "b" {
+	if len(got) != 1 || got[0].Params[mount.ParamFolderID] != "b" {
 		t.Fatalf("replace bind = %+v", got)
 	}
 	if tok, _ := auth.Credential("s", "gdrive"); tok.Token != "t2" {
 		t.Fatalf("shared holder after replace = %q", tok.Token)
 	}
-	if err := auth.Bind("s", vfs.Binding{
-		Provider: "gdrive", Point: "/notes", Auth: vfs.Credential{Token: "t2"},
+	if err := auth.Bind("s", mount.Binding{
+		Provider: "gdrive", Point: "/notes", Auth: mount.Credential{Token: "t2"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -291,13 +293,13 @@ func TestSessionAuth_replaceAndUnbindProvider(t *testing.T) {
 	if err := auth.UnbindProvider("s", "gdrive"); !errors.Is(err, vfs.ErrNotMounted) {
 		t.Fatalf("second UnbindProvider: %v", err)
 	}
-	if err := auth.Refresh("s", "gdrive", vfs.Credential{Token: "x"}); err == nil {
+	if err := auth.Refresh("s", "gdrive", mount.Credential{Token: "x"}); err == nil {
 		t.Fatal("refresh after unbind")
 	}
-	if err := auth.Refresh("", "gdrive", vfs.Credential{Token: "x"}); err == nil {
+	if err := auth.Refresh("", "gdrive", mount.Credential{Token: "x"}); err == nil {
 		t.Fatal("refresh empty session")
 	}
-	if err := auth.Refresh("s", "gdrive", vfs.Credential{}); err == nil {
+	if err := auth.Refresh("s", "gdrive", mount.Credential{}); err == nil {
 		t.Fatal("refresh empty token")
 	}
 	if err := auth.Unbind("", "/contracts"); err == nil {
@@ -314,7 +316,7 @@ func TestSessionAuth_replaceAndUnbindProvider(t *testing.T) {
 	if err := nilA.Bind("s", first); err == nil {
 		t.Fatal("nil Bind")
 	}
-	if err := nilA.Refresh("s", "gdrive", vfs.Credential{Token: "t"}); err == nil {
+	if err := nilA.Refresh("s", "gdrive", mount.Credential{Token: "t"}); err == nil {
 		t.Fatal("nil Refresh")
 	}
 	if err := nilA.Unbind("s", "/contracts"); err == nil {

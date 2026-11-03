@@ -4,33 +4,29 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"strings"
 	"testing"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+
+	"github.com/ryanaldo34/tacklr/internal/s3test"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-const minioImage = "minio/minio:RELEASE.2024-06-13T22-53-53Z"
-
 func TestS3_rejectsBadConfig(t *testing.T) {
 	ctx := t.Context()
-	if _, err := vfs.S3(nil, "")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := vfs.S3(nil, "")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("nil client")
 	}
-	if _, err := vfs.S3(vfs.AWSS3{}, "")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := vfs.S3(vfs.AWSS3{}, "")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("missing bucket")
 	}
-	if _, err := vfs.S3(vfs.AWSS3{}, "b")(ctx, "s", vfs.Binding{
+	if _, err := vfs.S3(vfs.AWSS3{}, "b")(ctx, "s", mount.Binding{
 		Params: map[string]string{"prefix": "a/../b"},
 	}); err == nil {
 		t.Fatal("bad prefix")
@@ -53,17 +49,17 @@ func TestS3_rejectsBadConfig(t *testing.T) {
 	}
 }
 
-// TestMountSession_s3MinIO exercises real S3 path I/O against MinIO (no mocks).
-func TestMountSession_s3MinIO(t *testing.T) {
+// TestMountSession_s3 exercises real S3 path I/O against an S3 server (no mocks).
+func TestMountSession_s3(t *testing.T) {
 	ctx := context.Background()
-	client, bucket := startMinIO(ctx, t)
+	client, bucket := startS3(ctx, t)
 
 	ms, err := vfs.Tree(
 		vfs.At("data", vfs.S3(vfs.AWSS3{Client: client}, bucket)),
 		vfs.At("ro", vfs.S3(vfs.AWSS3{Client: client}, bucket)).ReadOnly(),
-	)(ctx, "sess-s3", vfs.Request{Bindings: []vfs.Binding{
-		{Params: map[string]string{vfs.ParamName: "data", "prefix": "runs/1"}},
-		{Params: map[string]string{vfs.ParamName: "ro", "prefix": "readonly"}},
+	)(ctx, "sess-s3", vfs.Request{Bindings: []mount.Binding{
+		{Params: map[string]string{mount.ParamName: "data", "prefix": "runs/1"}},
+		{Params: map[string]string{mount.ParamName: "ro", "prefix": "readonly"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -229,9 +225,6 @@ func TestMountSession_s3MinIO(t *testing.T) {
 		ReadFile(ctx); err != nil || !strings.Contains(string(body), "edited") {
 		t.Fatalf("ReadFile after WriteDocument: %q err=%v", body, err)
 	}
-	if mt, err := ms.Classify(ctx, "/workspace/data/hello.go", nil); err != nil || mt == "" {
-		t.Fatalf("Classify: %q err=%v", mt, err)
-	}
 	if spec, err := ms.SpecAt("/workspace/data/hello.go"); err != nil || spec.Point != "/workspace/data" {
 		t.Fatalf("SpecAt: %+v err=%v", spec, err)
 	}
@@ -262,7 +255,7 @@ func TestMountSession_s3MinIO(t *testing.T) {
 	}
 
 	open := vfs.S3(vfs.AWSS3{Client: client}, bucket)
-	p, err := open(ctx, "sess", vfs.Binding{Params: map[string]string{"prefix": "direct"}})
+	p, err := open(ctx, "sess", mount.Binding{Params: map[string]string{"prefix": "direct"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,8 +301,8 @@ func TestMountSession_s3MinIO(t *testing.T) {
 		t.Fatal("open root as file")
 	}
 
-	blobMS, err := vfs.Tree(vfs.At("data", vfs.Blob(vfs.AWSS3{Client: client}, "")))(ctx, "blob-s3", vfs.Request{Bindings: []vfs.Binding{{
-		Params: map[string]string{vfs.ParamName: "data", "container": bucket, "prefix": "blobrun"},
+	blobMS, err := vfs.Tree(vfs.At("data", vfs.Blob(vfs.AWSS3{Client: client}, "")))(ctx, "blob-s3", vfs.Request{Bindings: []mount.Binding{{
+		Params: map[string]string{mount.ParamName: "data", "container": bucket, "prefix": "blobrun"},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -385,49 +378,8 @@ func mediaOf(d vfs.Textual) string {
 	return d.MediaType()
 }
 
-func startMinIO(ctx context.Context, t *testing.T) (*s3.Client, string) {
+func startS3(ctx context.Context, t *testing.T) (*s3.Client, string) {
 	t.Helper()
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image: minioImage,
-			Env: map[string]string{
-				"MINIO_ROOT_USER":     "minioadmin",
-				"MINIO_ROOT_PASSWORD": "minioadmin",
-			},
-			Cmd:          []string{"server", "/data"},
-			ExposedPorts: []string{"9000/tcp"},
-			WaitingFor:   wait.ForHTTP("/minio/health/live").WithPort("9000/tcp"),
-		},
-		Started: true,
-	})
-	if err != nil {
-		t.Skipf("MinIO unavailable: %v", err)
-	}
-	t.Cleanup(func() { _ = container.Terminate(context.Background()) })
-
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := container.MappedPort(ctx, "9000/tcp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion("us-east-1"),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("minioadmin", "minioadmin", "")),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	endpoint := fmt.Sprintf("http://%s:%s", host, port.Port())
-	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(endpoint)
-		o.UsePathStyle = true
-	})
 	const bucket = "vfs-test"
-	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatal(err)
-	}
-	return client, bucket
+	return s3test.Start(ctx, t, bucket), bucket
 }

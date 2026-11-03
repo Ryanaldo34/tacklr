@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -24,7 +25,7 @@ func TestMountIndexer_sourceReadersLimitSearchAndAnACLChangeReindexes(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "org", uuid.NewString())
+	ns := storetest.Namespace(t, "org", uuid.NewString())
 	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: ns, Principals: []string{"group:finance", "group:board"}})
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +77,7 @@ func TestMountIndexer_aReadersErrorFailsTheIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: mustNS(t, "org", "a")})
+	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: storetest.Namespace(t, "org", "a")})
 	if err != nil {
 		t.Fatal(err)
 	}

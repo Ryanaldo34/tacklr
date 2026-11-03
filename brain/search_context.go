@@ -1,8 +1,6 @@
 package brain
 
 import (
-	"encoding/json"
-	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -10,20 +8,14 @@ import (
 
 // SearchContext is the retrieval state of one agent thread: the host
 // namespace, the caller's principals, and the ranked rest of the last call
-// of each tool, which a call with more continues. Principals are not
-// exported: the host sets them every turn, so a revoked group membership
-// applies on the next turn.
+// of each tool, which a call with more continues. The namespace and the
+// principals are host configuration, set every turn (a revoked group
+// membership applies on the next turn); only the rests are session state.
 type SearchContext struct {
 	mu         sync.Mutex
 	namespace  Namespace
 	principals []string
 	rests      map[string]Rest
-}
-
-// searchContextExport is the harness checkpoint envelope.
-type searchContextExport struct {
-	Namespace Namespace       `json:"namespace,omitempty"`
-	Rests     map[string]Rest `json:"rests,omitempty"`
 }
 
 // NewSearchContext returns an empty search context.
@@ -50,13 +42,6 @@ func (c *SearchContext) SetNamespace(ns Namespace) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.namespace = ns.Clone()
-}
-
-// ClearNamespace clears retrieval isolation.
-func (c *SearchContext) ClearNamespace() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.namespace = nil
 }
 
 // Namespace returns the host-set search namespace, if any.
@@ -86,32 +71,16 @@ func (c *SearchContext) Rest(key string) Rest {
 	return c.rests[key]
 }
 
-// Export serializes the namespace and the rests into the harness checkpoint.
-func (c *SearchContext) Export() ([]byte, error) {
+// Rests is each call's ranked remainder, for the harness checkpoint.
+func (c *SearchContext) Rests() map[string]Rest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.namespace.Empty() && len(c.rests) == 0 {
-		return nil, nil
-	}
-	b, err := json.Marshal(searchContextExport{Namespace: c.namespace.Clone(), Rests: maps.Clone(c.rests)})
-	if err != nil {
-		return nil, fmt.Errorf("brain: export search context: %w", err)
-	}
-	return b, nil
+	return maps.Clone(c.rests)
 }
 
-// Restore loads a prior Export. Empty/nil clears the context.
-func (c *SearchContext) Restore(raw []byte) error {
+// SetRests replaces the rests with ones from a checkpoint.
+func (c *SearchContext) SetRests(rests map[string]Rest) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(raw) == 0 {
-		c.namespace, c.rests = nil, nil
-		return nil
-	}
-	var env searchContextExport
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("brain: restore search context: %w", err)
-	}
-	c.namespace, c.rests = env.Namespace, env.Rests
-	return nil
+	c.rests = maps.Clone(rests)
 }

@@ -1,42 +1,10 @@
 # Requires Go 1.27 (go.mod).
-.PHONY: test brain-pg-image helix-image temporal-image require-docker vet lint fmt cover coverage check
+.PHONY: test vet lint fmt cover coverage check
 
-# Docker CLI is often missing from PATH when Docker Desktop is installed via the
-# app bundle only. Prefer PATH, then the standard macOS Desktop location.
-DOCKER ?= $(shell command -v docker 2>/dev/null || \
-	([ -x /Applications/Docker.app/Contents/Resources/bin/docker ] && \
-		echo /Applications/Docker.app/Contents/Resources/bin/docker) || \
-	([ -x "$$HOME/.docker/bin/docker" ] && echo "$$HOME/.docker/bin/docker") || \
-	true)
-
-# Race detector + per-package coverage in test output. Requires Docker for brain
-# Postgres + Helix integration tests. -covermode=atomic is required with -race.
-# with-helix.sh starts one Helix server that every package shares.
-test: brain-pg-image helix-image temporal-image
-	DOCKER=$(DOCKER) HELIX_IMAGE=$(HELIX_IMAGE) ./scripts/with-helix.sh go test -race -count=1 -covermode=atomic ./...
-
-# pgvector + pg_textsearch image used by brain/postgres integration tests.
-brain-pg-image: require-docker
-	$(DOCKER) build -f brain/testdata/Dockerfile.postgres -t tacklr-pg-brain:test brain/testdata
-
-# Helix server (in-memory) for the graph integration tests.
-HELIX_IMAGE ?= ghcr.io/helixdb/helixdb:v0.0.12
-helix-image: require-docker
-	$(DOCKER) pull $(HELIX_IMAGE)
-
-# Temporal server + admin-tools. Persistence is tacklr-pg-brain:test (brain-pg-image).
-temporal-image: require-docker
-	$(DOCKER) pull temporalio/server:latest
-	$(DOCKER) pull temporalio/admin-tools:latest
-
-require-docker:
-	@if [ -z "$(DOCKER)" ]; then \
-		echo "docker CLI not found. Install Docker Desktop (or Colima) and either:"; \
-		echo "  - ensure 'docker' is on PATH, or"; \
-		echo "  - open Docker Desktop so /Applications/Docker.app/.../bin/docker exists"; \
-		echo "  - or: make DOCKER=/path/to/docker <target>"; \
-		exit 1; \
-	fi
+# The whole suite. It needs Linux, FUSE and Docker: Testcontainers starts
+# Postgres (pgvector), Helix and Temporal. -covermode=atomic is required with -race.
+test:
+	go test -race -count=1 -covermode=atomic ./...
 
 vet:
 	go vet ./...
@@ -51,8 +19,8 @@ lint:
 	golangci-lint run ./...
 
 # Profile + threshold gate (writes coverage.out for tools; no HTML).
-cover: brain-pg-image helix-image temporal-image
-	DOCKER=$(DOCKER) HELIX_IMAGE=$(HELIX_IMAGE) ./scripts/with-helix.sh go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+cover:
+	go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
 	@go run github.com/vladopajic/go-test-coverage/v2@latest --config=./.testcoverage.yml
 	@./scripts/coverage-summary.sh coverage.out
 	@./scripts/update-coverage-badge.sh coverage.out docs/badges/coverage.json

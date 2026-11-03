@@ -7,7 +7,7 @@
 //     SkillsPath on that tree (empty means /workspace/skills). With no workspace,
 //     SkillsPath is a local directory.
 //   - MountSession — path I/O, ReadText / WriteDocument, ReadLines, FuseMount / Close, HostDir
-//   - FuseMount / FuseProbe — kernel tree; the mount error means FUSE is unavailable
+//   - FuseMount — kernel tree (needs Linux FUSE)
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
 //   - SessionAuth + TokenHolder + Binding — session-scoped user-owned credentials (never on MountSpec)
 //   - GitRepo + GitToken / GitSSHKey — git clone onto worker disk; the agent runs git itself

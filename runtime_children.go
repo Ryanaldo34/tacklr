@@ -2,83 +2,29 @@ package tacklr
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 )
 
-// JobHost is the session-side implementation of HarnessRuntime job methods.
-// Durable runtimes bind nested sessions and named workers; nil host means
-// jobs are unavailable.
-type JobHost interface {
-	RunSpecialist(ctx context.Context, name, task, callID string) (SpecialistResult, error)
-	Schedule(ctx context.Context, job JobRequest, callID string) (Job, error)
-	Jobs() []Job
-	CancelJob(ctx context.Context, id string) error
-}
-
-// toolRuntime is the HarnessRuntime passed to tools: session emit/state/interrupt
-// plus job operations. Durable drivers replace the host; nil host errors on schedule.
-type toolRuntime struct {
-	sessionRuntime
-	host JobHost
-	// wait is shared across copies of this runtime for one tool call.
-	// RunSpecialist sets it when the child is not finished yet.
-	wait *string
-}
-
-func newToolRuntime(ch chan StreamEvent, sm *sessionManager, host JobHost) toolRuntime {
-	return toolRuntime{sessionRuntime: newSessionRuntime(ch, sm), host: host, wait: new(string)}
-}
-
-func (t toolRuntime) WithToolCallID(id string) toolRuntime {
-	t.sessionRuntime = t.sessionRuntime.WithToolCallID(id)
-	return t
-}
-
-func (t toolRuntime) requireHost() (JobHost, error) {
-	if t.host == nil {
-		return nil, fmt.Errorf("jobs are not available: %w", ErrFailed)
+// ChildID is the id of the child a tool call starts: a specialist session
+// or a named Runtime job. It comes from the call, so a call that runs again
+// names the same child. The harness and every runtime use it.
+func ChildID(parent, name, callID string, specialist bool) string {
+	kind := "j"
+	if specialist {
+		kind = "w"
 	}
-	return t.host, nil
+	return fmt.Sprintf("%s/%s/%s/%s", parent, kind, strings.TrimSpace(name), strings.TrimSpace(callID))
 }
 
-func (t toolRuntime) Schedule(ctx context.Context, job JobRequest) (Job, error) {
-	host, err := t.requireHost()
-	if err != nil {
-		return Job{}, err
-	}
-	return host.Schedule(ctx, job, t.CurrentToolCallID())
-}
-
-func (t toolRuntime) Jobs() []Job {
-	if t.host == nil {
-		return nil
-	}
-	return t.host.Jobs()
-}
-
-func (t toolRuntime) CancelJob(ctx context.Context, id string) error {
-	host, err := t.requireHost()
-	if err != nil {
-		return err
-	}
-	return host.CancelJob(ctx, id)
-}
-
-func (t toolRuntime) RunSpecialist(ctx context.Context, name, task string) (SpecialistResult, error) {
-	host, err := t.requireHost()
-	if err != nil {
-		return SpecialistResult{}, err
-	}
-	res, err := host.RunSpecialist(ctx, name, task, t.CurrentToolCallID())
-	if err != nil {
-		return SpecialistResult{}, err
-	}
-	if res.WaitFor != "" && t.wait != nil {
-		*t.wait = res.WaitFor
-	}
-	return res, nil
+// JobStart is a child a tool call asks the runtime to start. The runtime
+// starts and cancels children from the call's outcome.
+type JobStart struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Task string `json:"task"`
+	// Specialist is a nested session; otherwise a named worker.
+	Specialist bool `json:"specialist,omitempty"`
 }
 
 func formatJobs(rows []Job) string {
@@ -95,14 +41,7 @@ func formatJobs(rows []Job) string {
 	return b.String()
 }
 
-func unknownJobErr(name string, err error) error {
-	if errors.Is(err, ErrNotFound) {
-		return Correctionf(ErrNotFound, "%s: that job is unknown. Call list_children, then cancel_child with an id from that list", name)
-	}
-	return err
-}
-
-func spawnSpecialist(ctx context.Context, args spawnSpecialistArgs, runtime HarnessRuntime) (string, error) {
+func spawnSpecialist(ctx context.Context, args spawnSpecialistArgs, cc *CallContext) (string, error) {
 	spec := strings.TrimSpace(args.Specialist)
 	task := strings.TrimSpace(args.TaskDescriptionAndContext)
 	if task == "" {
@@ -111,45 +50,31 @@ func spawnSpecialist(ctx context.Context, args spawnSpecialistArgs, runtime Harn
 	if spec == "" {
 		return "", Correctionf(ErrInvalid, "spawn_specialist: specialist is required. Pass a name from the available specialists")
 	}
-	block := args.Block == nil || *args.Block
-	if !block {
-		job, err := runtime.Schedule(ctx, JobRequest{Name: spec, Task: task})
-		if err != nil {
-			return "", spawnSpecialistErr(err)
-		}
-		return fmt.Sprintf("Job %s scheduled (name=%s). The result arrives as a later message. Use list_children to inspect, or cancel_child to stop it.", job.ID, job.Name), nil
-	}
-	res, err := runtime.RunSpecialist(ctx, spec, task)
+	wait := args.Block == nil || *args.Block
+	job, err := cc.startJob(JobRequest{Name: spec, Task: task, Wait: wait}, true)
 	if err != nil {
-		return "", spawnSpecialistErr(err)
+		// The name and task are checked above, so the only failure is an
+		// unknown specialist.
+		return "", Correctionf(ErrNotFound, "spawn_specialist: that specialist is not registered. Pass a name from the available specialists")
 	}
-	if res.WaitFor != "" {
+	if wait {
+		// The child's output becomes this call's result once it finishes.
 		return "", nil
 	}
-	return res.Output, nil
+	return fmt.Sprintf("Job %s scheduled (name=%s). The result arrives as a later message. Use list_children to inspect, or cancel_child to stop it.", job.ID, job.Name), nil
 }
 
-func spawnSpecialistErr(err error) error {
-	if errors.Is(err, ErrNotFound) {
-		return Correctionf(ErrNotFound, "spawn_specialist: that specialist is not registered. Pass a name from the available specialists")
-	}
-	if errors.Is(err, ErrInvalid) {
-		return Correctionf(ErrInvalid, "spawn_specialist: specialist is required. Pass a name from the available specialists")
-	}
-	return unknownJobErr("spawn_specialist", err)
+func listChildren(_ context.Context, _ listChildrenArgs, cc *CallContext) (string, error) {
+	return formatJobs(cc.Jobs()), nil
 }
 
-func listChildren(_ context.Context, _ listChildrenArgs, runtime HarnessRuntime) (string, error) {
-	return formatJobs(runtime.Jobs()), nil
-}
-
-func cancelChild(ctx context.Context, args cancelChildArgs, runtime HarnessRuntime) (string, error) {
+func cancelChild(ctx context.Context, args cancelChildArgs, cc *CallContext) (string, error) {
 	id := strings.TrimSpace(args.ChildID)
 	if id == "" {
 		return "", Correctionf(ErrInvalid, "cancel_child: child_id is required. Call list_children and pass a child_id from that list")
 	}
-	if err := runtime.CancelJob(ctx, id); err != nil {
-		return "", unknownJobErr("cancel_child", err)
+	if err := cc.CancelJob(ctx, id); err != nil {
+		return "", Correctionf(ErrNotFound, "cancel_child: that job is unknown. Call list_children, then cancel_child with an id from that list")
 	}
 	return fmt.Sprintf("Job %s cancelled and removed.", id), nil
 }

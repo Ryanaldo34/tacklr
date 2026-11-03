@@ -1,6 +1,6 @@
 # Tool clients
 
-A tool that needs a database, SDK, or other client **closes over it** when you call `NewTool`. That is typed dependency injection. There is no string bag and no lookup on `HarnessRuntime`.
+A tool that needs a database, SDK, or other client **closes over it** when you call `NewTool`. That is typed dependency injection. There is no string bag and no lookup on `CallContext`.
 
 ## Host tools
 
@@ -11,7 +11,7 @@ func NewSearchRecordsTool(store RecordStore) *tacklr.Tool {
 	return tacklr.NewTool(tacklr.ToolConfig{
 		Name:        "search_records",
 		Description: "Search operational records.",
-		Handler: func(ctx context.Context, args SearchArgs, rt tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args SearchArgs, cc *tacklr.CallContext) (string, error) {
 			return store.Search(ctx, args.Query, args.Limit)
 		},
 	})
@@ -31,11 +31,15 @@ opts := tacklr.AgentOptions{
 }
 ```
 
-Or invoke the tool directly with that constructor. You do not mock `HarnessRuntime` to inject the store.
+Or invoke the tool directly with that constructor. You do not mock `CallContext` to inject the store: it is a concrete type the harness makes for each call (`*tacklr.CallContext`), so tests run tools through a real harness.
 
-### What `HarnessRuntime` is for
+### What `CallContext` is for
 
-Progress (`EmitUpdate`), park (`Park`), specialists (`RunSpecialist`), jobs (`Schedule` / `Jobs` / `CancelJob`), and session key-values (`StateGet` / `StateSet` / `StateDelete`). Hosts set those values on `CreateSession.State`, `Prompt.State`, or `Resume.State`. Close over clients in the constructor. Register named workers on `temporal.Config.Jobs`. Tools do not wait on jobs; a tool call already blocks the next model turn.
+Progress (`EmitUpdate`), park (`Park` with a typed interrupt such as `&UserSelectionInterrupt{…}`; a custom type is registered with `RegisterInterrupt` so a parked call can be read back), job workers (`Schedule`, with `Wait` to make the job's output the call's result; `Jobs`; `CancelJob`; specialists are the model's to start, through `spawn_specialist`), and session key-values (`StateGet` / `StateSet` / `StateDelete`). Hosts set those values on `CreateSession.State`, `Prompt.State`, or `Resume.State`. Close over clients in the constructor. Register named workers on `worker.Config.Jobs`.
+
+### Large results
+
+Each result goes into the context window with its call. When a reply's results do not fit even after the window collapses into a summary, the largest are cut to fit, and the cut result tells the model so. Set `AgentOptions.OverflowPath` to a directory on a writable mount to keep each cut result's full text there; the note names the file for `read`. A `ToolInterceptor` can also replace a result's `Output` to shorten it: it returns the call's `ToolOutcome` and may change its `Output` and `Effect` after `next` returns.
 
 ## Optional tools
 
@@ -69,7 +73,7 @@ These still inject when the turn’s world is present. They close over per-turn 
 | `Brain` | `search`, `open`, `related`; `save` with `BrainWriteKinds`; `link` when the engine has a graph |
 | Brain + workspace + search namespace | `index_file`, `unindex` |
 
-Write tools need an active plan (`create_plan`). That lock is a product rule: hosts cannot turn it off. Specialists skip it. `write` / `run_command` park for permission unless the host sets `UnattendedWrite` / `UnattendedRunCommand` on `AgentOptions`.
+Write tools need an active plan (`create_plan`). That lock is a product rule: hosts cannot turn it off. Specialists skip it. `write`, the document and spreadsheet writes, and `run_command` park for permission unless the host names them in `AgentOptions.AllowTools` (by the name the model calls them; a user's reject-always still wins).
 
 Plan tools close over the session plan store (harness state, not a host client). Child-session tools inject when `Specialists` is set. MCP tools close over the live MCP connection created at discover time.
 

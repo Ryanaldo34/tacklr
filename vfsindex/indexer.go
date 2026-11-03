@@ -54,19 +54,6 @@ type MountIndexer struct {
 // ReadersFunc resolves the principals that may read virtualPath at its source.
 type ReadersFunc func(ctx context.Context, virtualPath string, st vfs.FileInfo) ([]string, error)
 
-// IndexOpts configures a tree walk.
-type IndexOpts struct {
-	// MaxFiles stops after this many files opened (0 = unlimited).
-	MaxFiles int
-}
-
-// Stats summarizes IndexPrefix work.
-type Stats struct {
-	Indexed int // files written or re-chunked
-	Skipped int // version match, binary, non-text, or PolicyNone
-	Removed int // missing paths soft-deleted from brain
-}
-
 // NewMountIndexer validates required fields. Scope.Namespace must be set
 // (brain Put requires namespace attrs).
 func NewMountIndexer(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope) (*MountIndexer, error) {
@@ -94,7 +81,7 @@ type PathIndexResult string
 const (
 	// PathIndexed means Document/Chunks were written or re-chunked.
 	PathIndexed PathIndexResult = "indexed"
-	// PathSkipped means version match, binary, non-text, or PolicyNone.
+	// PathSkipped means version match, binary, non-text, or a NotIndexed mount.
 	PathSkipped PathIndexResult = "skipped"
 	// PathRemoved means the path was missing and any brain mirror was soft-deleted.
 	PathRemoved PathIndexResult = "removed"
@@ -158,7 +145,7 @@ func (x *MountIndexer) UnindexPath(ctx context.Context, virtualPath string) (boo
 
 func (x *MountIndexer) skipIndex(virtualPath string) bool {
 	spec, err := x.VFS.SpecAt(virtualPath)
-	return err == nil && NormalizePolicy(spec.IndexPolicy) == PolicyNone
+	return err == nil && spec.NotIndexed
 }
 
 // IndexPath indexes one virtual file, or removes its mirror when the file is missing.
@@ -187,47 +174,6 @@ func (x *MountIndexer) IndexPath(ctx context.Context, virtualPath string) (PathI
 	}
 	return x.indexFile(ctx, cleaned, st)
 }
-
-// IndexPrefix walks a directory (or single file) and indexes text-like files.
-func (x *MountIndexer) IndexPrefix(ctx context.Context, prefix string, opts IndexOpts) (Stats, error) {
-	var stats Stats
-	cleaned, skip, err := x.readyPath(ctx, prefix)
-	if err != nil {
-		return stats, err
-	}
-	if skip != "" {
-		return stats, nil
-	}
-	files := 0
-	err = walk(ctx, x.VFS, cleaned, func(vpath string, isDir bool) error {
-		if isDir {
-			return nil
-		}
-		if opts.MaxFiles > 0 && files >= opts.MaxFiles {
-			return errIndexLimit
-		}
-		files++
-		out, err := x.IndexPath(ctx, vpath)
-		if err != nil {
-			return err
-		}
-		switch out {
-		case PathIndexed:
-			stats.Indexed++
-		case PathSkipped, PathDirectory:
-			stats.Skipped++
-		case PathRemoved:
-			stats.Removed++
-		}
-		return nil
-	})
-	if err != nil && !errors.Is(err, errIndexLimit) {
-		return stats, err
-	}
-	return stats, nil
-}
-
-var errIndexLimit = errors.New("vfsindex: file limit")
 
 func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileInfo) (PathIndexResult, error) {
 	mt := cmp.Or(st.MediaType, "application/octet-stream")
@@ -489,48 +435,6 @@ func lineSpan(body string, starts []int, start, end int) string {
 func (x *MountIndexer) removeIndex(ctx context.Context, vpath string) error {
 	if err := x.Brain.SoftDelete(ctx, x.Scope, x.DocumentID(vpath)); err != nil && !errors.Is(err, brain.ErrNotFound) {
 		return err
-	}
-	return nil
-}
-
-func walk(ctx context.Context, ms *vfs.MountSession, vpath string, fn func(vpath string, isDir bool) error) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Root only: one Stat. Descendants reuse DirEntry.IsDir (no re-Stat per dir).
-
-	st, err := ms.Route(ctx, vpath).
-		Stat(ctx)
-	if err != nil {
-		return err
-	}
-	return walkKnown(ctx, ms, vpath, st.IsDir, fn)
-}
-
-func walkKnown(ctx context.Context, ms *vfs.MountSession, vpath string, isDir bool, fn func(vpath string, isDir bool) error) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !isDir {
-		return fn(vpath, false)
-	}
-	if err := fn(vpath, true); err != nil {
-		return err
-	}
-
-	ents, err := ms.Route(ctx, vpath).
-		ReadDir(ctx)
-	if err != nil {
-		return err
-	}
-	for _, e := range ents {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		child := path.Join(vpath, e.Name)
-		if err := walkKnown(ctx, ms, child, e.IsDir, fn); err != nil {
-			return err
-		}
 	}
 	return nil
 }

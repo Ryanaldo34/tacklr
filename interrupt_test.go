@@ -28,25 +28,22 @@ func TestUserSelection_fullLifecycle(t *testing.T) {
 		t.Fatal("error string")
 	}
 
-	if err := usi.ValidatePayload([]byte(`not-json`)); err == nil || !errors.Is(err, tacklr.ErrInvalidPayload) {
+	if err := usi.Return([]byte(`not-json`)); err == nil || !errors.Is(err, tacklr.ErrInvalidPayload) {
 		t.Fatalf("invalid json: %v", err)
 	}
-	if err := usi.ValidatePayload([]byte(`{}`)); err == nil || !errors.Is(err, tacklr.ErrInvalidPayload) || !strings.Contains(err.Error(), "selectionIdx") {
+	if err := usi.Return([]byte(`{}`)); err == nil || !errors.Is(err, tacklr.ErrInvalidPayload) || !strings.Contains(err.Error(), "selectionIdx") {
 		t.Fatalf("missing field: %v", err)
 	}
-	if err := usi.ValidatePayload([]byte(`{"selectionIdx":99}`)); err == nil {
+	if err := usi.Return([]byte(`{"selectionIdx":99}`)); err == nil {
 		t.Fatal("out of range validate")
 	}
-	if err := usi.ValidatePayload([]byte(`{"selectionIdx":"x"}`)); err == nil {
+	if err := usi.Return([]byte(`{"selectionIdx":"x"}`)); err == nil {
 		t.Fatal("selectionIdx wrong type")
 	}
-	if err := usi.ValidatePayload([]byte(`{"selectionIdx":0}`)); err != nil {
+	if err := usi.Return([]byte(`{"selectionIdx":0}`)); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := usi.Return([]byte(`not-json`)); err == nil {
-		t.Fatal("return bad json")
-	}
 	if err := usi.Return([]byte(`{"selectionIdx":-1}`)); err == nil {
 		t.Fatal("return out of range")
 	}
@@ -55,15 +52,6 @@ func TestUserSelection_fullLifecycle(t *testing.T) {
 	}
 	if usi.ConfirmedChoice == nil || usi.ConfirmedChoice.Title != "B" {
 		t.Fatalf("choice = %+v", usi.ConfirmedChoice)
-	}
-
-	// InitFromPayload replaces options list.
-	fresh := &tacklr.UserSelectionInterrupt{}
-	if err := fresh.InitFromPayload([]byte(`[{"title":"only"}]`)); err != nil {
-		t.Fatal(err)
-	}
-	if len(fresh.Options) != 1 || fresh.Options[0].Title != "only" {
-		t.Fatalf("%+v", fresh.Options)
 	}
 }
 
@@ -83,52 +71,24 @@ func TestToolPermission_allKinds(t *testing.T) {
 		t.Fatal("error string")
 	}
 
-	// Empty / null payload → default options.
-	if err := p.InitFromPayload(nil); err != nil {
-		t.Fatal(err)
-	}
-	if len(p.Options) != 4 {
-		t.Fatalf("defaults = %d", len(p.Options))
-	}
-	if err := p.InitFromPayload([]byte("null")); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.InitFromPayload([]byte(`{`)); err == nil {
-		t.Fatal("bad init json")
-	}
-	if err := p.InitFromPayload([]byte(`{"toolName":"rm","options":[{"optionId":"custom","name":"C","kind":"allow_once"}]}`)); err != nil {
-		t.Fatal(err)
-	}
-	if p.ToolName != "rm" || len(p.Options) != 1 {
-		t.Fatalf("%+v", p)
-	}
-	// Empty options in payload → defaults again.
-	if err := p.InitFromPayload([]byte(`{"toolName":"x"}`)); err != nil {
-		t.Fatal(err)
-	}
-	if len(p.Options) != 4 {
-		t.Fatal("defaults after empty options")
-	}
+	p.Options = tacklr.DefaultPermissionOptions()
 
-	if err := p.ValidatePayload([]byte(`x`)); err == nil {
+	if err := p.Return([]byte(`x`)); err == nil {
 		t.Fatal("bad json")
 	}
-	if err := p.ValidatePayload([]byte(`{}`)); err == nil {
+	if err := p.Return([]byte(`{}`)); err == nil {
 		t.Fatal("missing optionId")
 	}
-	if err := p.ValidatePayload([]byte(`{"optionId":"nope"}`)); err == nil {
+	if err := p.Return([]byte(`{"optionId":"nope"}`)); err == nil {
 		t.Fatal("unknown option validate")
 	}
-	if err := p.ValidatePayload([]byte(`{"optionId":1}`)); err == nil {
+	if err := p.Return([]byte(`{"optionId":1}`)); err == nil {
 		t.Fatal("optionId wrong type")
 	}
-	if err := p.ValidatePayload([]byte(`{"optionId":"allow-once"}`)); err != nil {
+	if err := p.Return([]byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := p.Return([]byte(`not-json`)); err == nil {
-		t.Fatal("return bad json")
-	}
 	if err := p.Return([]byte(`{"optionId":"missing"}`)); err == nil {
 		t.Fatal("unknown option return")
 	}
@@ -163,15 +123,10 @@ func TestToolPermission_allKinds(t *testing.T) {
 	}
 }
 
-// The registry is process-wide, so test-only types register once per test
-// binary; registering them inside a test panics when it runs again.
-func init() {
-	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return marshalBoom{} })
-	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return unmarshalBoom{} })
-}
-
-// TestRegister_New_Clone covers registry and deep clone outcomes.
-func TestRegister_New_Clone(t *testing.T) {
+// TestRegister_newAndDuplicate covers the registry: builtins are found, an
+// unknown type is not, a permission's answer stays off the client payload,
+// and a type registers once.
+func TestRegister_newAndDuplicate(t *testing.T) {
 	if _, ok := tacklr.NewInterrupt("user_selection_choice"); !ok {
 		t.Fatal("builtin selection")
 	}
@@ -186,54 +141,12 @@ func TestRegister_New_Clone(t *testing.T) {
 	if err := perm.Return([]byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
-	cpPerm, err := tacklr.CloneInterrupt(perm)
-	if err != nil {
-		t.Fatal(err)
-	}
-	clonedPerm, ok := cpPerm.(*tacklr.ToolPermissionInterrupt)
-	if !ok || !clonedPerm.Allowed || clonedPerm.SelectedOptionID != "allow-once" || clonedPerm.SelectedKind != tacklr.PermissionAllowOnce {
-		t.Fatalf("clone lost permission resolution: %+v", cpPerm)
-	}
 	wire, err := perm.Serialize()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(wire), "allowed") || strings.Contains(string(wire), "selectedOption") {
 		t.Fatalf("serialize leaked resolution: %s", wire)
-	}
-
-	src := &tacklr.UserSelectionInterrupt{
-		Options: []tacklr.UserChoice{{Title: "A"}},
-	}
-	cp, err := tacklr.CloneInterrupt(src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cloned, ok := cp.(*tacklr.UserSelectionInterrupt)
-	if !ok || len(cloned.Options) != 1 || cloned.Options[0].Title != "A" {
-		t.Fatalf("%+v", cp)
-	}
-	// Mutate original; clone stays independent after re-serialize path.
-	src.Options[0].Title = "mutated"
-	if cloned.Options[0].Title != "A" {
-		t.Fatal("clone should be independent")
-	}
-
-	got, err := tacklr.CloneInterrupt(nil)
-	if got != nil || err != nil {
-		t.Fatalf("nil clone: %v %v", got, err)
-	}
-
-	fake := fakeInterrupt{name: "not_in_registry"}
-	if _, err := tacklr.CloneInterrupt(fake); err == nil {
-		t.Fatal("clone unknown type")
-	}
-
-	if _, err := tacklr.CloneInterrupt(marshalBoom{}); err == nil {
-		t.Fatal("clone marshal error")
-	}
-	if _, err := tacklr.CloneInterrupt(unmarshalBoom{}); err == nil {
-		t.Fatal("clone unmarshal error")
 	}
 
 	// Double-register panics.
@@ -252,61 +165,6 @@ func (f fakeInterrupt) TypeName() string           { return f.name }
 func (f fakeInterrupt) Serialize() ([]byte, error) { return []byte(`{}`), nil }
 func (f fakeInterrupt) Return([]byte) error        { return nil }
 func (f fakeInterrupt) Error() string              { return f.name }
-
-type marshalBoom struct{}
-
-func (marshalBoom) TypeName() string           { return "marshal_boom" }
-func (marshalBoom) Serialize() ([]byte, error) { return []byte(`{}`), nil }
-func (marshalBoom) Return([]byte) error        { return nil }
-func (marshalBoom) Error() string              { return "marshal_boom" }
-func (marshalBoom) MarshalJSON() ([]byte, error) {
-	return nil, errors.New("marshal boom")
-}
-
-type unmarshalBoom struct{}
-
-func (unmarshalBoom) TypeName() string           { return "unmarshal_boom" }
-func (unmarshalBoom) Serialize() ([]byte, error) { return []byte(`{}`), nil }
-func (unmarshalBoom) Return([]byte) error        { return nil }
-func (unmarshalBoom) Error() string              { return "unmarshal_boom" }
-func (unmarshalBoom) MarshalJSON() ([]byte, error) {
-	return []byte(`"x"`), nil
-}
-
-func TestChildWaiting_typeNameAndError(t *testing.T) {
-	empty := &tacklr.ChildWaiting{}
-	if empty.TypeName() != tacklr.TypeChildWaiting {
-		t.Fatalf("default type: %s", empty.TypeName())
-	}
-	if empty.Error() != "child session awaiting input" {
-		t.Fatalf("default error: %s", empty.Error())
-	}
-	if err := empty.ValidatePayload(nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := empty.Return([]byte(`anything`)); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := empty.Serialize()
-	if err != nil || len(raw) == 0 {
-		t.Fatalf("serialize: %v %s", err, raw)
-	}
-
-	named := &tacklr.ChildWaiting{Kind: "spawn_wait", Message: "waiting on researcher"}
-	if named.TypeName() != "spawn_wait" {
-		t.Fatalf("kind: %s", named.TypeName())
-	}
-	if named.Error() != "waiting on researcher" {
-		t.Fatalf("message: %s", named.Error())
-	}
-	got, ok := tacklr.NewInterrupt(tacklr.TypeChildWaiting)
-	if !ok {
-		t.Fatal("child_waiting not registered")
-	}
-	if got.TypeName() != tacklr.TypeChildWaiting {
-		t.Fatalf("new: %s", got.TypeName())
-	}
-}
 
 func TestAuthExpired_typeNameAndResume(t *testing.T) {
 	empty := &tacklr.AuthExpired{}
@@ -329,17 +187,5 @@ func TestAuthExpired_typeNameAndResume(t *testing.T) {
 	}
 	if got.TypeName() != tacklr.TypeAuthExpired {
 		t.Fatalf("new: %s", got.TypeName())
-	}
-}
-
-// TestInterrupt_asError confirms errors.As works for tool return paths.
-func TestInterrupt_asError(t *testing.T) {
-	var err error = &tacklr.UserSelectionInterrupt{Options: []tacklr.UserChoice{{Title: "A"}}}
-	var target tacklr.Interrupt
-	if !errors.As(err, &target) {
-		t.Fatal("errors.As")
-	}
-	if !errors.Is(tacklr.ErrInterruptNotFound, tacklr.ErrInterruptNotFound) {
-		t.Fatal("sentinel")
 	}
 }

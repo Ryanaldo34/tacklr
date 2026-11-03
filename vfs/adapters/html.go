@@ -6,7 +6,7 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-const HTMLMediaType = "text/html"
+const htmlMediaType = "text/html"
 
 // HTML encodes and decodes the pretty HTML dialect used for Docs/Word agent
 // buffers. It is not registered as the text/html file codec (FUSE would steal

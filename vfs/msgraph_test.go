@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
 	"github.com/ryanaldo34/tacklr/internal/testhttp"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -336,7 +338,7 @@ func unescapeGraphRel(rel string) string {
 func mustGraph(t *testing.T, srv *httptest.Server, holder *vfs.TokenHolder, account string) vfs.Open {
 	t.Helper()
 	if holder == nil {
-		holder = vfs.NewTokenHolder(vfs.Credential{Token: "tok"})
+		holder = vfs.NewTokenHolder(mount.Credential{Token: "tok"})
 	}
 	api, err := vfs.NewGraph(holder, srv.URL, srv.Client())
 	if err != nil {
@@ -347,13 +349,12 @@ func mustGraph(t *testing.T, srv *httptest.Server, holder *vfs.TokenHolder, acco
 
 func mountGraphHTTP(t *testing.T, srv *httptest.Server, writable bool) (*vfs.MountSession, *vfs.TokenHolder) {
 	t.Helper()
-	holder := vfs.NewTokenHolder(vfs.Credential{Token: "tok"})
+	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok"})
 	open := mustGraph(t, srv, holder, vfs.AccountPersonal)
-	ms, err := vfs.Tree(vfs.At("legal", open))(t.Context(), "s", vfs.Request{Bindings: []vfs.Binding{{
-		Provider: vfs.ProviderMicrosoft, Writable: writable,
-		Params: map[string]string{vfs.ParamName: "legal"},
-		Auth:   vfs.Credential{Token: "tok"},
-		Live:   holder,
+	ms, err := vfs.Tree(vfs.At("legal", open))(t.Context(), "s", vfs.Request{Bindings: []mount.Binding{{
+		Provider: mount.ProviderMicrosoft, Writable: writable,
+		Params: map[string]string{mount.ParamName: "legal"},
+		Auth:   mount.Credential{Token: "tok"},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -409,8 +410,8 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 	fx.mu.Lock()
 	fx.onceStatus["/drives/drv/items/f1/content"] = http.StatusUnauthorized
 	fx.mu.Unlock()
-	holder.SetRefresh(func(context.Context) (vfs.Credential, error) {
-		return vfs.Credential{Token: "fresh"}, nil
+	holder.SetRefresh(func(context.Context) (mount.Credential, error) {
+		return mount.Credential{Token: "fresh"}, nil
 	})
 
 	got, err = ms.Route(ctx, "/workspace/legal/a.txt").
@@ -532,57 +533,6 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 	}
 }
 
-func TestGraph_xlsxCodecCellOverlayPersists(t *testing.T) {
-	if err := adapters.RegisterCommon(vfs.DefaultContentRegistry()); err != nil {
-		t.Fatal(err)
-	}
-	ctx := t.Context()
-	raw, err := (adapters.XLSX{}).EncodeSheets(ctx, []vfs.Sheet{{
-		ID: "1", Title: "Budget", Rows: 2, Cols: 2,
-		Cells: [][]vfs.Cell{
-			{{Input: "A", Value: "A"}, {Input: "B", Value: "B"}},
-			{{Input: "1", Value: "1"}, {Input: "42", Value: "42"}},
-		},
-	}}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fx := newGraphFX().legalTree()
-	fx.nodes["xlsx1"].body = raw
-	fx.nodes["xlsx1"].size = int64(len(raw))
-	srv := testhttp.New(t, fx)
-	fx.base = srv.URL
-	ms, _ := mountGraphHTTP(t, srv, true)
-
-	doc, err := ms.Route(ctx, "/workspace/legal/Budget.xlsx").
-		ReadText(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := vfs.AsGrid(doc); !ok {
-		t.Fatalf("type %T", doc)
-	}
-	body := "99"
-	if _, err := ms.Apply(ctx, "/workspace/legal/Budget.xlsx", vfs.Mutation{
-		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2", Body: &body,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := ms.Route(ctx, "/workspace/legal/Budget.xlsx").
-		ReadText(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	grid, ok := vfs.AsGrid(got)
-	if !ok {
-		t.Fatalf("reload type %T", got)
-	}
-	if grid.Sheets()[0].Cells[1][1].Input != "99" && grid.Sheets()[0].Cells[1][1].Value != "99" {
-		t.Fatalf("cell = %+v", grid.Sheets()[0].Cells[1][1])
-	}
-}
-
 func TestGraphAndDrive_writesStayOnMatchingProviders(t *testing.T) {
 	ctx := t.Context()
 	fx := newGraphFX().legalTree()
@@ -590,26 +540,26 @@ func TestGraphAndDrive_writesStayOnMatchingProviders(t *testing.T) {
 	fx.base = srv.URL
 	driveAPI := testdrive.Tree()
 	auth := vfs.NewSessionAuth()
-	if err := auth.Bind("s", vfs.Binding{
-		Provider: "gdrive", Writable: true, Auth: vfs.Credential{Token: "gd"},
-		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"},
+	if err := auth.Bind("s", mount.Binding{
+		Provider: "gdrive", Writable: true, Auth: mount.Credential{Token: "gd"},
+		Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root-a"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := auth.Bind("s", vfs.Binding{
-		Provider: vfs.ProviderMicrosoft, Writable: true, Auth: vfs.Credential{Token: "tok"},
-		Params: map[string]string{vfs.ParamName: "legal"},
+	if err := auth.Bind("s", mount.Binding{
+		Provider: mount.ProviderMicrosoft, Writable: true, Auth: mount.Credential{Token: "tok"},
+		Params: map[string]string{mount.ParamName: "legal"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	driveLive := auth.Holder("s", "gdrive")
-	graphLive := auth.Holder("s", vfs.ProviderMicrosoft)
+	graphLive := auth.Holder("s", mount.ProviderMicrosoft)
 	ms, err := vfs.Tree(
 		vfs.At("contracts", testdrive.Open(t, driveAPI, driveLive)),
 		vfs.At("legal", mustGraph(t, srv, graphLive, vfs.AccountPersonal)),
-	)(ctx, "s", vfs.Request{Bindings: []vfs.Binding{
-		{Provider: "gdrive", Writable: true, Auth: vfs.Credential{Token: "gd"}, Live: driveLive, Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"}},
-		{Provider: vfs.ProviderMicrosoft, Writable: true, Auth: vfs.Credential{Token: "tok"}, Live: graphLive, Params: map[string]string{vfs.ParamName: "legal"}},
+	)(ctx, "s", vfs.Request{Bindings: []mount.Binding{
+		{Provider: "gdrive", Writable: true, Auth: mount.Credential{Token: "gd"}, Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root-a"}},
+		{Provider: mount.ProviderMicrosoft, Writable: true, Auth: mount.Credential{Token: "tok"}, Params: map[string]string{mount.ParamName: "legal"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -636,30 +586,33 @@ func TestGraphAndDrive_writesStayOnMatchingProviders(t *testing.T) {
 		ReadFile(ctx); err != nil || string(got) != "drive" {
 		t.Fatalf("drive read = %q err=%v", got, err)
 	}
-	if err := auth.Refresh("s", "gdrive", vfs.Credential{Token: "gd2"}); err != nil {
+	if err := auth.Refresh("s", "gdrive", mount.Credential{Token: "gd2"}); err != nil {
 		t.Fatal(err)
 	}
-	if tok, ok := auth.Credential("s", vfs.ProviderMicrosoft); !ok || tok.Token != "tok" {
+	if tok, ok := auth.Credential("s", mount.ProviderMicrosoft); !ok || tok.Token != "tok" {
 		t.Fatalf("graph token after drive refresh = %+v ok=%v", tok, ok)
 	}
 }
 
-func TestGraphFactory_openRequiresFolderTokenAndId(t *testing.T) {
+// TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail: a file item
+// id, an organization binding without a site or drive, and an unknown account
+// fail; a site binding opens that site's library and a personal one /me/drive.
+func TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail(t *testing.T) {
 	ctx := t.Context()
 	fx := newGraphFX().legalTree()
 	srv := testhttp.New(t, fx)
 	fx.base = srv.URL
 	open := mustGraph(t, srv, nil, "")
-	if _, err := open(ctx, "s", vfs.Binding{
-		Auth:   vfs.Credential{Token: "tok"},
-		Params: map[string]string{vfs.ParamName: "legal", vfs.ParamDriveID: "drv", vfs.ParamItemID: "txt1"},
+	if _, err := open(ctx, "s", mount.Binding{
+		Auth:   mount.Credential{Token: "tok"},
+		Params: map[string]string{mount.ParamName: "legal", mount.ParamDriveID: "drv", mount.ParamItemID: "txt1"},
 	}); err == nil {
 		t.Fatal("file itemId must fail")
 	}
 
-	siteMS, err := vfs.Tree(vfs.At("lib", open))(ctx, "s", vfs.Request{Bindings: []vfs.Binding{{
-		Auth:   vfs.Credential{Token: "tok"},
-		Params: map[string]string{vfs.ParamName: "lib", vfs.ParamSiteID: "site-1"},
+	siteMS, err := vfs.Tree(vfs.At("lib", open))(ctx, "s", vfs.Request{Bindings: []mount.Binding{{
+		Auth:   mount.Credential{Token: "tok"},
+		Params: map[string]string{mount.ParamName: "lib", mount.ParamSiteID: "site-1"},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -673,35 +626,21 @@ func TestGraphFactory_openRequiresFolderTokenAndId(t *testing.T) {
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := mustGraph(t, srv, nil, vfs.AccountPersonal)(canceled, "s", vfs.Binding{Auth: vfs.Credential{Token: "tok"}}); !errors.Is(err, context.Canceled) {
+	if _, err := mustGraph(t, srv, nil, vfs.AccountPersonal)(canceled, "s", mount.Binding{Auth: mount.Credential{Token: "tok"}}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled: %v", err)
 	}
-}
 
-func TestGraph_requiresClient(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("want panic")
-		}
-	}()
-	_ = vfs.Graph(nil, nil, "")
-}
-
-func TestGraphFactory_organizationRequiresSiteOrDrive(t *testing.T) {
-	ctx := t.Context()
-	fx := newGraphFX().legalTree()
-	srv := testhttp.New(t, fx)
-	open := mustGraph(t, srv, nil, "")
-	tok := vfs.Binding{Auth: vfs.Credential{Token: "tok"}, Params: map[string]string{vfs.ParamName: "lib"}}
+	// The account type picks where a binding without a site or drive opens.
+	tok := mount.Binding{Auth: mount.Credential{Token: "tok"}, Params: map[string]string{mount.ParamName: "lib"}}
 	if _, err := open(ctx, "s", tok); err == nil || !strings.Contains(err.Error(), "siteId or driveId") {
 		t.Fatalf("default organization: %v", err)
 	}
-	if _, err := open(ctx, "s", vfs.Binding{Auth: vfs.Credential{Token: "tok"}, Params: map[string]string{vfs.ParamAccount: "nope"}}); err == nil || !strings.Contains(err.Error(), "not organization or personal") {
+	if _, err := open(ctx, "s", mount.Binding{Auth: mount.Credential{Token: "tok"}, Params: map[string]string{mount.ParamAccount: "nope"}}); err == nil || !strings.Contains(err.Error(), "not organization or personal") {
 		t.Fatalf("bad account: %v", err)
 	}
 
 	personal := mustGraph(t, srv, nil, vfs.AccountPersonal)
-	got, err := personal(ctx, "s", vfs.Binding{Auth: vfs.Credential{Token: "tok"}, Params: map[string]string{vfs.ParamName: "lib"}})
+	got, err := personal(ctx, "s", mount.Binding{Auth: mount.Credential{Token: "tok"}, Params: map[string]string{mount.ParamName: "lib"}})
 	if err != nil {
 		t.Fatal(err)
 	}

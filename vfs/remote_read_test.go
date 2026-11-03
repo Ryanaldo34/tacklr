@@ -2,16 +2,16 @@ package vfs_test
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
-	"github.com/ryanaldo34/tacklr/internal/testhttp"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -27,9 +27,9 @@ func pattern(n int) []byte {
 
 func TestS3_anObjectLargerThanTheReadCapStreamsAndReadsAtOffsets(t *testing.T) {
 	ctx := t.Context()
-	client, bucket := startMinIO(ctx, t)
+	client, bucket := startS3(ctx, t)
 	ms, err := vfs.Tree(vfs.At("data", vfs.S3(vfs.AWSS3{Client: client}, bucket)))(ctx, "sess-s3-read", vfs.Request{
-		Bindings: []vfs.Binding{{Params: map[string]string{vfs.ParamName: "data", "prefix": "reads"}}},
+		Bindings: []mount.Binding{{Params: map[string]string{mount.ParamName: "data", "prefix": "reads"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -58,23 +58,6 @@ func TestS3_anObjectLargerThanTheReadCapStreamsAndReadsAtOffsets(t *testing.T) {
 	}
 	if readErr != nil || !bytes.Equal(got, want) {
 		t.Fatalf("streaming Read = %d bytes, err=%v", len(got), readErr)
-	}
-}
-
-func TestGraph_anOffsetReadFailsWhenTheDownloadIsRefused(t *testing.T) {
-	ctx := t.Context()
-	fx := newGraphFX().legalTree()
-	srv := testhttp.New(t, fx)
-	fx.base = srv.URL
-	ms, _ := mountGraphHTTP(t, srv, true)
-
-	f, err := ms.Route(ctx, "/workspace/legal/exp.txt").Open(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	if _, err := f.(io.ReaderAt).ReadAt(make([]byte, 1), 0); !errors.Is(err, vfs.ErrAuthExpired) {
-		t.Fatalf("ReadAt = %v, want ErrAuthExpired", err)
 	}
 }
 

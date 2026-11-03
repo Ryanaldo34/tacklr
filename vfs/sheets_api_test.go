@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
@@ -126,7 +128,7 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	holder := NewTokenHolder(Credential{Token: "tok"})
+	holder := NewTokenHolder(mount.Credential{Token: "tok"})
 	api, err := NewGoogleSheetsHTTP(ctx, holder, ts.URL+"/", ts.Client())
 	if err != nil {
 		t.Fatal(err)

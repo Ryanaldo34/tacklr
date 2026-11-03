@@ -100,15 +100,18 @@
 // # Boot sketch
 //
 //	emb := brain.Embedding{Embedder: myEmbedder}
-//	store, err := postgres.Open(ctx, dsn, postgres.Options{EmbeddingDim: 1536, Embedding: emb})
-//	defer store.Close()
+//	opts := postgres.Options{EmbeddingDim: 1536, Embedding: emb}
+//	cfg, err := pgxpool.ParseConfig(dsn)
+//	if err := postgres.Configure(cfg, opts); err != nil { return err }
+//	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+//	store, err := postgres.Open(pool, opts)
 //	if err := store.Setup(ctx, specs...); err != nil { return err }
 //	client, err := helix.NewClient(helixURL)
 //	g, err := helixgraph.Open(ctx, client, helixgraph.Options{Dimension: 1536, EdgeRelations: []string{"about"}, Embedding: emb})
 //	eng, err := brain.NewEngine(store, brain.WithGraph(g))
 //	if err := eng.LoadKindsFromStore(ctx); err != nil { return err }
 //
-// Integration tests (skipped without Docker):
-//   - postgres.Store: Testcontainers + brain/testdata/Dockerfile.postgres
-//   - helixgraph: Testcontainers + ghcr.io/helixdb/helixdb:v0.0.12 (in-memory)
+// Integration tests need Docker (Testcontainers):
+//   - postgres.Store: pgvector/pgvector (internal/pgtest.Image)
+//   - helixgraph: ghcr.io/helixdb/helixdb:v0.0.12 (in-memory)
 package brain

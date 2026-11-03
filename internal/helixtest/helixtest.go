@@ -1,13 +1,11 @@
 // Package helixtest runs the Helix server live tests use, and one graph
-// opened on it. When TACKLR_HELIX_URL is set (scripts/with-helix.sh sets it),
-// every test package shares that server; otherwise each test process starts
-// its own in-memory container. Without either, the tests that need it skip.
+// opened on it. Every test package of one go test run shares one server: a
+// reusable container by name, which Ryuk removes when the run ends. Tests
+// share its data, so each writes under a tenant of its own.
 package helixtest
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -32,41 +30,36 @@ var Options = helixgraph.Options{
 }
 
 var (
-	serverOnce sync.Once
-	serverURL  string
-	serverSkip string
-	graphOnce  sync.Once
-	graph      *helixgraph.Graph
-	graphErr   error
+	serverOnce     sync.Once
+	serverURL      string
+	serverStartErr error
+	graphOnce      sync.Once
+	graph          *helixgraph.Graph
+	graphErr       error
 )
 
-// URL returns TACKLR_HELIX_URL, or starts the Helix container once per
-// process (Ryuk reaps it) and returns its base URL.
+// URL returns the shared Helix server's base URL, starting it on first use.
 func URL(t testing.TB) string {
 	t.Helper()
 	serverOnce.Do(func() {
-		if serverURL = os.Getenv("TACKLR_HELIX_URL"); serverURL != "" {
-			return
-		}
 		ctx := context.Background()
-		ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-			ContainerRequest: testcontainers.ContainerRequest{
-				Image:        Image,
-				ExposedPorts: []string{"8080/tcp"},
-				WaitingFor:   wait.ForHTTP("/readyz").WithPort("8080/tcp").WithStartupTimeout(2 * time.Minute),
-			},
-			Started: true,
-		})
+		ctr, err := testcontainers.Run(ctx, Image,
+			testcontainers.WithExposedPorts("8080/tcp"),
+			testcontainers.WithWaitStrategy(wait.ForHTTP("/readyz").WithPort("8080/tcp").WithStartupTimeout(2*time.Minute)),
+			// One container per go test run: every package of the run shares
+			// it (testcontainers.SessionID is the run's), and another run
+			// never reuses it, so one run's reaper cannot remove it under
+			// another run.
+			testcontainers.WithReuseByName("tacklr-helix-"+testcontainers.SessionID()),
+		)
 		if err != nil {
-			serverSkip = fmt.Sprintf("%v (docker pull %s)", err, Image)
+			serverStartErr = err
 			return
 		}
-		if serverURL, err = ctr.PortEndpoint(ctx, "8080/tcp", "http"); err != nil {
-			serverSkip = err.Error()
-		}
+		serverURL, serverStartErr = ctr.PortEndpoint(ctx, "8080/tcp", "http")
 	})
-	if serverSkip != "" {
-		t.Skipf("helix container unavailable: %s", serverSkip)
+	if serverStartErr != nil {
+		t.Fatalf("helix container: %v", serverStartErr)
 	}
 	return serverURL
 }

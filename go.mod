@@ -2,6 +2,8 @@ module github.com/ryanaldo34/tacklr
 
 go 1.27.0
 
+toolchain go1.27.3
+
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.22.0
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.8.0

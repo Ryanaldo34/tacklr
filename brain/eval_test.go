@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
@@ -87,7 +88,7 @@ func TestEval_fusedSearchLandsEachKindOfResultOnItsQuery(t *testing.T) {
 
 		entity := search(brain.SearchRequest{Query: "Acme Enterprise Renewal", Kind: "Deal"})
 		chunk := search(brain.SearchRequest{Query: "pricing email Acme renewal risk budget"})
-		byStage := search(brain.SearchRequest{Query: "renewal", Kind: "Deal", Filters: mustFilter(t, map[string]any{"stage": "negotiation"})})
+		byStage := search(brain.SearchRequest{Query: "renewal", Kind: "Deal", Filters: storetest.Filter(t, map[string]any{"stage": "negotiation"})})
 
 		if len(entity) == 0 || entity[0].Object == nil || entity[0].Object.ID != w.deal.ID {
 			t.Errorf("%s: the entity query = %v, want the Acme deal first", name, describe(entity))

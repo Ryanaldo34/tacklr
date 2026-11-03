@@ -347,121 +347,6 @@ func (f *CellFormat) ApplyPatch(p FormatPatch) {
 	}
 }
 
-// ParseCellFormat reads the String() bag (number=...,bold,bold=false,border=thin:bottom).
-func ParseCellFormat(s string) (CellFormat, error) {
-	var f CellFormat
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return f, nil
-	}
-	parts := strings.Split(s, ",")
-	for i := 0; i < len(parts); {
-		part := strings.TrimSpace(parts[i])
-		if part == "" {
-			i++
-			continue
-		}
-		key, val, hasVal := strings.Cut(part, "=")
-		key = strings.ToLower(strings.TrimSpace(key))
-		if key == "number" {
-			for i+1 < len(parts) && !formatBagKey(parts[i+1]) {
-				i++
-				val += "," + parts[i]
-			}
-		}
-		i++
-		switch key {
-		case "number":
-			f.Number = val
-			f.mark(fmtNumber)
-		case "bold":
-			f.Bold = parseFormatFlag(hasVal, val)
-			f.mark(fmtBold)
-		case "italic":
-			f.Italic = parseFormatFlag(hasVal, val)
-			f.mark(fmtItalic)
-		case "strike":
-			f.Strike = parseFormatFlag(hasVal, val)
-			f.mark(fmtStrike)
-		case "underline":
-			f.Underline = parseFormatFlag(hasVal, val)
-			f.mark(fmtUnderline)
-		case "fill":
-			f.Fill = val
-			f.mark(fmtFill)
-		case "color":
-			f.Color = val
-			f.mark(fmtColor)
-		case "align":
-			f.Align = normalizeAlign(val)
-			f.mark(fmtAlign)
-		case "valign":
-			f.VAlign = normalizeVAlign(val)
-			f.mark(fmtVAlign)
-		case "wrap":
-			f.Wrap = normalizeWrap(val)
-			f.mark(fmtWrap)
-		case "border":
-			b, err := parseBorderBag(val)
-			if err != nil {
-				return CellFormat{}, err
-			}
-			f.Border = b
-			f.mark(fmtBorder)
-		default:
-			return CellFormat{}, fmt.Errorf("vfs: unknown format field %q", key)
-		}
-	}
-	return f, nil
-}
-
-func formatBagKey(part string) bool {
-	part = strings.TrimSpace(part)
-	key, _, _ := strings.Cut(part, "=")
-	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "number", "bold", "italic", "strike", "underline", "fill", "color", "align", "valign", "wrap", "border":
-		return true
-	default:
-		return false
-	}
-}
-
-func parseFormatFlag(hasVal bool, val string) bool {
-	if !hasVal {
-		return true
-	}
-	return !strings.EqualFold(strings.TrimSpace(val), "false")
-}
-
-func parseBorderBag(s string) (*CellBorder, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return &CellBorder{}, nil
-	}
-	parts := strings.Split(s, ":")
-	b := &CellBorder{Style: normalizeBorderStyle(parts[0])}
-	if len(parts) > 1 && parts[1] != "" {
-		if strings.Contains(parts[1], "#") || looksHexColor(parts[1]) {
-			b.Color = HexColor(parts[1])
-		} else {
-			b.Edges = parts[1]
-		}
-	}
-	if len(parts) > 2 {
-		b.Color = HexColor(parts[2])
-	}
-	return b, nil
-}
-
-func looksHexColor(s string) bool {
-	s = strings.TrimPrefix(strings.TrimSpace(s), "#")
-	if len(s) != 6 && len(s) != 8 {
-		return false
-	}
-	_, err := strconv.ParseUint(s, 16, 32)
-	return err == nil
-}
-
 // Normalize maps align, valign, wrap, and border style onto the portable bag.
 func (f *CellFormat) Normalize() {
 	if f == nil {
@@ -813,7 +698,7 @@ func ParseA1(s string) (r1, c1, r2, c2 int, err error) {
 func parseA1(s string) (r1, c1, r2, c2 int, err error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0, 0, 0, 0, fmt.Errorf("vfs: empty A1")
+		return 0, 0, 0, 0, fmt.Errorf("%w: empty", ErrInvalidA1)
 	}
 	left, right, isRange := strings.Cut(s, ":")
 	r1, c1, err = parseA1Cell(left)
@@ -828,7 +713,7 @@ func parseA1(s string) (r1, c1, r2, c2 int, err error) {
 		return 0, 0, 0, 0, err
 	}
 	if r2 < r1 || c2 < c1 {
-		return 0, 0, 0, 0, fmt.Errorf("vfs: inverted A1 range %q", s)
+		return 0, 0, 0, 0, fmt.Errorf("%w: inverted range %q", ErrInvalidA1, s)
 	}
 	return r1, c1, r2, c2, nil
 }
@@ -848,11 +733,11 @@ func parseA1Cell(s string) (row, col int, err error) {
 		i++
 	}
 	if i == 0 || i == len(s) {
-		return 0, 0, fmt.Errorf("vfs: invalid A1 %q", s)
+		return 0, 0, fmt.Errorf("%w %q", ErrInvalidA1, s)
 	}
 	row, err = strconv.Atoi(s[i:])
 	if err != nil || row < 1 || col < 1 {
-		return 0, 0, fmt.Errorf("vfs: invalid A1 %q", s)
+		return 0, 0, fmt.Errorf("%w %q", ErrInvalidA1, s)
 	}
 	return row, col, nil
 }
@@ -898,7 +783,7 @@ func quoteSheetTitle(title string) string {
 func (d *gridBody) ReadRows(key string, start, end int) (Sheet, []string, error) {
 	i, ok := d.findSheet(key)
 	if !ok {
-		return Sheet{}, nil, fmt.Errorf("unknown block_id %q", key)
+		return Sheet{}, nil, fmt.Errorf("%w %q", ErrUnknownBlock, key)
 	}
 	sh := d.sheets[i]
 	if start < 1 || end < start {
@@ -929,7 +814,7 @@ func (d *gridBody) ReadCell(key, a1 string) (string, error) {
 func (d *gridBody) Cell(key, a1 string) (Cell, error) {
 	i, ok := d.findSheet(key)
 	if !ok {
-		return Cell{}, fmt.Errorf("unknown block_id %q", key)
+		return Cell{}, fmt.Errorf("%w %q", ErrUnknownBlock, key)
 	}
 	r1, c1, r2, c2, err := parseA1(a1)
 	if err != nil {
@@ -944,7 +829,7 @@ func (d *gridBody) Cell(key, a1 string) (Cell, error) {
 func (d *gridBody) ReadRangeTSV(key, a1 string) (string, error) {
 	i, ok := d.findSheet(key)
 	if !ok {
-		return "", fmt.Errorf("unknown block_id %q", key)
+		return "", fmt.Errorf("%w %q", ErrUnknownBlock, key)
 	}
 	r1, c1, r2, c2, err := parseA1(a1)
 	if err != nil {

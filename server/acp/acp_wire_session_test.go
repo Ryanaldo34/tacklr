@@ -10,9 +10,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/session"
 )
@@ -59,27 +62,11 @@ func (tr *toolRecorder) call(i int) []string {
 	return tr.seen[i]
 }
 
-func recordingStrategy(t *testing.T, tr *toolRecorder) tacklr.InferenceStrategy {
-	return testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+func recordingStrategy(t *testing.T, tr *toolRecorder) tacklr.Model {
+	return testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		tr.record(tools)
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
 	})
-}
-
-func acpSessionID(t *testing.T, rec *httptest.ResponseRecorder) string {
-	t.Helper()
-	var resp map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal response: %v", err)
-	}
-	if resp["error"] != nil {
-		t.Fatalf("unexpected error: %v", resp["error"])
-	}
-	sessionID, ok := resp["result"].(map[string]any)["sessionId"].(string)
-	if !ok || sessionID == "" {
-		t.Fatalf("missing sessionId in result: %v", resp)
-	}
-	return sessionID
 }
 
 // After discovery, the model can invoke a namespaced MCP tool and the handler
@@ -87,25 +74,25 @@ func acpSessionID(t *testing.T, rec *httptest.ResponseRecorder) string {
 func TestHandleRPC_sessionMCPServers_toolCallReturnsResult(t *testing.T) {
 	mcpHTTP := newTestMCPServer(t, "greet")
 	var invokeCount int
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		invokeCount++
 		if invokeCount == 1 {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
 				{ID: "call_mcp", CallID: "call_mcp", Name: "greet", Namespace: "testmcp", Arguments: `{}`},
 			}, IsComplete: true}
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			return
 		}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "mcp done", IsComplete: true}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "mcp done", IsComplete: true}
 	})
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"testmcp","url":"`+mcpHTTP.URL+`","headers":[]}]}}`)
-	sessionID := acpSessionID(t, rec1)
-	t.Cleanup(func() { _ = r.Runtime.Close(context.Background(), session.SessionID(sessionID)) })
+	sessionID := acptest.SessionID(t, rec1)
+	t.Cleanup(func() { _ = r.Client.Close(context.Background(), session.ID(sessionID)) })
 
 	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"call greet"}]}}`)
-	frames := parseACPFrames(t, rec2.Body)
+	frames := acptest.Frames(t, rec2.Body)
 
 	var toolResultText string
 	var sawFinal bool
@@ -166,14 +153,14 @@ func TestHandleRPC_sessionResume_overridesMCPServers(t *testing.T) {
 	serverA := newTestMCPServer(t, "tool_a")
 	serverB := newTestMCPServer(t, "tool_b")
 	recorder := &toolRecorder{}
-	r := newTestRuntime(t, recordingStrategy(t, recorder), tacklr.AgentOptions{})
+	r := acptest.NewRuntime(t, recordingStrategy(t, recorder), tacklr.AgentOptions{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"a","url":"`+serverA.URL+`","headers":[]}]}}`)
-	sessionID := acpSessionID(t, rec1)
-	t.Cleanup(func() { _ = r.Runtime.Close(context.Background(), session.SessionID(sessionID)) })
+	sessionID := acptest.SessionID(t, rec1)
+	t.Cleanup(func() { _ = r.Client.Close(context.Background(), session.ID(sessionID)) })
 
 	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"hi"}]}}`)
-	for _, f := range parseACPFrames(t, rec2.Body) {
+	for _, f := range acptest.Frames(t, rec2.Body) {
 		if f["error"] != nil {
 			t.Fatalf("prompt error: %v", f["error"])
 		}
@@ -183,7 +170,7 @@ func TestHandleRPC_sessionResume_overridesMCPServers(t *testing.T) {
 	}
 
 	rec3 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":3,"method":"session/resume","params":{"sessionId":"`+sessionID+`","cwd":"/tmp","mcpServers":[{"type":"http","name":"b","url":"`+serverB.URL+`","headers":[]}]}}`)
-	for _, f := range parseACPFrames(t, rec3.Body) {
+	for _, f := range acptest.Frames(t, rec3.Body) {
 		if f["error"] != nil {
 			t.Fatalf("resume error: %v", f["error"])
 		}

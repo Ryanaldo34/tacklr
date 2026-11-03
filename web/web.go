@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr"
 )
 
@@ -61,11 +63,11 @@ func WebSearch(client *Exa) *tacklr.Tool {
 		Name:        "web_search",
 		DisplayName: "Search: {query}",
 		Description: webSearchToolDescription,
-		Category:    tacklr.ToolCategorySearch,
+		Category:    message.ToolCategorySearch,
 		Access:      tacklr.ToolReadAccess,
 		Timeout:     webSearchToolTimeout,
-		Handler: func(ctx context.Context, args webSearchArgs, runtime tacklr.HarnessRuntime) (string, error) {
-			runtime.EmitUpdate("Searching the web…")
+		Handler: func(ctx context.Context, args webSearchArgs, cc *tacklr.CallContext) (string, error) {
+			cc.EmitUpdate("Searching the web…")
 			return runWebSearch(ctx, client, args)
 		},
 	})
@@ -393,11 +395,11 @@ func WebFetch(client *Exa) *tacklr.Tool {
 		Name:        "web_fetch",
 		DisplayName: "Web Fetch",
 		Description: webFetchToolDescription,
-		Category:    tacklr.ToolCategoryFetch,
+		Category:    message.ToolCategoryFetch,
 		Access:      tacklr.ToolReadAccess,
 		Timeout:     webFetchToolTimeout,
-		Handler: func(ctx context.Context, args webFetchArgs, runtime tacklr.HarnessRuntime) (string, error) {
-			runtime.EmitUpdate("Fetching page content…")
+		Handler: func(ctx context.Context, args webFetchArgs, cc *tacklr.CallContext) (string, error) {
+			cc.EmitUpdate("Fetching page content…")
 			return runWebFetch(ctx, client, args)
 		},
 	})

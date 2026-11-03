@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -23,9 +25,9 @@ func TestMountSession_localSession(t *testing.T) {
 		vfs.At("work", vfs.Local(base)),
 		vfs.At("nested", vfs.Local(base)).ReadOnly(),
 		vfs.At("ab", vfs.Local(base)),
-	)(ctx, "sess-1", vfs.Request{Bindings: []vfs.Binding{
-		{Params: map[string]string{vfs.ParamName: "nested", "subpath": "nested"}},
-		{Params: map[string]string{vfs.ParamName: "ab", "subpath": "ab"}},
+	)(ctx, "sess-1", vfs.Request{Bindings: []mount.Binding{
+		{Params: map[string]string{mount.ParamName: "nested", "subpath": "nested"}},
+		{Params: map[string]string{mount.ParamName: "ab", "subpath": "ab"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -46,9 +48,6 @@ func TestMountSession_localSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if mt, err := ms.Classify(ctx, "/workspace/work/hello.go", nil); err != nil || mt != "text/x-go" {
-		t.Fatalf("Classify: %q err=%v", mt, err)
-	}
 	if spec, err := ms.SpecAt("/workspace/work/hello.go"); err != nil || spec.Point != "/workspace/work" {
 		t.Fatalf("SpecAt: %+v err=%v", spec, err)
 	}
@@ -171,15 +170,6 @@ func TestMountSession_localSession(t *testing.T) {
 		t.Fatalf("canceled: %v", err)
 	}
 
-	if err := ms.Unmount("/workspace"); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/ab/c.txt").
-		ReadFile(ctx); !errors.Is(err, vfs.ErrNotMounted) {
-		t.Fatalf("after unmount: %v", err)
-	}
-
 	ms2, err := vfs.Tree(vfs.At("work", vfs.Local(base)))(ctx, "sess-2", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
@@ -189,12 +179,6 @@ func TestMountSession_localSession(t *testing.T) {
 	if b, err := ms2.Route(ctx, "/workspace/work/hello.go").
 		ReadFile(ctx); err != nil || string(b) != "package main\n" {
 		t.Fatalf("remount ReadFile = %q err=%v", b, err)
-	}
-	if err := ms2.Unmount("/workspace"); err != nil {
-		t.Fatal(err)
-	}
-	if n := len(ms2.Specs()); n != 0 {
-		t.Fatalf("unmount specs = %d", n)
 	}
 }
 
@@ -237,9 +221,6 @@ func TestMountSession_writeLimits(t *testing.T) {
 
 	if _, err := ms.ContentRev(ctx, "rel"); err == nil {
 		t.Fatal("ContentRev relative")
-	}
-	if _, err := ms.Classify(ctx, "/nomount/x.txt", nil); err == nil {
-		t.Fatal("Classify unmounted")
 	}
 	for _, p := range []string{"", "rel", "/has\x00x"} {
 		if _, err := ms.Route(ctx, p).
@@ -291,8 +272,8 @@ func TestDocument_session(t *testing.T) {
 	ms, err := vfs.Tree(
 		vfs.At("work", vfs.Local(base)),
 		vfs.At("ro", vfs.Local(base)).ReadOnly(),
-	)(ctx, "doc-sess", vfs.Request{Bindings: []vfs.Binding{{
-		Params: map[string]string{vfs.ParamName: "ro", "subpath": "ro"},
+	)(ctx, "doc-sess", vfs.Request{Bindings: []mount.Binding{{
+		Params: map[string]string{mount.ParamName: "ro", "subpath": "ro"},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -604,23 +585,11 @@ func TestDocument_session(t *testing.T) {
 		t.Fatalf("oversize encode: %v", err)
 	}
 
-	if mt, err := ms.Classify(ctx, "/workspace/work/note.txt", nil); err != nil || mt != "text/plain" {
-		t.Fatalf("Classify: %q err=%v", mt, err)
-	}
-	if mt, err := ms.Classify(ctx, "/workspace/work/new.json", []byte(`{"a":1}`)); err != nil || mt != "application/json" {
-		t.Fatalf("Classify new json: %q err=%v", mt, err)
-	}
-	if mt, err := ms.Classify(ctx, "/workspace/work/sniff", []byte("a\x00b")); err != nil || mt != "application/octet-stream" {
-		t.Fatalf("Classify nul: %q err=%v", mt, err)
-	}
 	if spec, err := ms.SpecAt("/workspace/work/note.txt"); err != nil || spec.Point != "/workspace/work" {
 		t.Fatalf("SpecAt: %+v err=%v", spec, err)
 	}
 	if _, err := ms.SpecAt("/nope/x"); err == nil {
 		t.Fatal("SpecAt unmounted")
-	}
-	if _, err := ms.Classify(ctx, "rel", nil); err == nil {
-		t.Fatal("Classify relative")
 	}
 
 	if _, err := ms.Route(ctx, "/workspace/work/note.txt").
@@ -708,9 +677,6 @@ func TestMountSession_configErrors(t *testing.T) {
 	if _, err := ms.SpecAt("/has\x00x"); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("nul path: %v", err)
 	}
-	if err := ms.Unmount("/missing"); !errors.Is(err, vfs.ErrNotMounted) {
-		t.Fatalf("unmount missing: %v", err)
-	}
 	if _, err := vfs.NewMountSession(""); err == nil {
 		t.Fatal("empty session id construct")
 	}
@@ -753,19 +719,19 @@ func (blankTypeCodec) Decode(context.Context, string, string, []byte) (vfs.Docum
 func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 	ctx := t.Context()
 	open := vfs.Local(t.TempDir())
-	if _, err := open(ctx, "s", vfs.Binding{Params: map[string]string{"subpath": ".."}}); err == nil {
+	if _, err := open(ctx, "s", mount.Binding{Params: map[string]string{"subpath": ".."}}); err == nil {
 		t.Fatal("subpath ..")
 	}
-	if _, err := open(ctx, "s", vfs.Binding{Params: map[string]string{"subpath": "/abs"}}); err == nil {
+	if _, err := open(ctx, "s", mount.Binding{Params: map[string]string{"subpath": "/abs"}}); err == nil {
 		t.Fatal("absolute subpath")
 	}
-	if _, err := open(ctx, "sess-id", vfs.Binding{Params: map[string]string{"session_scoped": "true"}}); err != nil {
+	if _, err := open(ctx, "sess-id", mount.Binding{Params: map[string]string{"session_scoped": "true"}}); err != nil {
 		t.Fatalf("session_scoped: %v", err)
 	}
-	if _, err := open(ctx, "../bad", vfs.Binding{Params: map[string]string{"session_scoped": "true"}}); err == nil {
+	if _, err := open(ctx, "../bad", mount.Binding{Params: map[string]string{"session_scoped": "true"}}); err == nil {
 		t.Fatal("unsafe session id")
 	}
-	if _, err := vfs.Local("rel")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := vfs.Local("rel")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("relative base")
 	}
 	file, err := os.CreateTemp(t.TempDir(), "notdir")
@@ -773,7 +739,7 @@ func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = file.Close()
-	if _, err := vfs.Local(file.Name())(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := vfs.Local(file.Name())(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("file as base")
 	}
 	if _, err := vfs.NewLocalProvider("relative"); err == nil {
@@ -785,7 +751,7 @@ func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(root, "leak")); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
+		t.Fatal(err)
 	}
 	p, err := vfs.NewLocalProvider(root)
 	if err != nil {

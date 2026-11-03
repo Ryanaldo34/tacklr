@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -448,7 +450,7 @@ func (f *s3WriteFile) Stat() (FileInfo, error) {
 // S3 opens providers that share one S3API client (HTTP pool).
 // defaultBucket is used when the spec omits params["bucket"].
 func S3(client S3API, defaultBucket string) Open {
-	return func(ctx context.Context, _ string, b Binding) (Provider, error) {
+	return func(ctx context.Context, _ string, b mount.Binding) (Provider, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

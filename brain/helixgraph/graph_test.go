@@ -37,7 +37,10 @@ func TestHelixGraph_contract(t *testing.T) {
 
 func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
+	// Opens that should succeed get a deadline too: a Helix that is gone
+	// fails the test instead of leaving it waiting.
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
 	// Nothing listens on port 9 (discard), so every request fails to connect.
 	unreachable, err := helix.NewClient("http://127.0.0.1:9")
 	if err != nil {
@@ -52,13 +55,12 @@ func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 	blocked := `{"op":{"status":"blocked","blocker_code":"invalid_source_data","operation_id":"%s","index_id":"1","generation":"1","operation_kind":"build","family":"text","stage":"scan","attempt":1,"progress":{"entities":"0","input_bytes":"0","output_operations":"0","output_bytes":"0"}}}`
 
 	errs := map[string]error{}
-	_, errs["unreachable"] = helixgraph.Open(ctx, unreachable, helixtest.Options)
 	helixProxy.failWith("brain_create_indexes", `{"text":{"kind":"unknown"}}`)
 	_, errs["index receipt"] = helixgraph.Open(ctx, helixProxy.client, helixtest.Options)
 	// Another Open's build of the index, which Helix does not know.
 	helixProxy.failWith("brain_create_indexes", `{"text":{"kind":"existing_operation","operation_id":"%s"}}`)
 	_, errs["another open's build"] = helixgraph.Open(ctx, helixProxy.client, helixtest.Options)
-	helixProxy.fail("brain_index_operation", http.StatusServiceUnavailable, "")
+	helixProxy.fail("brain_index_operation", http.StatusInternalServerError, "")
 	_, errs["index status request"] = helixgraph.Open(ctx, helixProxy.client, newIndex())
 	helixProxy.fail("brain_index_operation", http.StatusOK, `{"op":{}}`)
 	_, errs["index status"] = helixgraph.Open(ctx, helixProxy.client, newIndex())
@@ -68,6 +70,13 @@ func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 	short, cancel := context.WithTimeout(ctx, 3*indexPoll)
 	_, waited := helixgraph.Open(short, helixProxy.client, newIndex())
 	cancel()
+	// Helix is not listening yet: Open waits for it until the deadline.
+	starting, cancel := context.WithTimeout(ctx, 3*indexPoll)
+	_, notListening := helixgraph.Open(starting, unreachable, helixtest.Options)
+	cancel()
+	// A gateway in front of Helix failed one request.
+	helixProxy.rule.Store(&faultRule{query: "brain_index_operation", status: http.StatusBadGateway, once: true})
+	_, afterGateway := helixgraph.Open(ctx, helixProxy.client, newIndex())
 	// Another Open is creating the same indexes.
 	helixProxy.rule.Store(&faultRule{query: "brain_create_indexes", status: http.StatusConflict, once: true})
 	_, afterConflict := helixgraph.Open(ctx, helixProxy.client, helixtest.Options)
@@ -83,6 +92,12 @@ func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 	}
 	if !errors.Is(waited, context.DeadlineExceeded) {
 		t.Errorf("open while an index keeps running = %v, want the deadline", waited)
+	}
+	if !errors.Is(notListening, context.DeadlineExceeded) {
+		t.Errorf("open while Helix is not listening = %v, want it to wait until the deadline", notListening)
+	}
+	if afterGateway != nil {
+		t.Errorf("open after one gateway error = %v, want it to retry and succeed", afterGateway)
 	}
 	if afterConflict != nil {
 		t.Errorf("open after a conflict with another open = %v, want it to retry and succeed", afterConflict)

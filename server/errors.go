@@ -13,7 +13,7 @@ var (
 	ErrInvalidRequest  = errors.New("invalid request")
 	ErrMethodNotFound  = errors.New("method not found")
 	ErrInternal        = errors.New("internal server error")
-	ErrSessionNotFound = session.ErrSessionNotFound
+	ErrSessionNotFound = session.ErrNotFound
 )
 
 // clientError is a caller-facing error that unwraps to a sentinel.

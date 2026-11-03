@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // localProvider is a host directory as a mount source (unexported host root).
@@ -342,15 +344,26 @@ func localFileInfo(host string, info os.FileInfo) FileInfo {
 	return fi
 }
 
+// mapOSError is err as the vfs sentinel the agent can act on. Any other OS
+// error keeps its operation and cause but loses its path: the path is the
+// host's, which the agent must never see.
 func mapOSError(err error) error {
-	if err == nil {
+	switch {
+	case err == nil:
 		return nil
-	}
-	if os.IsNotExist(err) {
+	case errors.Is(err, fs.ErrNotExist):
 		return ErrNotExist
-	}
-	if os.IsExist(err) {
+	case errors.Is(err, fs.ErrExist):
 		return ErrExist
+	case errors.Is(err, fs.ErrPermission):
+		return ErrPermission
+	case errors.Is(err, syscall.ENOTDIR):
+		return ErrNotDir
+	case errors.Is(err, syscall.EISDIR):
+		return ErrIsDir
+	}
+	if pe, ok := errors.AsType[*fs.PathError](err); ok {
+		return fmt.Errorf("vfs: %s: %w", pe.Op, pe.Err)
 	}
 	return err
 }
@@ -371,7 +384,7 @@ var _ documentBackend = localProvider{}
 // "session_scoped=true" (optional). The jail stays in the closure; providers
 // never expose host roots.
 func Local(base string) Open {
-	return func(ctx context.Context, sessionID string, b Binding) (Provider, error) {
+	return func(ctx context.Context, sessionID string, b mount.Binding) (Provider, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

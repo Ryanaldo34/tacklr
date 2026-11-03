@@ -5,16 +5,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/internal/durtest"
+
 	"github.com/ryanaldo34/tacklr/session"
 )
 
 // Session is a Temporal Docker session for tests (Prompt / Subscribe / Resume).
 type Session struct {
-	Runtime session.Runtime
-	ID      session.SessionID
-	sub     session.Subscription
+	Client session.Client
+	ID     session.ID
+	sub    session.Subscription
 }
 
 // StartSession registers opts as the default catalog agent and creates a session.
@@ -36,38 +39,38 @@ func StartSession(t testing.TB, opts tacklr.AgentOptions) *Session {
 		_ = sub.Close()
 		_ = rt.Close(t.Context(), id)
 	})
-	return &Session{Runtime: rt, ID: id, sub: sub}
+	return &Session{Client: rt, ID: id, sub: sub}
 }
 
-func (s *Session) Prompt(t testing.TB, text string) []tacklr.StreamEvent {
+func (s *Session) Prompt(t testing.TB, text string) []session.Event {
 	t.Helper()
-	if err := s.Runtime.Prompt(t.Context(), s.ID, session.Prompt{Text: text}); err != nil {
+	if err := s.Client.Prompt(t.Context(), s.ID, session.Prompt{Text: text}); err != nil {
 		t.Fatal(err)
 	}
 	return s.Wait(t)
 }
 
-func (s *Session) PromptMessage(t testing.TB, msg *tacklr.Message) []tacklr.StreamEvent {
+func (s *Session) PromptMessage(t testing.TB, msg *message.Message) []session.Event {
 	t.Helper()
-	if err := s.Runtime.Prompt(t.Context(), s.ID, session.Prompt{UserMessage: msg}); err != nil {
+	if err := s.Client.Prompt(t.Context(), s.ID, session.Prompt{UserMessage: msg}); err != nil {
 		t.Fatal(err)
 	}
 	return s.Wait(t)
 }
 
-func (s *Session) Resume(t testing.TB, responses map[string][]byte) []tacklr.StreamEvent {
+func (s *Session) Resume(t testing.TB, responses map[string][]byte) []session.Event {
 	t.Helper()
-	if err := s.Runtime.Resume(t.Context(), s.ID, session.Resume{Responses: responses}); err != nil {
+	if err := s.Client.Resume(t.Context(), s.ID, session.Resume{Responses: responses}); err != nil {
 		t.Fatal(err)
 	}
 	return s.Wait(t)
 }
 
-func (s *Session) Wait(t testing.TB) []tacklr.StreamEvent {
+func (s *Session) Wait(t testing.TB) []session.Event {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
-	var got []tacklr.StreamEvent
+	var got []session.Event
 	for {
 		select {
 		case ev, ok := <-s.sub.Events():
@@ -75,8 +78,8 @@ func (s *Session) Wait(t testing.TB) []tacklr.StreamEvent {
 				return got
 			}
 			got = append(got, ev)
-			if ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError || ev.Type == tacklr.StreamEventInterrupt {
-				durtest.AssertStatusMatchesEvent(t, s.Runtime, s.ID, ev)
+			if ev.Type == session.EventComplete || ev.Type == session.EventError || ev.Type == session.EventInterrupt {
+				testkit.AssertStatusMatchesEvent(t, s.Client, s.ID, ev)
 				return got
 			}
 		case <-ctx.Done():

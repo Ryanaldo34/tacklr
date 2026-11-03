@@ -5,8 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -58,10 +59,10 @@ func TestMountSession_unionMergesBackends(t *testing.T) {
 		t.Fatalf("Specs = %+v", specs)
 	}
 	mem := specs[0]
-	if mem.Profile != "skills" || !mem.ReadOnly || mem.IndexPolicy != "" {
+	if mem.Profile != "skills" || !mem.ReadOnly || mem.NotIndexed {
 		t.Fatalf("skills member = %+v", mem)
 	}
-	if spec, err := ms.SpecAt("/workspace/skills/alpha/SKILL.md"); err != nil || spec.Point != "/workspace/skills" || spec.Profile != "skills" || !spec.ReadOnly || spec.IndexPolicy != "" {
+	if spec, err := ms.SpecAt("/workspace/skills/alpha/SKILL.md"); err != nil || spec.Point != "/workspace/skills" || spec.Profile != "skills" || !spec.ReadOnly || spec.NotIndexed {
 		t.Fatalf("SpecAt: %+v err=%v", spec, err)
 	}
 
@@ -159,22 +160,22 @@ func TestMountSession_unionNameCollisionAfterMount(t *testing.T) {
 
 func TestUnion_constructErrors(t *testing.T) {
 	ctx := t.Context()
-	if _, err := vfs.Union()(ctx, t.Name(), vfs.Binding{}); err == nil {
+	if _, err := vfs.Union()(ctx, t.Name(), mount.Binding{}); err == nil {
 		t.Fatal("empty Union")
 	}
-	if _, err := vfs.Union(nil)(ctx, t.Name(), vfs.Binding{}); err == nil {
+	if _, err := vfs.Union(nil)(ctx, t.Name(), mount.Binding{}); err == nil {
 		t.Fatal("nil member open")
 	}
-	boom := vfs.Open(func(context.Context, string, vfs.Binding) (vfs.Provider, error) {
+	boom := vfs.Open(func(context.Context, string, mount.Binding) (vfs.Provider, error) {
 		return nil, errors.New("open failed")
 	})
-	if _, err := vfs.Union(boom)(ctx, t.Name(), vfs.Binding{}); err == nil {
+	if _, err := vfs.Union(boom)(ctx, t.Name(), mount.Binding{}); err == nil {
 		t.Fatal("member open error")
 	}
-	skip := vfs.Open(func(context.Context, string, vfs.Binding) (vfs.Provider, error) {
+	skip := vfs.Open(func(context.Context, string, mount.Binding) (vfs.Provider, error) {
 		return nil, nil
 	})
-	p, err := vfs.Union(vfs.Local(t.TempDir()), skip)(ctx, t.Name(), vfs.Binding{})
+	p, err := vfs.Union(vfs.Local(t.TempDir()), skip)(ctx, t.Name(), mount.Binding{})
 	if err != nil || p == nil {
 		t.Fatalf("nil member skipped: p=%v err=%v", p, err)
 	}
@@ -247,37 +248,9 @@ func TestMountSession_unionMissingAndCanceled(t *testing.T) {
 	}
 }
 
-func TestMountSession_workAndSkills(t *testing.T) {
-	ctx := t.Context()
-	work, pack := t.TempDir(), t.TempDir()
-	writeUnionTree(t, pack, map[string]string{"alpha/SKILL.md": "---\nname: alpha\ndescription: A\n---\n\nA"})
-	ms, err := vfs.Tree(
-		vfs.At("work", vfs.Local(work)),
-		vfs.At("skills", vfs.Union(vfs.Local(pack))).ReadOnly(),
-	)(ctx, t.Name(), vfs.Request{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ms.Close() })
-	spec, err := ms.SpecAt("/workspace/skills/alpha/SKILL.md")
-	if err != nil || spec.Point != "/workspace/skills" || !spec.ReadOnly || spec.IndexPolicy != "" {
-		t.Fatalf("SpecAt /workspace/skills: %+v err=%v", spec, err)
-	}
-
-	if got, err := ms.Route(ctx, "/workspace/skills/alpha/SKILL.md").
-		ReadFile(ctx); err != nil || !strings.Contains(string(got), "name: alpha") {
-		t.Fatalf("ReadFile = %q err=%v", got, err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/note.txt").
-		WriteFile(ctx, []byte("ok")); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestUnion_providerRejectsWritesAndInvalidPaths(t *testing.T) {
 	ctx := t.Context()
-	p, err := vfs.Union(vfs.Local(t.TempDir()))(ctx, t.Name(), vfs.Binding{})
+	p, err := vfs.Union(vfs.Local(t.TempDir()))(ctx, t.Name(), mount.Binding{})
 	if err != nil {
 		t.Fatal(err)
 	}

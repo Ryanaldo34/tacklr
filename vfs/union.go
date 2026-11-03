@@ -9,6 +9,8 @@ import (
 	"os"
 	"slices"
 	"strings"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // unionProvider is a read-only merge of member providers at one alias.
@@ -20,7 +22,7 @@ type unionProvider struct {
 // Union merges backends into one read-only Open. Skill packs use
 // Tree(At("skills", Union(...))) when skills live on the workspace.
 func Union(opens ...Open) Open {
-	return func(ctx context.Context, sessionID string, b Binding) (Provider, error) {
+	return func(ctx context.Context, sessionID string, b mount.Binding) (Provider, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
