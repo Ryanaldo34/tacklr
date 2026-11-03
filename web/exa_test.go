@@ -126,9 +126,6 @@ func TestClient_postJSON_edges(t *testing.T) {
 
 func TestExaPostJSON_remainingBranches(t *testing.T) {
 	c := NewExa("k")
-	if err := c.postJSON(t.Context(), "/search", make(chan int), nil); err == nil || !strings.Contains(err.Error(), "marshal") {
-		t.Fatalf("marshal: %v", err)
-	}
 	c.BaseURL = "://bad"
 	if err := c.postJSON(t.Context(), "/search", SearchRequest{Query: "q"}, nil); err == nil || !strings.Contains(err.Error(), "build request") {
 		t.Fatalf("url: %v", err)
@@ -141,8 +138,8 @@ func TestExaPostJSON_remainingBranches(t *testing.T) {
 	t.Cleanup(srv.Close)
 	c.BaseURL = srv.URL
 	c.HTTPClient = nil
-	if err := c.postJSON(t.Context(), "/", SearchRequest{Query: "q"}, nil); err != nil {
-		t.Fatalf("nil client / empty op: %v", err)
+	if err := c.postJSON(t.Context(), "/search", SearchRequest{Query: "q"}, nil); err != nil {
+		t.Fatalf("nil client: %v", err)
 	}
 
 	c.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

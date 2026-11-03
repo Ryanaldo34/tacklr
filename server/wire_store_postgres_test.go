@@ -15,6 +15,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/pgtest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/server"
@@ -94,23 +95,23 @@ func TestPostgresWireStore_acpLoadAfterRestart(t *testing.T) {
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok", IsComplete: true}
 	})
 
-	r1 := newTestRuntime(t, strategy, tacklr.AgentOptions{})
-	s1 := newACPTestServerWithWire(t, r1, wire)
-	rec1 := s1.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj"}}`)
-	sessionID, _ := acpRPCResult(t, rec1)["sessionId"].(string)
+	r1 := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
+	s1 := acptest.NewServer(t, r1, wire)
+	rec1 := s1.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj"}}`)
+	sessionID, _ := acptest.Result(t, rec1)["sessionId"].(string)
 	if sessionID == "" {
 		t.Fatal("missing sessionId")
 	}
 
-	s2 := newACPTestServerWithWire(t, r1, wire)
-	rec2 := s2.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/proj"}}`)
-	if acpRPCResult(t, rec2)["sessionId"] != sessionID {
+	s2 := acptest.NewServer(t, r1, wire)
+	rec2 := s2.RPC(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/proj"}}`)
+	if acptest.Result(t, rec2)["sessionId"] != sessionID {
 		t.Fatalf("load: %s", rec2.Body.String())
 	}
 
-	rec3 := s2.rpc(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`)
+	rec3 := s2.RPC(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`)
 	var endTurn bool
-	for _, f := range parseACPFrames(t, rec3.Body) {
+	for _, f := range acptest.Frames(t, rec3.Body) {
 		if res, ok := f["result"].(map[string]any); ok && res["stopReason"] == "end_turn" {
 			endTurn = true
 		}

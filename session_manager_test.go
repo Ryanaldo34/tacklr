@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/session"
 
 	"github.com/ryanaldo34/tacklr/message"
@@ -60,7 +61,7 @@ func TestRuntime_emitUpdateNamesTheCallAndNeverBlocks(t *testing.T) {
 func TestCall_parkResumeAndRunAgain(t *testing.T) {
 	cc := callRuntime(newSessionManager(), "tc1")
 
-	_, unknownType := cc.Park(&ChildWaiting{Kind: "nope"})
+	_, unknownType := cc.Park(unregisteredOnCall{})
 	noPark := cc.resume([]byte(`{"selectionIdx":0}`))
 	_, parked := cc.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}})
 	invalid := cc.resume([]byte(`{}`))
@@ -76,8 +77,9 @@ func TestCall_parkResumeAndRunAgain(t *testing.T) {
 	if invalid == nil || beforeAnswer || answerErr != nil || !errors.Is(twice, ErrInterruptNotFound) {
 		t.Fatalf("invalid %v, taken before an answer %v, answer %v, twice %v", invalid, beforeAnswer, answerErr, twice)
 	}
-	if usi, ok := got.(*UserSelectionInterrupt); runErr != nil || !ok || usi.ConfirmedChoice.Title != "B" || cc.call.Park != nil {
-		t.Fatalf("run after resume = %+v %v, want the answer taken", got, runErr)
+	_, again := cc.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}})
+	if usi, ok := got.(*UserSelectionInterrupt); runErr != nil || !ok || usi.ConfirmedChoice.Title != "B" || !errors.As(again, &intr) {
+		t.Fatalf("run after resume = %+v %v, then a park %v; want the answer taken once", got, runErr, again)
 	}
 }
 
@@ -91,7 +93,7 @@ func TestCall_readsItsOwnAnswersCursorsAndPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := brain.Scope{Namespace: mustNS(t, "org", "acme")}
+	scope := brain.Scope{Namespace: storetest.Namespace(t, "org", "acme")}
 	for _, title := range []string{"one fact", "two fact"} {
 		if _, err := eng.Save(t.Context(), scope, brain.Object{Kind: "Fact", Title: title}); err != nil {
 			t.Fatal(err)

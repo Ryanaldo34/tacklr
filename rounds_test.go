@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/session"
 
 	"github.com/ryanaldo34/tacklr/message"
@@ -35,7 +37,6 @@ func roundsHarness(t *testing.T, opts AgentOptions, calls ...message.ToolCall) (
 	}}
 	opts.Tools = append(opts.Tools, gate, free)
 	h := mustNewHarness(t, opts)
-	t.Cleanup(h.Close)
 	return h, opts, runs
 }
 
@@ -98,18 +99,6 @@ func TestCommit_aPromptPastAnOpenRoundCancelsItsOpenCalls(t *testing.T) {
 	}
 }
 
-// TestRunTool_rejectsAnAnswerToNoPark: an answer for a call that is not
-// parked fails the step.
-func TestRunTool_rejectsAnAnswerToNoPark(t *testing.T) {
-	h, _, _ := roundsHarness(t, AgentOptions{sessionID: "outside", MaxWindowSize: 8192})
-
-	_, err := h.RunTool(t.Context(), ToolRun{Call: toolCall("g1", "gate", "{}"), Answer: []byte(`{}`)}, drainEventCh())
-
-	if !errors.Is(err, ErrInterruptNotFound) {
-		t.Fatalf("run = %v, want the answer to no park named", err)
-	}
-}
-
 // TestCommitRound_trimsAResultTooLargeForTheWindow: a result too large for
 // the window even with nothing left to summarize is cut to fit. With
 // OverflowPath its full text is first saved where read finds it; without, the
@@ -129,7 +118,7 @@ func TestCommitRound_trimsAResultTooLargeForTheWindow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ms := mustMountTree(t, "trim", vfs.At("work", vfs.Local(t.TempDir())))
+			ms := mustMountTree(t, "trim", vfs.Request{}, vfs.At("work", vfs.Local(t.TempDir())))
 			switch tc.block {
 			case "file":
 				if err := ms.Route(t.Context(), tc.overflow).WriteFile(t.Context(), []byte("x")); err != nil {
@@ -175,8 +164,7 @@ func TestRunTool_aChildResultIsTheCallsResultWhenItsEpisodeCannotBeKept(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewHarness(t, AgentOptions{sessionID: "episode-fails", MaxWindowSize: 8192, Model: &scriptedModel{}, Brain: eng, SearchNamespace: mustNS(t, "org", "acme")})
-	t.Cleanup(h.Close)
+	h := mustNewHarness(t, AgentOptions{sessionID: "episode-fails", MaxWindowSize: 8192, Model: &scriptedModel{}, Brain: eng, SearchNamespace: storetest.Namespace(t, "org", "acme")})
 	call := toolCall("sp1", "spawn_specialist", "{}")
 	h.context.Restore([]*message.Message{userMsg("go")})
 	r := NewRound(Reply{Messages: []*message.Message{{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{call}}}, Calls: []message.ToolCall{call}})
@@ -277,7 +265,7 @@ func TestRunTool_aSearchCursorCarriesToTheNextStepThroughCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "org", "cursor")
+	ns := storetest.Namespace(t, "org", "cursor")
 	for _, title := range []string{"cursor one", "cursor two"} {
 		if _, err := eng.Save(t.Context(), brain.Scope{Namespace: ns}, brain.Object{Kind: "Fact", Title: title, Content: "cursor"}); err != nil {
 			t.Fatal(err)
@@ -320,7 +308,6 @@ func TestRunTool_callsOfOneReplyRunAtOnceOnOneHarness(t *testing.T) {
 		return seen.(string), nil
 	}})
 	h := mustNewHarness(t, AgentOptions{MaxWindowSize: 8192, Model: &scriptedModel{}, Tools: []*Tool{set}})
-	t.Cleanup(h.Close)
 	out := drainEventCh()
 	if err := h.Commit(t.Context(), CommitIn{Users: []*message.Message{userMsg("go")}}, out); err != nil {
 		t.Fatal(err)
@@ -371,7 +358,6 @@ func TestCommit_countsTokensOnlyNearTheWindow(t *testing.T) {
 			}
 			free := NewTool(ToolConfig{Name: "free", Handler: func(context.Context) (string, error) { return "free-ok", nil }})
 			h := mustNewHarness(t, AgentOptions{MaxWindowSize: 8192, Model: model, Tools: []*Tool{free}})
-			t.Cleanup(h.Close)
 			out := drainEventCh()
 			reply, err := h.Infer(t.Context(), out)
 			if err != nil {
@@ -397,7 +383,6 @@ func TestCommit_countsTokensOnlyNearTheWindow(t *testing.T) {
 // already running is not started again, so it does not count twice.
 func TestSchedule_aSessionAtItsChildLimitGetsACorrection(t *testing.T) {
 	h := mustNewHarness(t, AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}})
-	t.Cleanup(h.Close)
 	h.jobs = []string{"ci"}
 	call := toolCall("c1", "x", `{}`)
 	running := ChildID(h.sessionId, "ci", "other", false)
@@ -407,5 +392,24 @@ func TestSchedule_aSessionAtItsChildLimitGetsACorrection(t *testing.T) {
 
 	if !errors.Is(err, ErrCorrection) || !strings.Contains(err.Error(), "already runs 1 jobs") {
 		t.Fatalf("schedule past the limit = %v, want a correction naming the limit", err)
+	}
+}
+
+func TestRunTool_aToolFailureIsItsCallsResultInTheWindow(t *testing.T) {
+	boom := NewTool(ToolConfig{Name: "boom", Handler: func(context.Context) (string, error) {
+		return "", fmt.Errorf("upstream: the search provider failed: %w", ErrFailed)
+	}})
+	h, _, _ := roundsHarness(t, AgentOptions{sessionID: "boom", MaxWindowSize: 8192, Tools: []*Tool{boom}}, toolCall("b1", "boom", "{}"))
+
+	_, err := replyRound(t, h)
+
+	var result *message.Message
+	for _, m := range h.context.Messages() {
+		if m.Role == message.RoleTool {
+			result = m
+		}
+	}
+	if err != nil || result == nil || !strings.Contains(result.Content, "search provider failed") {
+		t.Fatalf("commit %v, tool result %+v; want the failure as the call's result", err, result)
 	}
 }

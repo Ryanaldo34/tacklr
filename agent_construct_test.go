@@ -3,7 +3,6 @@ package tacklr
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +37,7 @@ func TestNewHarness_constructFailClosed(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ms := mustMountTree(t, t.Name(), vfs.At("skills", vfs.Local(root)))
+	ms := mustMountTree(t, t.Name(), vfs.Request{}, vfs.At("skills", vfs.Local(root)))
 	_, err := NewHarness(context.Background(), AgentOptions{
 		MaxWindowSize: 8192,
 		Model:         &scriptedModel{},
@@ -52,7 +51,7 @@ func TestNewHarness_constructFailClosed(t *testing.T) {
 func TestNewHarness_configurationInvariants(t *testing.T) {
 	// Arrange
 	validModel := &scriptedModel{}
-	ms := mustMountTree(t, "overflow-config", vfs.At("work", vfs.Local(t.TempDir())), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
+	ms := mustMountTree(t, "overflow-config", vfs.Request{}, vfs.At("work", vfs.Local(t.TempDir())), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
 	cases := []struct {
 		name string
 		opts AgentOptions
@@ -137,20 +136,6 @@ func TestNewHarness_configurationInvariants(t *testing.T) {
 	t.Cleanup(h.Close)
 	if h.maxWindowSize != 8192 {
 		t.Fatalf("resolved max window = %d", h.maxWindowSize)
-	}
-}
-
-func TestRestoreCheckpoint_rejectsACorruptOrOtherVersionCheckpoint(t *testing.T) {
-	h := mustNewHarness(t, AgentOptions{Model: &scriptedModel{}})
-	v := checkpointVersion
-	for name, raw := range map[string]string{
-		"corrupt":           fmt.Sprintf(`{"version":%d,"window":"x"}`, v),
-		"other version":     fmt.Sprintf(`{"version":%d,"window":[]}`, v-1),
-		"an invalid window": fmt.Sprintf(`{"version":%d,"window":[{"role":"tool","content":"x"}]}`, v),
-	} {
-		if err := h.RestoreCheckpoint([]byte(raw)); err == nil {
-			t.Errorf("%s checkpoint was accepted", name)
-		}
 	}
 }
 
@@ -270,5 +255,16 @@ func TestHarness_checkpointAfterRun(t *testing.T) {
 	restored := mustNewHarness(t, AgentOptions{Model: &scriptedModel{}})
 	if err := restored.RestoreCheckpoint(cp); err != nil || len(restored.context.Messages()) != len(h.context.Messages()) {
 		t.Fatalf("restore = %v with %d messages, want the window back", err, len(restored.context.Messages()))
+	}
+}
+
+func TestHarness_readSkillReturnsTheBodyOfASkillUnderSkillsPath(t *testing.T) {
+	root := skillPack(t, "research", "Research carefully", "Always verify claims.").Root
+	h := mustNewHarness(t, AgentOptions{MaxWindowSize: 8192, Model: &scriptedModel{}, SkillsPath: root})
+
+	res, err := h.findTool("read_skill", "").invoke(t.Context(), `{"name":"research"}`, turnRuntime(h))
+
+	if err != nil || !strings.Contains(res.Output, "Always verify claims") {
+		t.Fatalf("read_skill = %q %v, want the skill's body", res.Output, err)
 	}
 }

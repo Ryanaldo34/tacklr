@@ -15,6 +15,7 @@ import (
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
 
+	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/session"
 )
@@ -46,21 +47,21 @@ func TestHandleInbound_errorContract(t *testing.T) {
 
 	t.Run("methodNotFound", func(t *testing.T) {
 		k := fakeHost(t)
-		err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
+		err := acptest.WrittenError(t, acp.New(nil), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 			`{"jsonrpc":"2.0","id":1,"method":"session/foo","params":{}}`)
 		assert(t, err, server.ErrMethodNotFound, acp.CodeMethodNotFound, server.ErrMethodNotFound)
 	})
 
 	t.Run("invalidRequest", func(t *testing.T) {
 		k := fakeHost(t)
-		err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
+		err := acptest.WrittenError(t, acp.New(nil), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 			`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{}}`)
 		assert(t, err, server.ErrInvalidRequest, acp.CodeInvalidRequest, server.ErrInvalidRequest)
 	})
 
 	t.Run("sessionNotFound", func(t *testing.T) {
 		k := fakeHost(t)
-		err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
+		err := acptest.WrittenError(t, acp.New(nil), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 			`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"missing"}}`)
 		assert(t, err, server.ErrSessionNotFound, acp.CodeApplication, server.ErrSessionNotFound)
 	})
@@ -69,8 +70,8 @@ func TestHandleInbound_errorContract(t *testing.T) {
 		k := fakeHost(t)
 		proto := acp.New(nil)
 		env := server.ProtocolEnv{Client: k.Client, Agent: k.Agent}
-		sid := acpSessionID(t, serveACPInbound(t, k, proto, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
-		err := inboundWrittenError(t, proto, env,
+		sid := acptest.SessionID(t, acptest.Serve(t, k, proto, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
+		err := acptest.WrittenError(t, proto, env,
 			`{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sid+`","configId":"model","value":"ghost"}}`)
 		assert(t, err, server.ErrInvalidRequest, acp.CodeInvalidRequest, server.ErrInvalidRequest)
 	})
@@ -78,7 +79,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	t.Run("authenticationRequired", func(t *testing.T) {
 		k := fakeHost(t)
 		proto := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, false)
-		err := inboundWrittenError(t, proto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
+		err := acptest.WrittenError(t, proto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 			`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 		assert(t, err, server.ErrAuthenticationRequired, acp.CodeApplication, server.ErrAuthenticationRequired)
 	})
@@ -86,12 +87,12 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	t.Run("authenticationFailed", func(t *testing.T) {
 		k := fakeHost(t)
 		service := &server.Service{
-			Authenticator: testAuthenticator(func(context.Context, server.Attempt) (server.Principal, error) {
+			Authenticator: authenticatorFunc(func(context.Context, server.Attempt) (server.Principal, error) {
 				return server.Principal{}, server.ErrAuthenticationFailed
 			}),
 		}
 		proto := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, false)
-		err := inboundWrittenError(t, proto, server.ProtocolEnv{
+		err := acptest.WrittenError(t, proto, server.ProtocolEnv{
 			Client: k.Client, Agent: k.Agent, Security: service,
 			Conn: &server.Conn{Security: &server.Context{}},
 		}, `{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{"methodId":"login"}}`)
@@ -104,10 +105,10 @@ func TestHandleInbound_errorContract(t *testing.T) {
 			t.Fatal(err)
 		}
 		service := &server.Service{
-			Authenticator: testAuthenticator(func(context.Context, server.Attempt) (server.Principal, error) {
+			Authenticator: authenticatorFunc(func(context.Context, server.Attempt) (server.Principal, error) {
 				return alice, nil
 			}),
-			Authorizer: testAuthorizer(func(_ context.Context, _ server.Principal, op server.Operation) error {
+			Authorizer: authorizerFunc(func(_ context.Context, _ server.Principal, op server.Operation) error {
 				if op.Action == "session.load" {
 					return errors.New("denied")
 				}
@@ -119,7 +120,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 		aliceCtx := server.Context{Principal: alice}
 		env := server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Security: service, Conn: &server.Conn{Security: &aliceCtx}}
 		sid := sessionIDFromInbound(t, proto, env, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-		got := inboundWrittenError(t, proto, env,
+		got := acptest.WrittenError(t, proto, env,
 			`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sid+`"}}`)
 		assert(t, got, server.ErrAuthorizationDenied, acp.CodeApplication, server.ErrAuthorizationDenied)
 	})
@@ -148,11 +149,11 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	})
 
 	t.Run("internalProviderFailure", func(t *testing.T) {
-		k := newTestRuntime(t, testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		k := acptest.NewRuntime(t, testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{Type: session.EventError, Error: errors.New("provider down"), Content: "provider down"}
 		}), tacklr.AgentOptions{})
 		proto := acp.New(nil)
-		sid := acpSessionID(t, serveACPInbound(t, k, proto, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
+		sid := acptest.SessionID(t, acptest.Serve(t, k, proto, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
 		w := &recordingMessageWriter{}
 		_ = proto.HandleInbound(t.Context(), server.ProtocolEnv{
 			Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: w},
@@ -185,15 +186,15 @@ func TestHandleInbound_errorContract(t *testing.T) {
 }
 
 func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
-	k := newTestRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
+	k := acptest.NewRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
 	proto := acp.New(nil)
 	env := server.ProtocolEnv{Client: k.Client, Agent: k.Agent}
 	sid := sessionIDFromInbound(t, proto, env, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 
-	if err := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":0}}`); err == nil {
+	if err := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":0}}`); err == nil {
 		t.Fatal("want unsupported protocol version")
 	}
-	if err := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"`+sid+`","configId":"nope","value":"x"}}`); err == nil {
+	if err := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"`+sid+`","configId":"nope","value":"x"}}`); err == nil {
 		t.Fatal("want unknown configId")
 	}
 	if err := proto.HandleInbound(t.Context(), server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
@@ -214,7 +215,7 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	}
 
 	authProto := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, true)
-	if err := inboundWrittenError(t, authProto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
+	if err := acptest.WrittenError(t, authProto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":6,"method":"authenticate","params":{"methodId":"ghost"}}`); err == nil {
 		t.Fatal("want unknown auth method")
 	}
@@ -243,7 +244,7 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	}
 
 	down := acp.New(failPutStore{})
-	if err := inboundWrittenError(t, down, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
+	if err := acptest.WrittenError(t, down, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":9,"method":"session/new","params":{"cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want wire put failure")
 	}
@@ -253,17 +254,17 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	if err := mem.Put(t.Context(), "corrupt", []byte("not-json")); err != nil {
 		t.Fatal(err)
 	}
-	if err := inboundWrittenError(t, corrupt, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
+	if err := acptest.WrittenError(t, corrupt, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":10,"method":"session/load","params":{"sessionId":"corrupt","cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want corrupt wire decode")
 	}
 
-	if err := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":11,"method":"session/close","params":{"sessionId":"missing"}}`); err == nil {
+	if err := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":11,"method":"session/close","params":{"sessionId":"missing"}}`); err == nil {
 		t.Fatal("want close missing session")
 	}
 	_ = proto.HandleInbound(t.Context(), server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
 		[]byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{}}`))
-	if err := inboundWrittenError(t, authProto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
+	if err := acptest.WrittenError(t, authProto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":12,"method":"authenticate","params":{"methodId":"login"}}`); err == nil {
 		t.Fatal("want authenticate without security service")
 	}
@@ -277,7 +278,7 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 		t.Fatalf("load fill cwd: %v", err)
 	}
 
-	if err := inboundWrittenError(t, acp.New(failGetStore{}), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
+	if err := acptest.WrittenError(t, acp.New(failGetStore{}), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":15,"method":"session/load","params":{"sessionId":"x","cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want wire get failure")
 	}
@@ -285,7 +286,7 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	nth := &nthFailPut{inner: server.NewMemoryWireStore(), failOn: 2}
 	nthProto := acp.New(nth)
 	nthSID := sessionIDFromInbound(t, nthProto, env, `{"jsonrpc":"2.0","id":16,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	if err := inboundWrittenError(t, nthProto, env, `{"jsonrpc":"2.0","id":17,"method":"session/prompt","params":{"sessionId":"`+nthSID+`","prompt":[{"type":"text","text":"hi"}]}}`); err == nil {
+	if err := acptest.WrittenError(t, nthProto, env, `{"jsonrpc":"2.0","id":17,"method":"session/prompt","params":{"sessionId":"`+nthSID+`","prompt":[{"type":"text","text":"hi"}]}}`); err == nil {
 		t.Fatal("want nth put failure on prompt persist")
 	}
 
@@ -293,41 +294,41 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	frameEnv := server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: fw}}
 	_ = proto.HandleInbound(t.Context(), frameEnv, []byte(`{"jsonrpc":"2.0","id":18,"method":"session/prompt","params":{"sessionId":"`+sid+`","prompt":[{"type":"text","text":"hi"}]}}`))
 
-	if err := inboundWrittenError(t, proto, env, `{"jsonrpc":"1.0","id":19,"method":"initialize"}`); err == nil {
+	if err := acptest.WrittenError(t, proto, env, `{"jsonrpc":"1.0","id":19,"method":"initialize"}`); err == nil {
 		t.Fatal("want invalid JSON-RPC envelope")
 	}
-	if err := inboundWrittenError(t, authProto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
+	if err := acptest.WrittenError(t, authProto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":20,"method":"authenticate","params":{}}`); err == nil {
 		t.Fatal("want authenticate methodId required")
 	}
-	if err := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":21,"method":"session/cancel","params":{"sessionId":"missing"}}`); err == nil {
+	if err := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":21,"method":"session/cancel","params":{"sessionId":"missing"}}`); err == nil {
 		t.Fatal("want cancel missing session")
 	}
-	if err := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":22,"method":"session/prompt","params":{"sessionId":"missing","prompt":[{"type":"text","text":"hi"}]}}`); err == nil {
+	if err := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":22,"method":"session/prompt","params":{"sessionId":"missing","prompt":[{"type":"text","text":"hi"}]}}`); err == nil {
 		t.Fatal("want prompt missing session")
 	}
-	if err := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":23,"method":"session/set_config_option","params":{"sessionId":"missing","configId":"model","value":"default"}}`); err == nil {
+	if err := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":23,"method":"session/set_config_option","params":{"sessionId":"missing","configId":"model","value":"default"}}`); err == nil {
 		t.Fatal("want setConfig missing session")
 	}
 
 	delStore := &failDeleteStore{inner: server.NewMemoryWireStore()}
 	delProto := acp.New(delStore)
 	delSID := sessionIDFromInbound(t, delProto, env, `{"jsonrpc":"2.0","id":24,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	if err := inboundWrittenError(t, delProto, env, `{"jsonrpc":"2.0","id":25,"method":"session/close","params":{"sessionId":"`+delSID+`"}}`); err == nil {
+	if err := acptest.WrittenError(t, delProto, env, `{"jsonrpc":"2.0","id":25,"method":"session/close","params":{"sessionId":"`+delSID+`"}}`); err == nil {
 		t.Fatal("want close delete failure")
 	}
 
 	cfgNth := &nthFailPut{inner: server.NewMemoryWireStore(), failOn: 2}
 	cfgProto := acp.New(cfgNth)
 	cfgSID := sessionIDFromInbound(t, cfgProto, env, `{"jsonrpc":"2.0","id":26,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	if err := inboundWrittenError(t, cfgProto, env, `{"jsonrpc":"2.0","id":27,"method":"session/set_config_option","params":{"sessionId":"`+cfgSID+`","configId":"model","value":"default"}}`); err == nil {
+	if err := acptest.WrittenError(t, cfgProto, env, `{"jsonrpc":"2.0","id":27,"method":"session/set_config_option","params":{"sessionId":"`+cfgSID+`","configId":"model","value":"default"}}`); err == nil {
 		t.Fatal("want setConfig persist failure")
 	}
 
 	loadNth := &nthFailPut{inner: server.NewMemoryWireStore(), failOn: 2}
 	loadProto := acp.New(loadNth)
 	loadSID := sessionIDFromInbound(t, loadProto, env, `{"jsonrpc":"2.0","id":28,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	if err := inboundWrittenError(t, loadProto, env, `{"jsonrpc":"2.0","id":29,"method":"session/load","params":{"sessionId":"`+loadSID+`","cwd":"/tmp"}}`); err == nil {
+	if err := acptest.WrittenError(t, loadProto, env, `{"jsonrpc":"2.0","id":29,"method":"session/load","params":{"sessionId":"`+loadSID+`","cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want load persist failure")
 	}
 
@@ -336,10 +337,10 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 		t.Fatal(err)
 	}
 	denyCreate := &server.Service{
-		Authenticator: testAuthenticator(func(context.Context, server.Attempt) (server.Principal, error) {
+		Authenticator: authenticatorFunc(func(context.Context, server.Attempt) (server.Principal, error) {
 			return alice, nil
 		}),
-		Authorizer: testAuthorizer(func(_ context.Context, _ server.Principal, op server.Operation) error {
+		Authorizer: authorizerFunc(func(_ context.Context, _ server.Principal, op server.Operation) error {
 			if op.Action == "session.create" {
 				return errors.New("denied")
 			}
@@ -347,17 +348,17 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 		}),
 	}
 	aliceCtx := server.Context{Principal: alice}
-	if err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{
+	if err := acptest.WrittenError(t, acp.New(nil), server.ProtocolEnv{
 		Client: k.Client, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &aliceCtx},
 	}, `{"jsonrpc":"2.0","id":30,"method":"session/new","params":{"cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want session.create denied")
 	}
-	if err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{
+	if err := acptest.WrittenError(t, acp.New(nil), server.ProtocolEnv{
 		Client: k.Client, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &server.Context{}},
 	}, `{"jsonrpc":"2.0","id":31,"method":"session/new","params":{"cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want unauthenticated session.create")
 	}
-	if err := inboundWrittenError(t, proto, server.ProtocolEnv{
+	if err := acptest.WrittenError(t, proto, server.ProtocolEnv{
 		Client: k.Client, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &server.Context{}},
 	}, `{"jsonrpc":"2.0","id":38,"method":"session/load","params":{"sessionId":"`+sid+`"}}`); err == nil {
 		t.Fatal("want unauthenticated session.load")
@@ -366,7 +367,7 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	downRT := fakeRuntime{create: func(context.Context, session.CreateSession) (session.ID, error) {
 		return "", errors.New("runtime down")
 	}}
-	if err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Client: downRT, Agent: k.Agent},
+	if err := acptest.WrittenError(t, acp.New(nil), server.ProtocolEnv{Client: downRT, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":32,"method":"session/new","params":{"cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want CreateSession failure")
 	}
@@ -378,7 +379,7 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 
 	schemeProto := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login"}}, false)
 	loginOK := &server.Service{
-		Authenticator: testAuthenticator(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
+		Authenticator: authenticatorFunc(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
 			if attempt.Scheme != "login" {
 				return server.Principal{}, fmt.Errorf("scheme %q", attempt.Scheme)
 			}
@@ -396,11 +397,11 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 		t.Fatalf("setSecurity subject = %q", stored.Principal.Subject)
 	}
 
-	if err := inboundWrittenError(t, proto, env,
+	if err := acptest.WrittenError(t, proto, env,
 		`{"jsonrpc":"2.0","id":36,"method":"_tacklr/vfs/bind","params":{"sessionId":"missing","backends":[{"provider":"local","params":{"name":"docs"},"auth":{"token":"t"}}]}}`); err == nil {
 		t.Fatal("want vfs bind missing session")
 	}
-	if err := inboundWrittenError(t, proto, env,
+	if err := acptest.WrittenError(t, proto, env,
 		`{"jsonrpc":"2.0","id":37,"method":"_tacklr/vfs/refresh","params":{"sessionId":"missing","provider":"local","auth":{"token":"t"}}}`); err == nil {
 		t.Fatal("want vfs refresh missing session")
 	}
@@ -455,24 +456,6 @@ func (s *failDeleteStore) Get(ctx context.Context, id string) ([]byte, error) {
 	return s.inner.Get(ctx, id)
 }
 func (s *failDeleteStore) Delete(context.Context, string) error { return errors.New("delete down") }
-
-func inboundWrittenError(t *testing.T, proto server.Protocol, env server.ProtocolEnv, body string) error {
-	t.Helper()
-	w := &recordingMessageWriter{}
-	if env.Conn == nil {
-		env.Conn = &server.Conn{}
-	}
-	env.Conn.Writer = w
-	ret := proto.HandleInbound(t.Context(), env, []byte(body))
-	if len(w.Errors) > 0 {
-		return w.Errors[0].Err
-	}
-	if ret != nil {
-		return ret
-	}
-	t.Fatalf("no error written or returned for %s", body)
-	return nil
-}
 
 func sessionIDFromInbound(t *testing.T, proto server.Protocol, env server.ProtocolEnv, body string) string {
 	t.Helper()

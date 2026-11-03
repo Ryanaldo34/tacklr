@@ -136,10 +136,8 @@ func (p *graphProvider) listChildren(ctx context.Context, id string) ([]graphIte
 	return kids, err
 }
 
+// getByPath is the item at rel, a non-empty path under id.
 func (p *graphProvider) getByPath(ctx context.Context, id, rel string) (graphItem, error) {
-	if rel == "" {
-		return p.getItem(ctx, id)
-	}
 	var item graphItem
 	err := p.call(ctx, func() error {
 		var err error
@@ -363,13 +361,11 @@ func (p *graphProvider) MkdirAll(ctx context.Context, name string, perm fs.FileM
 	return err
 }
 
+// ensureDir makes every directory of rel, a non-empty path under the root.
 func (p *graphProvider) ensureDir(ctx context.Context, rel string) (graphItem, error) {
 	root, err := p.getItem(ctx, p.rootID)
 	if err != nil {
 		return graphItem{}, err
-	}
-	if rel == "" {
-		return root, nil
 	}
 	parentID := root.ID
 	var cur graphItem
@@ -401,14 +397,10 @@ func (p *graphProvider) ensureDir(ctx context.Context, rel string) (graphItem, e
 	return cur, nil
 }
 
+// parentAndLeaf is name's parent folder, made if missing, and its last
+// element. The caller resolved name, so it is clean and not the root.
 func (p *graphProvider) parentAndLeaf(ctx context.Context, name string) (parentID, leaf string, err error) {
-	rel, err := cleanRel(name)
-	if err != nil {
-		return "", "", err
-	}
-	if rel == "" {
-		return "", "", ErrInvalidPath
-	}
+	rel, _ := cleanRel(name)
 	dir, leaf := path.Split(rel)
 	dir = strings.TrimSuffix(dir, "/")
 	if dir == "" {

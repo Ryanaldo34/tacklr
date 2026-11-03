@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/session"
 
 	"github.com/ryanaldo34/tacklr/message"
@@ -30,14 +31,14 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "org", uuid.NewString())
+	ns := storetest.Namespace(t, "org", uuid.NewString())
 	west := append(ns.Clone(), brain.Attr{Name: "workspace", Value: "west"})
 	doc, err := eng.PutTree(ctx, brain.Scope{Namespace: west}, brain.Object{Kind: "Document", Title: "Runbook"},
 		brain.Parts(brain.Object{Kind: "Chunk", Content: "restart the knowledge service"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := putFixture(store, brain.Object{ID: uuid.New(), Kind: "Fact", Title: "foreign knowledge", Namespace: mustNS(t, "org", uuid.NewString())}); err != nil {
+	if err := storetest.Put(store, brain.Object{ID: uuid.New(), Kind: "Fact", Title: "foreign knowledge", Namespace: storetest.Namespace(t, "org", uuid.NewString())}); err != nil {
 		t.Fatal(err)
 	}
 	opts := AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns, BrainWriteKinds: []string{"Fact"}, sessionID: "brain-tools-1"}
@@ -172,7 +173,7 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 		brain.KindSpec{Kind: "Deal", IsParent: true}, brain.KindSpec{Kind: "Person", IsParent: true})...); err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "org", uuid.NewString())
+	ns := storetest.Namespace(t, "org", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	deal, err := eng.Save(ctx, scope, brain.Object{Kind: "Deal", Title: "Acme", Content: "Deal body."})
 	if err != nil {
@@ -182,9 +183,8 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ms := mustMountTree(t, "link-graph", vfs.At("work", vfs.Local(t.TempDir())))
+	ms := mustMountTree(t, "link-graph", vfs.Request{}, vfs.At("work", vfs.Local(t.TempDir())))
 	h := mustNewHarness(t, AgentOptions{sessionID: "link-graph", mountSession: ms, Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns})
-	t.Cleanup(h.Close)
 	activatePlan(t, h)
 	call := func(name, args string) (string, error) {
 		out, err := h.findTool(name, "").invoke(ctx, args, turnRuntime(h))
@@ -248,7 +248,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "org", uuid.NewString())
+	ns := storetest.Namespace(t, "org", uuid.NewString())
 	doc, err := eng.Save(ctx, brain.Scope{Namespace: ns}, brain.Object{Kind: "Document", Title: "Shared", Content: "worker-visible"})
 	if err != nil {
 		t.Fatal(err)
@@ -263,12 +263,10 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		Specialists: []*Specialist{{Name: "researcher", Model: workerModel}},
 	}
 	parentH := mustNewHarness(t, parentOpts)
-	t.Cleanup(parentH.Close)
 	workerOpts := parentOpts.WithSpecialist(parentH.specialists["researcher"])
 	workerOpts.SearchNamespace = ns
 	workerOpts.sessionID = "w/researcher/spawn_tc1"
 	worker := mustNewHarness(t, workerOpts)
-	t.Cleanup(worker.Close)
 
 	opened, openErr := worker.findTool("open", "").invoke(ctx, `{"ref":"`+doc.ID.String()+`"}`, turnRuntime(worker))
 	found, searchErr := worker.findTool("search", "").invoke(ctx, `{"query":"worker-visible"}`, turnRuntime(worker))
@@ -280,10 +278,4 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	if !ok || !gotNS.Equal(ns) {
 		t.Errorf("worker namespace = %v %v, want %v", gotNS, ok, ns)
 	}
-}
-
-// putFixture writes obj straight to the store under its own namespace.
-func putFixture(s brain.Store, obj brain.Object) error {
-	_, err := s.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, brain.Indexed{Object: obj, Text: obj.IndexText()})
-	return err
 }

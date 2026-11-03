@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
 // countingEmbedder records every text it embeds.
@@ -63,7 +64,7 @@ func TestEngine_putTreeHoldsAFewBatchesWhateverTheTreeSizeAndReusesUnchangedPart
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
+	scope := brain.Scope{Namespace: storetest.Namespace(t, "org", "a")}
 	var held int
 	parts := func(yield func(brain.Object, error) bool) {
 		for i := range total {
@@ -102,7 +103,7 @@ func TestEngine_putTreeHoldsAFewBatchesWhateverTheTreeSizeAndReusesUnchangedPart
 
 func TestEngine_putTreeFailsOnABadPartOrSourceAndKeepsThePreviousTree(t *testing.T) {
 	ctx := t.Context()
-	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
+	scope := brain.Scope{Namespace: storetest.Namespace(t, "org", "a")}
 	failing := func(yield func(brain.Object, error) bool) {
 		if yield(brain.Object{Kind: "Chunk", Content: "first"}, nil) {
 			yield(brain.Object{}, errors.New("disk read failed"))
@@ -117,7 +118,7 @@ func TestEngine_putTreeFailsOnABadPartOrSourceAndKeepsThePreviousTree(t *testing
 		want  string
 	}{
 		"a part with an id":            {nil, nil, brain.Parts(brain.Object{ID: uuid.New(), Kind: "Chunk", Content: "x"}), "part ids come from content"},
-		"a part in another namespace":  {nil, nil, brain.Parts(brain.Object{Kind: "Chunk", Content: "x", Namespace: mustNS(t, "org", "b")}), "is not the parent's"},
+		"a part in another namespace":  {nil, nil, brain.Parts(brain.Object{Kind: "Chunk", Content: "x", Namespace: storetest.Namespace(t, "org", "b")}), "is not the parent's"},
 		"a soft-deleted part":          {nil, nil, brain.Parts(brain.Object{Kind: "Chunk", Content: "x", DeletedAt: new(time.Now())}), "soft-deleted"},
 		"a source read error":          {nil, nil, failing, "disk read failed"},
 		"an embedder short a vector":   {func(e *countingEmbedder) { e.short = true }, nil, brain.Parts(brain.Object{Kind: "Chunk", Content: "x"}), "returned 0 vectors for 1 texts"},

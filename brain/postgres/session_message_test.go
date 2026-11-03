@@ -21,7 +21,7 @@ func TestSessionMessages_liveSearchUnion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "org", "acme")
+	ns := storetest.Namespace(t, "org", "acme")
 	const (
 		sessionID = "sess.with/dots"
 		marker    = "zebra"
@@ -142,7 +142,7 @@ func TestSessionMessages_liveSearchUnion(t *testing.T) {
 
 	filtered, err := eng.Search(ctx, scope, brain.SearchRequest{
 		Query:   marker,
-		Filters: mustFilter(t, map[string]any{"kind": "Fact"}),
+		Filters: storetest.Filter(t, map[string]any{"kind": "Fact"}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -188,7 +188,7 @@ func TestSessionMessages_aWindowWithAMalformedBodySavesNothing(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	store, _ := testDB(t)
-	host := mustNS(t, "org", "a")
+	host := storetest.Namespace(t, "org", "a")
 	window := []brain.SessionMessage{
 		{Role: "user", Body: []byte(`{"role":"user","content":"ok"}`), SearchText: "ok"},
 		{Role: "user", Body: []byte(`{not json`), SearchText: "broken"},

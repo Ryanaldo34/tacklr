@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -39,7 +40,7 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "id", uuid.NewString())
+	ns := storetest.Namespace(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
@@ -199,7 +200,7 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "id", uuid.NewString())
+	ns := storetest.Namespace(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
@@ -357,7 +358,7 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "id", uuid.NewString())
+	ns := storetest.Namespace(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
@@ -432,7 +433,7 @@ func TestMountIndexer_IndexFileAndDefaults(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "id", uuid.NewString())
+	ns := storetest.Namespace(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
@@ -634,7 +635,7 @@ func TestMountIndexer_aMarkdownIndexStopsAtTheFirstRejectedOrCancelledSection(t 
 		if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 			t.Fatal(err)
 		}
-		idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: mustNS(t, "id", uuid.NewString())})
+		idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: storetest.Namespace(t, "id", uuid.NewString())})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -653,13 +654,4 @@ func TestMountIndexer_aMarkdownIndexStopsAtTheFirstRejectedOrCancelledSection(t 
 			t.Errorf("%s: index = %v, want %q", name, err, tc.want)
 		}
 	}
-}
-
-func mustNS(t testing.TB, nv ...string) brain.Namespace {
-	t.Helper()
-	ns, err := brain.ParseNamespace(nv...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ns
 }

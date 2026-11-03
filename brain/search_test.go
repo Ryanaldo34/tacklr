@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
@@ -51,7 +52,7 @@ func TestSearch_ranksRecordsAndTheirPartsInTheCallersTenant(t *testing.T) {
 
 	byPart := search(brain.SearchRequest{Query: "oauth pkce implementation"})
 	byRecord := search(brain.SearchRequest{Query: "refunds"})
-	filtered := search(brain.SearchRequest{Query: "pipeline revenue", Filters: mustFilter(t, map[string]any{"stage": "negotiation"})})
+	filtered := search(brain.SearchRequest{Query: "pipeline revenue", Filters: storetest.Filter(t, map[string]any{"stage": "negotiation"})})
 	byKind := search(brain.SearchRequest{Query: "pipeline revenue", Kind: "Fact"})
 	byID := search(brain.SearchRequest{Query: policy.ID.String()})
 	exact := search(brain.SearchRequest{Query: `"Refund policy"`})
@@ -100,7 +101,7 @@ func TestSearch_facetsCountTheKindsAndFieldValuesOfAPage(t *testing.T) {
 		save(t, open, scope, brain.Object{Kind: "Note", Title: fmt.Sprint("renewal note ", i), Properties: map[string]any{"ref": uuid.NewString(), "tags": []any{"a"}}})
 	}
 	// A row written before the kind dropped a field keeps it.
-	if err := putFixture(catalogStore, brain.Object{ID: uuid.New(), Kind: "Deal", Title: "renewal deal", Namespace: scope.Namespace, Properties: map[string]any{"stage": "lost", "color": "red"}}); err != nil {
+	if err := storetest.Put(catalogStore, brain.Object{ID: uuid.New(), Kind: "Deal", Title: "renewal deal", Namespace: scope.Namespace, Properties: map[string]any{"stage": "lost", "color": "red"}}); err != nil {
 		t.Fatal(err)
 	}
 

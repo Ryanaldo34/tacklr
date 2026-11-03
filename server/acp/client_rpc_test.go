@@ -4,24 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
 	"testing"
 	"time"
+
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
-
-type recordingWriter struct {
-	mu     sync.Mutex
-	frames [][]byte
-}
-
-func (r *recordingWriter) WriteResult(id json.RawMessage, result any) error { return nil }
-func (r *recordingWriter) WriteError(id json.RawMessage, err error) error   { return nil }
-func (r *recordingWriter) WriteFrame(data []byte) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.frames = append(r.frames, append([]byte(nil), data...))
-	return nil
-}
 
 func TestClientBridge_callOutcomes(t *testing.T) {
 	if NewClientBridge(&failRPCWriter{}).TryCompleteResponse([]byte(`{`)) {
@@ -38,26 +25,24 @@ func TestClientBridge_callOutcomes(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := NewClientBridge(&recordingWriter{}).Call(ctx, "x", nil); !errors.Is(err, context.Canceled) {
+	if _, err := NewClientBridge(&testkit.RecordingWriter{}).Call(ctx, "x", nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled call: %v", err)
 	}
 
-	w := &recordingWriter{}
+	w := &testkit.RecordingWriter{}
 	b := NewClientBridge(w)
 	done := make(chan error, 1)
 	go func() { _, err := b.Call(t.Context(), "x", nil); done <- err }()
 	deadline := time.Now().Add(time.Second)
 	var id int64
 	for time.Now().Before(deadline) && id == 0 {
-		w.mu.Lock()
-		if len(w.frames) > 0 {
+		if frames := w.SnapshotFrames(); len(frames) > 0 {
 			var req struct {
 				ID int64 `json:"id"`
 			}
-			_ = json.Unmarshal(w.frames[0], &req)
+			_ = json.Unmarshal(frames[0], &req)
 			id = req.ID
 		}
-		w.mu.Unlock()
 		time.Sleep(5 * time.Millisecond)
 	}
 	errBody, _ := json.Marshal(map[string]any{

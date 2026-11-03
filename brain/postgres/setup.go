@@ -47,44 +47,45 @@ type Options struct {
 	Ranking brain.Ranking
 }
 
-// Open returns a Store with its own connection pool for connString; pool
-// settings ride in connString (pool_max_conns, …). Every connection starts
-// with search_path set to the schema, then public, and the statement
-// timeout. Statements with arguments are prepared once per connection and
-// cached, and an otelpgx tracer emits a span per statement under the
-// caller's context. Connections open on first use. Close the Store when done.
+// Configure sets what every connection of the Store's pool needs: the
+// search_path (opts.Schema, then public), the server-side statement
+// timeout, statements prepared once per connection and cached, and an
+// otelpgx tracer that emits a span per statement under the caller's
+// context. Call it on the host's pool config before pgxpool.NewWithConfig,
+// with the Options passed to Open. One pool configured this way also serves
+// session/postgres, which qualifies its own tables.
 //
 // A direct connection or a session-mode pooler works as is. A
 // transaction-mode pooler (such as port 6543 on hosted Postgres) must
 // support prepared statements (PgBouncer 1.21+ with max_prepared_statements,
 // Supavisor) and must forward the search_path and statement_timeout startup
 // parameters (or set them on the database role).
-func Open(ctx context.Context, connString string, opts Options) (*Store, error) {
+func Configure(cfg *pgxpool.Config, opts Options) error {
 	schema, err := schemaName(opts.Schema)
 	if err != nil {
-		return nil, err
-	}
-	cfg, err := pgxpool.ParseConfig(connString)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: %w", err)
+		return err
 	}
 	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeCacheStatement
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema + ", public"
 	timeout := cmp.Or(opts.StatementTimeout, DefaultStatementTimeout)
 	cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(max(timeout.Milliseconds(), 0), 10)
 	cfg.ConnConfig.Tracer = otelpgx.NewTracer(otelpgx.WithTrimSQLInSpanName(), otelpgx.WithDisableAcquireTracer())
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	return nil
+}
+
+// Open returns a Store over pool, a pool the host built from a config that
+// Configure set up with the same opts. It does no I/O. The host owns the
+// pool and closes it.
+func Open(pool *pgxpool.Pool, opts Options) (*Store, error) {
+	schema, err := schemaName(opts.Schema)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: %w", err)
+		return nil, err
 	}
 	return &Store{
 		db: pool, schema: schema, dim: cmp.Or(opts.EmbeddingDim, DefaultEmbeddingDim),
 		embedding: opts.Embedding, ranking: opts.Ranking,
 	}, nil
 }
-
-// Close closes the Store's connections.
-func (s *Store) Close() { s.db.Close() }
 
 func schemaName(schema string) (string, error) {
 	name := strings.TrimSpace(schema)

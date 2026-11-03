@@ -26,8 +26,10 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -147,10 +149,42 @@ func Open(ctx context.Context, client *helix.Client, opts Options) (*Graph, erro
 			indexes[fmt.Sprintf("edge_vector_%d", i)] = helix.EdgeVectorIndex(rel, propEdgeEmbedding, opts.Dimension, metric, propTenant)
 		}
 	}
-	if err := g.createIndexes(ctx, indexes); err != nil {
-		return nil, fmt.Errorf("helixgraph: open: %w", err)
+	// A Helix that is starting, or a gateway in front of it, fails a request
+	// for a moment; Open retries those until ctx ends. Creating the indexes
+	// again is safe: a build already under way comes back as its operation.
+	for {
+		err := g.createIndexes(ctx, indexes)
+		if err == nil {
+			return g, nil
+		}
+		if !transient(err) {
+			return nil, fmt.Errorf("helixgraph: open: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("helixgraph: open: %w", errors.Join(err, ctx.Err()))
+		case <-time.After(indexPollInterval):
+		}
 	}
-	return g, nil
+}
+
+// transient reports a failure that clears on its own: Helix not listening
+// yet, a reset connection, or a gateway that could not reach it.
+func transient(err error) bool {
+	var helixErr *helix.HelixError
+	if !errors.As(err, &helixErr) {
+		return false
+	}
+	switch helixErr.Kind {
+	case helix.ErrorNetwork:
+		return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET)
+	case helix.ErrorRemote:
+		switch helixErr.StatusCode {
+		case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		}
+	}
+	return false
 }
 
 // createIndexes creates indexes in one request, then waits for each build.

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
 func TestEngine_openReadsTheObjectItsKindAndItsFirstChildren(t *testing.T) {
@@ -26,7 +27,7 @@ func TestEngine_openReadsTheObjectItsKindAndItsFirstChildren(t *testing.T) {
 	}
 	parent := brain.Object{ID: uuid.New(), Kind: "Document", Title: "Parent", Content: "the body", Namespace: ns,
 		Properties: map[string]any{brain.PropVFSPath: "/workspace/doc.md"}}
-	if err := putFixture(store, parent); err != nil {
+	if err := storetest.Put(store, parent); err != nil {
 		t.Fatal(err)
 	}
 	var firstPart uuid.UUID
@@ -36,7 +37,7 @@ func TestEngine_openReadsTheObjectItsKindAndItsFirstChildren(t *testing.T) {
 		if pos == 0 {
 			firstPart = part.ID
 		}
-		if err := putFixture(store, part); err != nil {
+		if err := storetest.Put(store, part); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -44,7 +45,7 @@ func TestEngine_openReadsTheObjectItsKindAndItsFirstChildren(t *testing.T) {
 	deleted := time.Now().UTC()
 	gone := brain.Object{ID: uuid.New(), Kind: "Note", Namespace: ns, DeletedAt: &deleted}
 	for _, o := range []brain.Object{nested, gone} {
-		if err := putFixture(store, o); err != nil {
+		if err := storetest.Put(store, o); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -107,7 +108,7 @@ func TestEngine_openTakesTheKindFromTheCatalogWhenKindsAreRegistered(t *testing.
 	scope := brain.Scope{Namespace: tenant(t)}
 	deal := save(t, eng, scope, brain.Object{Kind: "Deal", Title: "Acme"})
 	stray := brain.Object{ID: uuid.New(), Kind: "Unregistered", Namespace: scope.Namespace}
-	if err := putFixture(store, stray); err != nil {
+	if err := storetest.Put(store, stray); err != nil {
 		t.Fatal(err)
 	}
 
@@ -138,9 +139,9 @@ func TestNewEngine_requiresAStoreAndValidKinds(t *testing.T) {
 func TestMemoryStore_PutRequiresIdentity(t *testing.T) {
 	s := brain.NewMemoryStore()
 	cases := map[string]func() error{
-		"empty object":      func() error { return putFixture(s, brain.Object{}) },
-		"missing kind":      func() error { return putFixture(s, brain.Object{ID: uuid.New()}) },
-		"missing namespace": func() error { return putFixture(s, brain.Object{ID: uuid.New(), Kind: "X"}) },
+		"empty object":      func() error { return storetest.Put(s, brain.Object{}) },
+		"missing kind":      func() error { return storetest.Put(s, brain.Object{ID: uuid.New()}) },
+		"missing namespace": func() error { return storetest.Put(s, brain.Object{ID: uuid.New(), Kind: "X"}) },
 		"empty kind":        func() error { return s.PutKind(context.Background(), brain.ObjectKind{}) },
 	}
 	for name, fn := range cases {

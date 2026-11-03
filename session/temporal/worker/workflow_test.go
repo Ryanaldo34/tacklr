@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -254,52 +253,6 @@ func TestSessionWorkflow_steerDuringYieldKeepsPark(t *testing.T) {
 	}
 	if !yielded {
 		t.Fatalf("want park kept through steer, got %+v", got)
-	}
-}
-
-func TestSessionWorkflow_toolFailureStaysInTheWindow(t *testing.T) {
-	env := newTestWorkflow(t)
-	boom := tacklr.NewTool(tacklr.ToolConfig{
-		Name: "boom",
-		Handler: func(context.Context) (string, error) {
-			return "", fmt.Errorf("upstream: the search provider failed: %w", tacklr.ErrFailed)
-		},
-	})
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		if last := lastMsg(msgs); last != nil && last.Role == message.RoleTool {
-			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: last.Content, IsComplete: true}
-			return
-		}
-		ch <- tacklr.LLMResponseChunk{
-			Type: session.EventFunctionCall,
-			ToolCalls: []message.ToolCall{{
-				ID: "b1", CallID: "b1", Name: "boom", Arguments: `{}`,
-			}},
-			IsComplete: true,
-		}
-	})
-	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{boom}}
-	_, fallback := registerSession(env, agent)
-	id := session.ID("sess-tool-failed")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeClose}) }, 80*time.Millisecond)
-	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: id})
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	if st := querySession(t, env); st.State != session.Complete {
-		t.Fatalf("status %+v", st)
-	}
-	var saw bool
-	for _, ev := range drainLog(t, fallback, id) {
-		if ev.Type == session.EventMessage && strings.Contains(ev.Content, "search provider failed") {
-			saw = true
-		}
-	}
-	if !saw {
-		t.Fatalf("want the failure text in the assistant reply, got %+v", drainLog(t, fallback, id))
 	}
 }
 
@@ -732,44 +685,6 @@ func TestSessionWorkflow_failedWorkerEndsTheChild(t *testing.T) {
 	got := finishSession(t, env, log, id)
 	if !strings.Contains(visibleText(got), "parent-saw-failure") {
 		t.Fatalf("a failed worker must reach the parent as a failed job, got %s", visibleText(got))
-	}
-}
-
-func TestSessionWorkflow_readSkillReturnsTheSkillBody(t *testing.T) {
-	pack := t.TempDir()
-	dir := filepath.Join(pack, "research")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body := "---\nname: research\ndescription: Research carefully\n---\n\nAlways verify claims.\n"
-	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		if last := lastMsg(msgs); last != nil && last.Role == message.RoleTool && strings.Contains(last.Content, "Always verify claims") {
-			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "skill-loaded", IsComplete: true}
-			return
-		}
-		ch <- tacklr.LLMResponseChunk{
-			Type: session.EventFunctionCall,
-			ToolCalls: []message.ToolCall{{
-				ID: "sk1", CallID: "sk1", Name: "read_skill", Arguments: `{"name":"research"}`,
-			}},
-			IsComplete: true,
-		}
-	})
-	env := newTestWorkflow(t)
-	agent := tacklr.AgentOptions{
-		Model: model, MaxWindowSize: 8192,
-		SkillsPath: pack,
-	}
-	_, log := registerSession(env, agent)
-	id := session.ID("sess-skill")
-	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
-	signalAt(env, 40*time.Millisecond, session.Wake{Kind: session.WakeClose})
-	got := finishSession(t, env, log, id)
-	if !strings.Contains(visibleText(got), "skill-loaded") {
-		t.Fatalf("read_skill must return the skill body, got %s", visibleText(got))
 	}
 }
 

@@ -23,7 +23,7 @@ func TestOnCallMiddleware_permissionThenInvoke(t *testing.T) {
 			return "ok", nil
 		},
 	})
-	cc, _ := onCallRuntime()
+	cc := callRuntime(newSessionManager(), "c1")
 	runner := newToolRunner(onCallMiddleware)
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{"path":"/a"}`, CallContext: cc}
 
@@ -55,7 +55,7 @@ func TestOnCallMiddleware_twoLayersParkOneAfterTheOther(t *testing.T) {
 		OnCall:  []OnCallFunc{ToolPermissionOnCall, choose},
 		Handler: func(context.Context) (string, error) { calls++; return "ok", nil },
 	})
-	cc, _ := onCallRuntime()
+	cc := callRuntime(newSessionManager(), "c1")
 	runner := newToolRunner(onCallMiddleware)
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, CallContext: cc}
 
@@ -83,7 +83,8 @@ func TestOnCallMiddleware_permissionAnswersWithoutAPark(t *testing.T) {
 		Handler: func(ctx context.Context) (string, error) { calls++; return "secret", nil },
 	})
 	run := func(decision permissionDecision, granted bool) (ToolOutcome, error) {
-		cc, sm := onCallRuntime()
+		sm := newSessionManager()
+		cc := callRuntime(sm, "c1")
 		if granted {
 			sm.Permissions.granted = map[string]bool{"sensitive": true}
 		}
@@ -125,11 +126,6 @@ func TestToolInterceptor_changesTheOutcome(t *testing.T) {
 	if err != nil || out.Output != "very" || out.Effect != EffectHandoff {
 		t.Fatalf("outcome = %+v %v, want the capped output and a handoff", out, err)
 	}
-}
-
-func onCallRuntime() (*CallContext, *sessionManager) {
-	sm := newSessionManager()
-	return callRuntime(sm, "c1"), sm
 }
 
 func requireParked(t *testing.T, err error, kind string) {

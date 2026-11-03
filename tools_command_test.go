@@ -127,7 +127,7 @@ func TestRunCommand_cdIntoQuotedPath(t *testing.T) {
 
 func newRunCommandSession(t *testing.T) (*vfs.MountSession, *CallContext) {
 	t.Helper()
-	ms := mustMountTree(t, t.Name(), vfs.At("work", vfs.Local(t.TempDir())))
+	ms := mustMountTree(t, t.Name(), vfs.Request{}, vfs.At("work", vfs.Local(t.TempDir())))
 	h := mustNewHarness(t, AgentOptions{
 		sessionID:    t.Name(),
 		mountSession: ms,

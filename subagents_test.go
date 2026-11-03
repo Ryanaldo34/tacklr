@@ -59,7 +59,6 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 			{Name: "alpha", Model: &scriptedModel{}},
 		},
 	})
-	t.Cleanup(h.Close)
 	prompt := h.constructSystemPrompt()
 	ai := strings.Index(prompt, " - alpha\n")
 	zi := strings.Index(prompt, " - zebra: last\n")
@@ -78,7 +77,6 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 func TestJobTools_correctBadArguments(t *testing.T) {
 	h := mustNewHarness(t, AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{},
 		Specialists: []*Specialist{{Name: "researcher", Model: &scriptedModel{}}}})
-	t.Cleanup(h.Close)
 	call := func(name, args string) error {
 		_, err := h.findTool(name, "").invoke(t.Context(), args, turnRuntime(h))
 		return err

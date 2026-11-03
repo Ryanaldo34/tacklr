@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -28,8 +29,8 @@ func vfsIndexHarness(t *testing.T, edit func(*AgentOptions)) (*Harness, *vfs.Mou
 	if err := eng.ApplyKinds(t.Context(), vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "id", uuid.NewString())
-	ms := mustMountTree(t, "vfs-idx-tools", vfs.At("work", vfs.Local(t.TempDir())))
+	ns := storetest.Namespace(t, "id", uuid.NewString())
+	ms := mustMountTree(t, "vfs-idx-tools", vfs.Request{}, vfs.At("work", vfs.Local(t.TempDir())))
 	opts := AgentOptions{
 		sessionID:       "vfs-idx-tools",
 		mountSession:    ms,
@@ -42,7 +43,6 @@ func vfsIndexHarness(t *testing.T, edit func(*AgentOptions)) (*Harness, *vfs.Mou
 		edit(&opts)
 	}
 	h := mustNewHarness(t, opts)
-	t.Cleanup(h.Close)
 	return h, ms, eng, ns
 }
 
@@ -243,9 +243,8 @@ func TestVFSIndexTools_refuseAMountThatIsNotIndexed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ms := mustMountTree(t, "not-indexed", vfs.At("work", vfs.Local(t.TempDir())), vfs.At("off", vfs.Local(t.TempDir())).NotIndexed())
-	h := mustNewHarness(t, AgentOptions{sessionID: "not-indexed", mountSession: ms, Model: &scriptedModel{}, Brain: eng, SearchNamespace: mustNS(t, "id", uuid.NewString())})
-	t.Cleanup(h.Close)
+	ms := mustMountTree(t, "not-indexed", vfs.Request{}, vfs.At("work", vfs.Local(t.TempDir())), vfs.At("off", vfs.Local(t.TempDir())).NotIndexed())
+	h := mustNewHarness(t, AgentOptions{sessionID: "not-indexed", mountSession: ms, Model: &scriptedModel{}, Brain: eng, SearchNamespace: storetest.Namespace(t, "id", uuid.NewString())})
 	activatePlan(t, h)
 	if err := ms.Route(ctx, "/workspace/off/a.txt").WriteFile(ctx, []byte("a\n")); err != nil {
 		t.Fatal(err)

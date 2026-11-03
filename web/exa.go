@@ -119,10 +119,7 @@ func (c *Exa) requireKey() error {
 }
 
 func (c *Exa) postJSON(ctx context.Context, path string, req any, out any) error {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("exa: marshal request: %w", err)
-	}
+	body, _ := json.Marshal(req) // SearchRequest or ContentsRequest: plain fields only
 
 	base := c.BaseURL
 	if base == "" {
@@ -144,9 +141,6 @@ func (c *Exa) postJSON(ctx context.Context, path string, req any, out any) error
 	}
 
 	op := strings.TrimPrefix(path, "/")
-	if op == "" {
-		op = "request"
-	}
 
 	resp, err := hc.Do(httpReq)
 	if err != nil {

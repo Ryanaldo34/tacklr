@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/server"
@@ -20,150 +21,82 @@ func (f authorizerFunc) Authorize(ctx context.Context, principal server.Principa
 	return f(ctx, principal, operation)
 }
 
-func TestService_authenticatesRedactsAndAuthorizes(t *testing.T) {
-	// Arrange
-	secret := server.NewSecret([]byte("credential"))
-	service := &server.Service{
-		Authenticator: authenticatorFunc(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
-			if string(attempt.Credential.Bytes()) != "credential" {
-				t.Fatalf("credential = %q", attempt.Credential.Bytes())
-			}
-			return server.NewPrincipal("alice")
-		}),
-		Authorizer: authorizerFunc(func(_ context.Context, principal server.Principal, operation server.Operation) error {
-			if principal.Subject != "alice" || operation.Action != "session.load" {
-				t.Fatalf("authorization = %#v %#v", principal, operation)
-			}
-			return nil
-		}),
+// TestService_authenticate covers each Authenticate outcome: a credential
+// becomes the authenticator's principal, and a missing service, a failing
+// authenticator, an empty principal or an empty subject each fail.
+func TestService_authenticate(t *testing.T) {
+	authenticator := func(p server.Principal, err error) *server.Service {
+		return &server.Service{Authenticator: authenticatorFunc(func(context.Context, server.Attempt) (server.Principal, error) { return p, err })}
 	}
-
-	// Act
-	securityContext, err := service.Authenticate(t.Context(), server.Attempt{
-		Scheme:     "test",
-		Credential: secret,
-		Binding:    server.ChannelBinding{Kind: "test", ID: "connection"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = service.Authorize(t.Context(), securityContext, server.Operation{Action: "session.load", Resource: "session"})
-
-	// Assert
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := secret.String(); got != "[REDACTED]" {
-		t.Fatalf("secret string = %q", got)
-	}
-}
-
-func TestNewPrincipal_rejectsEmptySubject(t *testing.T) {
-	// Act
-	_, err := server.NewPrincipal("   ")
-
-	// Assert
-	if !errors.Is(err, server.ErrAuthenticationFailed) {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestSecret_emptyAndRedaction(t *testing.T) {
-	// Arrange
-	empty := server.Secret{}
-	secret := server.NewSecret([]byte("credential"))
-
-	// Assert
-	if !empty.Empty() {
-		t.Fatal("empty secret reported as non-empty")
-	}
-	if secret.Empty() {
-		t.Fatal("non-empty secret reported as empty")
-	}
-	if got := secret.String(); got != "[REDACTED]" {
-		t.Fatalf("string = %q", got)
-	}
-	if got := secret.GoString(); got != "[REDACTED]" {
-		t.Fatalf("go string = %q", got)
-	}
-}
-
-func TestService_nilAuthenticatorAndEmptyPrincipal(t *testing.T) {
-	// Arrange
-	var service *server.Service
-
-	// Act
-	_, nilErr := service.Authenticate(t.Context(), server.Attempt{Scheme: "test"})
-	_, emptyPrincipalErr := (&server.Service{
-		Authenticator: authenticatorFunc(func(context.Context, server.Attempt) (server.Principal, error) {
-			return server.Principal{}, nil
-		}),
-	}).Authenticate(t.Context(), server.Attempt{Scheme: "test"})
-
-	// Assert
-	if !errors.Is(nilErr, server.ErrAuthenticationRequired) {
-		t.Fatalf("nil service error = %v", nilErr)
-	}
-	if !errors.Is(emptyPrincipalErr, server.ErrAuthenticationFailed) {
-		t.Fatalf("empty principal error = %v", emptyPrincipalErr)
-	}
-}
-
-func TestService_authorizeRequiresAction(t *testing.T) {
-	// Arrange
 	alice, err := server.NewPrincipal("alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := &server.Service{}
+	_, emptySubject := server.NewPrincipal("   ")
+	secret := server.NewSecret([]byte("credential"))
+	var seen string
+	ok := &server.Service{Authenticator: authenticatorFunc(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
+		seen = string(attempt.Credential.Bytes())
+		return alice, nil
+	})}
 
-	// Act
+	got, okErr := ok.Authenticate(t.Context(), server.Attempt{Scheme: "test", Credential: secret, Binding: server.ChannelBinding{Kind: "test", ID: "connection"}})
+	_, nilErr := (*server.Service)(nil).Authenticate(t.Context(), server.Attempt{Scheme: "test"})
+	_, badErr := authenticator(server.Principal{}, errors.New("bad credential")).Authenticate(t.Context(), server.Attempt{Scheme: "test"})
+	_, emptyErr := authenticator(server.Principal{}, nil).Authenticate(t.Context(), server.Attempt{Scheme: "test"})
+
+	if okErr != nil || got.Principal.Subject != "alice" || seen != "credential" {
+		t.Fatalf("authenticate = %+v %v (saw %q), want alice from the credential", got, okErr, seen)
+	}
+	if !errors.Is(nilErr, server.ErrAuthenticationRequired) {
+		t.Fatalf("no service = %v", nilErr)
+	}
+	for name, err := range map[string]error{"a failing authenticator": badErr, "an empty principal": emptyErr, "an empty subject": emptySubject} {
+		if !errors.Is(err, server.ErrAuthenticationFailed) {
+			t.Errorf("%s = %v, want authentication failed", name, err)
+		}
+	}
+}
+
+// TestService_authorize covers each Authorize outcome: allowed, denied by
+// the authorizer, refused without a principal, and a panic for an operation
+// with no action (a programming error).
+func TestService_authorize(t *testing.T) {
+	alice, err := server.NewPrincipal("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asked server.Operation
+	allow := &server.Service{Authorizer: authorizerFunc(func(_ context.Context, _ server.Principal, op server.Operation) error { asked = op; return nil })}
+	deny := &server.Service{Authorizer: authorizerFunc(func(context.Context, server.Principal, server.Operation) error { return errors.New("denied") })}
+	load := server.Operation{Action: "session.load", Resource: "session"}
+
+	allowed := allow.Authorize(t.Context(), server.Context{Principal: alice}, load)
+	denied := deny.Authorize(t.Context(), server.Context{Principal: alice}, load)
+	anonymous := allow.Authorize(t.Context(), server.Context{}, load)
+
+	if allowed != nil || asked != load {
+		t.Fatalf("allowed = %v for %+v", allowed, asked)
+	}
+	if !errors.Is(denied, server.ErrAuthorizationDenied) || !errors.Is(anonymous, server.ErrAuthenticationRequired) {
+		t.Fatalf("denied = %v, anonymous = %v", denied, anonymous)
+	}
 	defer func() {
 		if recover() == nil {
-			t.Fatal("expected panic for empty action")
+			t.Fatal("an operation with no action was authorized")
 		}
 	}()
-	_ = service.Authorize(t.Context(), server.Context{Principal: alice}, server.Operation{})
+	_ = allow.Authorize(t.Context(), server.Context{Principal: alice}, server.Operation{})
 }
 
-func TestService_authorizerDenies(t *testing.T) {
-	// Arrange
-	alice, err := server.NewPrincipal("alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := &server.Service{
-		Authorizer: authorizerFunc(func(context.Context, server.Principal, server.Operation) error {
-			return errors.New("denied")
-		}),
-	}
+// TestSecret_redactsAndReportsEmpty: a secret never prints its bytes.
+func TestSecret_redactsAndReportsEmpty(t *testing.T) {
+	secret := server.NewSecret([]byte("credential"))
 
-	// Act
-	err = service.Authorize(t.Context(), server.Context{Principal: alice}, server.Operation{Action: "session.load"})
-
-	// Assert
-	if !errors.Is(err, server.ErrAuthorizationDenied) {
-		t.Fatalf("authorize error = %v", err)
+	if !(server.Secret{}).Empty() || secret.Empty() {
+		t.Fatal("Empty is wrong")
 	}
-}
-
-func TestService_rejectsInvalidAuthenticationAndAuthorization(t *testing.T) {
-	// Arrange
-	service := &server.Service{
-		Authenticator: authenticatorFunc(func(context.Context, server.Attempt) (server.Principal, error) {
-			return server.Principal{}, errors.New("bad credential")
-		}),
-	}
-
-	// Act
-	_, authErr := service.Authenticate(t.Context(), server.Attempt{Scheme: "test"})
-	authorizationErr := service.Authorize(t.Context(), server.Context{}, server.Operation{Action: "session.load"})
-
-	// Assert
-	if !errors.Is(authErr, server.ErrAuthenticationFailed) {
-		t.Fatalf("authenticate error = %v", authErr)
-	}
-	if !errors.Is(authorizationErr, server.ErrAuthenticationRequired) {
-		t.Fatalf("authorize error = %v", authorizationErr)
+	if secret.String() != "[REDACTED]" || secret.GoString() != "[REDACTED]" || fmt.Sprintf("%v %#v", secret, secret) != "[REDACTED] [REDACTED]" {
+		t.Fatalf("secret printed as %q / %q", secret.String(), secret.GoString())
 	}
 }

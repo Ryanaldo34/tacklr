@@ -7,34 +7,11 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
-func mustNS(t testing.TB, nv ...string) brain.Namespace {
-	t.Helper()
-	ns, err := brain.ParseNamespace(nv...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ns
-}
-
 // tenant is a namespace no other test uses.
-func tenant(t testing.TB) brain.Namespace { return mustNS(t, "org", uuid.NewString()) }
-
-func mustFilter(t testing.TB, m map[string]any) brain.Filter {
-	t.Helper()
-	f, err := brain.DecodeFilter(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return f
-}
-
-// putFixture writes obj straight to the store under its own namespace.
-func putFixture(s brain.Store, obj brain.Object) error {
-	_, err := s.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, brain.Indexed{Object: obj, Text: obj.IndexText()})
-	return err
-}
+func tenant(t testing.TB) brain.Namespace { return storetest.Namespace(t, "org", uuid.NewString()) }
 
 // save saves obj through eng and returns it.
 func save(t testing.TB, eng *brain.Engine, scope brain.Scope, obj brain.Object) brain.Object {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/helixgraph"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
@@ -92,13 +93,13 @@ func TestSearch_theStoreDecidesGraphHitsLinkOnlyPagesAndRelationlessGraphs(t *te
 	link(t, eng, scope, deal.ID, person.ID, "about", "countersigned quarterly")
 	moved := deal
 	moved.Properties = map[string]any{"stage": "closed"}
-	if err := putFixture(store, moved); err != nil {
+	if err := storetest.Put(store, moved); err != nil {
 		t.Fatal(err)
 	}
 	save(t, bare, scope, brain.Object{Kind: "Deal", Title: "acme renewal"})
 
-	stale, staleErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "acme renewal", Filters: mustFilter(t, map[string]any{"stage": "open"})})
-	closed, closedErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "acme renewal", Filters: mustFilter(t, map[string]any{"stage": "closed"})})
+	stale, staleErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "acme renewal", Filters: storetest.Filter(t, map[string]any{"stage": "open"})})
+	closed, closedErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "acme renewal", Filters: storetest.Filter(t, map[string]any{"stage": "closed"})})
 	links, linksErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "countersigned quarterly"})
 	plain, plainErr := bare.Search(ctx, scope, brain.SearchRequest{Query: "acme renewal"})
 

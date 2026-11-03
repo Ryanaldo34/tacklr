@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
 // cancelEmbedder cancels the caller's ctx on its first call and counts calls.
@@ -33,7 +34,7 @@ func repeatVector(v []float32, n int) [][]float32 {
 }
 
 func TestEngine_cancelledWritesStopEmbeddingTheRest(t *testing.T) {
-	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
+	scope := brain.Scope{Namespace: storetest.Namespace(t, "org", "a")}
 	msgs := []brain.SessionMessage{{Role: "user", SearchText: "one"}, {Role: "user", SearchText: "two"}, {Role: "user", SearchText: "three"}}
 	parts := []brain.Object{{Kind: "Chunk", Content: "one"}, {Kind: "Chunk", Content: "two"}, {Kind: "Chunk", Content: "three"}}
 	run := func(write func(context.Context, *brain.Engine) error) (int, error) {

@@ -18,6 +18,7 @@ import (
 	"github.com/ryanaldo34/tacklr/server/acp"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
 
@@ -141,7 +142,7 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "thanks for choosing", IsComplete: true}
 	})
 
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}})
 	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -266,7 +267,7 @@ func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 		}, IsComplete: true}
 		ch <- tacklr.LLMResponseChunk{IsComplete: true}
 	})
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}})
 	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -339,11 +340,11 @@ func selectionParkTool() *tacklr.Tool {
 
 func TestACP_interruptClientOutcomes(t *testing.T) {
 	t.Run("httpInboundParksWithoutRPC", func(t *testing.T) {
-		r := newTestRuntime(t, parkOnceStrategy(t, "ask_user"), tacklr.AgentOptions{Tools: []*tacklr.Tool{selectionParkTool()}})
-		sid := acpSessionID(t, serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
+		r := acptest.NewRuntime(t, parkOnceStrategy(t, "ask_user"), tacklr.AgentOptions{Tools: []*tacklr.Tool{selectionParkTool()}})
+		sid := acptest.SessionID(t, serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
 		rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sid+`","prompt":[{"type":"text","text":"x"}]}}`)
 		var msg string
-		for _, f := range parseACPFrames(t, rec.Body) {
+		for _, f := range acptest.Frames(t, rec.Body) {
 			if errObj, ok := f["error"].(map[string]any); ok {
 				msg, _ = errObj["message"].(string)
 			}
@@ -354,7 +355,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	})
 
 	t.Run("formOffParksTurn", func(t *testing.T) {
-		r := newTestRuntime(t, parkOnceStrategy(t, "ask_user"), tacklr.AgentOptions{Tools: []*tacklr.Tool{selectionParkTool()}})
+		r := acptest.NewRuntime(t, parkOnceStrategy(t, "ask_user"), tacklr.AgentOptions{Tools: []*tacklr.Tool{selectionParkTool()}})
 		srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		defer cancel()
@@ -391,11 +392,11 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 		waiting := tacklr.NewTool(tacklr.ToolConfig{
 			Name: "wait_child",
 			Handler: func(ctx context.Context, _ struct{}, cc *tacklr.CallContext) (string, error) {
-				_, err := cc.Park(&tacklr.ChildWaiting{Kind: tacklr.TypeChildWaiting})
+				_, err := cc.Park(&plainInterrupt{})
 				return "", err
 			},
 		})
-		r := newTestRuntime(t, parkOnceStrategy(t, "wait_child"), tacklr.AgentOptions{Tools: []*tacklr.Tool{waiting}})
+		r := acptest.NewRuntime(t, parkOnceStrategy(t, "wait_child"), tacklr.AgentOptions{Tools: []*tacklr.Tool{waiting}})
 		srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		defer cancel()
@@ -536,7 +537,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 
 func interruptCallWriteFails(t *testing.T, tool *tacklr.Tool, strategy tacklr.Model, needle string, form bool) {
 	t.Helper()
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{tool}})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{tool}})
 	w := &failOnRPCWriter{needle: needle}
 	bridge := acp.NewClientBridge(w)
 	bridge.MarkInitialized()
@@ -575,7 +576,7 @@ func (f *failOnRPCWriter) WriteFrame(data []byte) error {
 
 func promptInterruptReply(t *testing.T, tool *tacklr.Tool, strategy tacklr.Model, initParams, method string, reply func(id any) map[string]any) {
 	t.Helper()
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{tool}})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{tool}})
 	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
@@ -652,7 +653,7 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "turn2 continued", IsComplete: true}
 	})
 
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
 	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 
 	recNew := &recordingMessageWriter{}
@@ -690,3 +691,14 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 		t.Errorf("turn2Steps = %d, want >= 2", turn2Steps)
 	}
 }
+
+// plainInterrupt is an interrupt ACP has no form for: it parks the turn as
+// a plain interrupt.
+type plainInterrupt struct{}
+
+func (*plainInterrupt) TypeName() string           { return "test_plain_interrupt" }
+func (*plainInterrupt) Serialize() ([]byte, error) { return []byte(`{}`), nil }
+func (*plainInterrupt) Return([]byte) error        { return nil }
+func (*plainInterrupt) Error() string              { return "waiting" }
+
+func init() { tacklr.RegisterInterrupt(func() tacklr.Interrupt { return &plainInterrupt{} }) }

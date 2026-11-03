@@ -166,38 +166,6 @@ func (f fakeInterrupt) Serialize() ([]byte, error) { return []byte(`{}`), nil }
 func (f fakeInterrupt) Return([]byte) error        { return nil }
 func (f fakeInterrupt) Error() string              { return f.name }
 
-func TestChildWaiting_typeNameAndError(t *testing.T) {
-	empty := &tacklr.ChildWaiting{}
-	if empty.TypeName() != tacklr.TypeChildWaiting {
-		t.Fatalf("default type: %s", empty.TypeName())
-	}
-	if empty.Error() != "child session awaiting input" {
-		t.Fatalf("default error: %s", empty.Error())
-	}
-	if err := empty.Return([]byte(`anything`)); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := empty.Serialize()
-	if err != nil || len(raw) == 0 {
-		t.Fatalf("serialize: %v %s", err, raw)
-	}
-
-	named := &tacklr.ChildWaiting{Kind: "spawn_wait", Message: "waiting on researcher"}
-	if named.TypeName() != "spawn_wait" {
-		t.Fatalf("kind: %s", named.TypeName())
-	}
-	if named.Error() != "waiting on researcher" {
-		t.Fatalf("message: %s", named.Error())
-	}
-	got, ok := tacklr.NewInterrupt(tacklr.TypeChildWaiting)
-	if !ok {
-		t.Fatal("child_waiting not registered")
-	}
-	if got.TypeName() != tacklr.TypeChildWaiting {
-		t.Fatalf("new: %s", got.TypeName())
-	}
-}
-
 func TestAuthExpired_typeNameAndResume(t *testing.T) {
 	empty := &tacklr.AuthExpired{}
 	if empty.TypeName() != tacklr.TypeAuthExpired {

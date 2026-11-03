@@ -9,8 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/session"
-
 	"github.com/ryanaldo34/tacklr/message"
 )
 
@@ -39,15 +37,6 @@ func (pt planToolsFixture) run(tool *Tool, args string) (ToolOutcome, error) {
 	out, err := tool.invoke(context.Background(), args, cc)
 	cc.commit()
 	return out, err
-}
-
-func drainEventCh() chan session.Event {
-	c := make(chan session.Event, 8)
-	go func() {
-		for range c {
-		}
-	}()
-	return c
 }
 
 // TestCreatePlanTool covers create_plan success and rejection return paths.
@@ -244,7 +233,6 @@ func TestCompleteTodoTool(t *testing.T) {
 // completion lands, and a change that no longer applies is skipped.
 func TestPlanTools_changesOfCallsThatRanAtOnceAllLand(t *testing.T) {
 	h := mustNewHarness(t, AgentOptions{sessionID: "plan-at-once", MaxWindowSize: 8192, Model: &scriptedModel{}})
-	t.Cleanup(h.Close)
 	const n = 4
 	todos := make([]Todo, n)
 	calls := make([]message.ToolCall, n, n+1)

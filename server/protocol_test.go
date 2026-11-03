@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -16,7 +14,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/message"
 
-	"github.com/ryanaldo34/tacklr/internal/livesess"
+	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
@@ -103,7 +101,7 @@ func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 			}
 		}
 	})
-	k := newTestRuntime(t, strategy, tacklr.AgentOptions{})
+	k := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
 	ctx := t.Context()
 	id, err := k.Client.CreateSession(ctx, session.CreateSession{})
 	if err != nil {
@@ -169,7 +167,7 @@ func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 }
 
 func TestRunTurn_runtimeErrors(t *testing.T) {
-	k := newTestRuntime(t, testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	k := acptest.NewRuntime(t, testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "x", IsComplete: true}
 	}), tacklr.AgentOptions{})
 	env := server.ProtocolEnv{Client: k.Client, Agent: k.Agent}
@@ -214,7 +212,7 @@ func TestRunTurn_runtimeErrors(t *testing.T) {
 }
 
 func TestRunTurn_protocolErrorStopsTurn(t *testing.T) {
-	k := newTestRuntime(t, testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	k := acptest.NewRuntime(t, testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "x", IsComplete: true}
 	}), tacklr.AgentOptions{})
 	id, err := k.Client.CreateSession(t.Context(), session.CreateSession{})
@@ -230,7 +228,7 @@ func TestRunTurn_protocolErrorStopsTurn(t *testing.T) {
 }
 
 func TestServeHTTP_respectsContextCancel(t *testing.T) {
-	r := newTestRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
+	r := fakeHost(t)
 	srv := server.NewServer(r.Client, r.Agent, acp.New(nil)).AllowAnonymousNetwork()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -300,114 +298,11 @@ func (s closedSub) Events() <-chan session.Event { return s.ch }
 func (s closedSub) Err() error                   { return s.err }
 func (closedSub) Close() error                   { return nil }
 
-type testRuntime struct {
-	Client session.Client
-	Agent  tacklr.AgentOptions
-}
-
-func fakeHost(t *testing.T) *testRuntime {
+func fakeHost(t *testing.T) *acptest.Runtime {
 	t.Helper()
 	agent := tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil),
 		MaxWindowSize: 8192, SystemPrompt: "test prompt"}
-	return &testRuntime{Client: fakeRuntime{}, Agent: agent}
-}
-
-func newTestRuntime(t *testing.T, model tacklr.Model, spec tacklr.AgentOptions) *testRuntime {
-	t.Helper()
-	if spec.Model == nil {
-		spec.Model = model
-	}
-	if spec.Model == nil {
-		spec.Model = testkit.HTTPModel(t, nil)
-	}
-	if spec.MaxWindowSize == 0 {
-		spec.MaxWindowSize = 8192
-	}
-	if spec.SystemPrompt == "" {
-		spec.SystemPrompt = "test prompt"
-	}
-	return &testRuntime{
-		Client: livesess.Runtime(t, spec),
-		Agent:  spec,
-	}
-}
-
-func newTestServer(t *testing.T) *server.Server {
-	t.Helper()
-	k := newTestRuntime(t, nil, tacklr.AgentOptions{})
-	return server.NewServer(k.Client, k.Agent, acp.New(nil))
+	return &acptest.Runtime{Client: fakeRuntime{}, Agent: agent}
 }
 
 type recordingMessageWriter = testkit.RecordingWriter
-
-func acpSessionID(t *testing.T, rec *httptest.ResponseRecorder) string {
-	t.Helper()
-	var resp map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal response: %v", err)
-	}
-	if resp["error"] != nil {
-		t.Fatalf("unexpected error: %v", resp["error"])
-	}
-	sessionID, ok := resp["result"].(map[string]any)["sessionId"].(string)
-	if !ok || sessionID == "" {
-		t.Fatalf("missing sessionId in result: %v", resp)
-	}
-	return sessionID
-}
-
-func serveACPInbound(t *testing.T, r *testRuntime, proto server.Protocol, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	mw := acp.HTTPWriter(rec)
-	env := server.ProtocolEnv{Client: r.Client, Agent: r.Agent, Conn: &server.Conn{Writer: mw}}
-	_ = proto.HandleInbound(t.Context(), env, []byte(body))
-	return rec
-}
-
-type acpTestServer struct {
-	t     *testing.T
-	r     *testRuntime
-	proto server.Protocol
-	wire  server.ProtocolWireStore
-}
-
-func newACPTestServerWithWire(t *testing.T, r *testRuntime, wire server.ProtocolWireStore) *acpTestServer {
-	t.Helper()
-	return &acpTestServer{t: t, r: r, proto: acp.New(wire), wire: wire}
-}
-
-func (s *acpTestServer) rpc(body string) *httptest.ResponseRecorder {
-	s.t.Helper()
-	return serveACPInbound(s.t, s.r, s.proto, body)
-}
-
-func acpRPCResult(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
-	t.Helper()
-	var resp map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v body=%s", err, rec.Body.String())
-	}
-	if errObj, ok := resp["error"]; ok && errObj != nil {
-		t.Fatalf("unexpected error: %v", errObj)
-	}
-	res, _ := resp["result"].(map[string]any)
-	return res
-}
-
-func parseACPFrames(t *testing.T, body io.Reader) []map[string]any {
-	t.Helper()
-	var frames []map[string]any
-	dec := json.NewDecoder(body)
-	for {
-		var frame map[string]any
-		if err := dec.Decode(&frame); err != nil {
-			if err == io.EOF {
-				break
-			}
-			t.Fatalf("decode ACP frame: %v", err)
-		}
-		frames = append(frames, frame)
-	}
-	return frames
-}

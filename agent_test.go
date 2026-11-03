@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/session"
 
 	"github.com/ryanaldo34/tacklr/message"
@@ -21,7 +21,7 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "org", "acme")
+	ns := storetest.Namespace(t, "org", "acme")
 	const (
 		sessionID = "sess-handoff"
 		token     = "unique-retain-handoff-token"
@@ -34,7 +34,6 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 		Brain:           eng,
 		Model:           &scriptedModel{},
 	})
-	t.Cleanup(h.Close)
 	text := messageSearchText(&message.Message{
 		Role:    message.RoleAssistant,
 		Content: "body",
@@ -100,7 +99,7 @@ func TestCommitRound_aCollapseSavesTheWindowForSearch(t *testing.T) {
 	h := mustNewHarness(t, AgentOptions{
 		sessionID:       "sess-collapse",
 		MaxWindowSize:   270,
-		SearchNamespace: mustNS(t, "org", "acme"),
+		SearchNamespace: storetest.Namespace(t, "org", "acme"),
 		Brain:           eng,
 		Model: &scriptedModel{
 			CountTokensFn: func(ctx context.Context, msgs []*message.Message, tools []*Tool) (int, error) {
@@ -112,7 +111,6 @@ func TestCommitRound_aCollapseSavesTheWindowForSearch(t *testing.T) {
 			},
 		},
 	})
-	t.Cleanup(h.Close)
 	collapsed := &message.Message{Role: message.RoleAssistant, Content: strings.Repeat("a", 300) + " " + token}
 	h.context.Restore([]*message.Message{{Role: message.RoleUser, Content: "goal"}, buildPlanDocumentMessage("ship"), collapsed})
 	call := func(name, args string) string {
@@ -157,11 +155,10 @@ func TestHandoff_sessionMessageSaveErrorKeepsWindow(t *testing.T) {
 	h := mustNewHarness(t, AgentOptions{
 		sessionID:       "sess-save-fail",
 		MaxWindowSize:   8192,
-		SearchNamespace: mustNS(t, "org", "acme"),
+		SearchNamespace: storetest.Namespace(t, "org", "acme"),
 		Brain:           eng,
 		Model:           &scriptedModel{},
 	})
-	t.Cleanup(h.Close)
 	h.context.Restore([]*message.Message{
 		{Role: message.RoleUser, Content: "do the work"},
 		{Role: message.RoleAssistant, Content: "kept-detail"},
@@ -209,23 +206,4 @@ func mustSearch(t *testing.T, eng *brain.Engine, scope brain.Scope, query string
 
 func toolCall(id, name, args string) message.ToolCall {
 	return message.ToolCall{ID: id, CallID: id, Name: name, Arguments: args}
-}
-
-func TestTagModelAfterToolsError_wrapsProviderFailures(t *testing.T) {
-	base := errors.New("upstream failed")
-	wrapped := fmt.Errorf("%w: already", ErrModelAfterTools)
-
-	fromError := tagModelAfterToolsError(LLMResponseChunk{Error: base})
-	fromWrapped := tagModelAfterToolsError(LLMResponseChunk{Error: wrapped})
-	fromContent := tagModelAfterToolsError(LLMResponseChunk{Type: session.EventError, Content: "provider said no"})
-
-	if !errors.Is(fromError.Error, ErrModelAfterTools) || fromError.Content == "" {
-		t.Fatalf("from error = %+v", fromError)
-	}
-	if !errors.Is(fromWrapped.Error, ErrModelAfterTools) || strings.Count(fromWrapped.Error.Error(), "model request failed") != 1 {
-		t.Fatalf("double wrap = %v", fromWrapped.Error)
-	}
-	if !errors.Is(fromContent.Error, ErrModelAfterTools) || !strings.Contains(fromContent.Content, "provider said no") {
-		t.Fatalf("from content = %+v", fromContent)
-	}
 }

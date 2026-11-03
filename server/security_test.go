@@ -13,24 +13,13 @@ import (
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
 
+	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
 
-type testAuthenticator func(context.Context, server.Attempt) (server.Principal, error)
-
-func (f testAuthenticator) Authenticate(ctx context.Context, attempt server.Attempt) (server.Principal, error) {
-	return f(ctx, attempt)
-}
-
-type testAuthorizer func(context.Context, server.Principal, server.Operation) error
-
-func (f testAuthorizer) Authorize(ctx context.Context, principal server.Principal, operation server.Operation) error {
-	return f(ctx, principal, operation)
-}
-
 func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 	service := &server.Service{
-		Authenticator: testAuthenticator(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
+		Authenticator: authenticatorFunc(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
 			if attempt.Scheme != "host-login" {
 				return server.Principal{}, errors.New("unexpected scheme")
 			}
@@ -43,7 +32,7 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 		Description: "Authenticate with the host",
 		Scheme:      "host-login",
 	}}, true)
-	k := newTestRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
+	k := acptest.NewRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
 	connection := &server.Conn{}
 	env := server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: connection, Security: service}
 	call := func(body string) map[string]any {
@@ -106,7 +95,8 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 }
 
 func TestServer_networkPolicyMustBeExplicit(t *testing.T) {
-	srv := newTestServer(t)
+	k := fakeHost(t)
+	srv := server.NewServer(k.Client, k.Agent, acp.New(nil))
 	err := srv.ServeHTTP(t.Context(), "127.0.0.1:0")
 	if !errors.Is(err, server.ErrNetworkSecurityPolicyRequired) {
 		t.Fatalf("server.ServeHTTP error = %v", err)
@@ -115,11 +105,11 @@ func TestServer_networkPolicyMustBeExplicit(t *testing.T) {
 
 func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 	service := &server.Service{
-		Authenticator: testAuthenticator(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
+		Authenticator: authenticatorFunc(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
 			return server.NewPrincipal(string(attempt.Credential.Bytes()))
 		}),
 	}
-	k := newTestRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
+	k := fakeHost(t)
 	srv := server.NewServer(k.Client, k.Agent, healthProtocol{}).WithSecurity(service, func(r *http.Request) (server.Attempt, bool) {
 		if token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); token != r.Header.Get("Authorization") {
 			return server.Attempt{Scheme: "bearer", Credential: server.NewSecret([]byte(token))}, true
@@ -146,7 +136,7 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 	badReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	badReq.Header.Set("Authorization", "Bearer bad")
 	failAuth := server.NewServer(k.Client, k.Agent, healthProtocol{}).WithSecurity(&server.Service{
-		Authenticator: testAuthenticator(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
+		Authenticator: authenticatorFunc(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
 			if string(attempt.Credential.Bytes()) == "bad" {
 				return server.Principal{}, errors.New("nope")
 			}

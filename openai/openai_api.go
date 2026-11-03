@@ -86,9 +86,6 @@ func classifyProviderFailure(status int, body []byte) error {
 
 // classifyAPIStatus applies refusal/max-token signals to a structured provider error.
 func classifyAPIStatus(apiErr *APIStatusError, errType string) error {
-	if apiErr == nil {
-		return nil
-	}
 	lower := strings.ToLower(apiErr.Body + " " + apiErr.Code + " " + errType)
 	if isRefusalSignal(lower) {
 		return fmt.Errorf("%w: %w", session.ErrModelRefused, apiErr)

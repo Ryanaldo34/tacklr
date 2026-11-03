@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -196,7 +197,9 @@ func TestSchema(t *testing.T) {
 	t.Run("basic fields with desc and required", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
 		s := asParams(t, tool)
-		assertObject(t, s)
+		if s["type"] != "object" || s["additionalProperties"] != false {
+			t.Errorf("expected {type:object, additionalProperties:false}, got %v", s)
+		}
 		props := s["properties"].(map[string]any)
 
 		n := props["name"].(map[string]any)
@@ -310,37 +313,6 @@ func TestSchema(t *testing.T) {
 	})
 }
 
-func TestAsJson(t *testing.T) {
-	tool := NewTool(ToolConfig{
-		Name:        "get_weather",
-		Description: "Get the weather",
-		Handler:     basicHandler,
-	})
-	def := tool.AsJson()
-
-	if def["type"] != "function" {
-		t.Errorf("type = %v", def["type"])
-	}
-	if def["name"] != "get_weather" {
-		t.Errorf("name = %v", def["name"])
-	}
-	if def["description"] != "Get the weather" {
-		t.Errorf("description = %v", def["description"])
-	}
-	if def["strict"] != true {
-		t.Errorf("strict = %v", def["strict"])
-	}
-	if def["parameters"] == nil {
-		t.Error("parameters missing")
-	}
-	// Nil parameters map → default empty object schema (strict tool host shape).
-	empty := (&Tool{name: "bare"}).AsJson()
-	params, _ := empty["parameters"].(map[string]any)
-	if params == nil || params["type"] != "object" {
-		t.Fatalf("nil params default = %#v", empty["parameters"])
-	}
-}
-
 // TestTypeToJSONSchema_structuredOutput is the public structured-output
 // helper: omitempty fields stay optional (non-strict).
 func TestTypeToJSONSchema_structuredOutput(t *testing.T) {
@@ -375,20 +347,31 @@ func TestTypeToJSONSchema_structuredOutput(t *testing.T) {
 	}
 }
 
+// TestToolsAsJson is the wire shape of a tool list: each tool a strict
+// function with its schema, a namespaced name joined with "__", and an
+// empty list as [].
 func TestToolsAsJson(t *testing.T) {
-	if ToolsAsJson(nil) != "[]" {
-		t.Fatalf("empty = %s", ToolsAsJson(nil))
-	}
 	raw := ToolsAsJson([]*Tool{
-		NewTool(ToolConfig{Name: "standalone", Handler: zeroArgsStringHandler}),
+		NewTool(ToolConfig{Name: "get_weather", Description: "Get the weather", Handler: basicHandler}),
 		NewTool(ToolConfig{Name: "greet", Namespace: "ado", Handler: zeroArgsStringHandler}),
 	})
 	var parsed []map[string]any
+
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 		t.Fatal(err)
 	}
-	if len(parsed) != 2 || parsed[0]["name"] != "standalone" || parsed[1]["name"] != "ado__greet" {
-		t.Fatalf("%s", raw)
+	if ToolsAsJson(nil) != "[]" {
+		t.Fatalf("empty = %s", ToolsAsJson(nil))
+	}
+	first := parsed[0]
+	if len(parsed) != 2 || first["type"] != "function" || first["name"] != "get_weather" || first["description"] != "Get the weather" || first["strict"] != true || first["parameters"] == nil {
+		t.Fatalf("tool = %v", first)
+	}
+	if parsed[1]["name"] != "ado__greet" {
+		t.Fatalf("namespaced name = %v", parsed[1]["name"])
+	}
+	if params, _ := parsed[1]["parameters"].(map[string]any); params == nil || params["type"] != "object" {
+		t.Fatalf("a tool with no arguments has parameters %#v, want an empty object schema", parsed[1]["parameters"])
 	}
 }
 
@@ -437,30 +420,14 @@ func TestNewTool_validation(t *testing.T) {
 	}
 }
 
-func assertObject(t *testing.T, s map[string]any) {
-	t.Helper()
-	if s["type"] != "object" || s["additionalProperties"] != false {
-		t.Errorf("expected {type:object, additionalProperties:false}, got %v", s)
-	}
-}
-
 func assertRequired(t *testing.T, s map[string]any, vals ...string) {
 	t.Helper()
 	req := s["required"].([]string)
 	for _, v := range vals {
-		if !contains(req, v) {
+		if !slices.Contains(req, v) {
 			t.Errorf("required %v missing %q", req, v)
 		}
 	}
-}
-
-func contains(slice []string, val string) bool {
-	for _, v := range slice {
-		if v == val {
-			return true
-		}
-	}
-	return false
 }
 
 func asParams(t *testing.T, tool *Tool) map[string]any {

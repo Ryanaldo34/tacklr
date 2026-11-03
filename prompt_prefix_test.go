@@ -30,7 +30,6 @@ func TestNewHarness_twoBuildsSendTheSameRequestPrefix(t *testing.T) {
 		SkillsLoader: skillPack(t, "research", "Research carefully", "Verify claims."),
 		Specialists:  []*Specialist{{Name: "writer", Model: &scriptedModel{}}, {Name: "analyst", Model: &scriptedModel{}}}}
 	one, two := mustNewHarness(t, opts), mustNewHarness(t, opts)
-	t.Cleanup(one.Close)
 	t.Cleanup(two.Close)
 
 	a, b := one.request(nil), two.request(nil)

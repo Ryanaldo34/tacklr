@@ -14,11 +14,14 @@ import (
 	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/pgtest"
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
 	"github.com/ryanaldo34/tacklr/session"
+	sessionpg "github.com/ryanaldo34/tacklr/session/postgres"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -40,7 +43,34 @@ func trace(t testing.TB) {
 	})
 }
 
-// Runtime starts a worker against the shared Temporal Docker server.
+// stores are the durable session stores in a Postgres schema of the test's
+// own, as a production host runs them: the events go through the Postgres
+// EventLog, since the live stack turns Workflow Streams off.
+func stores(t testing.TB) (session.Store, session.EventLog, session.SecretStorage) {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), pgtest.Conn(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	db, err := sessionpg.New(pool, sessionpg.Options{Schema: pgtest.Schema(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Setup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := sessionpg.NewAESGCM(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := db.EventLog()
+	t.Cleanup(log.Close)
+	return db.Store(), log, db.Secrets(sealer)
+}
+
+// Runtime starts a worker against the shared Temporal Docker server, on the
+// Postgres session stores.
 func Runtime(t testing.TB, agent tacklr.AgentOptions) session.Client {
 	t.Helper()
 	trace(t)
@@ -54,7 +84,7 @@ func Runtime(t testing.TB, agent tacklr.AgentOptions) session.Client {
 	}
 	t.Cleanup(c.Close)
 	tq := "tacklr-" + uuid.NewString()
-	store, log, secrets := session.NewMemoryStore(), session.NewMemoryEventLog(), session.NewMemorySecretStorage()
+	store, log, secrets := stores(t)
 	rt := temporal.Open(c, temporal.Config{TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true})
 	w := worker.New(c, worker.Config{Agent: agent, TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true})
 	stop := make(chan any)

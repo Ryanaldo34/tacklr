@@ -63,6 +63,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -71,13 +72,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/brain/postgres"
+	brainpg "github.com/ryanaldo34/tacklr/brain/postgres"
 	"github.com/ryanaldo34/tacklr/openai"
 	"github.com/ryanaldo34/tacklr/session"
+	sessionpg "github.com/ryanaldo34/tacklr/session/postgres"
 	"github.com/ryanaldo34/tacklr/session/temporal"
 	"github.com/ryanaldo34/tacklr/session/temporal/worker"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -94,12 +97,28 @@ func main() {
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
 
-	// The brain: a store (Postgres here) behind the knowledge engine.
-	store, err := postgres.Open(ctx, os.Getenv("DATABASE_URL"), postgres.Options{})
+	// One Postgres pool, owned by the host, serves the brain and the
+	// session stores. Configure sets what the brain store needs on every
+	// connection; the session tables are schema-qualified and need nothing.
+	brainOpts := brainpg.Options{}
+	cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer store.Close()
+	if err := brainpg.Configure(cfg, brainOpts); err != nil {
+		log.Fatal(err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer pool.Close()
+
+	// The brain: the Postgres store behind the knowledge engine.
+	store, err := brainpg.Open(pool, brainOpts)
+	if err != nil {
+		log.Fatal(err)
+	}
 	finding := brain.KindSpec{Kind: "Finding", Description: "A research finding", IsParent: true}
 	if err := store.Setup(ctx, finding); err != nil {
 		log.Fatal(err)
@@ -126,17 +145,34 @@ func main() {
 		OpenVFS: vfs.Tree(vfs.At("work", vfs.Local("/srv/tacklr/work"))),
 	}
 
+	// The durable session stores: checkpoints and tool-call outcomes, and
+	// the users' delegated tokens, sealed with a 32-byte key (or a Sealer
+	// over the host's KMS). Every worker and client shares them.
+	sessionDB, err := sessionpg.New(pool, sessionpg.Options{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := sessionDB.Setup(ctx); err != nil {
+		log.Fatal(err)
+	}
+	key, err := hex.DecodeString(os.Getenv("TACKLR_SECRETS_KEY"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	sealer, err := sessionpg.NewAESGCM(key)
+	if err != nil {
+		log.Fatal(err)
+	}
+	records, secrets := sessionDB.Store(), sessionDB.Secrets(sealer)
+
 	// The durable runtime: Temporal. The worker runs the sessions; the
-	// client starts and talks to them. Both use the same session stores:
-	// in memory here (one process), shared stores in production. For
-	// tracing, add Temporal's OpenTelemetry plugin to client.Options.Plugins
-	// (docs/session.md).
+	// client starts and talks to them. For tracing, add Temporal's
+	// OpenTelemetry plugin to client.Options.Plugins (docs/session.md).
 	c, err := temporal.Dial(client.Options{HostPort: os.Getenv("TEMPORAL_ADDRESS")})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer c.Close()
-	records, secrets := session.NewMemoryStore(), session.NewMemorySecretStorage()
 	w := worker.New(c, worker.Config{Agent: agent, Store: records, Secrets: secrets})
 	if err := w.Start(); err != nil {
 		log.Fatal(err)
@@ -511,13 +547,15 @@ The session's identity, MCP servers and children are the runtime's: it holds the
 
 The runtime keeps three kinds of session data apart. The client and the worker must use the same ones:
 
-| Store | Holds | In memory |
-|-------|-------|-----------|
-| `session.Store` | The session's checkpoint, as opaque bytes (the window of complete rounds, plan, user state, permission decisions, search cursors), and each tool call's `Outcome` (its result text and record), so the durable runtime's history does not hold tool results | `session.NewMemoryStore` |
-| `session.EventLog` | The client event stream (fallback when Workflow Streams are off) | `session.NewMemoryEventLog` (the default) |
-| `session.SecretStorage` | VFS tokens. Never in a checkpoint or workflow history | `session.NewMemorySecretStorage` |
+| Store | Holds | Implementations |
+|-------|-------|-----------------|
+| `session.Store` | The session's checkpoint, as opaque bytes (the window of complete rounds, plan, user state, permission decisions, search cursors), and each tool call's `Outcome` (its result text and record), so the durable runtime's history does not hold tool results | `session/postgres` (`DB.Store`); `session.NewMemoryStore` for one process |
+| `session.EventLog` | The client event stream (fallback when Workflow Streams are off, and for runtimes without a stream of their own) | `session/postgres` (`DB.EventLog`); `session.NewMemoryEventLog` (the default) |
+| `session.SecretStorage` | The session-scoped tokens a host passes on `CreateSession`, `Prompt` and `Resume` (an end user's Drive or Graph OAuth tokens, per-session object-store credentials). Never in a checkpoint or workflow history. Service credentials do not go here: the host passes those to the providers it builds | `session/postgres` (`DB.Secrets`, sealed by a `Sealer`); `session.NewMemorySecretStorage` for one process |
 
-The in-memory stores work for one process only. Production passes shared stores. `Store.Save` is compare-and-swap on a `Revision`, and `Revision` lets a worker learn whether the committed state it holds is current without loading the checkpoint:
+The in-memory stores work for one process only. Production passes shared ones; `session/postgres` keeps all three in Postgres over the host's pool (the Get started host wires it). Its `SecretStorage` seals each session's tokens before it writes them, bound to the session id, through a `Sealer`: `NewAESGCM` from a 32-byte key, or the host's own over its KMS. Its `EventLog` numbers each session's events without gaps and wakes subscribers in every process with `LISTEN`/`NOTIFY`.
+
+A store of your own runs `session/storetest`, the contract the built-in ones meet. `Store.Save` is compare-and-swap on a `Revision`, and `Revision` lets a worker learn whether the committed state it holds is current without loading the checkpoint:
 
 ```go
 type checkpointRow struct {
@@ -634,7 +672,9 @@ ACP's `_tacklr/vfs/bind` maps onto `Prompt.Auth`, so VFS tokens never reach work
 | `session/temporal` | The Temporal client (`temporal.Client`, `Dial`) |
 | `session/temporal/worker` | The Temporal worker: the session workflow, its activities, its harness cache, `JobHandler` |
 | `brain` | Knowledge engine, `Store` and `Graph` interfaces, in-memory store |
-| `brain/postgres` | Postgres `brain.Store` |
+| `brain/postgres` | Postgres `brain.Store` (`Configure` the host's pool, then `Open`) |
+| `session/postgres` | Postgres `session.Store`, `SecretStorage` (sealed) and `EventLog` over the host's pool |
+| `session/storetest` | The contract every session store meets |
 | `brain/helixgraph` | Helix `brain.Graph` |
 | `vfs` | Virtual filesystem, mounts, providers, content IR, FUSE |
 | `vfs/mount` | The mount bindings and credentials a client sends |

@@ -28,7 +28,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/internal/durtest"
+
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/message"
@@ -39,11 +39,6 @@ import (
 )
 
 var liveSeq atomic.Int64
-
-func liveHostPort(t *testing.T) string {
-	t.Helper()
-	return temporaldocker.HostPort(t)
-}
 
 type liveStack struct {
 	Client    session.Client
@@ -58,7 +53,7 @@ type liveStack struct {
 
 func newLiveStack(t *testing.T, agent tacklr.AgentOptions, change ...func(*Config)) *liveStack {
 	t.Helper()
-	addr := liveHostPort(t)
+	addr := temporaldocker.HostPort(t)
 	// As a host does: Temporal's tracing plugin on the client; the worker
 	// built from it gets it too.
 	plugin, err := temporalotel.NewPlugin(temporalotel.PluginOptions{})
@@ -135,24 +130,11 @@ func liveAgent(t *testing.T, model tacklr.Model, extra tacklr.AgentOptions) tack
 
 func waitTurn(t *testing.T, rt session.Client, id session.ID, sub session.Subscription, timeout time.Duration) []session.Event {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), timeout)
-	defer cancel()
-	var got []session.Event
-	for {
-		select {
-		case ev, ok := <-sub.Events():
-			if !ok {
-				return got
-			}
-			got = append(got, ev)
-			if ev.Type == session.EventComplete || ev.Type == session.EventError || ev.Type == session.EventInterrupt {
-				durtest.AssertStatusMatchesEvent(t, rt, id, ev)
-				return got
-			}
-		case <-ctx.Done():
-			t.Fatalf("timeout waiting for turn events, got %d %+v", len(got), got)
-		}
-	}
+	got := waitContains(t, sub, timeout, func(ev session.Event) bool {
+		return ev.Type == session.EventComplete || ev.Type == session.EventError || ev.Type == session.EventInterrupt
+	})
+	testkit.AssertStatusMatchesEvent(t, rt, id, got[len(got)-1])
+	return got
 }
 
 func waitContains(t *testing.T, sub session.Subscription, timeout time.Duration, want func(session.Event) bool) []session.Event {

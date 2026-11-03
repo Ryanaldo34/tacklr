@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
@@ -30,7 +31,7 @@ func TestPut_catalogEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "id", uuid.NewString())
+	ns := storetest.Namespace(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	pid := uuid.New()
 
@@ -86,7 +87,7 @@ func TestPut_embedderError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "id", uuid.NewString())
+	ns := storetest.Namespace(t, "id", uuid.NewString())
 	_, err = eng.Save(ctx, brain.Scope{Namespace: ns}, brain.Object{
 		Kind: "Note", Title: "x", Content: "body",
 	})
@@ -116,7 +117,7 @@ func TestPut_skipIndexKeepsPropertyOffEntityText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "id", uuid.NewString())
+	ns := storetest.Namespace(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	const msgID = "msg-skip-index-token"
 	deal, err := eng.Save(ctx, scope, brain.Object{
@@ -160,7 +161,7 @@ func TestPut_enumRejectsUnknownString(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "id", uuid.NewString())
+	ns := storetest.Namespace(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	_, err = eng.Save(ctx, scope, brain.Object{
 		Kind: "Deal", Title: "x", Properties: map[string]any{"stage": "Yellowish"},
@@ -193,7 +194,7 @@ func TestPut_indexTextFuncShapesEmbedAndGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "id", uuid.NewString())
+	ns := storetest.Namespace(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	obj, err := eng.Save(ctx, scope, brain.Object{
 		Kind: "Note", Title: "invoice", Content: "amount due Friday",
@@ -286,7 +287,7 @@ func TestPutTree_rejectsPartParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := mustNS(t, "id", uuid.NewString())
+	ns := storetest.Namespace(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	parent, err := eng.Save(ctx, scope, brain.Object{Kind: "Document", Title: "Memo"})
 	if err != nil {

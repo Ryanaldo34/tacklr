@@ -710,13 +710,14 @@ eng, err := brain.NewEngine(store, brain.WithKinds(
 
 Production-shaped. `postgres.Store.Setup` creates whatever schema is missing,
 then upserts the kinds you pass. Run it on each deploy; concurrent runs wait for
-each other on an advisory lock. `postgres.Open` takes the
-connection string and `Options`: `EmbeddingDim` must match the embedder (zero
-means 1536), and Setup fails when the existing vector column has another size.
-`Schema` names the schema (default `tacklr`); every connection's `search_path`
-is that schema, then `public`, with a server-side `statement_timeout`
-(`StatementTimeout`, default 30s). Pool settings ride in the connection string
-(`pool_max_conns`, …). A
+each other on an advisory lock. The host owns the pool: `postgres.Configure`
+sets what each connection needs on the host's `pgxpool.Config`, and
+`postgres.Open` takes the pool and the same `Options`. `EmbeddingDim` must match
+the embedder (zero means 1536), and Setup fails when the existing vector column
+has another size. `Schema` names the schema (default `tacklr`); every
+connection's `search_path` is that schema, then `public`, with a server-side
+`statement_timeout` (`StatementTimeout`, default 30s). Pool settings are the
+host's (`pool_max_conns`, …), and the same pool serves `session/postgres`. A
 transaction-mode pooler (port 6543 on hosted Postgres) must support prepared
 statements and forward those startup parameters; otherwise use 5432.
 
@@ -728,11 +729,14 @@ Helix is an optional graph. Inject both; `brain` does not import either package.
 // Each backend embeds with its own Embedding; they can share one Embedder.
 emb := brain.Embedding{Embedder: myEmbedder} // Embed(ctx, texts) and Model()
 
-store, err := postgres.Open(ctx, os.Getenv("DATABASE_URL"), postgres.Options{
+opts := postgres.Options{
     EmbeddingDim: 1536, // schema "tacklr"
     Embedding:    emb,  // nil Embedder: keyword search only
-})
-defer store.Close()
+}
+cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
+if err := postgres.Configure(cfg, opts); err != nil { /* ... */ }
+pool, err := pgxpool.NewWithConfig(ctx, cfg) // the host's pool; it closes it
+store, err := postgres.Open(pool, opts)
 kinds := append([]brain.KindSpec{dealSpec, personSpec}, vfsindex.MountIndexKinds()...)
 if err := store.Setup(ctx, kinds...); err != nil { /* ... */ }
 client, err := helix.NewClient(helixURL)
@@ -844,7 +848,7 @@ search. `MemoryStore`, `postgres.Store` and `helixgraph.Graph` pass them.
 | Store interface | `brain/store.go` |
 | In-process store | `brain/memory.go` |
 | Store backend contract | `brain/storetest` |
-| Postgres store | `brain/postgres` (`postgres.Open`, `Store.Setup`) |
+| Postgres store | `brain/postgres` (`postgres.Configure`, `postgres.Open`, `Store.Setup`) |
 | Graph interface | `brain/graph.go` |
 | Graph backend contract | `brain/graphtest` |
 | Helix adapter | `brain/helixgraph/` |

@@ -88,38 +88,6 @@ func (c *UserSelectionInterrupt) Error() string {
 	return string(b)
 }
 
-// TypeChildWaiting is kept for old checkpoints. A blocking specialist now
-// reports its child id on the tool step, and the session loop waits.
-// The payload is forwarded to the child session; Return is a no-op.
-const TypeChildWaiting = "child_waiting"
-
-// ChildWaiting accepts any resume payload (child HITL forwarded
-// through the parent session).
-type ChildWaiting struct {
-	Kind    string `json:"kind"`
-	Message string `json:"message,omitempty"`
-}
-
-func (p *ChildWaiting) TypeName() string {
-	if p != nil && p.Kind != "" {
-		return p.Kind
-	}
-	return TypeChildWaiting
-}
-
-func (p *ChildWaiting) Serialize() ([]byte, error) {
-	return json.Marshal(p)
-}
-
-func (p *ChildWaiting) Return([]byte) error { return nil }
-
-func (p *ChildWaiting) Error() string {
-	if p != nil && p.Message != "" {
-		return p.Message
-	}
-	return "child session awaiting input"
-}
-
 // TypeAuthExpired parks a tool call until the host rebinds credentials on Resume.Auth.
 const TypeAuthExpired = "auth_expired"
 
@@ -267,7 +235,6 @@ func RegisterDefaults() {
 	defaultsOnce.Do(func() {
 		RegisterInterrupt(func() Interrupt { return &UserSelectionInterrupt{} })
 		RegisterInterrupt(func() Interrupt { return &ToolPermissionInterrupt{} })
-		RegisterInterrupt(func() Interrupt { return &ChildWaiting{Kind: TypeChildWaiting} })
 		RegisterInterrupt(func() Interrupt { return &AuthExpired{} })
 	})
 }

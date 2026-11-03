@@ -353,20 +353,12 @@ func (t *Tool) invokeRaw(ctx context.Context, argsJson string, cc *CallContext) 
 // AsJson returns the OpenAI-style function tool definition for this tool.
 // parameters is never nil on the returned map.
 func (t *Tool) AsJson() map[string]any {
-	params := t.parameters
-	if params == nil {
-		params = map[string]any{
-			"type":                 "object",
-			"properties":           map[string]any{},
-			"additionalProperties": false,
-		}
-	}
 	return map[string]any{
 		"type":        "function",
 		"name":        t.name,
 		"description": t.description,
 		"strict":      t.strict,
-		"parameters":  params,
+		"parameters":  t.parameters,
 	}
 }
 

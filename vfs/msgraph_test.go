@@ -594,7 +594,10 @@ func TestGraphAndDrive_writesStayOnMatchingProviders(t *testing.T) {
 	}
 }
 
-func TestGraphFactory_openRequiresFolderTokenAndId(t *testing.T) {
+// TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail: a file item
+// id, an organization binding without a site or drive, and an unknown account
+// fail; a site binding opens that site's library and a personal one /me/drive.
+func TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail(t *testing.T) {
 	ctx := t.Context()
 	fx := newGraphFX().legalTree()
 	srv := testhttp.New(t, fx)
@@ -626,22 +629,8 @@ func TestGraphFactory_openRequiresFolderTokenAndId(t *testing.T) {
 	if _, err := mustGraph(t, srv, nil, vfs.AccountPersonal)(canceled, "s", mount.Binding{Auth: mount.Credential{Token: "tok"}}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled: %v", err)
 	}
-}
 
-func TestGraph_requiresClient(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("want panic")
-		}
-	}()
-	_ = vfs.Graph(nil, nil, "")
-}
-
-func TestGraphFactory_organizationRequiresSiteOrDrive(t *testing.T) {
-	ctx := t.Context()
-	fx := newGraphFX().legalTree()
-	srv := testhttp.New(t, fx)
-	open := mustGraph(t, srv, nil, "")
+	// The account type picks where a binding without a site or drive opens.
 	tok := mount.Binding{Auth: mount.Credential{Token: "tok"}, Params: map[string]string{mount.ParamName: "lib"}}
 	if _, err := open(ctx, "s", tok); err == nil || !strings.Contains(err.Error(), "siteId or driveId") {
 		t.Fatalf("default organization: %v", err)

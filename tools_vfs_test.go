@@ -21,7 +21,7 @@ import (
 func TestVFSTools_readWrite(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
-	ms := mustMountTree(t, "tools-vfs", vfs.At("work", vfs.Local(base)), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
+	ms := mustMountTree(t, "tools-vfs", vfs.Request{}, vfs.At("work", vfs.Local(base)), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
 
 	if err := ms.Route(ctx, "/workspace/work/a.go").
 		WriteFile(ctx, []byte("package a\n// old\nfunc A() {}\n")); err != nil {
@@ -446,7 +446,7 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 		{TabID: "t.b", StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
 		{TabID: "t.b", StartIndex: 2, EndIndex: 8, Kind: "paragraph", Text: "Other"},
 	}, []vfs.DocTab{{ID: "t.a", Title: "Intro", Index: 0}, {ID: "t.b", Title: "Appendix", Index: 1}})
-	ms := mustMountTreeReq(t, "tools-docs", vfs.Request{Bindings: []mount.Binding{{
+	ms := mustMountTree(t, "tools-docs", vfs.Request{Bindings: []mount.Binding{{
 		Provider: mount.ProviderGoogleDrive, Writable: true,
 		Auth:   mount.Credential{Token: "t"},
 		Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root"},
@@ -651,7 +651,7 @@ func fieldKV(s, key string) string {
 func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
-	ms := mustMountTree(t, "tools-docx", vfs.At("work", vfs.Local(base)))
+	ms := mustMountTree(t, "tools-docx", vfs.Request{}, vfs.At("work", vfs.Local(base)))
 	h := mustNewHarness(t, AgentOptions{
 		sessionID: "tools-docx", mountSession: ms, Model: &scriptedModel{},
 	})
@@ -724,7 +724,7 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 			}},
 		},
 	})
-	ms := mustMountTreeReq(t, "tools-sheets", vfs.Request{Bindings: []mount.Binding{{
+	ms := mustMountTree(t, "tools-sheets", vfs.Request{Bindings: []mount.Binding{{
 		Provider: mount.ProviderGoogleDrive, Writable: true,
 		Auth:   mount.Credential{Token: "t"},
 		Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root"},
@@ -833,7 +833,7 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	}
 
 	holder := vfs.NewTokenHolder(mount.Credential{Token: "t"})
-	expired := mustMountTree(t, "tools-sheets-expired", vfs.At("contracts", testdrive.Open(t, api, holder)))
+	expired := mustMountTree(t, "tools-sheets-expired", vfs.Request{}, vfs.At("contracts", testdrive.Open(t, api, holder)))
 	holder.Set(mount.Credential{})
 	_, err = vfsTools{ms: expired}.newRead().invoke(ctx, `{"path":"/workspace/contracts/Budget"}`, cc)
 	if !errors.Is(err, vfs.ErrAuthExpired) {

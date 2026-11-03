@@ -5,10 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/message"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/internal/durtest"
+
 	"github.com/ryanaldo34/tacklr/session"
 )
 
@@ -78,7 +79,7 @@ func (s *Session) Wait(t testing.TB) []session.Event {
 			}
 			got = append(got, ev)
 			if ev.Type == session.EventComplete || ev.Type == session.EventError || ev.Type == session.EventInterrupt {
-				durtest.AssertStatusMatchesEvent(t, s.Client, s.ID, ev)
+				testkit.AssertStatusMatchesEvent(t, s.Client, s.ID, ev)
 				return got
 			}
 		case <-ctx.Done():

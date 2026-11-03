@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
 func TestKindSpecNormalize_rejectsInvalidFields(t *testing.T) {
@@ -94,22 +94,22 @@ func TestFilterValidateAgainst_catalogRules(t *testing.T) {
 		filters brain.Filter
 		wantErr string // empty ⇒ expect success
 	}{
-		{"property requires kind", mustFilter(t, map[string]any{"stage": "open"}), "filter \"stage\" needs a kind; kinds: Deal, Document"},
-		{"unregistered kind", mustFilter(t, map[string]any{"kind": "Orphan"}), "unknown kind \"Orphan\"; kinds: Deal, Document"},
-		{"unknown property", mustFilter(t, map[string]any{"kind": "Document", "unknown": "x"}), "unknown filter \"unknown\" for Document; filterable: amount, due, signed, stage"},
-		{"wrong type", mustFilter(t, map[string]any{"kind": "Document", "stage": 1}), "want string"},
-		{"a number field given text", mustFilter(t, map[string]any{"kind": "Document", "amount": "many"}), "want number"},
-		{"a boolean field given text", mustFilter(t, map[string]any{"kind": "Document", "signed": "yes"}), "want boolean"},
-		{"a boolean field given a list", mustFilter(t, map[string]any{"kind": "Document", "signed": []any{true}}), "list values"},
-		{"a datetime field given a number", mustFilter(t, map[string]any{"kind": "Document", "due": 5}), "want datetime"},
-		{"a datetime field given an empty string", mustFilter(t, map[string]any{"kind": "Document", "due": ""}), "empty time"},
-		{"a list item of the wrong type", mustFilter(t, map[string]any{"kind": "Document", "stage": []any{"open", 2}}), "list[1]"},
-		{"valid datetime and boolean", mustFilter(t, map[string]any{"kind": "Document", "due": "2026-01-02", "signed": true}), ""},
-		{"kind list intersection", mustFilter(t, map[string]any{"kind": []any{"Document", "Deal"}, "stage": "open"}), "unknown filter \"stage\" for Deal; filterable: amount"},
-		{"valid single kind", mustFilter(t, map[string]any{"kind": "Document", "stage": "open"}), ""},
-		{"valid list filter", mustFilter(t, map[string]any{"kind": "Document", "stage": []any{"open", "closed"}}), ""},
-		{"valid shared field on one kind", mustFilter(t, map[string]any{"kind": "Deal", "amount": 42}), ""},
-		{"valid multi-kind shared field", mustFilter(t, map[string]any{"kind": []any{"Document", "Deal"}, "amount": 1.5}), ""},
+		{"property requires kind", storetest.Filter(t, map[string]any{"stage": "open"}), "filter \"stage\" needs a kind; kinds: Deal, Document"},
+		{"unregistered kind", storetest.Filter(t, map[string]any{"kind": "Orphan"}), "unknown kind \"Orphan\"; kinds: Deal, Document"},
+		{"unknown property", storetest.Filter(t, map[string]any{"kind": "Document", "unknown": "x"}), "unknown filter \"unknown\" for Document; filterable: amount, due, signed, stage"},
+		{"wrong type", storetest.Filter(t, map[string]any{"kind": "Document", "stage": 1}), "want string"},
+		{"a number field given text", storetest.Filter(t, map[string]any{"kind": "Document", "amount": "many"}), "want number"},
+		{"a boolean field given text", storetest.Filter(t, map[string]any{"kind": "Document", "signed": "yes"}), "want boolean"},
+		{"a boolean field given a list", storetest.Filter(t, map[string]any{"kind": "Document", "signed": []any{true}}), "list values"},
+		{"a datetime field given a number", storetest.Filter(t, map[string]any{"kind": "Document", "due": 5}), "want datetime"},
+		{"a datetime field given an empty string", storetest.Filter(t, map[string]any{"kind": "Document", "due": ""}), "empty time"},
+		{"a list item of the wrong type", storetest.Filter(t, map[string]any{"kind": "Document", "stage": []any{"open", 2}}), "list[1]"},
+		{"valid datetime and boolean", storetest.Filter(t, map[string]any{"kind": "Document", "due": "2026-01-02", "signed": true}), ""},
+		{"kind list intersection", storetest.Filter(t, map[string]any{"kind": []any{"Document", "Deal"}, "stage": "open"}), "unknown filter \"stage\" for Deal; filterable: amount"},
+		{"valid single kind", storetest.Filter(t, map[string]any{"kind": "Document", "stage": "open"}), ""},
+		{"valid list filter", storetest.Filter(t, map[string]any{"kind": "Document", "stage": []any{"open", "closed"}}), ""},
+		{"valid shared field on one kind", storetest.Filter(t, map[string]any{"kind": "Deal", "amount": 42}), ""},
+		{"valid multi-kind shared field", storetest.Filter(t, map[string]any{"kind": []any{"Document", "Deal"}, "amount": 1.5}), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,29 +161,29 @@ func TestOpen_takesTheKindFromTheCatalogOverTheStore(t *testing.T) {
 func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
+	ns := storetest.Namespace(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	docID := uuid.New()
 	orphanParent := uuid.New()
 	pos := 1
 
-	if err := putFixture(store, brain.Object{
+	if err := storetest.Put(store, brain.Object{
 		ID: docID, Kind: "Document", Title: "Deal memo", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := putFixture(store, brain.Object{
+	if err := storetest.Put(store, brain.Object{
 		ID: uuid.New(), Kind: "Chunk", Title: "chunk", Content: "negotiation terms",
 		Namespace: ns, UpdatedAt: now, ParentID: &docID, Position: &pos,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := putFixture(store, brain.Object{
+	if err := storetest.Put(store, brain.Object{
 		ID: orphanParent, Kind: "OrphanKind", Title: "orphan parent", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := putFixture(store, brain.Object{
+	if err := storetest.Put(store, brain.Object{
 		ID: uuid.New(), Kind: "OrphanKind", Title: "orphan part", Content: "zzzxorphanonlyphrase",
 		Namespace: ns, UpdatedAt: now, ParentID: &orphanParent, Position: &pos,
 	}); err != nil {
@@ -243,7 +243,7 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	if eng.Catalog().Empty() || len(eng.Catalog().Names()) != 2 {
 		t.Fatalf("catalog after v1: %v", eng.Catalog().Names())
 	}
-	row, err := kindNamed(ctx, store, "Document")
+	row, err := storetest.Kind(ctx, store, "Document")
 	if err != nil || row.Description != "docs v1" {
 		t.Fatalf("durable v1: %+v err=%v", row, err)
 	}
@@ -275,7 +275,7 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	if len(eng.Catalog().Names()) != 3 {
 		t.Fatalf("names: %v", eng.Catalog().Names())
 	}
-	row, err = kindNamed(ctx, store, "Document")
+	row, err = storetest.Kind(ctx, store, "Document")
 	if err != nil || row.Description != "docs v2" {
 		t.Fatalf("durable v2: %+v err=%v", row, err)
 	}
@@ -299,7 +299,7 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := kindNamed(ctx, store, "Note"); err != nil {
+	if _, err := storetest.Kind(ctx, store, "Note"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -314,13 +314,13 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	if err := engSync.SyncKindsToStore(ctx); err != nil {
 		t.Fatal(err)
 	}
-	row, err = kindNamed(ctx, mem, "Synced")
+	row, err = storetest.Kind(ctx, mem, "Synced")
 	if err != nil || row.Description != "via sync" {
 		t.Fatalf("sync: %+v err=%v", row, err)
 	}
 
 	// A search freezes the catalog: loading kinds again fails.
-	if _, err := eng2.Search(ctx, brain.Scope{Namespace: mustNS(t, "org", "freeze")}, brain.SearchRequest{Query: "x"}); err != nil {
+	if _, err := eng2.Search(ctx, brain.Scope{Namespace: storetest.Namespace(t, "org", "freeze")}, brain.SearchRequest{Query: "x"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := eng2.LoadKindsFromStore(ctx); err == nil {
@@ -345,21 +345,7 @@ func TestApplyKinds_invalidBatchFailsClosed(t *testing.T) {
 	if !eng.Catalog().Empty() {
 		t.Fatal("catalog must stay empty on failed migration")
 	}
-	if _, err := kindNamed(ctx, store, "Document"); !errors.Is(err, brain.ErrNotFound) {
+	if _, err := storetest.Kind(ctx, store, "Document"); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("no partial durable write on batch validate fail: %v", err)
 	}
-}
-
-// kindNamed is kind's row in the store's kind registry.
-func kindNamed(ctx context.Context, s brain.Store, kind string) (brain.ObjectKind, error) {
-	kinds, err := s.ListKinds(ctx)
-	if err != nil {
-		return brain.ObjectKind{}, err
-	}
-	for _, k := range kinds {
-		if k.Kind == kind {
-			return k, nil
-		}
-	}
-	return brain.ObjectKind{}, fmt.Errorf("%w: kind %q", brain.ErrNotFound, kind)
 }

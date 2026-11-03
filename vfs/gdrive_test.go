@@ -162,13 +162,22 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	}
 }
 
-func TestDrive_requiresClient(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("want panic")
-		}
-	}()
-	_ = vfs.Drive(nil, nil)
+// TestProviders_panicWithoutTheirAPIClient: building a Drive or Graph
+// provider with no API client is a programming error.
+func TestProviders_panicWithoutTheirAPIClient(t *testing.T) {
+	for name, build := range map[string]func(){
+		"drive": func() { _ = vfs.Drive(nil, nil) },
+		"graph": func() { _ = vfs.Graph(nil, nil, "") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("want panic")
+				}
+			}()
+			build()
+		})
+	}
 }
 
 func TestMountSession_gdriveDirectoryAndWriteDocument(t *testing.T) {

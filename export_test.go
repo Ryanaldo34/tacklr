@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/message"
+	"github.com/ryanaldo34/tacklr/session"
 
-	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -129,24 +129,11 @@ func mustNewHarness(t testing.TB, opts AgentOptions) *Harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(h.Close)
 	return h
 }
 
-func mustMountTree(t testing.TB, sessionID string, members ...vfs.Member) *vfs.MountSession {
-	t.Helper()
-	return mustMountTreeReq(t, sessionID, vfs.Request{}, members...)
-}
-
-func mustNS(t testing.TB, nv ...string) brain.Namespace {
-	t.Helper()
-	ns, err := brain.ParseNamespace(nv...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ns
-}
-
-func mustMountTreeReq(t testing.TB, sessionID string, req vfs.Request, members ...vfs.Member) *vfs.MountSession {
+func mustMountTree(t testing.TB, sessionID string, req vfs.Request, members ...vfs.Member) *vfs.MountSession {
 	t.Helper()
 	ms, err := vfs.Tree(members...)(t.Context(), sessionID, req)
 	if err != nil {
@@ -163,4 +150,14 @@ func (p *planStore) set(todos []Todo) {
 
 func (p *planStore) setDocument(doc string) {
 	_ = p.Change(func(todos []Todo, _ string) ([]Todo, string, error) { return todos, doc, nil })
+}
+
+// drainEventCh is an event channel nothing reads.
+func drainEventCh() chan session.Event {
+	c := make(chan session.Event, 8)
+	go func() {
+		for range c {
+		}
+	}()
+	return c
 }

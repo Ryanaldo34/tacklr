@@ -201,7 +201,25 @@ Resume.Auth            tokens for remount after park or worker recycle
 
 Recipes are on the session's `Identity` (`Identity.Mounts`), which the runtime holds and gives each step: where a mount came from, not file contents. Providers lazy-load bytes on open/read. Tokens are not snapshotted and are not written to Temporal event history. The Temporal adapter puts them in `Config.Secrets` (client and worker) (`session.SecretStorage`) before signaling a secret-free `AuthContext`. Activities load the bag at harness time (child sessions fall back to the parent id). Close deletes the session’s secrets.
 
-`SecretStorage` is not `session.Store`. Client and worker must share one instance (Redis, Postgres, Vault, or `MemorySecretStorage` when they share a process). There is no default: a private memory map per process looks like a successful Prompt and then remounts nothing.
+`SecretStorage` is not `session.Store`. Client and worker must share one instance: `session/postgres` (`DB.Secrets`), a store of the host's own over its vault, or `MemorySecretStorage` when they share a process. There is no default: a private memory map per process looks like a successful Prompt and then remounts nothing. It holds only these session-scoped tokens (an end user's delegated OAuth tokens, per-session object-store credentials); service-to-service credentials stay with the providers the host builds.
+
+### Durable stores in Postgres
+
+`session/postgres` keeps `session.Store`, `SecretStorage` and `EventLog` in Postgres over a pool the host owns, so every worker and client sees one copy:
+
+```go
+db, err := sessionpg.New(pool, sessionpg.Options{}) // schema "tacklr"; tables are schema-qualified
+if err := db.Setup(ctx); err != nil { /* ... */ }    // idempotent; run on each deploy
+sealer, err := sessionpg.NewAESGCM(key)               // 32 bytes; or a Sealer over the host's KMS
+store, secrets, events := db.Store(), db.Secrets(sealer), db.EventLog()
+defer events.Close()
+```
+
+- **Store:** one row per session checkpoint. `Save` compares and bumps the revision in one statement, so of two saves from one revision exactly one wins. Outcomes are keyed by session and call key; `Outcomes` reads every key in one query; `Delete` removes the checkpoint and its outcomes together.
+- **SecretStorage:** each session's bag is sealed before it is written, with the session id as associated data, so the row holds no plaintext token and one session's row does not open as another's.
+- **EventLog:** a counter row numbers each session's events in the statement that writes them, so sequences have no gaps. The statement also `NOTIFY`s the session id (never the event: a payload is at most 8000 bytes). One listening connection per `EventLog` wakes its subscribers, which read what they have not seen; after a reconnect it wakes them all, so nothing appended meanwhile is missed. `CloseSession` deletes the log and ends its subscribers in every process.
+
+A store of the host's own runs `session/storetest`, the contract these and the in-memory stores meet.
 
 After HITL or a worker restart, the next Prompt/Resume supplies tokens and they are Put again. A retry on another worker remounts only if that worker can `Get` the same store.
 
@@ -267,7 +285,7 @@ Do not put Temporal `workflow.Context` on `session.Client`.
 
 The session loop starts `tacklr.turn`. Inference and tool steps inherit that span. Do not add extra wrapper spans around a step.
 
-Host setup: `telemetry.Init` installs the process-wide OpenTelemetry providers and, when an endpoint is set, the OTLP exporters. `Dial` replaces the tracer with a replay-safe one that keeps that export configuration, then prepends Temporal’s OpenTelemetry plugin. Postgres statement spans from `postgres.Store` join the same trace: `postgres.Open` sets pgx's otelpgx tracer (`ConnConfig.Tracer`). A host that builds its own pool for `server.PostgresWireStore` sets that tracer itself.
+Host setup: `telemetry.Init` installs the process-wide OpenTelemetry providers and, when an endpoint is set, the OTLP exporters. `Dial` replaces the tracer with a replay-safe one that keeps that export configuration, then prepends Temporal’s OpenTelemetry plugin. Postgres statement spans join the same trace: `brain/postgres.Configure` sets pgx's otelpgx tracer (`ConnConfig.Tracer`) on the host's pool config, so the brain store, `session/postgres` and `server.PostgresWireStore` all emit them when they share that pool.
 
 ```go
 shutdown, err := telemetry.Init(ctx, telemetry.Config{

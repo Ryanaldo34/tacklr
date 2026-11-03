@@ -8,12 +8,6 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 )
 
-func TestClassifyAPIStatus_nilError(t *testing.T) {
-	if err := classifyAPIStatus(nil, ""); err != nil {
-		t.Fatalf("nil api error: %v", err)
-	}
-}
-
 func TestClassifyIncompleteReason_allOutcomes(t *testing.T) {
 	if err := classifyIncompleteReason(""); err != nil {
 		t.Fatalf("empty: %v", err)

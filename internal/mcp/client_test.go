@@ -163,58 +163,37 @@ func TestCommandEnvironment_skipsInvalidNames(t *testing.T) {
 	}
 }
 
-func TestBuildTransportStdioRequiresCommand(t *testing.T) {
-	c := &client{config: session.MCPServer{Name: "fs"}}
-	_, err := c.buildTransport()
-	if err == nil {
-		t.Fatal("expected error for missing command")
+// TestBuildTransport_needsWhatEachTransportConnectsWith: stdio needs a
+// command, HTTP and SSE need a URL, an SSE server gets an SSE transport at
+// its URL, and an unknown type is not supported.
+func TestBuildTransport_needsWhatEachTransportConnectsWith(t *testing.T) {
+	for name, tc := range map[string]struct {
+		config session.MCPServer
+		want   string
+	}{
+		"stdio without a command": {session.MCPServer{Name: "fs"}, "command is required"},
+		"http without a url":      {session.MCPServer{Name: "api", Type: session.MCPHTTP}, "url is required"},
+		"sse without a url":       {session.MCPServer{Name: "api", Type: session.MCPSSE}, "url is required"},
+		"an unknown type":         {session.MCPServer{Name: "weird", Type: "grpc"}, errTransportNotSupported.Error()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := (&client{config: tc.config}).buildTransport()
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("buildTransport = %v, want %q", err, tc.want)
+			}
+		})
 	}
-	if !strings.Contains(err.Error(), "command is required") {
-		t.Errorf("error = %q, want to contain %q", err.Error(), "command is required")
+
+	transport, err := (&client{config: session.MCPServer{Name: "events", Type: session.MCPSSE, URL: "https://events.example.com/mcp"}}).buildTransport()
+
+	if st, ok := transport.(*mcpsdk.SSEClientTransport); err != nil || !ok || st.Endpoint != "https://events.example.com/mcp" {
+		t.Fatalf("sse transport = %T %v, want an SSE transport at its URL", transport, err)
 	}
 }
 
-func TestBuildTransportSSE(t *testing.T) {
-	c := &client{config: session.MCPServer{
-		Name: "events",
-		Type: session.MCPSSE,
-		URL:  "https://events.example.com/mcp",
-	}}
-	transport, err := c.buildTransport()
-	if err != nil {
-		t.Fatalf("buildTransport: %v", err)
-	}
-	st, ok := transport.(*mcpsdk.SSEClientTransport)
-	if !ok {
-		t.Fatalf("expected *SSEClientTransport, got %T", transport)
-	}
-	if st.Endpoint != "https://events.example.com/mcp" {
-		t.Errorf("endpoint = %q, want https://events.example.com/mcp", st.Endpoint)
-	}
-}
-
-func TestBuildTransportHTTPRequiresURL(t *testing.T) {
-	for _, typ := range []string{session.MCPHTTP, session.MCPSSE} {
-		c := &client{config: session.MCPServer{Name: "api", Type: typ}}
-		_, err := c.buildTransport()
-		if err == nil {
-			t.Fatalf("type=%q: expected error for missing url", typ)
-		}
-		if !strings.Contains(err.Error(), "url is required") {
-			t.Errorf("type=%q: error = %q, want to contain %q", typ, err.Error(), "url is required")
-		}
-	}
-}
-
-func TestBuildTransportUnsupported(t *testing.T) {
-	c := &client{config: session.MCPServer{Name: "weird", Type: "grpc"}}
-	_, err := c.buildTransport()
-	if !errors.Is(err, errTransportNotSupported) {
-		t.Errorf("expected errTransportNotSupported, got %v", err)
-	}
-}
-
-func TestCloseIgnores405(t *testing.T) {
+// A client whose connect failed has no session, and closing it is clean.
+func TestClose_aClientThatNeverConnectedClosesCleanly(t *testing.T) {
 	c := &client{config: session.MCPServer{Name: "drive"}}
 	err := c.close()
 	if err != nil {

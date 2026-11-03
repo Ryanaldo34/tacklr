@@ -19,6 +19,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
 
@@ -44,7 +45,7 @@ func dialACPWebSocket(t *testing.T, hs *httptest.Server) (*websocket.Conn, strin
 	return conn, connID
 }
 
-func startACPWSServer(t *testing.T, r *testRuntime) (*httptest.Server, *server.Server) {
+func startACPWSServer(t *testing.T, r *acptest.Runtime) (*httptest.Server, *server.Server) {
 	t.Helper()
 	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 	hs := httptest.NewServer(srv.HTTPMux())
@@ -103,7 +104,7 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 		}
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
 	})
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}})
 	hs, srv := startACPWSServer(t, r)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -198,7 +199,7 @@ func TestACP_WS_disconnectCancelsInFlightTurn(t *testing.T) {
 		<-ctx.Done()
 		close(cancelled)
 	})
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
 	hs, _ := startACPWSServer(t, r)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -267,13 +268,13 @@ func TestACP_prompt_stopReason_maxTokens(t *testing.T) {
 
 func assertACPStopReason(t *testing.T, strategy tacklr.Model, tools []*tacklr.Tool, want string) {
 	t.Helper()
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: tools})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{Tools: tools})
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sessionID := acpSessionID(t, recNew)
+	sessionID := acptest.SessionID(t, recNew)
 	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"hi"}]}}`)
 	got := promptStopReason(t, rec)
 	if got != want {
-		blob, _ := json.Marshal(parseACPFrames(t, rec.Body))
+		blob, _ := json.Marshal(acptest.Frames(t, rec.Body))
 		t.Fatalf("stopReason = %q, want %q frames=%s", got, want, blob)
 	}
 }
@@ -285,7 +286,7 @@ func TestACP_sessionCancel_stopReasonCancelled(t *testing.T) {
 		once.Do(func() { close(started) })
 		<-ctx.Done()
 	})
-	r := newTestRuntime(t, strategy, tacklr.AgentOptions{})
+	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
 	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -321,7 +322,7 @@ func TestACP_sessionCancel_stopReasonCancelled(t *testing.T) {
 
 func promptStopReason(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
-	frames := parseACPFrames(t, rec.Body)
+	frames := acptest.Frames(t, rec.Body)
 	for _, f := range frames {
 		if res, ok := f["result"].(map[string]any); ok {
 			if sr, ok := res["stopReason"].(string); ok && sr != "" {

@@ -45,17 +45,6 @@ func TestStreamAssembler_accumulatesDeltasAndBuildsMessages(t *testing.T) {
 	}
 }
 
-// handoffHarness is a turn whose window holds the goal and whose plan has
-// todos, so a handoff has work to hand off.
-func handoffHarness(t *testing.T, model Model, todos ...Todo) *Harness {
-	t.Helper()
-	h := mustNewHarness(t, AgentOptions{MaxWindowSize: 8192, Model: model})
-	t.Cleanup(h.Close)
-	h.context.Restore([]*message.Message{userMsg("goal")})
-	h.session.Plan.set(todos)
-	return h
-}
-
 // TestHandoff_fallsBackWhenTheModelGivesNoHandoff: a failed request, an
 // empty stream, and a stream error each install the plan-derived handoff.
 func TestHandoff_fallsBackWhenTheModelGivesNoHandoff(t *testing.T) {
@@ -69,7 +58,8 @@ func TestHandoff_fallsBackWhenTheModelGivesNoHandoff(t *testing.T) {
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := handoffHarness(t, model, pending)
+			h := windowHarness(t, model, 8192, userMsg("goal"))
+			h.session.Plan.set([]Todo{pending})
 
 			err := h.handoff(t.Context())
 
@@ -82,7 +72,7 @@ func TestHandoff_fallsBackWhenTheModelGivesNoHandoff(t *testing.T) {
 }
 
 func TestHandoff_failsOnACancelledContext(t *testing.T) {
-	h := handoffHarness(t, &scriptedModel{})
+	h := windowHarness(t, &scriptedModel{}, 8192, userMsg("goal"))
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
@@ -135,12 +125,11 @@ func userMsg(content string) *message.Message {
 	return &message.Message{Role: message.RoleUser, Content: content}
 }
 
-// collapseHarness is a turn with a window of window and a MaxWindowSize of
-// size.
-func collapseHarness(t *testing.T, model *scriptedModel, size uint, window ...*message.Message) *Harness {
+// windowHarness is a turn whose window holds window, with a MaxWindowSize
+// of size.
+func windowHarness(t *testing.T, model Model, size uint, window ...*message.Message) *Harness {
 	t.Helper()
 	h := mustNewHarness(t, AgentOptions{MaxWindowSize: size, Model: model})
-	t.Cleanup(h.Close)
 	h.context.Restore(window)
 	return h
 }
@@ -184,7 +173,7 @@ func TestCommitRound_fails(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			h := collapseHarness(t, tc.model, 100, tc.window...)
+			h := windowHarness(t, tc.model, 100, tc.window...)
 
 			err := h.commitRound(t.Context(), tc.round, EffectNone)
 
@@ -198,7 +187,7 @@ func TestCommitRound_fails(t *testing.T) {
 // TestCommitRound_cutsAResultOnARuneBoundary: a cut result stays valid
 // UTF-8 and says the full output was not kept.
 func TestCommitRound_cutsAResultOnARuneBoundary(t *testing.T) {
-	h := collapseHarness(t, &scriptedModel{CountTokensFn: contentTokens}, 400, userMsg("goal"))
+	h := windowHarness(t, &scriptedModel{CountTokensFn: contentTokens}, 400, userMsg("goal"))
 
 	err := h.commitRound(t.Context(), []*message.Message{{Role: message.RoleTool, ToolCallID: "c1", Content: strings.Repeat("─", 400)}}, EffectNone)
 

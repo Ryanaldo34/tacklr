@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
@@ -55,8 +56,8 @@ func TestEngine_putKeepsObjectsInsideTheCallersScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := brain.Scope{Namespace: mustNS(t, "org", "a")}
-	b := brain.Scope{Namespace: mustNS(t, "org", "b")}
+	a := brain.Scope{Namespace: storetest.Namespace(t, "org", "a")}
+	b := brain.Scope{Namespace: storetest.Namespace(t, "org", "b")}
 	parentA, err := eng.Save(ctx, a, brain.Object{Kind: "Document", Title: "A's doc"})
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +71,7 @@ func TestEngine_putKeepsObjectsInsideTheCallersScope(t *testing.T) {
 	_, outsideErr := eng.Save(ctx, a, brain.Object{Kind: "Note", Namespace: b.Namespace})
 	_, nestedErr := eng.Save(ctx, a, brain.Object{Kind: "Chunk", ParentID: &chunk.ID, Content: "nested"})
 	_, partErr := eng.Save(ctx, b, brain.Object{Kind: "Chunk", ParentID: &parentA.ID, Content: "planted"})
-	narrowed, narrowErr := eng.Save(ctx, a, brain.Object{Kind: "Note", Namespace: mustNS(t, "org", "a", "team", "x")})
+	narrowed, narrowErr := eng.Save(ctx, a, brain.Object{Kind: "Note", Namespace: storetest.Namespace(t, "org", "a", "team", "x")})
 
 	if !errors.Is(outsideErr, brain.ErrInvalid) {
 		t.Errorf("object namespace outside scope = %v, want ErrInvalid", outsideErr)
@@ -81,7 +82,7 @@ func TestEngine_putKeepsObjectsInsideTheCallersScope(t *testing.T) {
 	if !errors.Is(partErr, brain.ErrNotFound) {
 		t.Errorf("part under another tenant's parent = %v, want ErrNotFound", partErr)
 	}
-	if narrowErr != nil || !narrowed.Namespace.Equal(mustNS(t, "org", "a", "team", "x")) {
+	if narrowErr != nil || !narrowed.Namespace.Equal(storetest.Namespace(t, "org", "a", "team", "x")) {
 		t.Errorf("narrower namespace = %+v %v", narrowed.Namespace, narrowErr)
 	}
 }
