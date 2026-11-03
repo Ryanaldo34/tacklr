@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 )
 
@@ -140,7 +142,7 @@ func (m *MountSession) memberEntries() []DirEntry {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	prefix := WorkspacePoint + "/"
+	prefix := mount.WorkspacePoint + "/"
 	out := make([]DirEntry, 0, len(m.mounts))
 	for mp := range m.mounts {
 		name := strings.TrimPrefix(mp, prefix)
@@ -217,22 +219,22 @@ func (m *MountSession) lookup(virtualPath string) (Route, error) {
 	if !m.hasWorkspaceLocked() {
 		return Route{}, ErrNotMounted
 	}
-	if cleaned == WorkspacePoint {
-		return Route{Point: WorkspacePoint}, nil
+	if cleaned == mount.WorkspacePoint {
+		return Route{Point: mount.WorkspacePoint}, nil
 	}
-	if strings.HasPrefix(cleaned, WorkspacePoint+"/") {
+	if strings.HasPrefix(cleaned, mount.WorkspacePoint+"/") {
 		return Route{
-			Point: WorkspacePoint,
-			Rel:   strings.TrimPrefix(cleaned, WorkspacePoint+"/"),
+			Point: mount.WorkspacePoint,
+			Rel:   strings.TrimPrefix(cleaned, mount.WorkspacePoint+"/"),
 		}, nil
 	}
 	return Route{}, ErrNotMounted
 }
 
 func (m *MountSession) hasWorkspaceLocked() bool {
-	prefix := WorkspacePoint + "/"
+	prefix := mount.WorkspacePoint + "/"
 	for mp := range m.mounts {
-		if mp == WorkspacePoint || strings.HasPrefix(mp, prefix) {
+		if mp == mount.WorkspacePoint || strings.HasPrefix(mp, prefix) {
 			return true
 		}
 	}

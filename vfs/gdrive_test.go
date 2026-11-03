@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -23,14 +25,14 @@ import (
 func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	ctx := t.Context()
 	api := testdrive.Tree()
-	holder := vfs.NewTokenHolder(vfs.Credential{Token: "tok"})
+	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok"})
 	open := testdrive.Open(t, api, holder)
 	ms, err := vfs.Tree(
 		vfs.At("contracts", open),
 		vfs.At("notes", open),
-	)(ctx, "sess-gd", vfs.Request{Bindings: []vfs.Binding{
-		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"}, Auth: vfs.Credential{Token: "tok"}, Live: holder},
-		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "notes", vfs.ParamFolderID: "root-b"}, Auth: vfs.Credential{Token: "tok"}, Live: holder},
+	)(ctx, "sess-gd", vfs.Request{Bindings: []mount.Binding{
+		{Provider: mount.ProviderGoogleDrive, Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root-a"}, Auth: mount.Credential{Token: "tok"}},
+		{Provider: mount.ProviderGoogleDrive, Params: map[string]string{mount.ParamName: "notes", mount.ParamFolderID: "root-b"}, Auth: mount.Credential{Token: "tok"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +44,7 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 		t.Fatalf("Specs = %+v", specs)
 	}
 	for _, m := range specs {
-		if !m.ReadOnly || m.Params[vfs.ParamName] == "" || (m.Point != "/workspace/contracts" && m.Point != "/workspace/notes") {
+		if !m.ReadOnly || m.Params[mount.ParamName] == "" || (m.Point != "/workspace/contracts" && m.Point != "/workspace/notes") {
 			t.Fatalf("member = %+v", m)
 		}
 	}
@@ -126,11 +128,11 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	}
 
 	// Near-expiry token refreshes before the provider request.
-	holder.Set(vfs.Credential{Token: "expiring", ExpiresAt: time.Now().Add(10 * time.Second)})
+	holder.Set(mount.Credential{Token: "expiring", ExpiresAt: time.Now().Add(10 * time.Second)})
 	proactiveRefreshes := 0
-	holder.SetRefresh(func(context.Context) (vfs.Credential, error) {
+	holder.SetRefresh(func(context.Context) (mount.Credential, error) {
 		proactiveRefreshes++
-		return vfs.Credential{Token: "proactive", ExpiresAt: time.Now().Add(time.Hour)}, nil
+		return mount.Credential{Token: "proactive", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	})
 
 	raw, err = ms.Route(ctx, "/workspace/notes/readme.txt").
@@ -141,8 +143,8 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 
 	// 401 + one reactive refresh succeeds.
 	api.OnceMedia("readme", http.StatusUnauthorized)
-	holder.SetRefresh(func(context.Context) (vfs.Credential, error) {
-		return vfs.Credential{Token: "fresh"}, nil
+	holder.SetRefresh(func(context.Context) (mount.Credential, error) {
+		return mount.Credential{Token: "fresh"}, nil
 	})
 
 	if raw, err := ms.Route(ctx, "/workspace/notes/readme.txt").
@@ -166,16 +168,16 @@ func TestDrive_requiresClient(t *testing.T) {
 			t.Fatal("want panic")
 		}
 	}()
-	_ = vfs.Drive(nil)
+	_ = vfs.Drive(nil, nil)
 }
 
 func TestMountSession_gdriveDirectoryAndWriteDocument(t *testing.T) {
 	ctx := t.Context()
 	api := testdrive.Tree()
-	ms, err := vfs.Tree(vfs.At("contracts", testdrive.Open(t, api, nil)))(ctx, "s", vfs.Request{Bindings: []vfs.Binding{{
+	ms, err := vfs.Tree(vfs.At("contracts", testdrive.Open(t, api, nil)))(ctx, "s", vfs.Request{Bindings: []mount.Binding{{
 		Provider: "gdrive",
-		Params:   map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"},
-		Auth:     vfs.Credential{Token: "t"},
+		Params:   map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root-a"},
+		Auth:     mount.Credential{Token: "t"},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -211,8 +213,8 @@ func TestDrive_validateRejectsFileID(t *testing.T) {
 	ctx := t.Context()
 	api := testdrive.Tree()
 	open := testdrive.Open(t, api, nil)
-	folder, err := open(ctx, "s", vfs.Binding{
-		Auth: vfs.Credential{Token: "t"}, Params: map[string]string{vfs.ParamFolderID: "root-a"},
+	folder, err := open(ctx, "s", mount.Binding{
+		Auth: mount.Credential{Token: "t"}, Params: map[string]string{mount.ParamFolderID: "root-a"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -220,8 +222,8 @@ func TestDrive_validateRejectsFileID(t *testing.T) {
 	if err := folder.Validate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	file, err := open(ctx, "s", vfs.Binding{
-		Auth: vfs.Credential{Token: "t"}, Params: map[string]string{vfs.ParamFolderID: "nda"},
+	file, err := open(ctx, "s", mount.Binding{
+		Auth: mount.Credential{Token: "t"}, Params: map[string]string{mount.ParamFolderID: "nda"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -291,7 +293,7 @@ func TestGoogleDrive_sdkAdapter(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
-	holder := vfs.NewTokenHolder(vfs.Credential{Token: "tok-1"})
+	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok-1"})
 	api, err := vfs.NewGoogleDriveHTTP(ctx, holder, ts.URL+"/", ts.Client())
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +339,7 @@ func TestGoogleDrive_sdkAdapter(t *testing.T) {
 		t.Fatalf("401: %v", err)
 	}
 
-	holder.Set(vfs.Credential{Token: "tok-2"})
+	holder.Set(mount.Credential{Token: "tok-2"})
 	if _, err := api.GetMeta(ctx, "root1"); err != nil {
 		t.Fatal(err)
 	}
@@ -894,10 +896,10 @@ func TestDrive_htmlReplaceOnSingleTabOmitsTabID(t *testing.T) {
 
 func mountDrive(t *testing.T, api *testdrive.FX, writable bool) *vfs.MountSession {
 	t.Helper()
-	ms, err := vfs.Tree(vfs.At("contracts", testdrive.Open(t, api, nil)))(t.Context(), "s", vfs.Request{Bindings: []vfs.Binding{{
+	ms, err := vfs.Tree(vfs.At("contracts", testdrive.Open(t, api, nil)))(t.Context(), "s", vfs.Request{Bindings: []mount.Binding{{
 		Provider: "gdrive", Writable: writable,
-		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"},
-		Auth:   vfs.Credential{Token: "t"},
+		Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root-a"},
+		Auth:   mount.Credential{Token: "t"},
 	}}})
 	if err != nil {
 		t.Fatal(err)

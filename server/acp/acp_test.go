@@ -12,7 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/mcp"
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
 
@@ -36,11 +37,11 @@ func TestMain(m *testing.M) {
 }
 
 type testRuntime struct {
-	Runtime session.Runtime
-	Agent   tacklr.AgentOptions
+	Client session.Client
+	Agent  tacklr.AgentOptions
 }
 
-func newTestRuntime(t *testing.T, model tacklr.InferenceStrategy, spec tacklr.AgentOptions) *testRuntime {
+func newTestRuntime(t *testing.T, model tacklr.Model, spec tacklr.AgentOptions) *testRuntime {
 	t.Helper()
 	if spec.Model == nil {
 		spec.Model = model
@@ -55,19 +56,19 @@ func newTestRuntime(t *testing.T, model tacklr.InferenceStrategy, spec tacklr.Ag
 		spec.SystemPrompt = "test prompt"
 	}
 	return &testRuntime{
-		Runtime: livesess.Runtime(t, spec),
-		Agent:   spec,
+		Client: livesess.Runtime(t, spec),
+		Agent:  spec,
 	}
 }
 
 func newEmptyRuntime(t *testing.T) *testRuntime {
 	t.Helper()
-	return &testRuntime{Runtime: livesess.Runtime(t, tacklr.AgentOptions{})}
+	return &testRuntime{Client: livesess.Runtime(t, tacklr.AgentOptions{})}
 }
 
 func inbound(ctx context.Context, s *server.Server, body []byte, w server.MessageWriter) {
 	_ = s.Protocols[0].HandleInbound(ctx, server.ProtocolEnv{
-		Runtime: s.Runtime, Agent: s.Agent, Security: s.Security,
+		Client: s.Client, Agent: s.Agent, Security: s.Security,
 		Connections: s.Connections, Conn: &server.Conn{Writer: w},
 	}, body)
 }
@@ -157,7 +158,7 @@ func serveACPInbound(t *testing.T, r *testRuntime, proto server.Protocol, body s
 	t.Helper()
 	rec := httptest.NewRecorder()
 	mw := acp.HTTPWriter(rec)
-	env := server.ProtocolEnv{Runtime: r.Runtime, Agent: r.Agent, Conn: &server.Conn{Writer: mw}}
+	env := server.ProtocolEnv{Client: r.Client, Agent: r.Agent, Conn: &server.Conn{Writer: mw}}
 	_ = proto.HandleInbound(t.Context(), env, []byte(body))
 	return rec
 }
@@ -237,8 +238,8 @@ func TestHandleRPC_sessionClose_thenLoadNotFound(t *testing.T) {
 func TestHandleRPC_sessionLoad_fromStoreAfterRestart(t *testing.T) {
 	wire := server.NewMemoryWireStore()
 
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "after-restart", IsComplete: true}
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "after-restart", IsComplete: true}
 	})
 
 	// Process 1: create session
@@ -259,8 +260,8 @@ func TestHandleRPC_sessionLoad_fromStoreAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	var env struct {
-		CWD        string          `json:"cwd"`
-		MCPServers []mcp.MCPConfig `json:"mcpServers"`
+		CWD        string              `json:"cwd"`
+		MCPServers []session.MCPServer `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		t.Fatal(err)
@@ -319,11 +320,11 @@ func TestHandleRPC_noAgentConfigured_onPrompt(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleRPC_sessionPrompt_streamsEvents(t *testing.T) {
-	strategy := testkit.TextHTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventReasoning, Content: "", IsComplete: false}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventReasoning, Content: "thinking", IsComplete: false}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "", IsComplete: false}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "hello", IsComplete: true}
+	strategy := testkit.TextHTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{Type: session.EventReasoning, Content: "", IsComplete: false}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventReasoning, Content: "thinking", IsComplete: false}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "", IsComplete: false}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "hello", IsComplete: true}
 	})
 	r := newTestRuntime(t, strategy, tacklr.AgentOptions{})
 
@@ -389,15 +390,15 @@ func TestHandleRPC_sessionPrompt_toolTitleAndName(t *testing.T) {
 		},
 	})
 	var calls atomic.Int32
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		if calls.Add(1) > 1 {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
 			return
 		}
 		ch <- tacklr.LLMResponseChunk{
-			Type:    tacklr.StreamEventFunctionCall,
+			Type:    session.EventFunctionCall,
 			Content: "calling",
-			ToolCalls: []tacklr.ToolCall{
+			ToolCalls: []message.ToolCall{
 				{
 					ID: "call_mark", CallID: "call_mark", Name: "mark_item",
 					Arguments: `{"title":"Ship release"}`,
@@ -450,14 +451,14 @@ func TestHandleRPC_sessionPrompt_toolTitleAndName(t *testing.T) {
 
 func TestHandleRPC_sessionPrompt_acpContentBlocks(t *testing.T) {
 	var sawLink, sawImage, sawPDF bool
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		if n := len(msgs); n > 0 {
 			last := msgs[n-1]
 			if last != nil && strings.Contains(last.Content, "[Resource link] name=spec") {
 				sawLink = true
 			}
 			for _, part := range last.ContentParts {
-				if part.Type == tacklr.ContentTypeInputImage {
+				if part.Type == message.ContentTypeInputImage {
 					sawImage = true
 				}
 				if part.FileData != nil && part.FileData.MIMEType == "application/pdf" {
@@ -465,7 +466,7 @@ func TestHandleRPC_sessionPrompt_acpContentBlocks(t *testing.T) {
 				}
 			}
 		}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok-blocks", IsComplete: true}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok-blocks", IsComplete: true}
 	})
 	r := newTestRuntime(t, strategy, tacklr.AgentOptions{})
 	initRec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)

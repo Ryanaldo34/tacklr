@@ -6,14 +6,13 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 
-	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/message"
 )
 
 // SessionID is the durable agent session identifier.
-type SessionID string
+type ID string
 
 // Seq is a monotonically increasing EventLog offset for one session.
 type Seq uint64
@@ -27,7 +26,7 @@ type AuthContext struct {
 	// Bindings are this slice's mounts and/or provider tokens. A binding with
 	// an alias upserts the recipe. A binding with only provider+token refreshes
 	// every cached recipe for that provider.
-	Bindings []vfs.Binding `json:"bindings,omitempty"`
+	Bindings []mount.Binding `json:"bindings,omitempty"`
 	// Drop removes cached recipes by alias or provider. Applied before Bindings.
 	Drop []string `json:"drop,omitempty"`
 }
@@ -45,13 +44,13 @@ type MountRecipe struct {
 
 // CreateSession is the typed input for Runtime.CreateSession.
 type CreateSession struct {
-	SessionID  SessionID
-	MCPServers []mcp.MCPConfig
+	SessionID  ID
+	MCPServers []MCPServer
 	// Mounts seeds the session recipe cache (no secrets). Tokens arrive on Prompt.
 	Mounts []MountRecipe
 	// Parent, when set, makes this a child session of that parent. The child
 	// reuses the same wait loop. Empty MCPServers/Mounts inherit from parent.
-	Parent SessionID
+	Parent ID
 	// Specialist selects an assistant on the agent's Specialists list.
 	// Required with Parent for spawn_specialist children.
 	Specialist string
@@ -60,7 +59,7 @@ type CreateSession struct {
 	Worker string
 	// State is host values for the session's user state
 	// (JSON-serializable). The first step writes them into the checkpoint;
-	// tools read them with HarnessRuntime.StateGet. No tokens or clients.
+	// tools read them with CallContext.StateGet. No tokens or clients.
 	// Child sessions do not inherit this map.
 	State map[string]any
 }
@@ -68,9 +67,9 @@ type CreateSession struct {
 // Prompt is the typed input for Runtime.Prompt.
 type Prompt struct {
 	Text        string
-	UserMessage *tacklr.Message
+	UserMessage *message.Message
 	// MCPServers, when non-nil, replaces session-scoped MCP configs for this turn.
-	MCPServers []mcp.MCPConfig
+	MCPServers []MCPServer
 	Auth       AuthContext
 	// State is host values the turn's first step writes into the
 	// session's user state. JSON-serializable values only. No tokens or
@@ -87,45 +86,33 @@ type Resume struct {
 	State map[string]any
 }
 
-// Identity is who a session is and what it mounts. The session's runtime
-// holds it and gives it to each step, which builds the turn's world from
-// it; the snapshot store does not keep it.
-type Identity struct {
-	Specialist string
-	// Worker, when set, means this session is a named JobHandler child.
-	Worker string
-	Parent SessionID
-	Mounts []MountRecipe
-}
-
 // SessionState is parent-facing session/job state. Child HITL does not change
 // this from running until the interrupt is resolved and the child completes,
 // fails, or is cancelled.
-type SessionState string
+type State string
 
 const (
-	SessionRunning  SessionState = "running"
-	SessionComplete SessionState = "complete"
-	SessionFailed   SessionState = "failed"
-	SessionUnknown  SessionState = "unknown"
+	Running  State = "running"
+	Complete State = "complete"
+	Failed   State = "failed"
+	Unknown  State = "unknown"
 )
 
 const (
 	// SessionKindSpecialist is Status.Kind for spawn_specialist children.
-	SessionKindSpecialist = "specialist"
+	KindSpecialist = "specialist"
 	// SessionKindWorker is Status.Kind for a named job-handler child.
-	SessionKindWorker = "worker"
+	KindWorker = "worker"
 )
 
 // SessionStatus is a value type returned by Runtime.Status. Not an interface.
-type SessionStatus struct {
-	ID         SessionID
-	Parent     SessionID
-	State      SessionState
+type Status struct {
+	ID         ID
+	Parent     ID
+	State      State
 	Specialist string
 	Kind       string
 	Result     string
-	Err        error
 	// Waiting is true while the session is parked for HITL. Parent-facing
 	// State stays running until that interrupt is resolved.
 	Waiting bool
@@ -138,42 +125,62 @@ const (
 )
 
 var (
-	// ErrSessionNotFound is unknown, closed, or already torn down.
-	ErrSessionNotFound = errors.New("session not found")
-	// ErrSessionExists is CreateSession with an id that is already live.
-	ErrSessionExists = errors.New("session already exists")
-	// ErrStaleCheckpoint is SnapshotStore.Save when expected Revision does not
+	// ErrNotFound is a session that is unknown, closed, or already torn down.
+	ErrNotFound = errors.New("session not found")
+	// ErrExists is CreateSession with an id that is already live.
+	ErrExists = errors.New("session already exists")
+	// ErrInvalid is a request a Client rejects before it reaches a session:
+	// state JSON cannot hold, or a specialist and a worker together.
+	ErrInvalid = errors.New("invalid session request")
+	// ErrStaleCheckpoint is Store.Save when expected Revision does not
 	// match the row (another writer already saved). Reload and retry.
 	ErrStaleCheckpoint = errors.New("stale checkpoint")
 )
 
-// JobHandler runs a named background job. The runtime registers handlers
-// by name. Schedule starts one.
-type JobHandler func(ctx context.Context, task string) (string, error)
-
 // EventLog is the session progress stream. Topics are TopicEvents and
 // TopicRetry (a repeated attempt).
 type EventLog interface {
-	Append(ctx context.Context, sessionID SessionID, topic string, ev tacklr.StreamEvent) error
-	Subscribe(ctx context.Context, sessionID SessionID, after Seq) (<-chan tacklr.StreamEvent, error)
-	Head(ctx context.Context, sessionID SessionID) (Seq, error)
-	CloseSession(ctx context.Context, sessionID SessionID) error
+	Append(ctx context.Context, sessionID ID, topic string, ev Event) error
+	Subscribe(ctx context.Context, sessionID ID, after Seq) (<-chan Event, error)
+	Head(ctx context.Context, sessionID ID) (Seq, error)
+	CloseSession(ctx context.Context, sessionID ID) error
 }
 
-// Revision is the SnapshotStore compare-and-swap token for one session row.
+// Revision is the Store compare-and-swap token for one session row.
 // The zero value means no row exists yet; the next Save creates it.
 type Revision string
 
-// SnapshotStore keeps each session's checkpoint: what the harness needs to
+// Store keeps each session's checkpoint: what the harness needs to
 // think again after a park or a worker recycle. Tokens, file bytes, MCP env
 // and headers, the session's identity, and child handles are not in it.
 //
 // Save's expected Revision must match the last Load (zero if no row).
 // Mismatch means another writer already saved — reload and retry.
-type SnapshotStore interface {
-	Save(ctx context.Context, sessionID SessionID, cp tacklr.SessionCheckpoint, expected Revision) (Revision, error)
-	Load(ctx context.Context, sessionID SessionID) (tacklr.SessionCheckpoint, Revision, error)
-	Delete(ctx context.Context, sessionID SessionID) error
+type Store interface {
+	Save(ctx context.Context, sessionID ID, cp []byte, expected Revision) (Revision, error)
+	Load(ctx context.Context, sessionID ID) ([]byte, Revision, error)
+	// Revision is the snapshot's current revision, "" when none exists. A
+	// worker reads it to learn whether the committed state it holds is
+	// current, without loading the snapshot.
+	Revision(ctx context.Context, sessionID ID) (Revision, error)
+	// PutOutcome keeps one tool call's outcome under its session and
+	// call key, so the durable runtime's history holds only that it exists.
+	// A Put of a key replaces it: a step that runs again leaves one record.
+	// Records stay until Delete, so a late Subscribe can read every result.
+	PutOutcome(ctx context.Context, sessionID ID, callKey string, o Outcome) error
+	// Outcomes returns the records kept under callKeys; a key with none is
+	// absent from the map.
+	Outcomes(ctx context.Context, sessionID ID, callKeys []string) (map[string]Outcome, error)
+	// Delete removes the session's snapshot and its outcome records.
+	Delete(ctx context.Context, sessionID ID) error
+}
+
+// Outcome is what the Store keeps for one tool call. Result is the text
+// its tool-result event carried, which a client reads back into the event
+// stream; Record is the harness's own encoding of the call's outcome.
+type Outcome struct {
+	Result string `json:"result,omitempty"`
+	Record []byte `json:"record,omitempty"`
 }
 
 // WithoutSecrets returns a copy with Credential Token and ExpiresAt cleared.
@@ -182,18 +189,9 @@ type SnapshotStore interface {
 func (a AuthContext) WithoutSecrets() AuthContext {
 	out := cloneAuth(a)
 	for i := range out.Bindings {
-		out.Bindings[i].Auth = vfs.Credential{}
+		out.Bindings[i].Auth = mount.Credential{}
 	}
 	return out
-}
-
-// DeleteSessionMessages removes this session's saved messages from the agent's brain.
-// An agent without a brain has none.
-func DeleteSessionMessages(ctx context.Context, agent tacklr.AgentOptions, sessionID SessionID) error {
-	if agent.Brain == nil {
-		return nil
-	}
-	return agent.Brain.DeleteSessionMessages(ctx, agent.SearchNamespace, string(sessionID))
 }
 
 func cloneAuth(a AuthContext) AuthContext {
@@ -201,11 +199,17 @@ func cloneAuth(a AuthContext) AuthContext {
 	if len(a.Bindings) == 0 {
 		return out
 	}
-	out.Bindings = make([]vfs.Binding, len(a.Bindings))
+	out.Bindings = make([]mount.Binding, len(a.Bindings))
 	for i, b := range a.Bindings {
 		b.Params = maps.Clone(b.Params)
-		b.Live = nil
 		out.Bindings[i] = b
 	}
 	return out
 }
+
+// ErrModelRefused and ErrMaxTokens are why a turn ended that a client acts
+// on (a refusal, the token limit); its error event names them.
+var (
+	ErrModelRefused = errors.New("model refused")
+	ErrMaxTokens    = errors.New("max tokens reached")
+)

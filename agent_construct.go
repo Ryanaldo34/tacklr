@@ -6,14 +6,15 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ryanaldo34/tacklr/session"
+
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-// AgentOptions is the one agent, and the argument to NewTurnManager.
+// AgentOptions is the one agent, and the argument to NewHarness.
 // A session runtime uses OpenVFS to build the workspace for each turn, then
 // BindTurn attaches the session id and that tree. SkillsPath is a directory
 // on that tree when it is mounted, and a local directory when it is not.
@@ -22,7 +23,7 @@ type AgentOptions struct {
 	// reported window.
 	MaxWindowSize uint
 	SystemPrompt  string
-	Model         InferenceStrategy
+	Model         Model
 	// sessionID is the thread id for this turn. BindTurn sets it.
 	sessionID string
 	// Name is the label used in logs. It does not select behavior.
@@ -32,10 +33,10 @@ type AgentOptions struct {
 	// over them in the constructor (see NewTool). Session-world tools
 	// (VFS, brain, index) still inject from the fields below.
 	Tools      []*Tool
-	MCPConfigs []mcp.MCPConfig
+	MCPConfigs []session.MCPServer
 	// MCPCredentialResolver resolves durable references immediately before
 	// connection. Inline client credentials remain session-scoped.
-	MCPCredentialResolver mcp.CredentialResolver
+	MCPCredentialResolver session.MCPCredentialResolver
 	Specialists           []*Specialist
 	// OverflowPath is a directory on a writable workspace mount (for example
 	// an object-storage mount). When a round is too large for the window even
@@ -62,7 +63,7 @@ type AgentOptions struct {
 	// link when the engine has a graph) when non-nil. Workers inherit the
 	// same engine. The host builds the store, and the graph with
 	// brain.WithGraph, each with its own embedding, and passes the engine
-	// before NewTurnManager. The harness does not construct backends.
+	// before NewHarness. The harness does not construct backends.
 	Brain *brain.Engine
 	// BrainWriteKinds are the kinds the save tool may write; it lists them
 	// as its kind choices. Empty: no save tool. Register them with
@@ -104,9 +105,9 @@ func BindTurn(opts AgentOptions, id string, mount *vfs.MountSession, jobs []stri
 	return opts
 }
 
-// NewTurnManager builds a TurnManager for one turn slice.
-// Session runtimes call this after BindTurn. Hosts use session.Runtime.
-func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error) {
+// NewHarness builds a Harness for one turn slice.
+// Session runtimes call this after BindTurn. Hosts use a session.Client.
+func NewHarness(ctx context.Context, opts AgentOptions) (*Harness, error) {
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
@@ -116,7 +117,7 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		sm.Search.SetNamespace(opts.SearchNamespace)
 	}
 	sm.Search.SetPrincipals(opts.SearchPrincipals)
-	h := &TurnManager{
+	h := &Harness{
 		model:                 opts.Model,
 		maxWindowSize:         int(opts.MaxWindowSize),
 		instructions:          opts.SystemPrompt,
@@ -210,7 +211,7 @@ func (opts *AgentOptions) validateOverflowPath() error {
 	return nil
 }
 
-func (h *TurnManager) finishInit(ctx context.Context, opts AgentOptions) error {
+func (h *Harness) finishInit(ctx context.Context, opts AgentOptions) error {
 	if err := h.initSkills(ctx); err != nil {
 		return fmt.Errorf("initialize skills: %w", err)
 	}
@@ -228,7 +229,7 @@ func (h *TurnManager) finishInit(ctx context.Context, opts AgentOptions) error {
 
 // injectBuiltinTools registers the plan tools, the session-world VFS, brain
 // and index tools, and the job tools.
-func (a *TurnManager) injectBuiltinTools() {
+func (a *Harness) injectBuiltinTools() {
 	a.tools = append(a.tools,
 		newCreatePlanTool(),
 		newEditPlanTool(),
@@ -253,7 +254,7 @@ func (a *TurnManager) injectBuiltinTools() {
 
 // grantTools lets the named tools run without a permission prompt. Each
 // name must be a registered tool's QualifiedName.
-func (a *TurnManager) grantTools(names []string) error {
+func (a *Harness) grantTools(names []string) error {
 	if len(names) == 0 {
 		return nil
 	}
@@ -269,7 +270,7 @@ func (a *TurnManager) grantTools(names []string) error {
 }
 
 // planningWriteLock blocks write tools until create_plan has set a plan.
-func (a *TurnManager) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (ToolOutcome, error) {
+func (a *Harness) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (ToolOutcome, error) {
 	if inv.Tool.access.Allows(WritePermission) && !a.session.Plan.HasActive() {
 		return ToolOutcome{}, fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
 	}
@@ -289,7 +290,7 @@ func skillsSource(opts AgentOptions) skills.SkillLoader {
 	return skills.Loader{Root: opts.SkillsPath}
 }
 
-func (a *TurnManager) initSkills(ctx context.Context) error {
+func (a *Harness) initSkills(ctx context.Context) error {
 	if a.skillsLoader == nil {
 		return nil
 	}
@@ -307,7 +308,7 @@ func (a *TurnManager) initSkills(ctx context.Context) error {
 	return nil
 }
 
-func (a *TurnManager) skillTool() *Tool {
+func (a *Harness) skillTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read_skill",
 		Description: "Load the full instructions for a skill listed in the skills catalog. Call when that method should shape the current work. Returns the skill body. Fails if the name is not in the catalog.",

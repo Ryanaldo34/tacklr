@@ -10,6 +10,8 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // GraphAPI is the OneDrive/SharePoint subset. Hosts call NewGraph
@@ -41,27 +43,24 @@ func Graph(api GraphAPI, holder *TokenHolder, account string) Open {
 	if api == nil {
 		panic("vfs: Graph requires a GraphAPI client")
 	}
-	return func(ctx context.Context, _ string, b Binding) (Provider, error) {
+	return func(ctx context.Context, _ string, b mount.Binding) (Provider, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		h := b.Live
-		if h == nil {
-			h = holder
-		}
+		h := holder
 		if h == nil && strings.TrimSpace(b.Auth.Token) != "" {
 			h = NewTokenHolder(b.Auth)
 		}
 		if h == nil || h.Current().Token == "" {
 			return nil, fmt.Errorf("vfs: msgraph access token required")
 		}
-		acct, err := graphAccount(account, b.Params[ParamAccount])
+		acct, err := graphAccount(account, b.Params[mount.ParamAccount])
 		if err != nil {
 			return nil, err
 		}
-		driveID := strings.TrimSpace(b.Params[ParamDriveID])
-		itemID := strings.TrimSpace(b.Params[ParamItemID])
-		siteID := strings.TrimSpace(b.Params[ParamSiteID])
+		driveID := strings.TrimSpace(b.Params[mount.ParamDriveID])
+		itemID := strings.TrimSpace(b.Params[mount.ParamItemID])
+		siteID := strings.TrimSpace(b.Params[mount.ParamSiteID])
 		if acct == AccountOrganization && driveID == "" && siteID == "" {
 			return nil, fmt.Errorf("vfs: msgraph organization account requires siteId or driveId")
 		}

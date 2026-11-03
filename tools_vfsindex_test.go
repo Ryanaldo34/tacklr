@@ -2,8 +2,11 @@ package tacklr
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -15,7 +18,7 @@ import (
 
 // vfsIndexHarness builds a turn with Brain, a workspace, and a SearchNamespace.
 // edit, when set, changes the options before the turn is built.
-func vfsIndexHarness(t *testing.T, edit func(*AgentOptions)) (*TurnManager, *vfs.MountSession, *brain.Engine, brain.Namespace) {
+func vfsIndexHarness(t *testing.T, edit func(*AgentOptions)) (*Harness, *vfs.MountSession, *brain.Engine, brain.Namespace) {
 	t.Helper()
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
@@ -38,12 +41,12 @@ func vfsIndexHarness(t *testing.T, edit func(*AgentOptions)) (*TurnManager, *vfs
 	if edit != nil {
 		edit(&opts)
 	}
-	h := mustNewTurnManager(t, opts)
+	h := mustNewHarness(t, opts)
 	t.Cleanup(h.Close)
 	return h, ms, eng, ns
 }
 
-func activatePlan(t *testing.T, h *TurnManager) {
+func activatePlan(t *testing.T, h *Harness) {
 	t.Helper()
 	h.session.Plan.set([]Todo{{Title: "t", Description: "d", Status: TodoStatusPending}})
 	if !h.session.Plan.HasActive() {
@@ -51,12 +54,12 @@ func activatePlan(t *testing.T, h *TurnManager) {
 	}
 }
 
-func runWriteTool(t *testing.T, h *TurnManager, tool *Tool, argsJSON string) (string, error) {
+func runWriteTool(t *testing.T, h *Harness, tool *Tool, argsJSON string) (string, error) {
 	t.Helper()
 	out, err := h.toolRunner.Run(context.Background(), ToolInvocation{
-		Tool:     tool,
-		ArgsJSON: argsJSON,
-		Runtime:  turnRuntime(h),
+		Tool:        tool,
+		ArgsJSON:    argsJSON,
+		CallContext: turnRuntime(h),
 	})
 	return out.Output, err
 }
@@ -130,6 +133,65 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	}
 }
 
+// TestVFSIndexTools_rejectBadRequestsAndReportEachFailure: index_file and
+// unindex reject a path that is not absolute and a batch past the limit or
+// with a missing file; a file whose readers cannot be found is an error line
+// in a batch that indexes the rest; a brain that cannot be read fails unindex.
+func TestVFSIndexTools_rejectBadRequestsAndReportEachFailure(t *testing.T) {
+	var failReads atomic.Bool
+	h, ms, _, _ := vfsIndexHarness(t, func(o *AgentOptions) {
+		eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithAudit(func(_ context.Context, ev brain.AuditEvent) error {
+			if failReads.Load() && ev.Op == brain.AuditRead {
+				return errors.New("audit store down")
+			}
+			return nil
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := eng.ApplyKinds(t.Context(), vfsindex.MountIndexKinds()...); err != nil {
+			t.Fatal(err)
+		}
+		o.Brain = eng
+		o.IndexReaders = func(_ context.Context, p string, _ vfs.FileInfo) ([]string, error) {
+			if strings.HasSuffix(p, "locked.txt") {
+				return nil, errors.New("acl lookup failed")
+			}
+			return nil, nil
+		}
+	})
+	activatePlan(t, h)
+	ctx := t.Context()
+	for _, name := range []string{"open.txt", "locked.txt"} {
+		if err := ms.Route(ctx, "/workspace/work/"+name).WriteFile(ctx, []byte(name+" body\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	index := func(args string) (string, error) { return runWriteTool(t, h, h.findTool("index_file", ""), args) }
+	unindex := func(args string) (string, error) { return runWriteTool(t, h, h.findTool("unindex", ""), args) }
+	nine, _ := json.Marshal(map[string]any{"paths": slices.Repeat([]string{"/workspace/work/open.txt"}, maxIndexFilePaths+1)})
+
+	rejected := map[string]error{}
+	_, rejected["a relative path"] = index(`{"path":"work/open.txt"}`)
+	_, rejected["a relative path in a batch"] = index(`{"paths":["/workspace/work/open.txt","work/x"]}`)
+	_, rejected["a batch past the limit"] = index(string(nine))
+	_, rejected["a missing file"] = index(`{"path":"/workspace/work/none.txt"}`)
+	_, rejected["a relative unindex"] = unindex(`{"path":"work/open.txt"}`)
+	batch, batchErr := index(`{"paths":["/workspace/work/open.txt","/workspace/work/locked.txt"]}`)
+	failReads.Store(true)
+	_, rejected["an unindex the brain cannot read"] = unindex(`{"path":"/workspace/work/open.txt"}`)
+
+	for name, err := range rejected {
+		if err == nil {
+			t.Errorf("%s: want an error", name)
+		}
+	}
+	lines := strings.Split(batch, "\n")
+	if batchErr != nil || len(lines) != 2 || !strings.HasPrefix(lines[0], "indexed") || !strings.Contains(lines[1], "error path=/workspace/work/locked.txt") {
+		t.Fatalf("batch = %q %v, want the open file indexed and an error line for the locked one", batch, batchErr)
+	}
+}
+
 // TestVFSIndexTools_indexedFileACLFollowsSearchPrincipals: IndexReaders puts
 // the file's source sharing on the index, and search returns it only to a
 // session whose SearchPrincipals include one of those readers.
@@ -182,7 +244,7 @@ func TestVFSIndexTools_refuseAMountThatIsNotIndexed(t *testing.T) {
 		t.Fatal(err)
 	}
 	ms := mustMountTree(t, "not-indexed", vfs.At("work", vfs.Local(t.TempDir())), vfs.At("off", vfs.Local(t.TempDir())).NotIndexed())
-	h := mustNewTurnManager(t, AgentOptions{sessionID: "not-indexed", mountSession: ms, Model: &scriptedModel{}, Brain: eng, SearchNamespace: mustNS(t, "id", uuid.NewString())})
+	h := mustNewHarness(t, AgentOptions{sessionID: "not-indexed", mountSession: ms, Model: &scriptedModel{}, Brain: eng, SearchNamespace: mustNS(t, "id", uuid.NewString())})
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
 	if err := ms.Route(ctx, "/workspace/off/a.txt").WriteFile(ctx, []byte("a\n")); err != nil {

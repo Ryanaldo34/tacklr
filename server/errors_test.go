@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
@@ -44,21 +46,21 @@ func TestHandleInbound_errorContract(t *testing.T) {
 
 	t.Run("methodNotFound", func(t *testing.T) {
 		k := fakeHost(t)
-		err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent},
+		err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 			`{"jsonrpc":"2.0","id":1,"method":"session/foo","params":{}}`)
 		assert(t, err, server.ErrMethodNotFound, acp.CodeMethodNotFound, server.ErrMethodNotFound)
 	})
 
 	t.Run("invalidRequest", func(t *testing.T) {
 		k := fakeHost(t)
-		err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent},
+		err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 			`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{}}`)
 		assert(t, err, server.ErrInvalidRequest, acp.CodeInvalidRequest, server.ErrInvalidRequest)
 	})
 
 	t.Run("sessionNotFound", func(t *testing.T) {
 		k := fakeHost(t)
-		err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent},
+		err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 			`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"missing"}}`)
 		assert(t, err, server.ErrSessionNotFound, acp.CodeApplication, server.ErrSessionNotFound)
 	})
@@ -66,7 +68,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	t.Run("unknownConfig", func(t *testing.T) {
 		k := fakeHost(t)
 		proto := acp.New(nil)
-		env := server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent}
+		env := server.ProtocolEnv{Client: k.Client, Agent: k.Agent}
 		sid := acpSessionID(t, serveACPInbound(t, k, proto, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
 		err := inboundWrittenError(t, proto, env,
 			`{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sid+`","configId":"model","value":"ghost"}}`)
@@ -76,7 +78,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	t.Run("authenticationRequired", func(t *testing.T) {
 		k := fakeHost(t)
 		proto := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, false)
-		err := inboundWrittenError(t, proto, server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent},
+		err := inboundWrittenError(t, proto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 			`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 		assert(t, err, server.ErrAuthenticationRequired, acp.CodeApplication, server.ErrAuthenticationRequired)
 	})
@@ -90,7 +92,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 		}
 		proto := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, false)
 		err := inboundWrittenError(t, proto, server.ProtocolEnv{
-			Runtime: k.Runtime, Agent: k.Agent, Security: service,
+			Client: k.Client, Agent: k.Agent, Security: service,
 			Conn: &server.Conn{Security: &server.Context{}},
 		}, `{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{"methodId":"login"}}`)
 		assert(t, err, server.ErrAuthenticationFailed, acp.CodeApplication, server.ErrAuthenticationFailed)
@@ -115,7 +117,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 		k := fakeHost(t)
 		proto := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, false)
 		aliceCtx := server.Context{Principal: alice}
-		env := server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent, Security: service, Conn: &server.Conn{Security: &aliceCtx}}
+		env := server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Security: service, Conn: &server.Conn{Security: &aliceCtx}}
 		sid := sessionIDFromInbound(t, proto, env, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 		got := inboundWrittenError(t, proto, env,
 			`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sid+`"}}`)
@@ -128,7 +130,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		ret := acp.New(nil).HandleInbound(ctx, server.ProtocolEnv{
-			Runtime: k.Runtime, Agent: k.Agent, Conn: &server.Conn{Writer: w},
+			Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: w},
 		}, []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`))
 		err := ret
 		if len(w.Errors) > 0 {
@@ -146,14 +148,14 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	})
 
 	t.Run("internalProviderFailure", func(t *testing.T) {
-		k := newTestRuntime(t, testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Error: errors.New("provider down"), Content: "provider down"}
+		k := newTestRuntime(t, testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			ch <- tacklr.LLMResponseChunk{Type: session.EventError, Error: errors.New("provider down"), Content: "provider down"}
 		}), tacklr.AgentOptions{})
 		proto := acp.New(nil)
 		sid := acpSessionID(t, serveACPInbound(t, k, proto, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
 		w := &recordingMessageWriter{}
 		_ = proto.HandleInbound(t.Context(), server.ProtocolEnv{
-			Runtime: k.Runtime, Agent: k.Agent, Conn: &server.Conn{Writer: w},
+			Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: w},
 		}, []byte(`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sid+`","prompt":[{"type":"text","text":"hi"}]}}`))
 		var err error
 		if len(w.Errors) > 0 {
@@ -185,7 +187,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	k := newTestRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
 	proto := acp.New(nil)
-	env := server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent}
+	env := server.ProtocolEnv{Client: k.Client, Agent: k.Agent}
 	sid := sessionIDFromInbound(t, proto, env, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 
 	if err := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":0}}`); err == nil {
@@ -194,12 +196,12 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	if err := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"`+sid+`","configId":"nope","value":"x"}}`); err == nil {
 		t.Fatal("want unknown configId")
 	}
-	if err := proto.HandleInbound(t.Context(), server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
+	if err := proto.HandleInbound(t.Context(), server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
 		[]byte(`{"jsonrpc":"2.0","id":4,"method":"session/cancel","params":{"sessionId":"`+sid+`"}}`)); err != nil {
 		t.Fatalf("cancel request: %v", err)
 	}
 	w := &recordingMessageWriter{}
-	if err := proto.HandleInbound(t.Context(), server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent, Conn: &server.Conn{Writer: w}},
+	if err := proto.HandleInbound(t.Context(), server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: w}},
 		[]byte(`{"jsonrpc":"2.0","id":5,"method":"session/resume","params":{"sessionId":"`+sid+`","responses":{"intr-1":"{}"}}}`)); err != nil {
 		t.Fatalf("session/resume: %v", err)
 	}
@@ -212,11 +214,11 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	}
 
 	authProto := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, true)
-	if err := inboundWrittenError(t, authProto, server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent},
+	if err := inboundWrittenError(t, authProto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":6,"method":"authenticate","params":{"methodId":"ghost"}}`); err == nil {
 		t.Fatal("want unknown auth method")
 	}
-	if err := proto.HandleInbound(t.Context(), server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
+	if err := proto.HandleInbound(t.Context(), server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
 		[]byte(`{"jsonrpc":"2.0","id":7,"method":"logout","params":{}}`)); err != nil {
 		t.Fatalf("logout: %v", err)
 	}
@@ -226,7 +228,7 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	bridge := acp.NewClientBridge(&recordingMessageWriter{})
 	waitErr := make(chan error, 1)
 	go func() {
-		waitErr <- proto.HandleInbound(ctx, server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}, Ask: bridge}},
+		waitErr <- proto.HandleInbound(ctx, server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}, Ask: bridge}},
 			[]byte(`{"jsonrpc":"2.0","id":8,"method":"session/prompt","params":{"sessionId":"`+sid+`","prompt":[{"type":"text","text":"hi"}]}}`))
 	}()
 	time.Sleep(20 * time.Millisecond)
@@ -241,7 +243,7 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	}
 
 	down := acp.New(failPutStore{})
-	if err := inboundWrittenError(t, down, server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent},
+	if err := inboundWrittenError(t, down, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":9,"method":"session/new","params":{"cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want wire put failure")
 	}
@@ -251,7 +253,7 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	if err := mem.Put(t.Context(), "corrupt", []byte("not-json")); err != nil {
 		t.Fatal(err)
 	}
-	if err := inboundWrittenError(t, corrupt, server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent},
+	if err := inboundWrittenError(t, corrupt, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":10,"method":"session/load","params":{"sessionId":"corrupt","cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want corrupt wire decode")
 	}
@@ -259,9 +261,9 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	if err := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":11,"method":"session/close","params":{"sessionId":"missing"}}`); err == nil {
 		t.Fatal("want close missing session")
 	}
-	_ = proto.HandleInbound(t.Context(), server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
+	_ = proto.HandleInbound(t.Context(), server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
 		[]byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{}}`))
-	if err := inboundWrittenError(t, authProto, server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent},
+	if err := inboundWrittenError(t, authProto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":12,"method":"authenticate","params":{"methodId":"login"}}`); err == nil {
 		t.Fatal("want authenticate without security service")
 	}
@@ -270,12 +272,12 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	}
 
 	emptyCWD := sessionIDFromInbound(t, proto, env, `{"jsonrpc":"2.0","id":13,"method":"session/new","params":{}}`)
-	if err := proto.HandleInbound(t.Context(), server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
+	if err := proto.HandleInbound(t.Context(), server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
 		[]byte(`{"jsonrpc":"2.0","id":14,"method":"session/load","params":{"sessionId":"`+emptyCWD+`","cwd":"/filled","mcpServers":[{"type":"http","name":"x","url":"https://example.com/mcp"}]}}`)); err != nil {
 		t.Fatalf("load fill cwd: %v", err)
 	}
 
-	if err := inboundWrittenError(t, acp.New(failGetStore{}), server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent},
+	if err := inboundWrittenError(t, acp.New(failGetStore{}), server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":15,"method":"session/load","params":{"sessionId":"x","cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want wire get failure")
 	}
@@ -288,13 +290,13 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	}
 
 	fw := &failFrameWriter{}
-	frameEnv := server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent, Conn: &server.Conn{Writer: fw}}
+	frameEnv := server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: fw}}
 	_ = proto.HandleInbound(t.Context(), frameEnv, []byte(`{"jsonrpc":"2.0","id":18,"method":"session/prompt","params":{"sessionId":"`+sid+`","prompt":[{"type":"text","text":"hi"}]}}`))
 
 	if err := inboundWrittenError(t, proto, env, `{"jsonrpc":"1.0","id":19,"method":"initialize"}`); err == nil {
 		t.Fatal("want invalid JSON-RPC envelope")
 	}
-	if err := inboundWrittenError(t, authProto, server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent},
+	if err := inboundWrittenError(t, authProto, server.ProtocolEnv{Client: k.Client, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":20,"method":"authenticate","params":{}}`); err == nil {
 		t.Fatal("want authenticate methodId required")
 	}
@@ -346,30 +348,30 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	}
 	aliceCtx := server.Context{Principal: alice}
 	if err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{
-		Runtime: k.Runtime, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &aliceCtx},
+		Client: k.Client, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &aliceCtx},
 	}, `{"jsonrpc":"2.0","id":30,"method":"session/new","params":{"cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want session.create denied")
 	}
 	if err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{
-		Runtime: k.Runtime, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &server.Context{}},
+		Client: k.Client, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &server.Context{}},
 	}, `{"jsonrpc":"2.0","id":31,"method":"session/new","params":{"cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want unauthenticated session.create")
 	}
 	if err := inboundWrittenError(t, proto, server.ProtocolEnv{
-		Runtime: k.Runtime, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &server.Context{}},
+		Client: k.Client, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &server.Context{}},
 	}, `{"jsonrpc":"2.0","id":38,"method":"session/load","params":{"sessionId":"`+sid+`"}}`); err == nil {
 		t.Fatal("want unauthenticated session.load")
 	}
 
-	downRT := fakeRuntime{create: func(context.Context, session.CreateSession) (session.SessionID, error) {
+	downRT := fakeRuntime{create: func(context.Context, session.CreateSession) (session.ID, error) {
 		return "", errors.New("runtime down")
 	}}
-	if err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Runtime: downRT, Agent: k.Agent},
+	if err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{Client: downRT, Agent: k.Agent},
 		`{"jsonrpc":"2.0","id":32,"method":"session/new","params":{"cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want CreateSession failure")
 	}
 
-	if err := acp.New(nil).HandleInbound(t.Context(), server.ProtocolEnv{Runtime: k.Runtime, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
+	if err := acp.New(nil).HandleInbound(t.Context(), server.ProtocolEnv{Client: k.Client, Conn: &server.Conn{Writer: &recordingMessageWriter{}}},
 		[]byte(`{"jsonrpc":"2.0","id":34,"method":"session/new","params":{"cwd":"/tmp"}}`)); err != nil {
 		t.Fatalf("nil catalog session/new: %v", err)
 	}
@@ -386,7 +388,7 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	var stored server.Context
 	authConn := &server.Conn{Writer: &recordingMessageWriter{}, SetSecurity: func(c server.Context) { stored = c }}
 	if err := schemeProto.HandleInbound(t.Context(), server.ProtocolEnv{
-		Runtime: k.Runtime, Agent: k.Agent, Security: loginOK, Conn: authConn,
+		Client: k.Client, Agent: k.Agent, Security: loginOK, Conn: authConn,
 	}, []byte(`{"jsonrpc":"2.0","id":35,"method":"authenticate","params":{"methodId":"login"}}`)); err != nil {
 		t.Fatalf("scheme default authenticate: %v", err)
 	}

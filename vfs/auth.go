@@ -11,22 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"golang.org/x/oauth2"
 	"google.golang.org/api/option"
-)
-
-// ProviderGoogleDrive is the bind kind for Drive.
-// ProviderMicrosoft is the bind kind for OneDrive and SharePoint libraries.
-const (
-	ProviderGoogleDrive = "gdrive"
-	ProviderMicrosoft   = "msgraph"
-	ParamFolderID       = "folderId"
-	ParamName           = "name"
-	ParamDriveID        = "driveId"
-	ParamItemID         = "itemId"
-	ParamSiteID         = "siteId"
-	// ParamAccount selects a Microsoft account kind on a bind ("organization" or "personal").
-	ParamAccount = "account"
 )
 
 // Microsoft account kinds for Graph / ParamAccount.
@@ -36,35 +24,11 @@ const (
 	AccountPersonal     = "personal"
 )
 
-// Credential is a session-scoped access token. Never store this on MountSpec
-// or in a checkpoint / SnapshotStore. Work-item payloads (Prompt/Resume) may
-// carry it; backends must not persist it with recipes. Workflow history
-// must not contain Token; the runtime keeps it in SecretStorage.
-type Credential struct {
-	Token     string    `json:"token,omitempty"`
-	ExpiresAt time.Time `json:"expiresAt,omitempty"`
-}
-
-// Binding is one user-owned cloud folder under /workspace/<alias>.
-// Alias is params["name"] or a leftover single-segment Point (not /workspace).
-// Provider is the bind kind (gdrive, msgraph). Writable is opt-in; the Go
-// zero value stays read-only.
-type Binding struct {
-	Provider string            `json:"provider"`
-	Point    string            `json:"point,omitempty"`
-	Auth     Credential        `json:"auth,omitempty"`
-	Params   map[string]string `json:"params,omitempty"`
-	Writable bool              `json:"writable,omitempty"`
-	// Live is the process token bag for this bind (not serialized). OpenVFS
-	// copies it so 401 refresh shares the holder.
-	Live *TokenHolder `json:"-"`
-}
-
 // ValidateBinding checks provider, alias, and access token. Optional backend
 // params (gdrive folderId, Graph site/drive) are applied when the factory
 // opens; omitted gdrive folderId is My Drive. Point may be empty when
 // params["name"] is set; leftover "/contracts" becomes alias contracts.
-func ValidateBinding(b Binding) error {
+func ValidateBinding(b mount.Binding) error {
 	if strings.TrimSpace(b.Provider) == "" {
 		return fmt.Errorf("vfs: provider required")
 	}
@@ -77,8 +41,8 @@ func ValidateBinding(b Binding) error {
 	return nil
 }
 
-func resolveBindingAlias(b Binding) (string, error) {
-	name := strings.TrimSpace(b.Params[ParamName])
+func resolveBindingAlias(b mount.Binding) (string, error) {
+	name := strings.TrimSpace(b.Params[mount.ParamName])
 	if name != "" {
 		if err := validAlias(name); err != nil {
 			return "", err
@@ -86,7 +50,7 @@ func resolveBindingAlias(b Binding) (string, error) {
 		return name, nil
 	}
 	point := strings.TrimSpace(b.Point)
-	if point == "" || point == WorkspacePoint {
+	if point == "" || point == mount.WorkspacePoint {
 		return "", fmt.Errorf("%w: name required", ErrInvalidPath)
 	}
 	if err := ValidMountPoint(point); err != nil {
@@ -97,10 +61,6 @@ func resolveBindingAlias(b Binding) (string, error) {
 		return "", err
 	}
 	return alias, nil
-}
-
-func bindingAlias(b Binding) string {
-	return strings.TrimSpace(b.Params[ParamName])
 }
 
 func unbindAlias(point string) (string, error) {
@@ -125,13 +85,13 @@ func unbindAlias(point string) (string, error) {
 }
 
 // TokenRefreshFunc fetches a new access token (IdP or host callback).
-type TokenRefreshFunc func(ctx context.Context) (Credential, error)
+type TokenRefreshFunc func(ctx context.Context) (mount.Credential, error)
 
 // TokenHolder is the live access token for one (session, provider).
 // All folder mounts for that pair share the same holder. Refresh updates every mount.
 type TokenHolder struct {
 	mu          sync.Mutex
-	cred        Credential
+	cred        mount.Credential
 	refresh     TokenRefreshFunc
 	refreshing  bool
 	refreshDone chan struct{}
@@ -142,12 +102,12 @@ type TokenHolder struct {
 const DefaultTokenRefreshSkew = time.Minute
 
 // NewTokenHolder returns a holder with the initial credential.
-func NewTokenHolder(c Credential) *TokenHolder {
+func NewTokenHolder(c mount.Credential) *TokenHolder {
 	return &TokenHolder{cred: c}
 }
 
 // Set replaces the current credential.
-func (h *TokenHolder) Set(c Credential) {
+func (h *TokenHolder) Set(c mount.Credential) {
 	if h == nil {
 		return
 	}
@@ -157,9 +117,9 @@ func (h *TokenHolder) Set(c Credential) {
 }
 
 // Current returns a copy of the credential. Token is present; callers must not log it.
-func (h *TokenHolder) Current() Credential {
+func (h *TokenHolder) Current() mount.Credential {
 	if h == nil {
-		return Credential{}
+		return mount.Credential{}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -285,7 +245,7 @@ func (h *TokenHolder) Token() (*oauth2.Token, error) {
 
 type sessionBindings struct {
 	holders map[string]*TokenHolder // provider → holder
-	list    []Binding
+	list    []mount.Binding
 }
 
 // SessionAuth is the in-memory store of user-owned backend credentials.
@@ -312,7 +272,7 @@ func (s *SessionAuth) ensure(sessionID string) *sessionBindings {
 // Bind records a folder mount and its access token. Cloud binds attach under
 // /workspace/<alias>. A second bind to the same alias replaces it. A new token
 // for the same provider updates the shared holder.
-func (s *SessionAuth) Bind(sessionID string, b Binding) error {
+func (s *SessionAuth) Bind(sessionID string, b mount.Binding) error {
 	if s == nil {
 		return fmt.Errorf("vfs: session auth required")
 	}
@@ -330,11 +290,11 @@ func (s *SessionAuth) Bind(sessionID string, b Binding) error {
 	if params == nil {
 		params = make(map[string]string, 1)
 	}
-	params[ParamName] = alias
-	b.Point = WorkspacePoint
+	params[mount.ParamName] = alias
+	b.Point = mount.WorkspacePoint
 	b.Params = params
 	token := b.Auth
-	b.Auth = Credential{} // live token lives on the holder only
+	b.Auth = mount.Credential{} // live token lives on the holder only
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -345,7 +305,7 @@ func (s *SessionAuth) Bind(sessionID string, b Binding) error {
 		sess.holders[b.Provider] = NewTokenHolder(token)
 	}
 	for i, existing := range sess.list {
-		if bindingAlias(existing) == alias {
+		if existing.Alias() == alias {
 			sess.list[i] = b
 			return nil
 		}
@@ -355,7 +315,7 @@ func (s *SessionAuth) Bind(sessionID string, b Binding) error {
 }
 
 // Refresh replaces the access token for provider on the session.
-func (s *SessionAuth) Refresh(sessionID, provider string, c Credential) error {
+func (s *SessionAuth) Refresh(sessionID, provider string, c mount.Credential) error {
 	if s == nil {
 		return fmt.Errorf("vfs: session auth required")
 	}
@@ -417,7 +377,7 @@ func (s *SessionAuth) drop(sessionID, point, provider string) error {
 	kept := sess.list[:0]
 	removed := map[string]struct{}{}
 	for _, b := range sess.list {
-		match := (point != "" && bindingAlias(b) == point) || (provider != "" && b.Provider == provider)
+		match := (point != "" && b.Alias() == point) || (provider != "" && b.Provider == provider)
 		if match {
 			removed[b.Provider] = struct{}{}
 			continue
@@ -454,10 +414,10 @@ func (s *SessionAuth) Clear(sessionID string) {
 }
 
 // Credential returns the current credential for provider, or false.
-func (s *SessionAuth) Credential(sessionID, provider string) (Credential, bool) {
+func (s *SessionAuth) Credential(sessionID, provider string) (mount.Credential, bool) {
 	h := s.Holder(sessionID, provider)
 	if h == nil {
-		return Credential{}, false
+		return mount.Credential{}, false
 	}
 	c := h.Current()
 	return c, c.Token != ""
@@ -478,7 +438,7 @@ func (s *SessionAuth) Holder(sessionID, provider string) *TokenHolder {
 }
 
 // Bindings returns a copy of the session bindings (no tokens).
-func (s *SessionAuth) Bindings(sessionID string) []Binding {
+func (s *SessionAuth) Bindings(sessionID string) []mount.Binding {
 	if s == nil || sessionID == "" {
 		return nil
 	}
@@ -488,7 +448,7 @@ func (s *SessionAuth) Bindings(sessionID string) []Binding {
 	if !ok {
 		return nil
 	}
-	out := make([]Binding, len(sess.list))
+	out := make([]mount.Binding, len(sess.list))
 	for i, b := range sess.list {
 		b.Params = maps.Clone(b.Params)
 		out[i] = b

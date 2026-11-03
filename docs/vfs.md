@@ -78,7 +78,7 @@ func openVFS(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession
 		if err != nil {
 			return nil, err
 		}
-		members = append(members, vfs.At("drive", vfs.Drive(api)))
+		members = append(members, vfs.At("drive", vfs.Drive(api, h)))
 	}
 	return vfs.Tree(members...)(ctx, id, req)
 }
@@ -102,7 +102,7 @@ Tests point the official SDKs at httptest: `NewGoogleDriveHTTP` and `NewGraph(ho
 
 Host-owned roots and secrets (local jail, S3 / Azure Blob client) live in the Open closures, not on mounts or checkpoints.
 
-User-owned cloud folders (Google Drive, OneDrive, SharePoint libraries) are extra At members under **`/workspace/<alias>`**. The **client** does OAuth (PKCE). It sends only a short-lived access token over ACP extension methods. Tokens live on the work item (`Prompt.Auth` / `Resume.Auth`). In-process they stay in `TokenHolder` for the turn. Temporal writes them to `SecretStorage` (the store on `Open`, shared with `StartWorker`) and never to `MountSpec`, `SnapshotStore`, Temporal event history, or the ACP wire store. After `session/load` or process restart the client must bind again.
+User-owned cloud folders (Google Drive, OneDrive, SharePoint libraries) are extra At members under **`/workspace/<alias>`**. The **client** does OAuth (PKCE). It sends only a short-lived access token over ACP extension methods. Tokens live on the work item (`Prompt.Auth` / `Resume.Auth`). In-process they stay in `TokenHolder` for the turn. Temporal writes them to `SecretStorage` (the store on `temporal.Open`, shared with `worker.New`) and never to `MountSpec`, `session.Store`, Temporal event history, or the ACP wire store. After `session/load` or process restart the client must bind again.
 
 ```text
 initialize  →  agentCapabilities._meta.tacklr.vfs { credentials, tokenRefresh, tokenExpiry, writable }
@@ -114,7 +114,7 @@ _tacklr/vfs/bind     { sessionId, backends: [{ provider, point, auth.token, para
                      gdrive: omit folderId for My Drive; folders are path names under /workspace/<alias>.
                      msgraph: account (empty → organization), driveId, itemId, siteId.
                      organization (default) requires siteId or driveId. personal uses /me/drive.
-session/prompt       → Runtime OpenVFS (Tree + this turn's binds); agent sees /workspace/work, /workspace/contracts
+session/prompt       → worker OpenVFS (Tree + this turn's binds); agent sees /workspace/work, /workspace/contracts
 _tacklr/vfs/refresh  → new access token for a provider (gdrive and msgraph are different holders); next prompt
 _tacklr/vfs/token    ← agent asks the client after a 401 (if the client advertised tokenRefresh)
 _tacklr/vfs/unbind   → by alias (point leftover /contracts, or point /workspace + name); next prompt
@@ -147,7 +147,7 @@ Docs **tables**: `kind=table` body is TSV (`A\tB`) **or** a GFM pipe table (`| A
 // Host OpenVFS, after a drive bind:
 h := vfs.NewTokenHolder(b.Auth)
 api, err := vfs.NewGoogleDrive(ctx, h)
-members = append(members, vfs.At("drive", vfs.Drive(api)))
+members = append(members, vfs.At("drive", vfs.Drive(api, h)))
 ```
 
 Raw path I/O (absolute virtual paths only):
@@ -271,7 +271,7 @@ Tool guidance:
 
 FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **The only mount point is `/workspace`**. Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `Tree` attaches `/workspace`; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseMount` returns the kernel error when FUSE is unavailable. `Close` unmounts. Host `ls`/`rg` from HostDir see `workspace/work/…`.
 
-`session.Runtime` injects a **turn-scoped** `MountSession` from `AgentOptions.OpenVFS`. A nil `Projection` leaves that session in-process. `vfs.FuseProjection` mounts it at `$TMP/tacklr-fuse/<session>` mode `0700`, and `FuseMount`'s error is how the host learns the kernel mount failed. The activity closes that tree when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
+The worker injects a **turn-scoped** `MountSession` from `AgentOptions.OpenVFS`. A nil `Projection` leaves that session in-process. `vfs.FuseProjection` mounts it at `$TMP/tacklr-fuse/<session>` mode `0700`, and `FuseMount`'s error is how the host learns the kernel mount failed. The activity closes that tree when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 

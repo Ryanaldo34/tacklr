@@ -180,7 +180,7 @@ func (d *richBody) ReplaceBlock(id string, text string, includeHeading bool) err
 		}
 	}
 	if i < 0 {
-		return fmt.Errorf("unknown block_id %q", id)
+		return fmt.Errorf("%w %q", ErrUnknownBlock, id)
 	}
 	b := d.tree[i]
 	switch b.Kind {

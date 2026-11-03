@@ -1,12 +1,13 @@
-package temporal
+package worker
 
 import (
 	"context"
 
+	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
-	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/ryanaldo34/tacklr/session"
@@ -16,7 +17,7 @@ import (
 // startTurn opens tacklr.turn with Temporal's replay-safe Tracer (OTEL v2).
 // Turn totals are recorded on the non-replay path only so the in-flight gauge
 // is not double-counted (see Instruments.RecordTurnOutcome).
-func startTurn(ctx workflow.Context, agentID string, sessionID session.SessionID, kind string) (workflow.Context, func(string, error)) {
+func startTurn(ctx workflow.Context, agentID string, sessionID session.ID, kind string) (workflow.Context, func(string, error)) {
 	started := workflow.Now(ctx)
 	ctx, span := temporalotel.Tracer(telemetry.InstrumentationName).Start(ctx, telemetry.SpanTurn, trace.WithAttributes(
 		attribute.String(telemetry.AttrArea, telemetry.AreaRuntime),
@@ -27,12 +28,15 @@ func startTurn(ctx workflow.Context, agentID string, sessionID session.SessionID
 		attribute.String(telemetry.AttrTurnKind, kind),
 	))
 	return ctx, func(outcome string, err error) {
-		if err != nil {
+		// A cancelled turn ends with context.Canceled; its status says
+		// cancelled, not a failure of some other class.
+		switch {
+		case outcome == telemetry.OutcomeCancelled:
+			span.SetStatus(codes.Error, telemetry.OutcomeCancelled)
+		case err != nil:
 			span.RecordError(err)
 			span.SetStatus(codes.Error, telemetry.ErrorClassOther)
-		} else if outcome == telemetry.OutcomeCancelled {
-			span.SetStatus(codes.Error, telemetry.OutcomeCancelled)
-		} else {
+		default:
 			span.SetStatus(codes.Ok, "")
 		}
 		span.SetAttributes(attribute.String(telemetry.AttrOutcome, outcome))

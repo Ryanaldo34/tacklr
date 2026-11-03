@@ -6,7 +6,7 @@ import (
 )
 
 // planStore holds the plan document and todo list for Adaptive Case Management.
-// It is a sessionManager module — not exposed on HarnessRuntime.
+// It is a sessionManager module — not exposed on CallContext.
 // After newPlanStore / newSessionManager the receiver is never nil.
 type planStore struct {
 	mu           sync.RWMutex
@@ -65,11 +65,7 @@ func (p *planStore) ConsumeTodosUpdated() ([]Todo, bool) {
 		return nil, false
 	}
 	p.todosUpdated = false
-	if p.todos == nil {
-		return nil, true
-	}
-	cp := make([]Todo, len(p.todos))
-	copy(cp, p.todos)
+	cp := slices.Clone(p.todos)
 	return cp, true
 }
 

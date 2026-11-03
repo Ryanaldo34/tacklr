@@ -5,9 +5,13 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
 )
 
-func TestNewTurnManager_rejectsInvalidSpecialists(t *testing.T) {
+func TestNewHarness_rejectsInvalidSpecialists(t *testing.T) {
 	ok := &scriptedModel{}
 	cases := []struct {
 		name  string
@@ -23,7 +27,7 @@ func TestNewTurnManager_rejectsInvalidSpecialists(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewTurnManager(context.Background(), AgentOptions{
+			if _, err := NewHarness(context.Background(), AgentOptions{
 				MaxWindowSize: 8192, Model: ok, Specialists: tc.specs,
 			}); err == nil {
 				t.Fatal("expected constructor error")
@@ -34,20 +38,20 @@ func TestNewTurnManager_rejectsInvalidSpecialists(t *testing.T) {
 
 func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 	var n int
-	h := mustNewTurnManager(t, AgentOptions{
+	h := mustNewHarness(t, AgentOptions{
 		MaxWindowSize: 8192,
 		Model: &scriptedModel{
-			InvokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			InvokeFn: func(ctx context.Context, msgs []*message.Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 				n++
 				if n == 1 {
-					ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					ch <- LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
 						toolCall("sp1", "spawn_specialist", `{"specialist":"alpha","task_description_and_context":"x"}`),
 						toolCall("ls1", "list_children", `{}`),
 						toolCall("cc1", "cancel_child", `{"child_id":"missing"}`),
 					}, IsComplete: true}
 					return
 				}
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+				ch <- LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
 			},
 		},
 		Specialists: []*Specialist{
@@ -62,8 +66,8 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 	if ai < 0 || zi < 0 || ai > zi {
 		t.Fatalf("want alpha then zebra in prompt: %s", prompt)
 	}
-	rt := turnRuntime(h)
-	res, err := h.findTool("list_children", "").invoke(t.Context(), `{}`, rt)
+	cc := turnRuntime(h)
+	res, err := h.findTool("list_children", "").invoke(t.Context(), `{}`, cc)
 	if err != nil || !strings.Contains(strings.ToLower(res.Output), "no jobs") {
 		t.Fatalf("list_children: %q %v", res.Output, err)
 	}
@@ -72,7 +76,7 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 // TestJobTools_correctBadArguments: spawn_specialist and cancel_child name
 // a missing or unknown argument for the model to correct.
 func TestJobTools_correctBadArguments(t *testing.T) {
-	h := mustNewTurnManager(t, AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{},
+	h := mustNewHarness(t, AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{},
 		Specialists: []*Specialist{{Name: "researcher", Model: &scriptedModel{}}}})
 	t.Cleanup(h.Close)
 	call := func(name, args string) error {

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -17,16 +19,16 @@ func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
 	ms, err := vfs.Tree(
 		vfs.At("contracts", open),
 		vfs.At("notes", open),
-	)(ctx, "sess-ws", vfs.Request{Bindings: []vfs.Binding{
-		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"}, Auth: vfs.Credential{Token: "tok"}},
-		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "notes", vfs.ParamFolderID: "root-b"}, Auth: vfs.Credential{Token: "tok"}},
+	)(ctx, "sess-ws", vfs.Request{Bindings: []mount.Binding{
+		{Provider: mount.ProviderGoogleDrive, Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root-a"}, Auth: mount.Credential{Token: "tok"}},
+		{Provider: mount.ProviderGoogleDrive, Params: map[string]string{mount.ParamName: "notes", mount.ParamFolderID: "root-b"}, Auth: mount.Credential{Token: "tok"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 
-	if ents, err := ms.Route(ctx, vfs.WorkspacePoint).
+	if ents, err := ms.Route(ctx, mount.WorkspacePoint).
 		ReadDir(ctx); err != nil || len(ents) != 2 || ents[0].Name != "contracts" || ents[1].Name != "notes" || !ents[0].IsDir {
 		t.Fatalf("ReadDir /workspace = %+v err=%v", ents, err)
 	}

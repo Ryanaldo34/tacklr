@@ -2,22 +2,25 @@ package tacklr
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/mcp"
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 type failMCP struct{}
 
-func (failMCP) ResolveMCP(context.Context, string) (mcp.Credentials, error) {
-	return mcp.Credentials{}, errors.New("expired")
+func (failMCP) ResolveMCP(context.Context, string) (session.MCPCredentials, error) {
+	return session.MCPCredentials{}, errors.New("expired")
 }
 
 type zeroWindowStrategy struct{ scriptedModel }
@@ -28,15 +31,15 @@ type errWindowStrategy struct{ scriptedModel }
 
 func (*errWindowStrategy) MaxContextWindow() (int, error) { return 0, errors.New("no window") }
 
-// TestNewTurnManager_constructFailClosed is the fail-closed construct surface:
+// TestNewHarness_constructFailClosed is the fail-closed construct surface:
 // broken /skills pack, missing session, and resume without a model.
-func TestNewTurnManager_constructFailClosed(t *testing.T) {
+func TestNewHarness_constructFailClosed(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	ms := mustMountTree(t, t.Name(), vfs.At("skills", vfs.Local(root)))
-	_, err := NewTurnManager(context.Background(), AgentOptions{
+	_, err := NewHarness(context.Background(), AgentOptions{
 		MaxWindowSize: 8192,
 		Model:         &scriptedModel{},
 		mountSession:  ms,
@@ -46,7 +49,7 @@ func TestNewTurnManager_constructFailClosed(t *testing.T) {
 	}
 }
 
-func TestNewTurnManager_configurationInvariants(t *testing.T) {
+func TestNewHarness_configurationInvariants(t *testing.T) {
 	// Arrange
 	validModel := &scriptedModel{}
 	ms := mustMountTree(t, "overflow-config", vfs.At("work", vfs.Local(t.TempDir())), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
@@ -71,6 +74,10 @@ func TestNewTurnManager_configurationInvariants(t *testing.T) {
 			opts: AgentOptions{Model: validModel, AllowTools: []string{"nope"}},
 		},
 		{
+			name: "a nil nested specialist",
+			opts: AgentOptions{Model: validModel, Specialists: []*Specialist{{Name: "lead", Model: validModel, Specialists: []*Specialist{nil}}}},
+		},
+		{
 			name: "nil tool",
 			opts: AgentOptions{Model: validModel, Tools: []*Tool{nil}},
 		},
@@ -78,16 +85,16 @@ func TestNewTurnManager_configurationInvariants(t *testing.T) {
 			name: "invalid MCP transport",
 			opts: AgentOptions{
 				Model:      validModel,
-				MCPConfigs: []mcp.MCPConfig{{Name: "stdio"}},
+				MCPConfigs: []session.MCPServer{{Name: "stdio"}},
 			},
 		},
 		{
 			name: "duplicate MCP server",
 			opts: AgentOptions{
 				Model: validModel,
-				MCPConfigs: []mcp.MCPConfig{
-					{Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test/a"},
-					{Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test/b"},
+				MCPConfigs: []session.MCPServer{
+					{Name: "remote", Type: session.MCPHTTP, URL: "https://example.test/a"},
+					{Name: "remote", Type: session.MCPHTTP, URL: "https://example.test/b"},
 				},
 			},
 		},
@@ -107,8 +114,8 @@ func TestNewTurnManager_configurationInvariants(t *testing.T) {
 			name: "credential ref without resolver",
 			opts: AgentOptions{
 				Model: validModel,
-				MCPConfigs: []mcp.MCPConfig{
-					{Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test", CredentialRef: "vault://remote"},
+				MCPConfigs: []session.MCPServer{
+					{Name: "remote", Type: session.MCPHTTP, URL: "https://example.test", CredentialRef: "vault://remote"},
 				},
 			},
 		},
@@ -117,13 +124,13 @@ func TestNewTurnManager_configurationInvariants(t *testing.T) {
 	// Act and assert
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewTurnManager(t.Context(), tc.opts); err == nil {
+			if _, err := NewHarness(t.Context(), tc.opts); err == nil {
 				t.Fatal("invalid configuration was accepted")
 			}
 		})
 	}
 
-	h, err := NewTurnManager(t.Context(), AgentOptions{Model: validModel})
+	h, err := NewHarness(t.Context(), AgentOptions{Model: validModel})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,20 +141,14 @@ func TestNewTurnManager_configurationInvariants(t *testing.T) {
 }
 
 func TestRestoreCheckpoint_rejectsACorruptOrOtherVersionCheckpoint(t *testing.T) {
-	h := mustNewTurnManager(t, AgentOptions{Model: &scriptedModel{}})
+	h := mustNewHarness(t, AgentOptions{Model: &scriptedModel{}})
+	v := checkpointVersion
 	for name, raw := range map[string]string{
-		"corrupt":                      `{"version":4,"window":"x"}`,
-		"other version":                `{"version":3,"window":[]}`,
-		"an invalid window":            `{"version":4,"window":[{"role":"tool","content":"x"}]}`,
-		"a park that is not an object": `{"version":4,"window":[],"round":{"reply":[],"calls":[{"call":{},"park":"x"}]}}`,
-		"a park of an unknown type":    `{"version":4,"window":[],"round":{"reply":[],"calls":[{"call":{},"park":{"type":"nope","data":{}}}]}}`,
-		"a park whose data is bad":     `{"version":4,"window":[],"round":{"reply":[],"calls":[{"call":{},"park":{"type":"tool_permission","data":"x"}}]}}`,
+		"corrupt":           fmt.Sprintf(`{"version":%d,"window":"x"}`, v),
+		"other version":     fmt.Sprintf(`{"version":%d,"window":[]}`, v-1),
+		"an invalid window": fmt.Sprintf(`{"version":%d,"window":[{"role":"tool","content":"x"}]}`, v),
 	} {
-		var cp SessionCheckpoint
-		if err := json.Unmarshal([]byte(raw), &cp); err != nil {
-			t.Fatal(err)
-		}
-		if err := h.RestoreCheckpoint(cp); err == nil {
+		if err := h.RestoreCheckpoint([]byte(raw)); err == nil {
 			t.Errorf("%s checkpoint was accepted", name)
 		}
 	}
@@ -167,9 +168,9 @@ func skillPack(t *testing.T, name, description, instructions string) skills.Load
 	return skills.Loader{Root: root}
 }
 
-func TestTurnManager_checkpointAfterRun(t *testing.T) {
-	mock := &scriptedModel{SupportsMIMEFn: IsTextMIME}
-	h, err := NewTurnManager(t.Context(), AgentOptions{
+func TestHarness_checkpointAfterRun(t *testing.T) {
+	mock := &scriptedModel{SupportsMIMEFn: message.IsTextMIME}
+	h, err := NewHarness(t.Context(), AgentOptions{
 		sessionID:     "sess",
 		Model:         mock,
 		MaxWindowSize: 8192, SystemPrompt: "be brief",
@@ -179,8 +180,8 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 			Description: "Looks things up.",
 			Model:       mock,
 		}},
-		MCPConfigs: []mcp.MCPConfig{{
-			Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test", CredentialRef: "vault://remote",
+		MCPConfigs: []session.MCPServer{{
+			Name: "remote", Type: session.MCPHTTP, URL: "https://example.test", CredentialRef: "vault://remote",
 		}},
 		MCPCredentialResolver: failMCP{},
 	})
@@ -188,19 +189,19 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(h.Close)
-	out := make(chan StreamEvent, 16)
+	out := make(chan session.Event, 16)
 	go func() {
 		for range out {
 		}
 	}()
-	if err := h.Commit(t.Context(), CommitIn{Users: []*Message{{Role: RoleUser, Content: "hello"}}}, out); err != nil {
+	if err := h.Commit(t.Context(), CommitIn{Users: []*message.Message{{Role: message.RoleUser, Content: "hello"}}}, out); err != nil {
 		t.Fatal(err)
 	}
-	img := &Message{Role: RoleUser, ContentParts: []ContentPart{{
-		Type:     ContentTypeInputImage,
-		FileData: &FileData{MIMEType: "image/png"},
+	img := &message.Message{Role: message.RoleUser, ContentParts: []message.ContentPart{{
+		Type:     message.ContentTypeInputImage,
+		FileData: &message.FileData{MIMEType: "image/png"},
 	}}}
-	if err := h.Commit(t.Context(), CommitIn{Users: []*Message{img}}, out); err == nil {
+	if err := h.Commit(t.Context(), CommitIn{Users: []*message.Message{img}}, out); err == nil {
 		t.Fatal("text-only model must reject image input")
 	}
 	write := NewTool(ToolConfig{
@@ -220,11 +221,11 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := h.Commit(ctx, CommitIn{Users: []*Message{{Role: RoleUser, Content: "x"}}}, out); err == nil {
+	if err := h.Commit(ctx, CommitIn{Users: []*message.Message{{Role: message.RoleUser, Content: "x"}}}, out); err == nil {
 		t.Fatal("cancelled absorb")
 	}
 
-	ask := ToolCall{ID: "ask1", CallID: "ask1", Name: "ask_user_choice", Arguments: `{"question":"which?","choices":[{"title":"a"},{"title":"b"}]}`}
+	ask := message.ToolCall{ID: "ask1", CallID: "ask1", Name: "ask_user_choice", Arguments: `{"question":"which?","choices":[{"title":"a"},{"title":"b"}]}`}
 	parked, err := h.RunTool(t.Context(), ToolRun{Call: ask}, out)
 	if err != nil || parked.Park == nil {
 		t.Fatalf("ask = %+v %v, want a park", parked, err)
@@ -233,23 +234,23 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 		t.Fatal("invalid selection")
 	}
 
-	mock.InvokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "hi", IsComplete: true}
+	mock.InvokeFn = func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+		ch <- LLMResponseChunk{Type: session.EventMessage, Content: "hi", IsComplete: true}
 	}
 	if _, err := h.Infer(t.Context(), out); err != nil {
 		t.Fatal(err)
 	}
 	// The window ends on a tool round: the next request answers tools.
-	call := ToolCall{ID: "c1", CallID: "c1", Name: "x", Arguments: "{}"}
+	call := message.ToolCall{ID: "c1", CallID: "c1", Name: "x", Arguments: "{}"}
 	result, _ := h.toolResultMessage(call, "ok", "success")
-	h.context.Add(&Message{Role: RoleAssistant, ToolCalls: []ToolCall{call}}, result)
+	h.context.Add(&message.Message{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{call}}, result)
 	mock.InvokeErr = errors.New("upstream")
 	if _, err := h.Infer(t.Context(), out); !errors.Is(err, ErrModelAfterTools) {
 		t.Fatalf("want ErrModelAfterTools, got %v", err)
 	}
 	mock.InvokeErr = nil
-	mock.InvokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-		ch <- LLMResponseChunk{Type: StreamEventError, Error: errors.New("provider"), IsComplete: true}
+	mock.InvokeFn = func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+		ch <- LLMResponseChunk{Type: session.EventError, Error: errors.New("provider"), IsComplete: true}
 	}
 	if _, err := h.Infer(t.Context(), out); !errors.Is(err, ErrModelAfterTools) {
 		t.Fatalf("want an after-tools stream error, got %v", err)
@@ -266,7 +267,7 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored := mustNewTurnManager(t, AgentOptions{Model: &scriptedModel{}})
+	restored := mustNewHarness(t, AgentOptions{Model: &scriptedModel{}})
 	if err := restored.RestoreCheckpoint(cp); err != nil || len(restored.context.Messages()) != len(h.context.Messages()) {
 		t.Fatalf("restore = %v with %d messages, want the window back", err, len(restored.context.Messages()))
 	}

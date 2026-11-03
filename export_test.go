@@ -6,24 +6,26 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// scriptedModel is the package-tacklr test InferenceStrategy. Root tests cannot
+// scriptedModel is the package-tacklr test Model. Root tests cannot
 // import internal/testkit (cycle: testkit → tacklr). Same shape as testkit.ScriptedModel.
 type scriptedModel struct {
-	InvokeFn       func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk)
+	InvokeFn       func(ctx context.Context, msgs []*message.Message, tools []*Tool, ch chan<- LLMResponseChunk)
 	InvokeErr      error
-	InvokeErrFn    func(ctx context.Context, msgs []*Message, tools []*Tool) error
-	CountTokensFn  func(ctx context.Context, msgs []*Message, tools []*Tool) (int, error)
+	InvokeErrFn    func(ctx context.Context, msgs []*message.Message, tools []*Tool) error
+	CountTokensFn  func(ctx context.Context, msgs []*message.Message, tools []*Tool) (int, error)
 	SupportsMIMEFn func(string) bool
 
 	CallNum         atomic.Int64
 	mu              sync.Mutex
 	SystemPrompts   []string
-	LastInvokeMsgs  []*Message
+	LastInvokeMsgs  []*message.Message
 	LastInvokeTools []*Tool
 }
 
@@ -89,14 +91,14 @@ func (m *scriptedModel) LastSystemPrompt() string {
 	return ""
 }
 
-func reloadHarness(t *testing.T, h *TurnManager, opts AgentOptions) *TurnManager {
+func reloadHarness(t *testing.T, h *Harness, opts AgentOptions) *Harness {
 	t.Helper()
 	cp, err := h.Checkpoint()
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Close()
-	n, err := NewTurnManager(t.Context(), opts)
+	n, err := NewHarness(t.Context(), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,23 +109,23 @@ func reloadHarness(t *testing.T, h *TurnManager, opts AgentOptions) *TurnManager
 }
 
 // callRuntime is the runtime of one call, id, on sm (events drained).
-func callRuntime(sm *sessionManager, id string) *HarnessRuntime {
-	return newHarnessRuntime(drainEventCh(), &TurnManager{session: sm}, nil, roundCall{Call: ToolCall{ID: id, CallID: id}}, callWrites{})
+func callRuntime(sm *sessionManager, id string) *CallContext {
+	return newCallContext(drainEventCh(), &Harness{session: sm}, ToolRun{}, roundCall{Call: message.ToolCall{ID: id, CallID: id}}, callWrites{})
 }
 
 // turnRuntime is the runtime of one call on h.
-func turnRuntime(h *TurnManager) *HarnessRuntime {
-	return newHarnessRuntime(drainEventCh(), h, nil, roundCall{}, callWrites{})
+func turnRuntime(h *Harness) *CallContext {
+	return newCallContext(drainEventCh(), h, ToolRun{}, roundCall{}, callWrites{})
 }
 
 // commit applies what the call wrote to the committed state, as Commit does.
-func (rt *HarnessRuntime) commit() {
-	rt.session.apply(rt.writes)
+func (cc *CallContext) commit() {
+	cc.session.apply(cc.writes)
 }
 
-func mustNewTurnManager(t testing.TB, opts AgentOptions) *TurnManager {
+func mustNewHarness(t testing.TB, opts AgentOptions) *Harness {
 	t.Helper()
-	h, err := NewTurnManager(t.Context(), opts)
+	h, err := NewHarness(t.Context(), opts)
 	if err != nil {
 		t.Fatal(err)
 	}

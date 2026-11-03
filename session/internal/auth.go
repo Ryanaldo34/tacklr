@@ -1,24 +1,25 @@
-package session
+package adapter
 
 import (
 	"maps"
 	"slices"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 var sourceParamKeys = []string{
-	vfs.ParamFolderID,
-	vfs.ParamItemID,
-	vfs.ParamDriveID,
-	vfs.ParamSiteID,
+	mount.ParamFolderID,
+	mount.ParamItemID,
+	mount.ParamDriveID,
+	mount.ParamSiteID,
 }
 
 // ApplyAuth updates cached recipes from a work-item AuthContext.
 // Drop is applied first. Bindings with an alias
 // upsert that recipe. Tokens are not stored on the returned recipes.
-func ApplyAuth(recipes []MountRecipe, auth AuthContext) []MountRecipe {
+func ApplyAuth(recipes []session.MountRecipe, auth session.AuthContext) []session.MountRecipe {
 	out := cloneRecipes(recipes)
 	if len(auth.Drop) > 0 {
 		filtered := out[:0]
@@ -31,7 +32,7 @@ func ApplyAuth(recipes []MountRecipe, auth AuthContext) []MountRecipe {
 		out = filtered
 	}
 	for _, b := range auth.Bindings {
-		alias := bindingAlias(b)
+		alias := b.Alias()
 		if alias == "" {
 			continue
 		}
@@ -54,9 +55,9 @@ func ApplyAuth(recipes []MountRecipe, auth AuthContext) []MountRecipe {
 
 // BindingsForTurn builds the secret-bearing mounts for one turn.
 // Each cached recipe is included when a token for its provider is on auth.
-func BindingsForTurn(recipes []MountRecipe, auth AuthContext) []vfs.Binding {
+func BindingsForTurn(recipes []session.MountRecipe, auth session.AuthContext) []mount.Binding {
 	byProvider, byAlias := tokenIndex(auth)
-	out := make([]vfs.Binding, 0, len(recipes))
+	out := make([]mount.Binding, 0, len(recipes))
 	for _, r := range recipes {
 		cred, ok := byAlias[r.Alias]
 		if !ok {
@@ -66,10 +67,10 @@ func BindingsForTurn(recipes []MountRecipe, auth AuthContext) []vfs.Binding {
 			continue
 		}
 		params := cloneParams(r.Params)
-		params[vfs.ParamName] = r.Alias
-		out = append(out, vfs.Binding{
+		params[mount.ParamName] = r.Alias
+		out = append(out, mount.Binding{
 			Provider: r.Provider,
-			Point:    vfs.WorkspacePoint,
+			Point:    mount.WorkspacePoint,
 			Auth:     cred,
 			Params:   params,
 			Writable: r.Writable,
@@ -78,10 +79,10 @@ func BindingsForTurn(recipes []MountRecipe, auth AuthContext) []vfs.Binding {
 	return out
 }
 
-func recipeFromBinding(b vfs.Binding, alias string) MountRecipe {
+func recipeFromBinding(b mount.Binding, alias string) session.MountRecipe {
 	params := cloneParams(b.Params)
-	params[vfs.ParamName] = alias
-	return MountRecipe{
+	params[mount.ParamName] = alias
+	return session.MountRecipe{
 		Provider:  b.Provider,
 		Alias:     alias,
 		Params:    params,
@@ -115,18 +116,7 @@ func mergeSourceIDs(a, b []string) []string {
 	return out
 }
 
-func bindingAlias(b vfs.Binding) string {
-	if name := strings.TrimSpace(b.Params[vfs.ParamName]); name != "" {
-		return name
-	}
-	point := strings.TrimSpace(b.Point)
-	if point == "" || point == vfs.WorkspacePoint {
-		return ""
-	}
-	return strings.TrimPrefix(point, "/")
-}
-
-func dropRecipe(r MountRecipe, drop []string) bool {
+func dropRecipe(r session.MountRecipe, drop []string) bool {
 	for _, d := range drop {
 		d = strings.TrimSpace(d)
 		if r.Alias == d || r.Provider == d {
@@ -136,9 +126,9 @@ func dropRecipe(r MountRecipe, drop []string) bool {
 	return false
 }
 
-func tokenIndex(auth AuthContext) (byProvider, byAlias map[string]vfs.Credential) {
-	byProvider = make(map[string]vfs.Credential)
-	byAlias = make(map[string]vfs.Credential)
+func tokenIndex(auth session.AuthContext) (byProvider, byAlias map[string]mount.Credential) {
+	byProvider = make(map[string]mount.Credential)
+	byAlias = make(map[string]mount.Credential)
 	for _, b := range auth.Bindings {
 		if strings.TrimSpace(b.Auth.Token) == "" {
 			continue
@@ -146,7 +136,7 @@ func tokenIndex(auth AuthContext) (byProvider, byAlias map[string]vfs.Credential
 		if b.Provider != "" {
 			byProvider[b.Provider] = b.Auth
 		}
-		if alias := bindingAlias(b); alias != "" {
+		if alias := b.Alias(); alias != "" {
 			byAlias[alias] = b.Auth
 		}
 	}
@@ -161,11 +151,11 @@ func cloneParams(p map[string]string) map[string]string {
 	return out
 }
 
-func cloneRecipes(in []MountRecipe) []MountRecipe {
+func cloneRecipes(in []session.MountRecipe) []session.MountRecipe {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]MountRecipe, len(in))
+	out := make([]session.MountRecipe, len(in))
 	for i, r := range in {
 		out[i] = r
 		out[i].Params = maps.Clone(r.Params)

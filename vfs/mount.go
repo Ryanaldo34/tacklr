@@ -2,10 +2,6 @@ package vfs
 
 import "maps"
 
-// WorkspacePoint is the only top-level mount. Backends live at
-// /workspace/<name> via Tree(At(...)).
-const WorkspacePoint = "/workspace"
-
 // MountSpec is the durable, secret-free description of a mount.
 // Safe to JSON into session checkpoints. Never store credentials here.
 type MountSpec struct {

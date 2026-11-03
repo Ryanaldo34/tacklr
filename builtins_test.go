@@ -8,6 +8,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
 )
 
 // planToolsFixture holds the builtin plan tools and one session's plan.
@@ -31,14 +35,14 @@ func testPlanTools() planToolsFixture {
 
 // run runs tool as one call and commits what it wrote.
 func (pt planToolsFixture) run(tool *Tool, args string) (ToolOutcome, error) {
-	rt := callRuntime(pt.sm, "c1")
-	out, err := tool.invoke(context.Background(), args, rt)
-	rt.commit()
+	cc := callRuntime(pt.sm, "c1")
+	out, err := tool.invoke(context.Background(), args, cc)
+	cc.commit()
 	return out, err
 }
 
-func drainEventCh() chan StreamEvent {
-	c := make(chan StreamEvent, 8)
+func drainEventCh() chan session.Event {
+	c := make(chan session.Event, 8)
 	go func() {
 		for range c {
 		}
@@ -50,6 +54,9 @@ func drainEventCh() chan StreamEvent {
 func TestCreatePlanTool(t *testing.T) {
 	t.Run("installs the plan document", func(t *testing.T) {
 		pt := testPlanTools()
+		if _, err := pt.run(pt.list, `{}`); err == nil || !strings.Contains(err.Error(), "no plan exists") {
+			t.Fatalf("list before a plan = %v, want no plan", err)
+		}
 		res, err := pt.run(pt.create, `{"plan":"CoS: ship it","todos":[{"title":"a","status":"pending","description":"d"}]}`)
 		if err != nil {
 			t.Fatal(err)
@@ -142,7 +149,17 @@ func TestEditPlanTool(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
-	rt := callRuntime(newSessionManager(), "tc_ask")
+	cc := callRuntime(newSessionManager(), "tc_ask")
+	for args, want := range map[string]string{
+		`{"question":" ","choices":[{"title":"a"},{"title":"b"}]}`: "question is required",
+		`{"question":"q","choices":[{"title":"a"}]}`:               "at least 2 choices",
+		`{"question":"q","choices":[{"title":"a"},{"title":" "}]}`: "title is required",
+		`{"question":"q","choices":[{"title":"a"},{"title":"a"}]}`: "duplicate choice title",
+	} {
+		if _, err := askUserChoiceTool.invoke(context.Background(), args, cc); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("ask %s = %v, want %q", args, err, want)
+		}
+	}
 
 	args, _ := json.Marshal(map[string]any{
 		"question": "Which approach?",
@@ -152,7 +169,7 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 		},
 	})
 
-	_, err := askUserChoiceTool.invoke(context.Background(), string(args), rt)
+	_, err := askUserChoiceTool.invoke(context.Background(), string(args), cc)
 	if err == nil {
 		t.Fatal("first invoke should raise interrupt")
 	}
@@ -165,10 +182,10 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 		t.Errorf("interrupt question = %+v", usi)
 	}
 	// Answer and run again, as the harness does after resume.
-	if err := rt.resume([]byte(`{"selectionIdx":1}`)); err != nil {
+	if err := cc.resume([]byte(`{"selectionIdx":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	res, err := askUserChoiceTool.invoke(context.Background(), string(args), rt)
+	res, err := askUserChoiceTool.invoke(context.Background(), string(args), cc)
 	got := res.Output
 	if err != nil {
 		t.Fatal(err)
@@ -226,11 +243,11 @@ func TestCompleteTodoTool(t *testing.T) {
 // once do); the round's Commit replays each change in call order, so every
 // completion lands, and a change that no longer applies is skipped.
 func TestPlanTools_changesOfCallsThatRanAtOnceAllLand(t *testing.T) {
-	h := mustNewTurnManager(t, AgentOptions{sessionID: "plan-at-once", MaxWindowSize: 8192, Model: &scriptedModel{}})
+	h := mustNewHarness(t, AgentOptions{sessionID: "plan-at-once", MaxWindowSize: 8192, Model: &scriptedModel{}})
 	t.Cleanup(h.Close)
 	const n = 4
 	todos := make([]Todo, n)
-	calls := make([]ToolCall, n, n+1)
+	calls := make([]message.ToolCall, n, n+1)
 	for i := range n {
 		todos[i] = Todo{Title: fmt.Sprintf("t%d", i), Status: TodoStatusPending}
 		calls[i] = toolCall(fmt.Sprintf("c%d", i), "complete_todo", fmt.Sprintf(`{"title":"t%d"}`, i))
@@ -239,8 +256,8 @@ func TestPlanTools_changesOfCallsThatRanAtOnceAllLand(t *testing.T) {
 	// commit t0 is already completed, so that change is skipped.
 	calls = append(calls, toolCall("again", "complete_todo", `{"title":"t0"}`))
 	h.session.Plan.set(todos)
-	h.context.Restore([]*Message{userMsg("go")})
-	r := NewRound(Reply{Messages: []*Message{{Role: RoleAssistant, ToolCalls: calls}}, Calls: calls})
+	h.context.Restore([]*message.Message{userMsg("go")})
+	r := NewRound(Reply{Messages: []*message.Message{{Role: message.RoleAssistant, ToolCalls: calls}}, Calls: calls})
 	for i, call := range calls {
 		o, err := h.RunTool(t.Context(), ToolRun{Call: call}, drainEventCh())
 		if err != nil {

@@ -6,9 +6,9 @@ import (
 
 // ToolInvocation is one tool call in the interceptor chain.
 type ToolInvocation struct {
-	Tool     *Tool
-	ArgsJSON string
-	Runtime  *HarnessRuntime
+	Tool        *Tool
+	ArgsJSON    string
+	CallContext *CallContext
 }
 
 // ToolCallFunc is the next interceptor step or the final tool invoke. It
@@ -35,7 +35,7 @@ func newToolRunner(interceptors ...ToolInterceptor) *toolRunner {
 // Run runs the interceptor chain and the tool.
 func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (ToolOutcome, error) {
 	next := ToolCallFunc(func(ctx context.Context, inv ToolInvocation) (ToolOutcome, error) {
-		return inv.Tool.invoke(ctx, inv.ArgsJSON, inv.Runtime)
+		return inv.Tool.invoke(ctx, inv.ArgsJSON, inv.CallContext)
 	})
 	for i := len(r.interceptors) - 1; i >= 0; i-- {
 		interceptor, inner := r.interceptors[i], next
@@ -61,9 +61,6 @@ func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
 // onCallMiddleware runs Tool.OnCall constructors in order. A layer the call
 // completed before a park is not asked again.
 func onCallMiddleware(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (ToolOutcome, error) {
-	if len(inv.Tool.onCall) == 0 {
-		return next(ctx, inv)
-	}
 	for _, ctor := range inv.Tool.onCall {
 		if err := applyOnCallLayer(&inv, ctor); err != nil {
 			return ToolOutcome{}, err
@@ -73,33 +70,33 @@ func onCallMiddleware(ctx context.Context, inv ToolInvocation, next ToolCallFunc
 }
 
 func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc) error {
-	rt := inv.Runtime
+	cc := inv.CallContext
 	intr := ctor(*inv)
 	if intr == nil {
 		return nil
 	}
 	typeName := intr.TypeName()
-	if layer, ok := rt.layer(typeName); ok {
+	if layer, ok := cc.layer(typeName); ok {
 		inv.ArgsJSON = layer.Args
 		return nil
 	}
-	if answered, ok := rt.takeAnswer(typeName); ok {
+	if answered, ok := cc.takeAnswer(typeName); ok {
 		denied := false
 		if perm, ok := answered.(*ToolPermissionInterrupt); ok {
-			rt.rememberAnswer(perm)
+			cc.rememberAnswer(perm)
 			denied = !perm.Allowed
 		}
 		return finishOnCallLayer(inv, typeName, denied)
 	}
 	if perm, ok := intr.(*ToolPermissionInterrupt); ok {
-		switch rt.decision(perm.ToolName) {
+		switch cc.decision(perm.ToolName) {
 		case permDenyAlways:
 			return finishOnCallLayer(inv, typeName, true)
 		case permAllowAlways:
 			return finishOnCallLayer(inv, typeName, false)
 		}
 	}
-	return rt.park(intr)
+	return cc.park(intr)
 }
 
 // finishOnCallLayer ends a layer: a denied call fails for the model to
@@ -109,6 +106,6 @@ func finishOnCallLayer(inv *ToolInvocation, typeName string, denied bool) error 
 	if denied {
 		return Correctionf(ErrToolPermissionDenied, "%s was rejected by the user. Do not retry this tool unless the task can proceed another way", inv.Tool.QualifiedName())
 	}
-	inv.Runtime.recordLayer(onCallLayer{TypeName: typeName, Args: inv.ArgsJSON})
+	inv.CallContext.recordLayer(onCallLayer{TypeName: typeName, Args: inv.ArgsJSON})
 	return nil
 }

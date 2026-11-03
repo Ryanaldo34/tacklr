@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/ryanaldo34/tacklr"
@@ -40,9 +41,9 @@ func (c *Conn) EstablishSecurity(securityContext Context) {
 
 // ProtocolEnv is the domain + connection context passed into protocol handlers.
 type ProtocolEnv struct {
-	Runtime session.Runtime
-	Agent   tacklr.AgentOptions
-	Conn    *Conn
+	Client session.Client
+	Agent  tacklr.AgentOptions
+	Conn   *Conn
 	// Security is protocol-neutral. Implementations map wire credentials into
 	// this service and store the resulting Context on Conn.
 	Security *Service
@@ -67,20 +68,20 @@ type HTTPRoute struct {
 	Handler              func(env ProtocolEnv, w http.ResponseWriter, r *http.Request)
 }
 
-// Protocol is the host extension point for streaming and delivery over session.Runtime.
+// Protocol is the host extension point for streaming and delivery over session.Client.
 //
 // The ACP built-in is package server/acp. Hosts implement Protocol to
 // define their own wire: HTTP/WebSocket routes, frame encoding, and HITL resume.
 // The kernel does not import protocol types. Parse wire credentials into
 // vfs.Binding values and store them on a session.CredentialBag. Put bag.Take()
-// on Prompt or Resume. Call RunTurn to pump Runtime.Subscribe through OnStreamEvent.
+// on Prompt or Resume. Call RunTurn to pump Client.Subscribe through OnEvent.
 type Protocol interface {
 	// HandleInbound decodes one connection-oriented body (WebSocket).
 	// HTTP-route-only protocols may return nil.
 	HandleInbound(ctx context.Context, env ProtocolEnv, body []byte) error
 	HTTPRoutes() []HTTPRoute
 
-	OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev tacklr.StreamEvent, reqID json.RawMessage) StreamControl
+	OnEvent(ctx context.Context, env ProtocolEnv, threadID string, ev session.Event, reqID json.RawMessage) StreamControl
 	OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error
 }
 
@@ -93,9 +94,9 @@ func RunTurn(
 	reqID json.RawMessage,
 	prompt PromptOrResume,
 ) error {
-	id := session.SessionID(threadID)
+	id := session.ID(threadID)
 	after := prompt.After
-	if seq, err := env.Runtime.Head(ctx, id); err == nil {
+	if seq, err := env.Client.Head(ctx, id); err == nil {
 		after = seq
 	}
 
@@ -113,18 +114,18 @@ func RunTurn(
 
 	// Subscribe before Prompt/Resume so a fast-finishing turn cannot land in
 	// the log before the pump is attached.
-	sub, err := env.Runtime.Subscribe(ctx, id, after)
+	sub, err := env.Client.Subscribe(ctx, id, after)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = sub.Close() }()
 
 	if prompt.Resume != nil {
-		if err := env.Runtime.Resume(ctx, id, *prompt.Resume); err != nil {
+		if err := env.Client.Resume(ctx, id, *prompt.Resume); err != nil {
 			return err
 		}
 	} else {
-		if err := env.Runtime.Prompt(ctx, id, prompt.Prompt); err != nil {
+		if err := env.Client.Prompt(ctx, id, prompt.Prompt); err != nil {
 			return err
 		}
 	}
@@ -140,26 +141,29 @@ func RunTurn(
 	for {
 		select {
 		case <-ctx.Done():
-			_ = env.Runtime.Cancel(context.Background(), id)
+			_ = env.Client.Cancel(context.Background(), id)
 			return end(true)
 		case ev, ok := <-sub.Events():
 			if !ok {
 				if ctx.Err() != nil {
 					return end(true)
 				}
+				if err := sub.Err(); err != nil {
+					return fmt.Errorf("server: turn stream: %w", err)
+				}
 				return errors.New("server: turn stream ended without a result")
 			}
-			ctrl := proto.OnStreamEvent(ctx, env, threadID, ev, reqID)
+			ctrl := proto.OnEvent(ctx, env, threadID, ev, reqID)
 			if err := writeFrames(ctrl.Frames); err != nil {
-				_ = env.Runtime.Cancel(context.Background(), id)
+				_ = env.Client.Cancel(context.Background(), id)
 				return err
 			}
 			if ctrl.Err != nil {
-				_ = env.Runtime.Cancel(context.Background(), id)
+				_ = env.Client.Cancel(context.Background(), id)
 				return ctrl.Err
 			}
 			if len(ctrl.Resume) > 0 {
-				if err := env.Runtime.Resume(ctx, id, session.Resume{
+				if err := env.Client.Resume(ctx, id, session.Resume{
 					Responses: ctrl.Resume,
 					Auth:      prompt.Prompt.Auth,
 				}); err != nil {

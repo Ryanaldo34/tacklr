@@ -6,26 +6,28 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-var _ tacklr.InferenceStrategy = (*ScriptedModel)(nil)
+var _ tacklr.Model = (*ScriptedModel)(nil)
 
-// ScriptedModel is a cancel-aware InferenceStrategy for tests.
+// ScriptedModel is a cancel-aware Model for tests.
 // Default CountTokens is sum of message content lengths (not zero), so window-pressure
 // paths can fire when MaxWindowSize is small. Override CountTokensFn to customize.
 type ScriptedModel struct {
-	InvokeFn       func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)
+	InvokeFn       func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)
 	InvokeErr      error
-	InvokeErrFn    func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) error
-	CountTokensFn  func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error)
+	InvokeErrFn    func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool) error
+	CountTokensFn  func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool) (int, error)
 	SupportsMIMEFn func(string) bool
 
 	CallNum         atomic.Int64
 	mu              sync.Mutex
 	SystemPrompts   []string
-	LastInvokeMsgs  []*tacklr.Message
+	LastInvokeMsgs  []*message.Message
 	LastInvokeTools []*tacklr.Tool
 }
 
@@ -97,7 +99,7 @@ func (m *ScriptedModel) LastSystemPrompt() string {
 }
 
 // ContentTokenEstimate is a shared length-based token stand-in for pressure tests.
-func ContentTokenEstimate(msgs []*tacklr.Message) int {
+func ContentTokenEstimate(msgs []*message.Message) int {
 	n := 0
 	for _, m := range msgs {
 		if m != nil {

@@ -8,6 +8,11 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
+
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
 
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -18,7 +23,7 @@ import (
 // round's messages; then each user message as a round of its own). A call
 // of the round without its result is cancelled. The runtime saves the
 // session after it; it is the only step whose state is saved.
-func (a *TurnManager) Commit(ctx context.Context, in CommitIn, out chan StreamEvent) error {
+func (a *Harness) Commit(ctx context.Context, in CommitIn, out chan session.Event) error {
 	a.session.setState(in.State)
 	if in.Round != nil {
 		if err := a.commitReplyRound(ctx, in.Round, out); err != nil {
@@ -29,7 +34,7 @@ func (a *TurnManager) Commit(ctx context.Context, in CommitIn, out chan StreamEv
 		if bad := UnsupportedMIMEs(a.model, user.MIMETypes()); len(bad) > 0 {
 			return fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
 		}
-		if err := a.commitRound(ctx, []*Message{user}, EffectNone); err != nil {
+		if err := a.commitRound(ctx, []*message.Message{user}, EffectNone); err != nil {
 			return err
 		}
 	}
@@ -37,7 +42,7 @@ func (a *TurnManager) Commit(ctx context.Context, in CommitIn, out chan StreamEv
 }
 
 // commitReplyRound commits a reply and its calls' results.
-func (a *TurnManager) commitReplyRound(ctx context.Context, r *Round, out chan StreamEvent) error {
+func (a *Harness) commitReplyRound(ctx context.Context, r *Round, out chan session.Event) error {
 	msgs := slices.Clone(r.Reply.Messages)
 	effect := EffectNone
 	for i, call := range r.Reply.Calls {
@@ -61,7 +66,7 @@ func (a *TurnManager) commitReplyRound(ctx context.Context, r *Round, out chan S
 // Infer is the Infer step: one model request on the committed window. It
 // changes no session state: the reply commits as a round once its calls
 // have their results.
-func (a *TurnManager) Infer(ctx context.Context, out chan StreamEvent) (Reply, error) {
+func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, error) {
 	afterTools := a.afterTools()
 	turnCtx := ctx
 	if afterTools {
@@ -73,12 +78,12 @@ func (a *TurnManager) Infer(ctx context.Context, out chan StreamEvent) (Reply, e
 		if afterTools {
 			outErr = fmt.Errorf("%w: %w", ErrModelAfterTools, err)
 		}
-		out <- StreamEvent{Type: StreamEventError, Error: outErr}
+		out <- session.Event{Type: session.EventError, Error: outErr}
 		return Reply{}, outErr
 	}
 	asm := newStreamAssembler()
-	var reply []*Message
-	var toolCalls []ToolCall
+	var reply []*message.Message
+	var toolCalls []message.ToolCall
 	for {
 		var chunk LLMResponseChunk
 		var ok bool
@@ -90,43 +95,53 @@ func (a *TurnManager) Infer(ctx context.Context, out chan StreamEvent) (Reply, e
 		if !ok {
 			break
 		}
-		if afterTools && (chunk.Type == StreamEventError || chunk.Error != nil) {
+		if afterTools && chunk.Err() != nil {
 			chunk = tagModelAfterToolsError(chunk)
 		}
 		a.streamChunk(chunk, out)
-		if chunk.Type == StreamEventError || chunk.Error != nil {
-			if chunk.Error != nil {
-				return Reply{}, chunk.Error
-			}
-			return Reply{}, errors.New(chunk.Content)
+		if err := chunk.Err(); err != nil {
+			return Reply{}, err
+		}
+		if chunk.InputTokens > 0 {
+			// The provider counted this request: the window as it is now,
+			// the tools and the system prompt.
+			a.usage = requestUsage{tokens: chunk.InputTokens, messages: len(a.context.Messages())}
 		}
 		asm.AddDelta(chunk)
 		if chunk.IsComplete {
 			toolCalls = append(toolCalls, chunk.ToolCalls...)
-			if chunk.Type == StreamEventMessage || chunk.Type == StreamEventReasoning {
+			if chunk.Type == session.EventMessage || chunk.Type == session.EventReasoning {
 				msg := asm.MessageFromComplete(chunk)
 				reply = append(reply, msg)
 			}
 		}
 	}
 	r := Reply{Messages: reply, Calls: toolCalls}
+	for i, tc := range toolCalls {
+		if tool := a.findTool(tc.Name, tc.Namespace); tool != nil && tool.timeout > 0 {
+			if r.Timeouts == nil {
+				r.Timeouts = make([]time.Duration, len(toolCalls))
+			}
+			r.Timeouts[i] = tool.timeout
+		}
+	}
 	if len(toolCalls) == 0 {
 		for _, m := range reply {
-			if m.Role == RoleAssistant && m.Content != "" {
+			if m.Role == message.RoleAssistant && m.Content != "" {
 				r.Result = m.Content
 			}
 		}
 		return r, nil
 	}
-	r.Messages = append(r.Messages, &Message{Role: RoleAssistant, ToolCalls: slices.Clone(toolCalls)})
+	r.Messages = append(r.Messages, &message.Message{Role: message.RoleAssistant, ToolCalls: slices.Clone(toolCalls)})
 	return r, nil
 }
 
 // afterTools reports whether the model is answering tool results: the
 // window's last committed round is a tool round.
-func (a *TurnManager) afterTools() bool {
+func (a *Harness) afterTools() bool {
 	window := a.context.Messages()
-	return len(window) > 0 && window[len(window)-1].Role == RoleTool
+	return len(window) > 0 && window[len(window)-1].Role == message.RoleTool
 }
 
 // toolRun is one executed call. A call that neither parked nor awaits a
@@ -145,7 +160,7 @@ type toolRun struct {
 // prior outcome. A child's result becomes the call's result; an answer
 // resumes its park; otherwise the call runs. It changes no session state:
 // the outcome carries the call's writes for Commit.
-func (a *TurnManager) RunTool(ctx context.Context, run ToolRun, out chan StreamEvent) (CallOutcome, error) {
+func (a *Harness) RunTool(ctx context.Context, run ToolRun, out chan session.Event) (CallOutcome, error) {
 	o := CallOutcome{Call: run.Call}
 	prior, err := record(run.Prior)
 	if err != nil {
@@ -162,22 +177,22 @@ func (a *TurnManager) RunTool(ctx context.Context, run ToolRun, out chan StreamE
 		rec.Result = a.emitToolResult(out, run.Call, c.Output, status)
 		return o.with(rec, true), nil
 	}
-	rt := newHarnessRuntime(out, a, run.Children, roundCall{Call: run.Call, Park: prior.Park, Layers: prior.Layers}, prior.Writes)
+	cc := newCallContext(out, a, run, roundCall{Call: run.Call, Park: prior.Park, Layers: prior.Layers}, prior.Writes)
 	if run.Answer != nil {
-		if err := rt.resume(run.Answer); err != nil {
+		if err := cc.resume(run.Answer); err != nil {
 			return o, fmt.Errorf("return from interrupt %q: %w", run.Call.Key(), err)
 		}
 	}
-	r := a.executeToolCall(ctx, rt)
-	rec.Layers, rec.Writes = rt.call.Layers, rt.writes
-	o.Starts, o.Cancels = rt.starts, rt.cancels
+	r := a.executeToolCall(ctx, cc)
+	rec.Layers, rec.Writes = cc.call.Layers, cc.writes
+	o.Starts, o.Cancels = cc.starts, cc.cancels
 	switch {
 	case r.interrupted:
-		rec.Park = rt.call.Park
+		rec.Park = cc.call.Park
 		o.Park = &Park{InterruptID: run.Call.Key(), Data: r.interruptData}
 		return o.with(rec, false), nil
-	case rt.await != "":
-		o.AwaitID = rt.await
+	case cc.await != "":
+		o.AwaitID = cc.await
 		return o.with(rec, false), nil
 	}
 	if r.err != nil {
@@ -198,8 +213,8 @@ func (o CallOutcome) with(rec callRecord, done bool) CallOutcome {
 
 // executeToolCall runs rt's call through the interceptor chain. It may park
 // or wait on a child.
-func (a *TurnManager) executeToolCall(ctx context.Context, rt *HarnessRuntime) toolRun {
-	tc := rt.call.Call
+func (a *Harness) executeToolCall(ctx context.Context, cc *CallContext) toolRun {
+	tc := cc.call.Call
 	tcKey := tc.Key()
 	var run toolRun
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
@@ -211,13 +226,13 @@ func (a *TurnManager) executeToolCall(ctx context.Context, rt *HarnessRuntime) t
 		return run
 	}
 	outcome, err := a.toolRunner.Run(toolCtx, ToolInvocation{
-		Tool:     tool,
-		ArgsJSON: tc.Arguments,
-		Runtime:  rt,
+		Tool:        tool,
+		ArgsJSON:    tc.Arguments,
+		CallContext: cc,
 	})
 	var parked Interrupt
 	if err != nil && !errors.As(err, &parked) && (errors.Is(err, ErrAuthExpired) || errors.Is(err, vfs.ErrAuthExpired)) {
-		err = rt.park(&AuthExpired{Tool: tc.Name})
+		err = cc.park(&AuthExpired{Tool: tc.Name})
 	}
 	if errors.As(err, &parked) {
 		serialized, _ := parked.Serialize()
@@ -242,24 +257,20 @@ func (a *TurnManager) executeToolCall(ctx context.Context, rt *HarnessRuntime) t
 		return run
 	}
 	toolSpan.Finish("success", nil)
-	if rt.await != "" {
+	if cc.await != "" {
 		return run
 	}
 	run.content, run.status, run.effect = outcome.Output, "success", outcome.Effect
 	return run
 }
 
+// tagModelAfterToolsError marks an error chunk as a model failure after
+// the round's tools ran.
 func tagModelAfterToolsError(chunk LLMResponseChunk) LLMResponseChunk {
-	if chunk.Error != nil {
-		if !errors.Is(chunk.Error, ErrModelAfterTools) {
-			chunk.Error = fmt.Errorf("%w: %w", ErrModelAfterTools, chunk.Error)
-		}
-		chunk.Content = chunk.Error.Error()
-		return chunk
+	err := chunk.Err()
+	if !errors.Is(err, ErrModelAfterTools) {
+		err = fmt.Errorf("%w: %w", ErrModelAfterTools, err)
 	}
-	if chunk.Content != "" {
-		chunk.Error = fmt.Errorf("%w: %s", ErrModelAfterTools, chunk.Content)
-		chunk.Content = chunk.Error.Error()
-	}
+	chunk.Error, chunk.Content = err, err.Error()
 	return chunk
 }

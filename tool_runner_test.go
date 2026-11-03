@@ -23,13 +23,13 @@ func TestOnCallMiddleware_permissionThenInvoke(t *testing.T) {
 			return "ok", nil
 		},
 	})
-	rt, _ := onCallRuntime()
+	cc, _ := onCallRuntime()
 	runner := newToolRunner(onCallMiddleware)
-	inv := ToolInvocation{Tool: tool, ArgsJSON: `{"path":"/a"}`, Runtime: rt}
+	inv := ToolInvocation{Tool: tool, ArgsJSON: `{"path":"/a"}`, CallContext: cc}
 
 	_, err := runner.Run(t.Context(), inv)
 	requireParked(t, err, "tool_permission")
-	if err := rt.resume([]byte(`{"optionId":"allow-once"}`)); err != nil {
+	if err := cc.resume([]byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
 	out, err := runner.Run(t.Context(), inv)
@@ -55,14 +55,14 @@ func TestOnCallMiddleware_twoLayersParkOneAfterTheOther(t *testing.T) {
 		OnCall:  []OnCallFunc{ToolPermissionOnCall, choose},
 		Handler: func(context.Context) (string, error) { calls++; return "ok", nil },
 	})
-	rt, _ := onCallRuntime()
+	cc, _ := onCallRuntime()
 	runner := newToolRunner(onCallMiddleware)
-	inv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt}
+	inv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, CallContext: cc}
 
 	_, first := runner.Run(t.Context(), inv)
-	firstAnswer := rt.resume([]byte(`{"optionId":"allow-once"}`))
+	firstAnswer := cc.resume([]byte(`{"optionId":"allow-once"}`))
 	_, second := runner.Run(t.Context(), inv)
-	secondAnswer := rt.resume([]byte(`{"selectionIdx":1}`))
+	secondAnswer := cc.resume([]byte(`{"selectionIdx":1}`))
 	out, err := runner.Run(t.Context(), inv)
 
 	requireParked(t, first, "tool_permission")
@@ -83,14 +83,14 @@ func TestOnCallMiddleware_permissionAnswersWithoutAPark(t *testing.T) {
 		Handler: func(ctx context.Context) (string, error) { calls++; return "secret", nil },
 	})
 	run := func(decision permissionDecision, granted bool) (ToolOutcome, error) {
-		rt, sm := onCallRuntime()
+		cc, sm := onCallRuntime()
 		if granted {
 			sm.Permissions.granted = map[string]bool{"sensitive": true}
 		}
 		if decision != permNone {
 			sm.Permissions.set("sensitive", decision)
 		}
-		return newToolRunner(onCallMiddleware).Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt})
+		return newToolRunner(onCallMiddleware).Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`, CallContext: cc})
 	}
 
 	allowed, allowErr := run(permAllowAlways, false)
@@ -127,7 +127,7 @@ func TestToolInterceptor_changesTheOutcome(t *testing.T) {
 	}
 }
 
-func onCallRuntime() (*HarnessRuntime, *sessionManager) {
+func onCallRuntime() (*CallContext, *sessionManager) {
 	sm := newSessionManager()
 	return callRuntime(sm, "c1"), sm
 }

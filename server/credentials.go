@@ -1,9 +1,11 @@
-package session
+package server
 
 import (
 	"sync"
 
+	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // CredentialBag is the VFS credential state for one wire session.
@@ -12,21 +14,21 @@ import (
 // the next Prompt or Resume and clears the drop list.
 type CredentialBag struct {
 	mu       sync.Mutex
-	bindings []vfs.Binding
+	bindings []mount.Binding
 	drop     []string
 }
 
 // Bind validates b and stores it. A later bind with the same provider and
 // alias replaces the previous one.
-func (b *CredentialBag) Bind(binding vfs.Binding) error {
+func (b *CredentialBag) Bind(binding mount.Binding) error {
 	if err := vfs.ValidateBinding(binding); err != nil {
 		return err
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	alias := bindingAlias(binding)
+	alias := binding.Alias()
 	for i, existing := range b.bindings {
-		if bindingAlias(existing) == alias && existing.Provider == binding.Provider {
+		if existing.Alias() == alias && existing.Provider == binding.Provider {
 			b.bindings[i] = binding
 			return nil
 		}
@@ -37,7 +39,7 @@ func (b *CredentialBag) Bind(binding vfs.Binding) error {
 
 // Refresh replaces the token on every binding for provider.
 // It reports whether any binding matched.
-func (b *CredentialBag) Refresh(provider string, cred vfs.Credential) bool {
+func (b *CredentialBag) Refresh(provider string, cred mount.Credential) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	found := false
@@ -58,7 +60,7 @@ func (b *CredentialBag) Unbind(point, provider string) {
 	defer b.mu.Unlock()
 	kept := b.bindings[:0]
 	for _, existing := range b.bindings {
-		alias := bindingAlias(existing)
+		alias := existing.Alias()
 		drop := false
 		if point != "" && (alias == point || existing.Point == point) {
 			drop = true
@@ -76,11 +78,11 @@ func (b *CredentialBag) Unbind(point, provider string) {
 }
 
 // Take returns the bindings for the next work item and clears drops.
-func (b *CredentialBag) Take() AuthContext {
+func (b *CredentialBag) Take() session.AuthContext {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := AuthContext{
-		Bindings: append([]vfs.Binding(nil), b.bindings...),
+	out := session.AuthContext{
+		Bindings: append([]mount.Binding(nil), b.bindings...),
 		Drop:     append([]string(nil), b.drop...),
 	}
 	b.drop = nil

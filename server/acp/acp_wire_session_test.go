@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/ryanaldo34/tacklr"
@@ -59,10 +61,10 @@ func (tr *toolRecorder) call(i int) []string {
 	return tr.seen[i]
 }
 
-func recordingStrategy(t *testing.T, tr *toolRecorder) tacklr.InferenceStrategy {
-	return testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+func recordingStrategy(t *testing.T, tr *toolRecorder) tacklr.Model {
+	return testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		tr.record(tools)
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
 	})
 }
 
@@ -87,22 +89,22 @@ func acpSessionID(t *testing.T, rec *httptest.ResponseRecorder) string {
 func TestHandleRPC_sessionMCPServers_toolCallReturnsResult(t *testing.T) {
 	mcpHTTP := newTestMCPServer(t, "greet")
 	var invokeCount int
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		invokeCount++
 		if invokeCount == 1 {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
 				{ID: "call_mcp", CallID: "call_mcp", Name: "greet", Namespace: "testmcp", Arguments: `{}`},
 			}, IsComplete: true}
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			return
 		}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "mcp done", IsComplete: true}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "mcp done", IsComplete: true}
 	})
 	r := newTestRuntime(t, strategy, tacklr.AgentOptions{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"testmcp","url":"`+mcpHTTP.URL+`","headers":[]}]}}`)
 	sessionID := acpSessionID(t, rec1)
-	t.Cleanup(func() { _ = r.Runtime.Close(context.Background(), session.SessionID(sessionID)) })
+	t.Cleanup(func() { _ = r.Client.Close(context.Background(), session.ID(sessionID)) })
 
 	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"call greet"}]}}`)
 	frames := parseACPFrames(t, rec2.Body)
@@ -170,7 +172,7 @@ func TestHandleRPC_sessionResume_overridesMCPServers(t *testing.T) {
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"a","url":"`+serverA.URL+`","headers":[]}]}}`)
 	sessionID := acpSessionID(t, rec1)
-	t.Cleanup(func() { _ = r.Runtime.Close(context.Background(), session.SessionID(sessionID)) })
+	t.Cleanup(func() { _ = r.Client.Close(context.Background(), session.ID(sessionID)) })
 
 	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"hi"}]}}`)
 	for _, f := range parseACPFrames(t, rec2.Body) {

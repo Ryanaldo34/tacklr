@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
@@ -27,7 +29,7 @@ func TestS3_anObjectLargerThanTheReadCapStreamsAndReadsAtOffsets(t *testing.T) {
 	ctx := t.Context()
 	client, bucket := startS3(ctx, t)
 	ms, err := vfs.Tree(vfs.At("data", vfs.S3(vfs.AWSS3{Client: client}, bucket)))(ctx, "sess-s3-read", vfs.Request{
-		Bindings: []vfs.Binding{{Params: map[string]string{vfs.ParamName: "data", "prefix": "reads"}}},
+		Bindings: []mount.Binding{{Params: map[string]string{mount.ParamName: "data", "prefix": "reads"}}},
 	})
 	if err != nil {
 		t.Fatal(err)

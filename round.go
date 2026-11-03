@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
@@ -12,7 +14,7 @@ import (
 // completed, from its prior outcome. It lives for the step only; the
 // runtime keeps the outcome.
 type roundCall struct {
-	Call ToolCall
+	Call message.ToolCall
 	// Park is the interrupt the call waits on.
 	Park *callPark
 	// Layers are the OnCall layers the call completed; a run skips them.
@@ -74,11 +76,24 @@ type onCallLayer struct {
 // message and window effect once it has one, its park, the OnCall layers it
 // completed, and every shared-state write its runs made, in order.
 type callRecord struct {
-	Result *Message         `json:"result,omitempty"`
+	Result *message.Message `json:"result,omitempty"`
 	Effect ToolResultEffect `json:"effect,omitempty"`
 	Park   *callPark        `json:"park,omitempty"`
 	Layers []onCallLayer    `json:"layers,omitempty"`
 	Writes callWrites       `json:"writes,omitzero"`
+}
+
+// RecordResult is the result text in an outcome record (CallOutcome.Record):
+// what the call's tool-result event carried. A record without a result,
+// a park or a wait, has none.
+func RecordResult(record []byte) (string, error) {
+	var rec struct {
+		Result struct {
+			Content string `json:"content"`
+		} `json:"result"`
+	}
+	err := json.Unmarshal(record, &rec)
+	return rec.Result.Content, err
 }
 
 // record decodes o's harness part; an outcome without one has none. A

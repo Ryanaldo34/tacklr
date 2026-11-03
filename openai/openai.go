@@ -12,6 +12,10 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/pkoukk/tiktoken-go"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
@@ -20,9 +24,9 @@ import (
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-// OpenAIInferenceStrategy holds only model and endpoint settings; each
+// Model holds only model and endpoint settings; each
 // request carries its own prompt and cache key, so one is safe to share.
-type OpenAIInferenceStrategy struct {
+type Model struct {
 	apiKey string
 	model  string
 	// reasoning effort: "low" | "medium" | "high" (provider-specific).
@@ -35,7 +39,7 @@ type OpenAIInferenceStrategy struct {
 	// localTokenFallback uses tiktoken when the provider has no input_tokens endpoint.
 	localTokenFallback bool
 	// promptCacheFor overrides cache-profile resolution when non-nil.
-	// NewOpenRouterInferenceStrategy pins OpenRouter's key-only profile here.
+	// NewOpenRouter pins OpenRouter's key-only profile here.
 	promptCacheFor func(model, baseURL, key string) promptCache
 }
 
@@ -45,13 +49,13 @@ var (
 	// ErrMalformedStream means a provider emitted invalid SSE event JSON.
 	ErrMalformedStream = errors.New("malformed provider stream")
 
-	_ tacklr.InferenceStrategy = (*OpenAIInferenceStrategy)(nil)
+	_ tacklr.Model = (*Model)(nil)
 )
 
 // promptCache resolves the cache profile for this strategy's model and
 // endpoint and the request's cache key (prompt_cache_key, and
 // x-grok-conv-id on xAI). A strategy may pin its own profile.
-func (s *OpenAIInferenceStrategy) promptCache(key string) promptCache {
+func (s *Model) promptCache(key string) promptCache {
 	key = strings.TrimSpace(key)
 	if s.promptCacheFor != nil {
 		return s.promptCacheFor(s.model, s.baseURL, key)
@@ -59,47 +63,47 @@ func (s *OpenAIInferenceStrategy) promptCache(key string) promptCache {
 	return newPromptCache(s.model, s.baseURL, key)
 }
 
-func NewOpenAIInferenceStrategy(client *http.Client) *OpenAIInferenceStrategy {
+func New(client *http.Client) *Model {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &OpenAIInferenceStrategy{
+	return &Model{
 		httpClient: client,
 		baseURL:    "https://api.openai.com/v1",
 	}
 }
 
-func (s *OpenAIInferenceStrategy) WithApiKey(key string) *OpenAIInferenceStrategy {
+func (s *Model) WithApiKey(key string) *Model {
 	s.apiKey = key
 	return s
 }
 
-func (s *OpenAIInferenceStrategy) WithModel(model string) *OpenAIInferenceStrategy {
+func (s *Model) WithModel(model string) *Model {
 	s.model = model
 	return s
 }
 
 // ModelTelemetryIdentity names the provider and model for model spans.
-func (s *OpenAIInferenceStrategy) ModelTelemetryIdentity() telemetry.ModelIdentity {
+func (s *Model) ModelTelemetryIdentity() telemetry.ModelIdentity {
 	return telemetry.NewModelIdentity(s.model, s.baseURL)
 }
 
-func (s *OpenAIInferenceStrategy) WithURL(url string) *OpenAIInferenceStrategy {
+func (s *Model) WithURL(url string) *Model {
 	s.baseURL = url
 	return s
 }
 
 // WithLocalTokenFallback counts tokens with tiktoken when the provider returns
 // 404/400/422 for /responses/input_tokens. Off by default.
-func (s *OpenAIInferenceStrategy) WithLocalTokenFallback() *OpenAIInferenceStrategy {
+func (s *Model) WithLocalTokenFallback() *Model {
 	s.localTokenFallback = true
 	return s
 }
 
-func (s *OpenAIInferenceStrategy) WithReasoningLevel(level string) *OpenAIInferenceStrategy {
+func (s *Model) WithReasoningLevel(level string) *Model {
 	s.reasoning = level
 	// Default summary so Azure OpenAI / OpenAI stream thought deltas as
-	// response.reasoning_summary_text.delta (mapped to StreamEventReasoning).
+	// response.reasoning_summary_text.delta (mapped to session.EventReasoning).
 	if level != "" && s.reasoningSummary == "" {
 		s.reasoningSummary = "auto"
 	}
@@ -108,17 +112,17 @@ func (s *OpenAIInferenceStrategy) WithReasoningLevel(level string) *OpenAIInfere
 
 // WithReasoningSummary sets reasoning.summary on Responses API requests
 // ("auto", "concise", "detailed"). Empty clears it.
-func (s *OpenAIInferenceStrategy) WithReasoningSummary(summary string) *OpenAIInferenceStrategy {
+func (s *Model) WithReasoningSummary(summary string) *Model {
 	s.reasoningSummary = summary
 	return s
 }
 
-// SupportsMIME implements tacklr.InferenceStrategy for the selected model id.
-func (s *OpenAIInferenceStrategy) SupportsMIME(mimeType string) bool {
+// SupportsMIME implements tacklr.Model for the selected model id.
+func (s *Model) SupportsMIME(mimeType string) bool {
 	return modelSupportsMIME(s.model, mimeType)
 }
 
-func (s *OpenAIInferenceStrategy) MaxContextWindow() (int, error) {
+func (s *Model) MaxContextWindow() (int, error) {
 	if limit, ok := modelContextLimits[s.model]; ok {
 		return limit, nil
 	}
@@ -141,7 +145,7 @@ func (s *OpenAIInferenceStrategy) MaxContextWindow() (int, error) {
 	return 0, fmt.Errorf("max context window: unknown model %q: %w", s.model, tacklr.ErrUnknownModel)
 }
 
-func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, req tacklr.ModelRequest) (int, error) {
+func (s *Model) CountTokens(ctx context.Context, req tacklr.ModelRequest) (int, error) {
 	if s.apiKey == "" {
 		return 0, tacklr.ErrApiKeyNotSet
 	}
@@ -217,7 +221,7 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, req tacklr.Mo
 	return countResp.InputTokens, nil
 }
 
-func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tacklr.LLMResponseChunk, error) {
+func (s *Model) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tacklr.LLMResponseChunk, error) {
 	if s.apiKey == "" {
 		return nil, tacklr.ErrApiKeyNotSet
 	}
@@ -281,7 +285,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, req tacklr.ModelRe
 			return
 		}
 		sendChunk(tacklr.LLMResponseChunk{
-			Type:       tacklr.StreamEventError,
+			Type:       session.EventError,
 			Content:    err.Error(),
 			Error:      err,
 			IsComplete: true,
@@ -329,10 +333,10 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, req tacklr.ModelRe
 	return events, nil
 }
 
-func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.Reader, events chan<- tacklr.LLMResponseChunk, inputSummary string) {
+func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, events chan<- tacklr.LLMResponseChunk, inputSummary string) {
 	// Match main-branch classification: output_text is always a message chunk.
 	// DeepSeek on Foundry streams thinking inside output_text (e.g. <think> tags);
-	// reclassifying those deltas as StreamEventReasoning broke ACP clients that
+	// reclassifying those deltas as session.EventReasoning broke ACP clients that
 	// already handled thinking correctly from agent_message_chunk on main.
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
@@ -341,7 +345,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 	emitFailure := func(err error, detail string) {
 		emitProviderFailed(ctx, err, http.StatusOK, inputSummary, detail)
 		events <- tacklr.LLMResponseChunk{
-			Type:       tacklr.StreamEventError,
+			Type:       session.EventError,
 			Content:    err.Error(),
 			Error:      err,
 			IsComplete: true,
@@ -396,7 +400,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 		case "response.output_text.delta":
 			if evt.Delta != "" {
 				events <- tacklr.LLMResponseChunk{
-					Type:       tacklr.StreamEventMessage,
+					Type:       session.EventMessage,
 					MessageId:  msgID,
 					Content:    evt.Delta,
 					IsComplete: false,
@@ -410,7 +414,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 					reasoningStreamed[msgID] = struct{}{}
 				}
 				events <- tacklr.LLMResponseChunk{
-					Type:       tacklr.StreamEventReasoning,
+					Type:       session.EventReasoning,
 					MessageId:  msgID,
 					Content:    evt.Delta,
 					IsComplete: false,
@@ -428,7 +432,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			}
 			emitProviderFailed(ctx, classified, 200, inputSummary, data)
 			events <- tacklr.LLMResponseChunk{
-				Type:       tacklr.StreamEventError,
+				Type:       session.EventError,
 				Content:    classified.Error(),
 				Error:      classified,
 				IsComplete: true,
@@ -439,7 +443,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			if terminal, classified := classifyTerminalSSE(evt.Type, data); terminal {
 				emitProviderFailed(ctx, classified, 200, inputSummary, data)
 				events <- tacklr.LLMResponseChunk{
-					Type:       tacklr.StreamEventError,
+					Type:       session.EventError,
 					Content:    classified.Error(),
 					Error:      classified,
 					IsComplete: true,
@@ -451,7 +455,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 				terminal = true
 				if u, ok := parseResponseUsage(data); ok {
 					events <- tacklr.LLMResponseChunk{
-						Type:             tacklr.StreamEventComplete,
+						Type:             session.EventComplete,
 						IsComplete:       true,
 						InputTokens:      u.Input,
 						OutputTokens:     u.Output,
@@ -603,7 +607,7 @@ func classifyTerminalSSE(evtType, data string) (terminal bool, err error) {
 	}
 	classified := classifyAPIStatus(apiErr, "")
 	// Known stop-reason sentinels are already actionable; skip noisy raw dumps.
-	if errors.Is(classified, tacklr.ErrModelRefused) || errors.Is(classified, tacklr.ErrMaxTokens) {
+	if errors.Is(classified, session.ErrModelRefused) || errors.Is(classified, session.ErrMaxTokens) {
 		return true, classified
 	}
 	slog.Error("model stream ended with a provider error",
@@ -649,7 +653,7 @@ func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputIte
 	telemetry.EmitEventSeverity(ctx, telemetry.EventProviderFailed, log.SeverityError, attrs...)
 }
 
-func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk, reasoningStreamed map[string]struct{}) {
+func (s *Model) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk, reasoningStreamed map[string]struct{}) {
 	var typeHolder struct {
 		Type string `json:"type"`
 	}
@@ -672,9 +676,9 @@ func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, ev
 		// Refusal-only completed message → terminal stop reason, not end_turn.
 		if isRefusalMessage(msg.Content) {
 			text := refusalText(msg.Content)
-			err := fmt.Errorf("%w: %s", tacklr.ErrModelRefused, text)
+			err := fmt.Errorf("%w: %s", session.ErrModelRefused, text)
 			events <- tacklr.LLMResponseChunk{
-				Type:       tacklr.StreamEventError,
+				Type:       session.EventError,
 				MessageId:  msg.ID,
 				Content:    err.Error(),
 				Error:      err,
@@ -683,7 +687,7 @@ func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, ev
 			return
 		}
 		events <- tacklr.LLMResponseChunk{
-			Type:       tacklr.StreamEventMessage,
+			Type:       session.EventMessage,
 			MessageId:  msg.ID,
 			IsComplete: true,
 		}
@@ -729,7 +733,7 @@ func refusalText(parts []struct {
 	return "model refused"
 }
 
-func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
+func (s *Model) emitFunctionCallChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
 	var fc struct {
 		ID        string `json:"id"`
 		CallID    string `json:"call_id"`
@@ -756,8 +760,8 @@ func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, eve
 		callID = id
 	}
 	events <- tacklr.LLMResponseChunk{
-		Type: tacklr.StreamEventFunctionCall,
-		ToolCalls: []tacklr.ToolCall{{
+		Type: session.EventFunctionCall,
+		ToolCalls: []message.ToolCall{{
 			ID:        id,
 			Type:      "function_call",
 			CallID:    callID,
@@ -770,7 +774,7 @@ func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, eve
 	}
 }
 
-func (s *OpenAIInferenceStrategy) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk, reasoningStreamed map[string]struct{}) {
+func (s *Model) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk, reasoningStreamed map[string]struct{}) {
 	var reasoning struct {
 		ID               string `json:"id"`
 		EncryptedContent string `json:"encrypted_content"`
@@ -815,7 +819,7 @@ func (s *OpenAIInferenceStrategy) emitReasoningChunk(raw json.RawMessage, events
 		}
 	}
 	events <- tacklr.LLMResponseChunk{
-		Type:             tacklr.StreamEventReasoning,
+		Type:             session.EventReasoning,
 		MessageId:        reasoning.ID,
 		Content:          content,
 		EncryptedContent: reasoning.EncryptedContent,
@@ -823,11 +827,11 @@ func (s *OpenAIInferenceStrategy) emitReasoningChunk(raw json.RawMessage, events
 	}
 }
 
-func marshalMessagesToInput(messages []*tacklr.Message, systemPrompt string, stampBreakpoints bool) []json.RawMessage {
+func marshalMessagesToInput(messages []*message.Message, systemPrompt string, stampBreakpoints bool) []json.RawMessage {
 	// Responses API requires each function_call to be immediately followed by its
 	// function_call_output (same call_id). Parallel tool batches must interleave
 	// call→output, not emit all calls then all outputs.
-	paired := make(map[*tacklr.Message]bool)
+	paired := make(map[*message.Message]bool)
 	var items []json.RawMessage
 	lastToolOut := -1
 
@@ -842,25 +846,25 @@ func marshalMessagesToInput(messages []*tacklr.Message, systemPrompt string, sta
 	if text := strings.TrimSpace(systemPrompt); text != "" {
 		if stampBreakpoints {
 			appendJSON(multiInputRequest{
-				Role: string(tacklr.RoleDeveloper),
+				Role: string(message.RoleDeveloper),
 				Content: []any{inputTextPart{
 					Type: "input_text", Text: text,
 					PromptCacheBreakpoint: &promptCacheBreakpoint{Mode: "explicit"},
 				}},
 			})
 		} else {
-			appendJSON(easyInputRequest{Role: string(tacklr.RoleDeveloper), Content: text})
+			appendJSON(easyInputRequest{Role: string(message.RoleDeveloper), Content: text})
 		}
 	}
 
-	takeToolOutput := func(tc tacklr.ToolCall) *tacklr.Message {
+	takeToolOutput := func(tc message.ToolCall) *message.Message {
 		wire, key := tc.WireID(), tc.Key()
 		if wire == "" && key == "" {
 			return nil
 		}
-		var byKey *tacklr.Message
+		var byKey *message.Message
 		for _, m := range messages {
-			if m == nil || m.Role != tacklr.RoleTool || paired[m] {
+			if m == nil || m.Role != message.RoleTool || paired[m] {
 				continue
 			}
 			// Prefer the Responses call_id. A leftover result keyed by the
@@ -880,7 +884,7 @@ func marshalMessagesToInput(messages []*tacklr.Message, systemPrompt string, sta
 		return nil
 	}
 
-	appendFunctionCall := func(tc tacklr.ToolCall) {
+	appendFunctionCall := func(tc message.ToolCall) {
 		callID := tc.WireID()
 		name := tc.Name
 		if tc.Namespace != "" {
@@ -890,8 +894,8 @@ func marshalMessagesToInput(messages []*tacklr.Message, systemPrompt string, sta
 		if args == "" {
 			args = "{}"
 		}
-		status := string(tacklr.StatusCompleted)
-		if tc.Status == string(tacklr.StatusInProgress) || tc.Status == string(tacklr.StatusIncomplete) {
+		status := string(message.StatusCompleted)
+		if tc.Status == string(message.StatusInProgress) || tc.Status == string(message.StatusIncomplete) {
 			status = tc.Status
 		}
 		appendJSON(functionCallInputRequest{
@@ -906,7 +910,7 @@ func marshalMessagesToInput(messages []*tacklr.Message, systemPrompt string, sta
 				Type:   "function_call_output",
 				CallID: callID,
 				Output: out.Content,
-				Status: string(tacklr.StatusCompleted),
+				Status: string(message.StatusCompleted),
 			})
 			lastToolOut = len(items) - 1
 		}
@@ -917,30 +921,30 @@ func marshalMessagesToInput(messages []*tacklr.Message, systemPrompt string, sta
 			continue
 		}
 		switch msg.Role {
-		case tacklr.RoleTool:
+		case message.RoleTool:
 			if paired[msg] {
 				continue
 			}
 			// Unmatched function_call_output is an invalid_request_error
 			// ("No tool call found for function call output"). Drop it.
 
-		case tacklr.RoleUser, tacklr.RoleSystem:
+		case message.RoleUser, message.RoleSystem:
 			appendJSON(marshalRoleContent(string(msg.Role), msg))
 
-		case tacklr.RoleDeveloper:
+		case message.RoleDeveloper:
 			if stampBreakpoints && tacklr.IsPlanDocument(msg) {
 				appendJSON(multiInputRequest{
-					Role: string(tacklr.RoleDeveloper),
+					Role: string(message.RoleDeveloper),
 					Content: []any{inputTextPart{
 						Type: "input_text", Text: msg.Content,
 						PromptCacheBreakpoint: &promptCacheBreakpoint{Mode: "explicit"},
 					}},
 				})
 			} else {
-				appendJSON(marshalRoleContent(string(tacklr.RoleDeveloper), msg))
+				appendJSON(marshalRoleContent(string(message.RoleDeveloper), msg))
 			}
 
-		case tacklr.RoleReasoning:
+		case message.RoleReasoning:
 			// Responses multi-turn: pass prior reasoning items back with the tool
 			// turn. `summary` is required (empty array when none). Do not send
 			// status — that is an output field and Azure rejects it on input.
@@ -965,7 +969,7 @@ func marshalMessagesToInput(messages []*tacklr.Message, systemPrompt string, sta
 			}
 			appendJSON(item)
 
-		case tacklr.RoleAssistant:
+		case message.RoleAssistant:
 			if msg.Content != "" || len(msg.ContentParts) > 0 {
 				appendJSON(marshalRoleContent(string(msg.Role), msg))
 			}
@@ -995,7 +999,7 @@ func marshalMessagesToInput(messages []*tacklr.Message, systemPrompt string, sta
 
 // marshalRoleContent uses string content when there are no multimodal parts;
 // otherwise Responses array content (input_text / input_image / input_file).
-func marshalRoleContent(role string, msg *tacklr.Message) any {
+func marshalRoleContent(role string, msg *message.Message) any {
 	if msg == nil {
 		return easyInputRequest{Role: role, Content: ""}
 	}
@@ -1008,7 +1012,7 @@ func marshalRoleContent(role string, msg *tacklr.Message) any {
 	}
 	for _, p := range msg.ContentParts {
 		switch p.Type {
-		case tacklr.ContentTypeInputImage:
+		case message.ContentTypeInputImage:
 			if p.ImageURL == nil || p.ImageURL.URL == "" {
 				continue
 			}
@@ -1017,7 +1021,7 @@ func marshalRoleContent(role string, msg *tacklr.Message) any {
 				ImageURL: p.ImageURL.URL,
 				Detail:   p.ImageURL.Detail,
 			})
-		case tacklr.ContentTypeInputFile:
+		case message.ContentTypeInputFile:
 			if p.FileData == nil || p.FileData.Data == "" {
 				continue
 			}
@@ -1028,7 +1032,7 @@ func marshalRoleContent(role string, msg *tacklr.Message) any {
 			}
 			fileData := fd.Data
 			if !strings.HasPrefix(fileData, "data:") {
-				fileData = tacklr.DataURL(fd.MIMEType, fileData)
+				fileData = message.DataURL(fd.MIMEType, fileData)
 			}
 			parts = append(parts, inputFilePart{
 				Type:     "input_file",
@@ -1091,14 +1095,14 @@ func summarizeInputItems(items []json.RawMessage) string {
 // appends the Responses API paths (/responses, /responses/input_tokens) to it.
 const openRouterBaseURL = "https://openrouter.ai/api/v1"
 
-// NewOpenRouterInferenceStrategy returns an OpenAI Responses strategy
+// NewOpenRouter returns an OpenAI Responses strategy
 // preconfigured for OpenRouter.
 //
 // OpenRouter validates prompt_cache_options.mode and rejects "implicit", so the
 // strategy pins a key-only cache profile: prompt_cache_key is sent, while the
 // GPT-5.6 cache options and content-block breakpoints stay off the wire.
-func NewOpenRouterInferenceStrategy(client *http.Client) *OpenAIInferenceStrategy {
-	s := NewOpenAIInferenceStrategy(client).WithURL(openRouterBaseURL)
+func NewOpenRouter(client *http.Client) *Model {
+	s := New(client).WithURL(openRouterBaseURL)
 	s.promptCacheFor = func(_, _, key string) promptCache {
 		return openRouterCache{key: key}
 	}
@@ -1154,8 +1158,8 @@ func modelHasPrefix(model string, prefixes []string) bool {
 
 // modelSupportsMIME is the OpenAI-strategy capability matrix for a model id.
 func modelSupportsMIME(model, mimeType string) bool {
-	mime := tacklr.NormalizeMIME(mimeType)
-	if tacklr.IsTextMIME(mime) {
+	mime := message.NormalizeMIME(mimeType)
+	if message.IsTextMIME(mime) {
 		return true
 	}
 	if strings.HasPrefix(mime, "image/") {

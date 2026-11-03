@@ -26,7 +26,7 @@ Work spans many model calls, tools hit real systems, and the window fills with t
 
 **The agent's world is bounded.** A virtual filesystem gives one path API over the mounts you attach: local disk, S3, Azure Blob, Google Drive and Docs, Microsoft Graph, and git. The agent sees `/workspace/work/notes.md`, not a host path or a bucket key. Credentials travel on the prompt (`Prompt.Auth`, `Resume.Auth`), never in checkpoints or workflow history.
 
-**Sessions live in the cloud.** Hosts call `session.Runtime`. A durable runtime (Temporal today, others later) runs the session, so it outlives any one process. A human-in-the-loop question parks the session until `Resume`.
+**Sessions live in the cloud.** Hosts call a `session.Client`. A durable runtime (Temporal today, others later) runs the session, so it outlives any one process. A human-in-the-loop question parks the session until `Resume`.
 
 **Knowledge is queried, not stuffed into the window.** The optional brain is a host-owned store with hybrid search, an optional graph, and namespaces. The agent asks when it needs a fact.
 
@@ -42,6 +42,7 @@ One `Prompt` or `Resume` is a turn.
 - **`Commit` is the only step that writes the snapshot.** It is idempotent: it applies its input once, even when the runtime runs it again.
 - **Park and resume.** A tool can ask the user a question. The turn parks on the first interrupt in call order. `Resume` runs the parked call again with the answer; the calls that already finished do not run again.
 - **Children.** The model starts specialists with the built-in `spawn_specialist`. Tools start Runtime job workers with `Schedule`. A blocking child's output is its call's result.
+- **One harness per session per worker.** A step needs the session's harness: its tools, MCP connections and their tools, skills, system prompt and VFS. A worker builds it once and every step of the session it runs shares it; committed state in it reloads only when the snapshot's revision moved. The tool list and system prompt are built in a fixed order, so every request has the same prefix and the provider's prompt cache holds. Temporal sends a session's steps to the worker that holds its harness (a task queue per worker), and to another worker if that one is gone.
 - **Collapse.** When a commit puts the window over 85% of its size, everything after the first message and the plan collapses into one summary. The collapsed messages are saved, and `search` finds them. A round still too large has its biggest results trimmed; with `AgentOptions.OverflowPath` each full result is written to the workspace first.
 
 ```text
@@ -55,7 +56,7 @@ The planning built-ins (`create_plan`, `list_plan`, `edit_plan`, `complete_todo`
 
 ## Get started
 
-A host builds an `AgentOptions`, opens a durable runtime, and talks to sessions through `session.Runtime`.
+A host builds an `AgentOptions`, starts a worker that runs sessions, and talks to sessions through a `session.Client`. A host that only talks to sessions imports `session` and `session/temporal`, not the harness.
 
 ```go
 package main
@@ -78,6 +79,7 @@ import (
 	"github.com/ryanaldo34/tacklr/openai"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/temporal"
+	"github.com/ryanaldo34/tacklr/session/temporal/worker"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/web"
 )
@@ -86,8 +88,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// The model: any tacklr.InferenceStrategy. This one speaks the OpenAI Responses API.
-	model := openai.NewOpenAIInferenceStrategy(&http.Client{Timeout: 2 * time.Minute}).
+	// The model: any tacklr.Model. This one speaks the OpenAI Responses API.
+	model := openai.New(&http.Client{Timeout: 2 * time.Minute}).
 		WithURL(os.Getenv("OPENAI_BASE_URL")).
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
@@ -124,69 +126,74 @@ func main() {
 		OpenVFS: vfs.Tree(vfs.At("work", vfs.Local("/srv/tacklr/work"))),
 	}
 
-	// The durable runtime: Temporal. Production passes shared Snapshots and Secrets.
+	// The durable runtime: Temporal. The worker runs the sessions; the
+	// client starts and talks to them. Both use the same session stores:
+	// in memory here (one process), shared stores in production. For
+	// tracing, add Temporal's OpenTelemetry plugin to client.Options.Plugins
+	// (docs/session.md).
 	c, err := temporal.Dial(client.Options{HostPort: os.Getenv("TEMPORAL_ADDRESS")})
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer c.Close()
-	rt := temporal.Open(c, temporal.Config{Agent: agent})
-	w := rt.StartWorker()
+	records, secrets := session.NewMemoryStore(), session.NewMemorySecretStorage()
+	w := worker.New(c, worker.Config{Agent: agent, Store: records, Secrets: secrets})
 	if err := w.Start(); err != nil {
 		log.Fatal(err)
 	}
 	defer w.Stop()
+	sessions := temporal.Open(c, temporal.Config{Store: records, Secrets: secrets})
 
 	// The host API: create a session, follow its events, prompt it.
-	id, err := rt.CreateSession(ctx, session.CreateSession{})
+	id, err := sessions.CreateSession(ctx, session.CreateSession{})
 	if err != nil {
 		log.Fatal(err)
 	}
-	head, err := rt.Head(ctx, id)
+	head, err := sessions.Head(ctx, id)
 	if err != nil {
 		log.Fatal(err)
 	}
-	sub, err := rt.Subscribe(ctx, id, head)
+	sub, err := sessions.Subscribe(ctx, id, head)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer sub.Close()
-	if err := rt.Prompt(ctx, id, session.Prompt{Text: "What changed in Go 1.27? Save what you find."}); err != nil {
+	if err := sessions.Prompt(ctx, id, session.Prompt{Text: "What changed in Go 1.27? Save what you find."}); err != nil {
 		log.Fatal(err)
 	}
 	for ev := range sub.Events() {
 		switch ev.Type {
-		case tacklr.StreamEventMessage:
+		case session.EventMessage:
 			fmt.Print(ev.Content)
-		case tacklr.StreamEventInterrupt:
+		case session.EventInterrupt:
 			fmt.Println("\nwaiting for the user:", string(ev.Data))
 			return
-		case tacklr.StreamEventComplete, tacklr.StreamEventError:
+		case session.EventComplete, session.EventError:
 			return
 		}
 	}
 }
 ```
 
-`weatherTool` is the tool in [Tools and HarnessRuntime](#tools-and-harnessruntime). With a `Brain`, the agent gets `search`, `open`, `related` and `save` (and `link` when the engine has a graph). With `OpenVFS`, it gets `read`, `write`, `write_document`, `write_spreadsheet`, `run_command`, and `index_file`/`unindex` when a brain is set too.
+`weatherTool` is the tool in [Tools and CallContext](#tools-and-callcontext). With a `Brain`, the agent gets `search`, `open`, `related` and `save` (and `link` when the engine has a graph). With `OpenVFS`, it gets `read`, `write`, `write_document`, `write_spreadsheet`, `run_command`, and `index_file`/`unindex` when a brain is set too.
 
 ---
 
 ## Key interfaces
 
-### InferenceStrategy and ModelRequest
+### Model and ModelRequest
 
-The model is an interface. `Invoke` and `CountTokens` take one `ModelRequest` with everything for that request, so a strategy holds no per-request state and one value is safe to share across sessions. The harness builds every request in one place, so a token count measures exactly what the request sends.
+The model is an interface. `Invoke` and `CountTokens` take one `ModelRequest` with everything for that request, so a model holds no per-request state and one value is safe to share across sessions. The harness builds every request in one place, so a token count measures exactly what the request sends.
 
 ```go
 type ModelRequest struct {
-	Messages     []*Message
+	Messages     []*message.Message
 	Tools        []*Tool
 	SystemPrompt string
 	CacheKey     string // the session id, for provider prompt caching
 }
 
-type InferenceStrategy interface {
+type Model interface {
 	Invoke(ctx context.Context, req ModelRequest) (chan LLMResponseChunk, error)
 	CountTokens(ctx context.Context, req ModelRequest) (int, error)
 	MaxContextWindow() (int, error)
@@ -195,7 +202,7 @@ type InferenceStrategy interface {
 }
 ```
 
-A minimal strategy:
+A minimal model:
 
 ```go
 type echoModel struct{}
@@ -203,7 +210,7 @@ type echoModel struct{}
 func (echoModel) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tacklr.LLMResponseChunk, error) {
 	ch := make(chan tacklr.LLMResponseChunk, 1)
 	last := req.Messages[len(req.Messages)-1]
-	ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "you said: " + last.Content, IsComplete: true}
+	ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "you said: " + last.Content, IsComplete: true}
 	close(ch)
 	return ch, nil
 }
@@ -223,9 +230,9 @@ func (echoModel) ModelTelemetryIdentity() telemetry.ModelIdentity {
 }
 ```
 
-`openai.NewOpenAIInferenceStrategy` is the built-in client for OpenAI-compatible endpoints.
+`openai.New` is the built-in client for OpenAI-compatible endpoints.
 
-### Tools and HarnessRuntime
+### Tools and CallContext
 
 A tool is a Go function. `NewTool` reads its arguments struct (`json` and `desc` tags) to build the JSON schema. Give a tool its clients by closing over them in the constructor; a test passes a fake client to the same constructor.
 
@@ -255,13 +262,13 @@ func weatherTool(client *http.Client) *tacklr.Tool {
 }
 ```
 
-A handler that also takes `*tacklr.HarnessRuntime` gets the running call. The harness makes one for each call; a tool never makes one.
+A handler that also takes `cc *tacklr.CallContext` gets the running call. The harness makes one for each call; a tool never makes one.
 
 | Method | What it does |
 |--------|--------------|
 | `StateGet`, `StateSet`, `StateDelete` | Session key-values. A call reads its own writes first; its writes apply when its round commits. Hosts set values on `CreateSession.State`, `Prompt.State`, `Resume.State`. |
 | `Park(intr)` | Asks the user. The call parks; after `Resume` it runs again and `Park` returns the answered interrupt. |
-| `Schedule(ctx, JobRequest)` | Starts a Runtime job worker. With `Wait`, the job's output is the call's result; without it, the output arrives later as a message. |
+| `Schedule(ctx, JobRequest)` | Starts a job worker. With `Wait`, the job's output is the call's result; without it, the output arrives later as a message. |
 | `Jobs`, `CancelJob` | Lists and stops this session's jobs. |
 | `EmitUpdate` | Sends a progress event to the client. |
 | `CurrentToolCallID` | The call's id. A runtime may run a call again when a worker dies before it reports, so a tool with external side effects passes this id as its idempotency key. |
@@ -276,10 +283,10 @@ func deployTool() *tacklr.Tool {
 		Name:        "deploy",
 		Description: "Deploy a service to the environment in session state.",
 		Access:      tacklr.ToolWriteAccess,
-		Handler: func(ctx context.Context, args deployArgs, rt *tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args deployArgs, cc *tacklr.CallContext) (string, error) {
 			// Ask the user before a production deploy. The call parks here; after
 			// Resume it runs again and Park returns the answered interrupt.
-			answered, err := rt.Park(&tacklr.UserSelectionInterrupt{
+			answered, err := cc.Park(&tacklr.UserSelectionInterrupt{
 				Question: "Deploy " + args.Service + "?",
 				Options:  []tacklr.UserChoice{{Title: "Deploy"}, {Title: "Cancel"}},
 			})
@@ -289,12 +296,12 @@ func deployTool() *tacklr.Tool {
 			if answered.(*tacklr.UserSelectionInterrupt).ConfirmedChoice.Title != "Deploy" {
 				return "deploy cancelled by the user", nil
 			}
-			env, _ := rt.StateGet("env") // host state from CreateSession/Prompt.State
-			rt.EmitUpdate("starting the pipeline")
-			// A Runtime job worker; with Wait the job's output is this call's result.
-			_, err = rt.Schedule(ctx, tacklr.JobRequest{
+			env, _ := cc.StateGet("env") // host state from CreateSession/Prompt.State
+			cc.EmitUpdate("starting the pipeline")
+			// A job worker; with Wait the job's output is this call's result.
+			_, err = cc.Schedule(ctx, tacklr.JobRequest{
 				Name: "pipeline",
-				Task: fmt.Sprintf(`{"service":%q,"env":%q,"key":%q}`, args.Service, env, rt.CurrentToolCallID()),
+				Task: fmt.Sprintf(`{"service":%q,"env":%q,"key":%q}`, args.Service, env, cc.CurrentToolCallID()),
 				Wait: true,
 			})
 			return "", err
@@ -325,7 +332,7 @@ func init() {
 }
 ```
 
-The client gets a `StreamEventInterrupt` whose `MessageID` is the call id and whose `Data` is the serialized interrupt. It answers with `Runtime.Resume(ctx, id, session.Resume{Responses: map[string][]byte{callID: answer}})`.
+The client gets a `session.EventInterrupt` whose `MessageID` is the call id and whose `Data` is the serialized interrupt. It answers with `Client.Resume(ctx, id, session.Resume{Responses: map[string][]byte{callID: answer}})`.
 
 ### ToolInterceptor, OnCall and AllowTools
 
@@ -334,7 +341,7 @@ A `ToolInterceptor` wraps every call. It can short-circuit, or change the `ToolO
 ```go
 func auditInterceptor(ctx context.Context, inv tacklr.ToolInvocation, next tacklr.ToolCallFunc) (tacklr.ToolOutcome, error) {
 	out, err := next(ctx, inv)
-	slog.InfoContext(ctx, "tool call", "tool", inv.Tool.Name(), "call", inv.Runtime.CurrentToolCallID(), "error", err)
+	slog.InfoContext(ctx, "tool call", "tool", inv.Tool.Name(), "call", inv.CallContext.CurrentToolCallID(), "error", err)
 	return out, err
 }
 
@@ -346,7 +353,7 @@ func gatedTool() *tacklr.Tool {
 	})
 }
 
-func agentWithPolicy(model tacklr.InferenceStrategy) tacklr.AgentOptions {
+func agentWithPolicy(model tacklr.Model) tacklr.AgentOptions {
 	return tacklr.AgentOptions{
 		Model:            model,
 		Tools:            []*tacklr.Tool{gatedTool(), deployTool()},
@@ -363,7 +370,7 @@ The built-ins `write`, `write_document`, `write_spreadsheet` and `run_command` a
 A specialist is a nested agent: its own model, tools and instructions, run as a child session over the parent's mounts. You declare specialists; the model decides when to start one with the built-in `spawn_specialist` (`block=true` waits and returns the specialist's output; `block=false` starts it in the background). Tools cannot start specialists.
 
 ```go
-func agentWithSpecialists(model tacklr.InferenceStrategy) tacklr.AgentOptions {
+func agentWithSpecialists(model tacklr.Model) tacklr.AgentOptions {
 	return tacklr.AgentOptions{
 		Model: model,
 		Specialists: []*tacklr.Specialist{{
@@ -376,11 +383,11 @@ func agentWithSpecialists(model tacklr.InferenceStrategy) tacklr.AgentOptions {
 }
 ```
 
-A Runtime job worker is plain Go work a tool starts with `Schedule`: a shell pipeline, a long data job. Register workers on the runtime:
+A job worker is plain Go work a tool starts with `Schedule`: a shell pipeline, a long data job. Register workers on the worker (`worker.Config.Jobs`):
 
 ```go
-func jobWorkers() map[string]session.JobHandler {
-	return map[string]session.JobHandler{
+func jobWorkers() map[string]worker.JobHandler {
+	return map[string]worker.JobHandler{
 		"pipeline": func(ctx context.Context, task string) (string, error) {
 			return "deployed: " + task, nil
 		},
@@ -435,7 +442,7 @@ func workspace() vfs.OpenVFS {
 	)
 }
 
-func agentWithWorkspace(model tacklr.InferenceStrategy) tacklr.AgentOptions {
+func agentWithWorkspace(model tacklr.Model) tacklr.AgentOptions {
 	return tacklr.AgentOptions{
 		Model:        model,
 		OpenVFS:      workspace(),
@@ -446,52 +453,46 @@ func agentWithWorkspace(model tacklr.InferenceStrategy) tacklr.AgentOptions {
 
 `ReadOnly` refuses writes. `NotIndexed` makes `index_file` refuse that mount. `OverflowPath` must be on a writable mount. Writes persist when they happen; file bytes are never in a checkpoint. Details: [docs/vfs.md](docs/vfs.md).
 
-### session.Runtime
+### session.Client
 
-`session.Runtime` is the host API. Protocols and autonomous hosts call it; `session/temporal.Runtime` implements it.
+`session.Client` is the host API. Protocols and autonomous hosts call it; `temporal.Client` (package `session/temporal`) implements it. That package imports no harness or worker code.
 
 ```go
-type Runtime interface {
-	CreateSession(ctx context.Context, req CreateSession) (SessionID, error)
-	Close(ctx context.Context, sessionID SessionID) error
-	Status(ctx context.Context, id SessionID) (SessionStatus, error)
-	Head(ctx context.Context, sessionID SessionID) (Seq, error)
-	Subscribe(ctx context.Context, sessionID SessionID, after Seq) (Subscription, error)
+type Client interface {
+	CreateSession(ctx context.Context, req CreateSession) (ID, error)
+	Close(ctx context.Context, sessionID ID) error
+	Status(ctx context.Context, id ID) (Status, error)
+	Head(ctx context.Context, sessionID ID) (Seq, error)
+	Subscribe(ctx context.Context, sessionID ID, after Seq) (Subscription, error)
 
-	Prompt(ctx context.Context, sessionID SessionID, msg Prompt) error
-	Resume(ctx context.Context, sessionID SessionID, resume Resume) error
-	Cancel(ctx context.Context, sessionID SessionID) error
+	Prompt(ctx context.Context, sessionID ID, msg Prompt) error
+	Resume(ctx context.Context, sessionID ID, resume Resume) error
+	Cancel(ctx context.Context, sessionID ID) error
 
-	Children(ctx context.Context, parent SessionID) ([]SessionID, error)
-	Jobs(ctx context.Context, parent SessionID) ([]SessionStatus, error)
+	Jobs(ctx context.Context, parent ID) ([]Status, error)
 }
 ```
 
-A prompt while a turn runs or is parked steers it; it does not cancel the model call. `Cancel` stops the turn and its children; the session stays open.
+A prompt while a turn runs or is parked steers it; it does not cancel the model call. `Cancel` stops the turn and its jobs; the session stays open. A `Subscription`'s `Err` says why its events stopped (nil when the host closed it). A failure event carries a `FailKind` (refused, max tokens, cancelled), so `ev.Error` is the matching sentinel on the far side of the wire. A request the client rejects before it reaches a session (state JSON cannot hold, a specialist and a worker together) is `session.ErrInvalid`.
 
-### session.Driver
+### loop.Executor
 
-`session.Driver` is what a durable runtime implements. The generic turn scheduler (`session.Turn.Run`) calls it, so every runtime runs a turn the same way; a runtime only decides where and how each step runs.
+`loop.Executor` is what a durable runtime implements. The generic session loop (`loop.Run`, package `session/loop`) calls it, so every runtime runs a session the same way; a runtime only decides where and how each step runs. The Temporal worker (`session/temporal/worker`) implements it as workflow code.
 
 ```go
-type Driver interface {
+type Executor interface {
 	Begin(kind string, promptLen, resumes int)
 	End()
-	Commit(base Revision, in tacklr.CommitIn) (Revision, error)
+	Commit(base session.Revision, in tacklr.CommitIn) (session.Revision, error)
 	Infer() (tacklr.Reply, error)
 	Tools(runs []tacklr.ToolRun) []ToolResult
-	Emit(tacklr.StreamEvent)
+	Emit(session.Event)
 	Job(name, task string) (string, error)
 
-	Prompts() []PromptIn
-	Ready() []*tacklr.Message
-	Recv() Wake
-	Wait() Wake
+	Next(block bool) session.Wake
 
-	Children() []SessionID
-	Start(tacklr.CallOutcome) error
-	Await(SessionID) (output string, failed bool, err error)
-	CancelAll()
+	Start(tacklr.JobStart) error
+	Cancel(id session.ID)
 }
 ```
 
@@ -501,71 +502,93 @@ The contract:
 - **A step may run more than once** before the runtime records it (a worker dies before it reports). `Infer` and `Tool` steps change nothing a later step reads, so that is safe.
 - **`Commit` is the only snapshot writer, and it is idempotent.** `base` is the revision the previous `Commit` returned; a `Commit` that finds the snapshot past `base` already saved and applies nothing again.
 - **`Tools` runs its runs at once** (Temporal: one activity each) and returns a result per run, in run order.
-- **`Start` starts a child by its deterministic id;** starting the same id twice starts it once.
+- **`Next` is the one mailbox read:** prompts, resumes, cancels, closes and job ends in arrival order (`block` waits for one). One session function decides what each does, given the state: a prompt starts a turn when idle and steers it when it runs, waits on jobs, or is parked; a job's end becomes its waiting call's result or, for a background job, an inbox message.
+- **The session owns each job's lifecycle** (`Turn.Jobs`): it starts a job by its deterministic id, cancels it by id, and turns its end into a result. The runtime only runs it: `Start` starts it (an id already started is not started again), `Cancel` stops it, and its result comes back once, as a job-end wake.
 
-The session's identity, MCP servers and children are the runtime's: it holds them and builds each step's world from them. Details: [docs/session.md](docs/session.md).
+The session's identity, MCP servers and children are the runtime's: it holds them and builds each step's harness from them. A worker keeps that harness for the session (its `HarnessCache`), and the runtime routes the session's steps to it. Details: [docs/session.md](docs/session.md).
 
-### SnapshotStore, EventLog and SecretStorage
+### Store, EventLog and SecretStorage
 
-The runtime keeps three kinds of session data apart:
+The runtime keeps three kinds of session data apart. The client and the worker must use the same ones:
 
-| Store | Holds | Default |
-|-------|-------|---------|
-| `session.SnapshotStore` | `tacklr.SessionCheckpoint`: the window of complete rounds, plan, user state, permission decisions, search cursors | in memory |
-| `session.EventLog` | The client event stream (fallback when Workflow Streams are off) | in memory |
-| `session.SecretStorage` | VFS tokens. Never in a snapshot or workflow history | in memory |
+| Store | Holds | In memory |
+|-------|-------|-----------|
+| `session.Store` | The session's checkpoint, as opaque bytes (the window of complete rounds, plan, user state, permission decisions, search cursors), and each tool call's `Outcome` (its result text and record), so the durable runtime's history does not hold tool results | `session.NewMemoryStore` |
+| `session.EventLog` | The client event stream (fallback when Workflow Streams are off) | `session.NewMemoryEventLog` (the default) |
+| `session.SecretStorage` | VFS tokens. Never in a checkpoint or workflow history | `session.NewMemorySecretStorage` |
 
-The in-memory stores work for one process only. Production passes shared stores. `SnapshotStore.Save` is compare-and-swap on a `Revision`:
+The in-memory stores work for one process only. Production passes shared stores. `Store.Save` is compare-and-swap on a `Revision`, and `Revision` lets a worker learn whether the committed state it holds is current without loading the checkpoint:
 
 ```go
 type checkpointRow struct {
-	cp  tacklr.SessionCheckpoint
-	rev session.Revision
+	cp       []byte
+	rev      session.Revision
+	outcomes map[string]session.Outcome
 }
 
-type mapSnapshots struct{ rows map[session.SessionID]checkpointRow }
+type mapStore struct{ rows map[session.ID]checkpointRow }
 
-func (m *mapSnapshots) Save(ctx context.Context, id session.SessionID, cp tacklr.SessionCheckpoint, expected session.Revision) (session.Revision, error) {
-	if m.rows[id].rev != expected {
+func (m *mapStore) Save(ctx context.Context, id session.ID, cp []byte, expected session.Revision) (session.Revision, error) {
+	row := m.rows[id]
+	if row.rev != expected {
 		return "", session.ErrStaleCheckpoint
 	}
-	next := session.Revision(fmt.Sprint(len(m.rows[id].rev) + 1))
-	m.rows[id] = checkpointRow{cp: cp, rev: next}
-	return next, nil
+	row.cp, row.rev = cp, session.Revision(fmt.Sprint(len(row.rev)+1))
+	m.rows[id] = row
+	return row.rev, nil
 }
 
-func (m *mapSnapshots) Load(ctx context.Context, id session.SessionID) (tacklr.SessionCheckpoint, session.Revision, error) {
+func (m *mapStore) Load(ctx context.Context, id session.ID) ([]byte, session.Revision, error) {
 	row, ok := m.rows[id]
 	if !ok {
-		return tacklr.SessionCheckpoint{}, "", session.ErrSessionNotFound
+		return nil, "", session.ErrNotFound
 	}
 	return row.cp, row.rev, nil
 }
 
-func (m *mapSnapshots) Delete(ctx context.Context, id session.SessionID) error {
+func (m *mapStore) Revision(ctx context.Context, id session.ID) (session.Revision, error) {
+	return m.rows[id].rev, nil
+}
+
+func (m *mapStore) PutOutcome(ctx context.Context, id session.ID, callKey string, o session.Outcome) error {
+	row := m.rows[id]
+	if row.outcomes == nil {
+		row.outcomes = map[string]session.Outcome{}
+	}
+	row.outcomes[callKey] = o
+	m.rows[id] = row
+	return nil
+}
+
+func (m *mapStore) Outcomes(ctx context.Context, id session.ID, callKeys []string) (map[string]session.Outcome, error) {
+	out := map[string]session.Outcome{}
+	for _, k := range callKeys {
+		if o, ok := m.rows[id].outcomes[k]; ok {
+			out[k] = o
+		}
+	}
+	return out, nil
+}
+
+func (m *mapStore) Delete(ctx context.Context, id session.ID) error {
 	delete(m.rows, id)
 	return nil
 }
 
-func runtimeConfig(agent tacklr.AgentOptions) temporal.Config {
-	return temporal.Config{
-		Agent:     agent,
-		Snapshots: &mapSnapshots{rows: map[session.SessionID]checkpointRow{}},
-		Secrets:   session.NewMemorySecretStorage(),
-		Jobs:      jobWorkers(),
-	}
+func workerConfig(agent tacklr.AgentOptions, store session.Store, secrets session.SecretStorage) worker.Config {
+	return worker.Config{Agent: agent, Store: store, Secrets: secrets, Jobs: jobWorkers()}
 }
 ```
 
-`Close` deletes the session's snapshot and secrets.
+`Close` deletes the session's checkpoint and secrets; the session's worker deletes its saved messages from the brain as it closes.
 
 ### server.Protocol
 
-A `server.Protocol` maps a wire protocol onto `session.Runtime`. ACP (`server/acp`) is the built-in one.
+A `server.Protocol` maps a wire protocol onto a `session.Client`. ACP (`server/acp`) is the built-in one.
 
 ```go
-func serveACP(ctx context.Context, rt session.Runtime, agent tacklr.AgentOptions) error {
-	return server.NewServer(rt, agent, acp.New(nil)).ServeHTTP(ctx, "127.0.0.1:8080")
+func serveACP(ctx context.Context, sessions session.Client, agent tacklr.AgentOptions) error {
+	return server.NewServer(sessions, agent, acp.New(nil)).ServeHTTP(ctx, "127.0.0.1:8080")
 }
 ```
 
@@ -578,7 +601,7 @@ ACP's `_tacklr/vfs/bind` maps onto `Prompt.Auth`, so VFS tokens never reach work
 | Piece | What it does | Where to read |
 |-------|--------------|---------------|
 | Planning | `create_plan`, todos, hand-off on `complete_todo` | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
-| MCP | External tool servers (`AgentOptions.MCPConfigs`) | [`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
+| MCP | External tool servers (`AgentOptions.MCPConfigs`, `session.MCPServer`) | [`session`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/session) |
 | Skills | `SKILL.md` catalogs from `SkillsPath`; the model reads them only through `read_skill` | [`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
 | Web | `web_search` and `web_fetch` (`web.WebSearch`, `web.WebFetch`, Exa client) | [`web`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/web) |
 | Email | `read_inbox` and permission-gated `send_email` (Gmail, Outlook) | [`email`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/email) |
@@ -591,8 +614,8 @@ ACP's `_tacklr/vfs/bind` maps onto `Prompt.Auth`, so VFS tokens never reach work
 
 | Doc | What it covers |
 |-----|----------------|
-| [docs/session.md](docs/session.md) | `session.Runtime`, `session.Driver`, the Temporal runtime, rounds, HITL, children, auth |
-| [docs/tools.md](docs/tools.md) | Tools, `HarnessRuntime`, clients through constructor closures |
+| [docs/session.md](docs/session.md) | `session.Client`, `loop.Executor`, the Temporal client and worker, rounds, HITL, children, auth |
+| [docs/tools.md](docs/tools.md) | Tools, `CallContext`, clients through constructor closures |
 | [docs/vfs.md](docs/vfs.md) | Mounts, content IR, providers, FUSE |
 | [docs/knowledge.md](docs/knowledge.md) | The brain: search, graph, kinds, session history, tools |
 | [docs/fuse-vfs-run-command.md](docs/fuse-vfs-run-command.md) | How `run_command` and the FUSE projection fit |
@@ -604,17 +627,20 @@ ACP's `_tacklr/vfs/bind` maps onto `Prompt.Auth`, so VFS tokens never reach work
 
 | Package | Role |
 |---------|------|
-| `tacklr` | The harness: turns, rounds, tools, `HarnessRuntime`, plan, specialists, interrupts, checkpoints |
-| `session` | `Runtime`, `Driver`, the generic turn scheduler, `SnapshotStore`, `EventLog`, `SecretStorage` |
-| `session/temporal` | The Temporal runtime |
+| `tacklr` | The harness: `Harness`, `Model`, rounds, tools, `CallContext`, window, plan, specialists, interrupts, checkpoints, VFS/brain/MCP wiring |
+| `message` | Conversation data: `Message`, content parts, `ToolCall` |
+| `session` | The client contract: `Client`, `Store`, `Event`, `Status`, `EventLog`, `SecretStorage`, `MCPServer` |
+| `session/loop` | The generic session loop: `loop.Run`, `Executor`, `Turn` |
+| `session/temporal` | The Temporal client (`temporal.Client`, `Dial`) |
+| `session/temporal/worker` | The Temporal worker: the session workflow, its activities, its harness cache, `JobHandler` |
 | `brain` | Knowledge engine, `Store` and `Graph` interfaces, in-memory store |
 | `brain/postgres` | Postgres `brain.Store` |
 | `brain/helixgraph` | Helix `brain.Graph` |
 | `vfs` | Virtual filesystem, mounts, providers, content IR, FUSE |
+| `vfs/mount` | The mount bindings and credentials a client sends |
 | `vfsindex` | Workspace files into the brain (`index_file`) |
-| `openai` | OpenAI-compatible `InferenceStrategy` |
-| `server` | Protocol host over `session.Runtime`; `server/acp` is ACP |
-| `mcp` | MCP config types |
+| `openai` | OpenAI-compatible `Model` |
+| `server` | Protocol host over a `session.Client`; `server/acp` is ACP |
 | `skills` | Skill loading from `SkillsPath` |
 | `web` | Web search and fetch tools |
 | `email` | Inbox and send tools; `email/gmail` and `email/outlook` |

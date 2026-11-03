@@ -4,9 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
 
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
@@ -16,23 +21,23 @@ func TestStreamAssembler_accumulatesDeltasAndBuildsMessages(t *testing.T) {
 	asm := newStreamAssembler()
 
 	// Act
-	asm.AddDelta(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1", Content: "hel"})
-	asm.AddDelta(LLMResponseChunk{Type: StreamEventReasoning, MessageId: "r1", Content: "think"})
-	asm.AddDelta(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1", Content: "lo"})
-	asm.AddDelta(LLMResponseChunk{Type: StreamEventFunctionCall, MessageId: "x", Content: "ignored"})
+	asm.AddDelta(LLMResponseChunk{Type: session.EventMessage, MessageId: "m1", Content: "hel"})
+	asm.AddDelta(LLMResponseChunk{Type: session.EventReasoning, MessageId: "r1", Content: "think"})
+	asm.AddDelta(LLMResponseChunk{Type: session.EventMessage, MessageId: "m1", Content: "lo"})
+	asm.AddDelta(LLMResponseChunk{Type: session.EventFunctionCall, MessageId: "x", Content: "ignored"})
 	completed := asm.MessageFromComplete(LLMResponseChunk{
-		Type: StreamEventReasoning, MessageId: "r1", IsComplete: true,
+		Type: session.EventReasoning, MessageId: "r1", IsComplete: true,
 		EncryptedContent: "gAAAAABasm",
 	})
 
 	// Assert
-	if got := asm.CompleteContent(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1"}); got != "hello" {
+	if got := asm.CompleteContent(LLMResponseChunk{Type: session.EventMessage, MessageId: "m1"}); got != "hello" {
 		t.Fatalf("message content = %q", got)
 	}
-	if got := asm.CompleteContent(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1", Content: "explicit"}); got != "explicit" {
+	if got := asm.CompleteContent(LLMResponseChunk{Type: session.EventMessage, MessageId: "m1", Content: "explicit"}); got != "explicit" {
 		t.Fatalf("explicit content = %q", got)
 	}
-	if completed.Role != RoleReasoning || completed.Content != "think" {
+	if completed.Role != message.RoleReasoning || completed.Content != "think" {
 		t.Fatalf("reasoning message = %+v", completed)
 	}
 	if completed.EncryptedContent != "gAAAAABasm" {
@@ -42,11 +47,11 @@ func TestStreamAssembler_accumulatesDeltasAndBuildsMessages(t *testing.T) {
 
 // handoffHarness is a turn whose window holds the goal and whose plan has
 // todos, so a handoff has work to hand off.
-func handoffHarness(t *testing.T, model InferenceStrategy, todos ...Todo) *TurnManager {
+func handoffHarness(t *testing.T, model Model, todos ...Todo) *Harness {
 	t.Helper()
-	h := mustNewTurnManager(t, AgentOptions{MaxWindowSize: 8192, Model: model})
+	h := mustNewHarness(t, AgentOptions{MaxWindowSize: 8192, Model: model})
 	t.Cleanup(h.Close)
-	h.context.Restore([]*Message{userMsg("goal")})
+	h.context.Restore([]*message.Message{userMsg("goal")})
 	h.session.Plan.set(todos)
 	return h
 }
@@ -55,12 +60,12 @@ func handoffHarness(t *testing.T, model InferenceStrategy, todos ...Todo) *TurnM
 // empty stream, and a stream error each install the plan-derived handoff.
 func TestHandoff_fallsBackWhenTheModelGivesNoHandoff(t *testing.T) {
 	pending := Todo{Title: "Ship", Description: "finish", Status: TodoStatusPending}
-	for name, model := range map[string]InferenceStrategy{
+	for name, model := range map[string]Model{
 		// A model without a telemetry identity: spans start without one.
-		"a failed request": struct{ InferenceStrategy }{&scriptedModel{InvokeErr: errors.New("handoff invoke failed")}},
-		"an empty stream":  &scriptedModel{InvokeFn: func(context.Context, []*Message, []*Tool, chan<- LLMResponseChunk) {}},
-		"a stream error": &scriptedModel{InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventError, Content: "handoff stream failed"}
+		"a failed request": struct{ Model }{&scriptedModel{InvokeErr: errors.New("handoff invoke failed")}},
+		"an empty stream":  &scriptedModel{InvokeFn: func(context.Context, []*message.Message, []*Tool, chan<- LLMResponseChunk) {}},
+		"a stream error": &scriptedModel{InvokeFn: func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{Type: session.EventError, Content: "handoff stream failed"}
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -86,25 +91,39 @@ func TestHandoff_failsOnACancelledContext(t *testing.T) {
 	}
 }
 
-func TestWatchModelStream_cancelsAndDrainsProviderChunks(t *testing.T) {
-	// Arrange
-	ctx, cancel := context.WithCancel(context.Background())
-	in := make(chan LLMResponseChunk, 8)
-	_, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, 1, telemetry.WindowShape{})
+// TestWatchModelStream_aCancelEndsTheStreamAndFreesTheProvider: after a
+// cancel the watched stream closes and the provider is not left blocked,
+// whether the reader is waiting for a chunk or has stopped reading.
+func TestWatchModelStream_aCancelEndsTheStreamAndFreesTheProvider(t *testing.T) {
+	for name, unread := range map[string]int{"a reader waiting for a chunk": 0, "a reader that stopped reading": 17} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			in := make(chan LLMResponseChunk, 32)
+			_, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, 1, telemetry.WindowShape{})
+			out := watchModelStream(ctx, span, in)
+			for range unread + 3 {
+				in <- LLMResponseChunk{Type: session.EventMessage, Content: "partial"}
+			}
+			// The watcher holds one chunk it cannot hand on: out is full.
+			for unread > 0 && len(in) > 3 {
+				runtime.Gosched()
+			}
 
-	// Act
-	out := watchModelStream(ctx, span, in)
-	in <- LLMResponseChunk{Type: StreamEventMessage, Content: "partial"}
-	cancel()
-	close(in)
-	for range out {
+			cancel()
+			got := 0
+			for range out {
+				got++
+			}
+
+			if got > 16 || len(in) != 0 {
+				t.Fatalf("read %d chunks, %d left with the provider; want the stream closed and the provider's chunks drained", got, len(in))
+			}
+		})
 	}
-
-	// Assert — no hang; span ended via drain path.
 }
 
 // contentTokens counts a message's content length as its tokens.
-func contentTokens(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
+func contentTokens(_ context.Context, msgs []*message.Message, _ []*Tool) (int, error) {
 	n := 0
 	for _, m := range msgs {
 		n += len(m.Content)
@@ -112,13 +131,15 @@ func contentTokens(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
 	return n, nil
 }
 
-func userMsg(content string) *Message { return &Message{Role: RoleUser, Content: content} }
+func userMsg(content string) *message.Message {
+	return &message.Message{Role: message.RoleUser, Content: content}
+}
 
 // collapseHarness is a turn with a window of window and a MaxWindowSize of
 // size.
-func collapseHarness(t *testing.T, model *scriptedModel, size uint, window ...*Message) *TurnManager {
+func collapseHarness(t *testing.T, model *scriptedModel, size uint, window ...*message.Message) *Harness {
 	t.Helper()
-	h := mustNewTurnManager(t, AgentOptions{MaxWindowSize: size, Model: model})
+	h := mustNewHarness(t, AgentOptions{MaxWindowSize: size, Model: model})
 	t.Cleanup(h.Close)
 	h.context.Restore(window)
 	return h
@@ -130,36 +151,36 @@ func collapseHarness(t *testing.T, model *scriptedModel, size uint, window ...*M
 // committed rounds.
 func TestCommitRound_fails(t *testing.T) {
 	big := strings.Repeat("x", 80)
-	failCount := func(after int) func(context.Context, []*Message, []*Tool) (int, error) {
+	failCount := func(after int) func(context.Context, []*message.Message, []*Tool) (int, error) {
 		calls := 0
-		return func(ctx context.Context, msgs []*Message, tools []*Tool) (int, error) {
+		return func(ctx context.Context, msgs []*message.Message, tools []*Tool) (int, error) {
 			if calls++; calls > after {
 				return 0, errors.New("count failed")
 			}
 			return contentTokens(ctx, msgs, tools)
 		}
 	}
-	summary := func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "s", IsComplete: true}
+	summary := func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+		ch <- LLMResponseChunk{Type: session.EventMessage, Content: "s", IsComplete: true}
 	}
 	cases := []struct {
 		name   string
 		model  *scriptedModel
-		window []*Message
-		round  []*Message
+		window []*message.Message
+		round  []*message.Message
 		want   string
 	}{
-		{"the first count", &scriptedModel{CountTokensFn: failCount(0)}, []*Message{userMsg("goal")}, []*Message{userMsg("x")}, "count tokens"},
-		{"after the summary", &scriptedModel{CountTokensFn: failCount(1), InvokeFn: summary}, []*Message{userMsg("goal"), userMsg(big)}, []*Message{userMsg(big)}, "count tokens"},
-		{"during a trim", &scriptedModel{CountTokensFn: failCount(1)}, []*Message{userMsg("goal")}, []*Message{{Role: RoleTool, ToolCallID: "c1", Content: big + big}}, "count tokens"},
-		{"the summary request", &scriptedModel{CountTokensFn: contentTokens, InvokeErr: errors.New("invoke failed")}, []*Message{userMsg("goal"), userMsg(big)}, []*Message{userMsg(big)}, "invoke failed"},
-		{"the summary stream", &scriptedModel{CountTokensFn: contentTokens, InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventError, Error: fmt.Errorf("%w: stream failed", ErrNetwork)}
-		}}, []*Message{userMsg("goal"), userMsg(big)}, []*Message{userMsg(big)}, "stream failed"},
-		{"a summary stream error without an error value", &scriptedModel{CountTokensFn: contentTokens, InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventError, Content: "provider said no"}
-		}}, []*Message{userMsg("goal"), userMsg(big)}, []*Message{userMsg(big)}, "provider said no"},
-		{"nothing to trim", &scriptedModel{CountTokensFn: contentTokens}, []*Message{userMsg("goal")}, []*Message{userMsg(big + big)}, "the round needs 164 tokens"},
+		{"the first count", &scriptedModel{CountTokensFn: failCount(0)}, []*message.Message{userMsg("goal")}, []*message.Message{userMsg("x")}, "count tokens"},
+		{"after the summary", &scriptedModel{CountTokensFn: failCount(1), InvokeFn: summary}, []*message.Message{userMsg("goal"), userMsg(big)}, []*message.Message{userMsg(big)}, "count tokens"},
+		{"during a trim", &scriptedModel{CountTokensFn: failCount(1)}, []*message.Message{userMsg("goal")}, []*message.Message{{Role: message.RoleTool, ToolCallID: "c1", Content: big + big}}, "count tokens"},
+		{"the summary request", &scriptedModel{CountTokensFn: contentTokens, InvokeErr: errors.New("invoke failed")}, []*message.Message{userMsg("goal"), userMsg(big)}, []*message.Message{userMsg(big)}, "invoke failed"},
+		{"the summary stream", &scriptedModel{CountTokensFn: contentTokens, InvokeFn: func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{Type: session.EventError, Error: fmt.Errorf("%w: stream failed", ErrNetwork)}
+		}}, []*message.Message{userMsg("goal"), userMsg(big)}, []*message.Message{userMsg(big)}, "stream failed"},
+		{"a summary stream error without an error value", &scriptedModel{CountTokensFn: contentTokens, InvokeFn: func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{Type: session.EventError, Content: "provider said no"}
+		}}, []*message.Message{userMsg("goal"), userMsg(big)}, []*message.Message{userMsg(big)}, "provider said no"},
+		{"nothing to trim", &scriptedModel{CountTokensFn: contentTokens}, []*message.Message{userMsg("goal")}, []*message.Message{userMsg(big + big)}, "the round needs 164 tokens"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -179,7 +200,7 @@ func TestCommitRound_fails(t *testing.T) {
 func TestCommitRound_cutsAResultOnARuneBoundary(t *testing.T) {
 	h := collapseHarness(t, &scriptedModel{CountTokensFn: contentTokens}, 400, userMsg("goal"))
 
-	err := h.commitRound(t.Context(), []*Message{{Role: RoleTool, ToolCallID: "c1", Content: strings.Repeat("─", 400)}}, EffectNone)
+	err := h.commitRound(t.Context(), []*message.Message{{Role: message.RoleTool, ToolCallID: "c1", Content: strings.Repeat("─", 400)}}, EffectNone)
 
 	window := h.context.Messages()
 	got := window[len(window)-1].Content

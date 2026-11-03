@@ -10,6 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
 
@@ -60,7 +64,7 @@ func newACPRPC(ctx context.Context, t *testing.T, srv *server.Server) *acpRPC {
 	bridge := acp.NewClientBridge(w)
 	return &acpRPC{
 		t: t, ctx: ctx, proto: srv.Protocols[0], bridge: bridge, ch: ch,
-		env: server.ProtocolEnv{Runtime: srv.Runtime, Agent: srv.Agent, Conn: &server.Conn{Writer: w, Ask: bridge}},
+		env: server.ProtocolEnv{Client: srv.Client, Agent: srv.Agent, Conn: &server.Conn{Writer: w, Ask: bridge}},
 	}
 }
 
@@ -114,8 +118,8 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 	}}
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
-			intr, err := runtime.Park(ask)
+		Handler: func(ctx context.Context, _ struct{}, cc *tacklr.CallContext) (string, error) {
+			intr, err := cc.Park(ask)
 			if err != nil {
 				return "", err
 			}
@@ -125,20 +129,20 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 	})
 
 	var invokeCount atomic.Int32
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		n := invokeCount.Add(1)
 		if n == 1 {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
 				{ID: "call_ask", CallID: "call_ask", Name: "ask_user", Arguments: `{}`},
 			}, IsComplete: true}
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			return
 		}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "thanks for choosing", IsComplete: true}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "thanks for choosing", IsComplete: true}
 	})
 
 	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}})
-	srv := server.NewServer(r.Runtime, r.Agent, acp.New(server.NewMemoryWireStore()))
+	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -256,14 +260,14 @@ func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 		OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) { return "nope", nil },
 	})
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
 			{ID: "c1", CallID: "c1", Name: "sensitive", Arguments: `{}`},
 		}, IsComplete: true}
 		ch <- tacklr.LLMResponseChunk{IsComplete: true}
 	})
 	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}})
-	srv := server.NewServer(r.Runtime, r.Agent, acp.New(server.NewMemoryWireStore()))
+	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
@@ -308,17 +312,17 @@ func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 	}
 }
 
-func parkOnceStrategy(t *testing.T, name string) tacklr.InferenceStrategy {
+func parkOnceStrategy(t *testing.T, name string) tacklr.Model {
 	var n atomic.Int32
-	return testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	return testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		if n.Add(1) == 1 {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
 				{ID: "p1", CallID: "p1", Name: name, Arguments: `{}`},
 			}, IsComplete: true}
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			return
 		}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
 	})
 }
 
@@ -326,8 +330,8 @@ func parkOnceStrategy(t *testing.T, name string) tacklr.InferenceStrategy {
 func selectionParkTool() *tacklr.Tool {
 	return tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
-			_, err := runtime.Park(&tacklr.UserSelectionInterrupt{Question: "Pick", Options: []tacklr.UserChoice{{Title: "A"}, {Title: "B"}}})
+		Handler: func(ctx context.Context, _ struct{}, cc *tacklr.CallContext) (string, error) {
+			_, err := cc.Park(&tacklr.UserSelectionInterrupt{Question: "Pick", Options: []tacklr.UserChoice{{Title: "A"}, {Title: "B"}}})
 			return "", err
 		},
 	})
@@ -351,7 +355,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 
 	t.Run("formOffParksTurn", func(t *testing.T) {
 		r := newTestRuntime(t, parkOnceStrategy(t, "ask_user"), tacklr.AgentOptions{Tools: []*tacklr.Tool{selectionParkTool()}})
-		srv := server.NewServer(r.Runtime, r.Agent, acp.New(server.NewMemoryWireStore()))
+		srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		defer cancel()
 		rpc := newACPRPC(ctx, t, srv)
@@ -386,13 +390,13 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	t.Run("unknownInterruptParks", func(t *testing.T) {
 		waiting := tacklr.NewTool(tacklr.ToolConfig{
 			Name: "wait_child",
-			Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
-				_, err := runtime.Park(&tacklr.ChildWaiting{Kind: tacklr.TypeChildWaiting})
+			Handler: func(ctx context.Context, _ struct{}, cc *tacklr.CallContext) (string, error) {
+				_, err := cc.Park(&tacklr.ChildWaiting{Kind: tacklr.TypeChildWaiting})
 				return "", err
 			},
 		})
 		r := newTestRuntime(t, parkOnceStrategy(t, "wait_child"), tacklr.AgentOptions{Tools: []*tacklr.Tool{waiting}})
-		srv := server.NewServer(r.Runtime, r.Agent, acp.New(server.NewMemoryWireStore()))
+		srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 		defer cancel()
 		rpc := newACPRPC(ctx, t, srv)
@@ -530,7 +534,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	})
 }
 
-func interruptCallWriteFails(t *testing.T, tool *tacklr.Tool, strategy tacklr.InferenceStrategy, needle string, form bool) {
+func interruptCallWriteFails(t *testing.T, tool *tacklr.Tool, strategy tacklr.Model, needle string, form bool) {
 	t.Helper()
 	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{tool}})
 	w := &failOnRPCWriter{needle: needle}
@@ -540,7 +544,7 @@ func interruptCallWriteFails(t *testing.T, tool *tacklr.Tool, strategy tacklr.In
 		bridge.SetCaps(acp.ClientCapabilities{ElicitationForm: true})
 	}
 	proto := acp.New(server.NewMemoryWireStore())
-	env := server.ProtocolEnv{Runtime: r.Runtime, Agent: r.Agent, Conn: &server.Conn{Writer: w, Ask: bridge}}
+	env := server.ProtocolEnv{Client: r.Client, Agent: r.Agent, Conn: &server.Conn{Writer: w, Ask: bridge}}
 	if err := proto.HandleInbound(t.Context(), env, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -569,10 +573,10 @@ func (f *failOnRPCWriter) WriteFrame(data []byte) error {
 	return f.recordingMessageWriter.WriteFrame(data)
 }
 
-func promptInterruptReply(t *testing.T, tool *tacklr.Tool, strategy tacklr.InferenceStrategy, initParams, method string, reply func(id any) map[string]any) {
+func promptInterruptReply(t *testing.T, tool *tacklr.Tool, strategy tacklr.Model, initParams, method string, reply func(id any) map[string]any) {
 	t.Helper()
 	r := newTestRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{tool}})
-	srv := server.NewServer(r.Runtime, r.Agent, acp.New(server.NewMemoryWireStore()))
+	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	rpc := newACPRPC(ctx, t, srv)
@@ -613,7 +617,7 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 	phase := "turn1"
 	var turn1Steps, turn2Steps int
 
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		mu.Lock()
 		p := phase
 		mu.Unlock()
@@ -621,35 +625,35 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 			turn1Steps++
 			switch turn1Steps {
 			case 1:
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+				ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
 					{ID: "cp", CallID: "cp", Name: "create_plan", Arguments: `{"plan":"P","todos":[{"title":"Alpha","status":"pending","description":"a"},{"title":"Beta","status":"pending","description":"b"}]}`},
 				}, IsComplete: true}
 				ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			case 2:
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+				ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
 					{ID: "ct", CallID: "ct", Name: "complete_todo", Arguments: `{"title":"Alpha"}`},
 				}, IsComplete: true}
 				ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			case 3:
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "handoff alpha", IsComplete: true}
+				ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "handoff alpha", IsComplete: true}
 			default:
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "turn1 done", IsComplete: true}
+				ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "turn1 done", IsComplete: true}
 			}
 			return
 		}
 		turn2Steps++
 		if turn2Steps == 1 {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
 				{ID: "lp", CallID: "lp", Name: "list_plan", Arguments: `{}`},
 			}, IsComplete: true}
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			return
 		}
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "turn2 continued", IsComplete: true}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "turn2 continued", IsComplete: true}
 	})
 
 	r := newTestRuntime(t, strategy, tacklr.AgentOptions{})
-	srv := server.NewServer(r.Runtime, r.Agent, acp.New(server.NewMemoryWireStore()))
+	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
 
 	recNew := &recordingMessageWriter{}
 	inbound(context.Background(), srv, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`), recNew)

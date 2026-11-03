@@ -12,22 +12,22 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ryanaldo34/tacklr/session"
+
 	mcpjsonrpc "github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/ryanaldo34/tacklr/mcp"
 )
 
 var errTransportNotSupported = errors.New("mcp transport not supported")
 
 // client wraps a connection to a single MCP server.
 type client struct {
-	config  mcp.MCPConfig
+	config  session.MCPServer
 	sdk     *mcpsdk.Client
 	session *mcpsdk.ClientSession
 }
 
-func newClient(cfg mcp.MCPConfig) *client {
+func newClient(cfg session.MCPServer) *client {
 	return &client{config: cfg}
 }
 
@@ -52,14 +52,14 @@ func (c *client) connect(ctx context.Context) error {
 
 func (c *client) buildTransport() (mcpsdk.Transport, error) {
 	switch c.config.Type {
-	case "", mcp.TransportStdio:
+	case "", session.MCPStdio:
 		if c.config.Command == "" {
 			return nil, fmt.Errorf("mcp server %q: command is required for stdio transport", c.config.Name)
 		}
 		cmd := exec.Command(c.config.Command, c.config.Args...)
 		cmd.Env = commandEnvironment(c.config)
 		return &mcpsdk.CommandTransport{Command: cmd}, nil
-	case mcp.TransportHTTP:
+	case session.MCPHTTP:
 		if c.config.URL == "" {
 			return nil, fmt.Errorf("mcp server %q: url is required for http transport", c.config.Name)
 		}
@@ -67,7 +67,7 @@ func (c *client) buildTransport() (mcpsdk.Transport, error) {
 			Endpoint:   c.config.URL,
 			HTTPClient: buildHTTPClient(c.config),
 		}, nil
-	case mcp.TransportSSE:
+	case session.MCPSSE:
 		if c.config.URL == "" {
 			return nil, fmt.Errorf("mcp server %q: url is required for sse transport", c.config.Name)
 		}
@@ -91,7 +91,7 @@ var defaultMCPHostEnvironment = []string{
 	"TMPDIR",
 }
 
-func commandEnvironment(config mcp.MCPConfig) []string {
+func commandEnvironment(config session.MCPServer) []string {
 	if config.InheritHostEnv {
 		return appendExplicitEnvironment(os.Environ(), config.Env)
 	}
@@ -125,7 +125,7 @@ func commandEnvironment(config mcp.MCPConfig) []string {
 	return out
 }
 
-func appendExplicitEnvironment(base []string, explicit []mcp.EnvVariable) []string {
+func appendExplicitEnvironment(base []string, explicit []session.MCPEnv) []string {
 	values := make(map[string]string, len(base)+len(explicit))
 	for _, entry := range base {
 		name, value, ok := strings.Cut(entry, "=")

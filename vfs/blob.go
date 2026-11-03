@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
@@ -19,7 +21,7 @@ import (
 // The object model matches S3: a container is the bucket, blob names are keys,
 // and delimiter "/" listing gives virtual directories.
 func Blob(client S3API, defaultContainer string) Open {
-	return func(ctx context.Context, _ string, b Binding) (Provider, error) {
+	return func(ctx context.Context, _ string, b mount.Binding) (Provider, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ryanaldo34/tacklr/session"
+
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
@@ -89,10 +91,10 @@ func classifyAPIStatus(apiErr *APIStatusError, errType string) error {
 	}
 	lower := strings.ToLower(apiErr.Body + " " + apiErr.Code + " " + errType)
 	if isRefusalSignal(lower) {
-		return fmt.Errorf("%w: %w", tacklr.ErrModelRefused, apiErr)
+		return fmt.Errorf("%w: %w", session.ErrModelRefused, apiErr)
 	}
 	if isMaxTokensSignal(lower) {
-		return fmt.Errorf("%w: %w", tacklr.ErrMaxTokens, apiErr)
+		return fmt.Errorf("%w: %w", session.ErrMaxTokens, apiErr)
 	}
 	if apiErr.Status == http.StatusRequestTimeout || apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= 500 {
 		return tacklr.Network(apiErr)
@@ -108,10 +110,10 @@ func classifyIncompleteReason(reason string) error {
 		return nil
 	}
 	if isMaxTokensSignal(r) || r == "max_output_tokens" || r == "max_tokens" {
-		return fmt.Errorf("%w: response incomplete (%s)", tacklr.ErrMaxTokens, reason)
+		return fmt.Errorf("%w: response incomplete (%s)", session.ErrMaxTokens, reason)
 	}
 	if isRefusalSignal(r) || r == "content_filter" {
-		return fmt.Errorf("%w: response incomplete (%s)", tacklr.ErrModelRefused, reason)
+		return fmt.Errorf("%w: response incomplete (%s)", session.ErrModelRefused, reason)
 	}
 	return fmt.Errorf("response incomplete (%s)", reason)
 }

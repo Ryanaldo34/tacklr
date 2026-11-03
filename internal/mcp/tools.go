@@ -6,9 +6,9 @@ import (
 	"slices"
 	"strings"
 
-	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/ryanaldo34/tacklr/session"
 
-	"github.com/ryanaldo34/tacklr/mcp"
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // ToolHandler is the call signature for a discovered MCP tool.
@@ -20,7 +20,7 @@ type RegisterTool func(name, description, namespace string, schema map[string]an
 // DiscoverAllTools connects to each MCP server in configs and invokes register
 // for every tool found. It returns a cleanup function that closes all open
 // connections. Unreachable servers are logged and skipped.
-func DiscoverAllTools(ctx context.Context, configs []mcp.MCPConfig, register RegisterTool) (cleanup func()) {
+func DiscoverAllTools(ctx context.Context, configs []session.MCPServer, register RegisterTool) (cleanup func()) {
 	var clients []*client
 
 	for _, cfg := range configs {

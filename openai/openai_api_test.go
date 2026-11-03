@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/session"
 )
 
 func TestClassifyAPIStatus_nilError(t *testing.T) {
@@ -18,17 +18,17 @@ func TestClassifyIncompleteReason_allOutcomes(t *testing.T) {
 	if err := classifyIncompleteReason(""); err != nil {
 		t.Fatalf("empty: %v", err)
 	}
-	if err := classifyIncompleteReason("max_output_tokens"); !errors.Is(err, tacklr.ErrMaxTokens) {
+	if err := classifyIncompleteReason("max_output_tokens"); !errors.Is(err, session.ErrMaxTokens) {
 		t.Fatalf("max_output_tokens: %v", err)
 	}
-	if err := classifyIncompleteReason("max_tokens"); !errors.Is(err, tacklr.ErrMaxTokens) {
+	if err := classifyIncompleteReason("max_tokens"); !errors.Is(err, session.ErrMaxTokens) {
 		t.Fatalf("max_tokens: %v", err)
 	}
-	if err := classifyIncompleteReason("content_filter"); !errors.Is(err, tacklr.ErrModelRefused) {
+	if err := classifyIncompleteReason("content_filter"); !errors.Is(err, session.ErrModelRefused) {
 		t.Fatalf("content_filter: %v", err)
 	}
 	err := classifyIncompleteReason("other")
-	if err == nil || errors.Is(err, tacklr.ErrMaxTokens) {
+	if err == nil || errors.Is(err, session.ErrMaxTokens) {
 		t.Fatalf("other: %v", err)
 	}
 	if !strings.Contains(err.Error(), "incomplete") {

@@ -5,6 +5,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+
+	"github.com/ryanaldo34/tacklr/message"
 )
 
 // Specialist describes a nested session a harness can spawn via spawn_specialist.
@@ -14,7 +16,7 @@ import (
 type Specialist struct {
 	Tools        []*Tool
 	Instructions string
-	Model        InferenceStrategy
+	Model        Model
 	Name         string
 	Description  string
 	// Specialists are nested workers available to this worker when it runs.
@@ -24,16 +26,10 @@ type Specialist struct {
 // initSpecialists registers worker specs. Invalid or duplicate specs are
 // constructor errors: a misconfigured host must not start a harness that
 // silently drops workers.
-func (h *TurnManager) initSpecialists(specs []*Specialist) error {
+func (h *Harness) initSpecialists(specs []*Specialist) error {
 	for _, spec := range specs {
-		if spec == nil {
-			return fmt.Errorf("tacklr: Specialist must not be nil")
-		}
-		if spec.Name == "" {
-			return fmt.Errorf("tacklr: Specialist.Name is required")
-		}
-		if spec.Model == nil {
-			return fmt.Errorf("tacklr: Specialist.Model is required")
+		if err := validateSpecialist(spec); err != nil {
+			return err
 		}
 		if _, exists := h.specialists[spec.Name]; exists {
 			return fmt.Errorf("tacklr: duplicate Specialist name %s", spec.Name)
@@ -44,8 +40,28 @@ func (h *TurnManager) initSpecialists(specs []*Specialist) error {
 	return nil
 }
 
+// validateSpecialist checks spec and the specialists nested in it, so
+// FindSpecialist meets only valid specs.
+func validateSpecialist(spec *Specialist) error {
+	if spec == nil {
+		return fmt.Errorf("tacklr: Specialist must not be nil")
+	}
+	if spec.Name == "" {
+		return fmt.Errorf("tacklr: Specialist.Name is required")
+	}
+	if spec.Model == nil {
+		return fmt.Errorf("tacklr: Specialist.Model is required")
+	}
+	for _, nested := range spec.Specialists {
+		if err := validateSpecialist(nested); err != nil {
+			return fmt.Errorf("specialist %s: %w", spec.Name, err)
+		}
+	}
+	return nil
+}
+
 // formatSpecialistPromptList builds the deterministic AVAILABLE SPECIALISTS list.
-func (a *TurnManager) formatSpecialistPromptList() string {
+func (a *Harness) formatSpecialistPromptList() string {
 	names := slices.Sorted(maps.Keys(a.specialists))
 	if len(names) == 0 {
 		return ""
@@ -68,12 +84,12 @@ type spawnSpecialistArgs struct {
 	Block                     *bool  `json:"block" desc:"Wait for the worker and return its result. Defaults to true. Set false to start a job and continue the turn; the result arrives as a later message."`
 }
 
-func (a *TurnManager) spawnTool() *Tool {
+func (a *Harness) spawnTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "spawn_specialist",
 		DisplayName: "Spawn {specialist}",
 		Description: "Run a named specialist on a focused subtask when work can proceed in parallel or needs substantial research or analysis and you only need the final output. When block is true (the default), waits and returns the specialist's result. When block is false, schedules a job and returns a job id; the result arrives later as a message and the current turn can continue. Fails if the specialist is unknown or the task is empty.",
-		Category:    ToolCategoryExecute,
+		Category:    message.ToolCategoryExecute,
 		Handler:     spawnSpecialist,
 	})
 }
@@ -84,22 +100,22 @@ type cancelChildArgs struct {
 	ChildID string `json:"child_id" desc:"Job id returned by spawn_specialist when block is false"`
 }
 
-func (a *TurnManager) listChildrenTool() *Tool {
+func (a *Harness) listChildrenTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "list_children",
 		DisplayName: "List jobs",
 		Description: "Return the current jobs (id, name, status) without waiting. Status stays running while a specialist is waiting for user input. Returns \"No jobs.\" when none exist, otherwise a list. Finished job results arrive as later messages; this call does not return those bodies.",
-		Category:    ToolCategoryExecute,
+		Category:    message.ToolCategoryExecute,
 		Handler:     listChildren,
 	})
 }
 
-func (a *TurnManager) cancelChildTool() *Tool {
+func (a *Harness) cancelChildTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "cancel_child",
 		DisplayName: "Cancel job {child_id}",
 		Description: "Cancel a job and remove it. Call when that work is no longer needed. Returns that the job was cancelled and removed. Completed and failed jobs are discarded without returning their result. Fails if child_id is empty or unknown.",
-		Category:    ToolCategoryExecute,
+		Category:    message.ToolCategoryExecute,
 		Handler:     cancelChild,
 	})
 }
@@ -108,9 +124,6 @@ func (a *TurnManager) cancelChildTool() *Tool {
 func FindSpecialist(specs []*Specialist, name string) *Specialist {
 	name = strings.TrimSpace(name)
 	for _, spec := range specs {
-		if spec == nil {
-			continue
-		}
 		if spec.Name == name {
 			return spec
 		}

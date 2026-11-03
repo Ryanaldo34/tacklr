@@ -4,10 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testhttp"
@@ -17,18 +22,18 @@ import (
 // HTTPModel is the real OpenAI-compatible client pointed at a local server.
 // respond sees the conversation the client sent and writes chunks. An error
 // chunk becomes the HTTP error the client classifies. Anything else is SSE.
-func HTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.InferenceStrategy {
+func HTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
 	tb.Helper()
 	return newHTTPModel(tb, "gpt-4o", respond)
 }
 
 // TextHTTPModel is HTTPModel on a model id that accepts text only.
-func TextHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.InferenceStrategy {
+func TextHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
 	tb.Helper()
 	return newHTTPModel(tb, "text-only", respond)
 }
 
-func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.InferenceStrategy {
+func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
 	tb.Helper()
 	// life ends when the test does. A script blocked on ctx.Done() has to
 	// release the connection before httptest.Server.Close, and the workflow
@@ -39,13 +44,8 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 			// A message's content length is its token count, so a test sets
 			// the window in characters.
 			body, _ := io.ReadAll(r.Body)
-			msgs, _ := messagesFromResponses(body)
-			n := 0
-			for _, m := range msgs {
-				n += len(m.Content)
-			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": n})
+			_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": inputTokens(body)})
 			return
 		}
 		if r.URL.Path != "/responses" {
@@ -102,7 +102,7 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 		c, ok := <-ch
 		if !ok {
 			begin()
-			_, _ = io.WriteString(w, completedSSE)
+			_, _ = io.WriteString(w, completedSSE(inputTokens(body)))
 			flush()
 			return
 		}
@@ -121,26 +121,41 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 			emit(c)
 		}
 		begin()
-		_, _ = io.WriteString(w, completedSSE)
+		_, _ = io.WriteString(w, completedSSE(inputTokens(body)))
 		flush()
 	}))
 	// After the server close hook, so a blocked script is released first.
 	tb.Cleanup(cancelLife)
-	return openai.NewOpenAIInferenceStrategy(srv.Client()).
+	return openai.New(srv.Client()).
 		WithApiKey("test-key").
 		WithModel(model).
 		WithURL(srv.URL)
 }
 
-const completedSSE = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+// completedSSE ends a response, reporting its input tokens as a provider
+// does: the same count the token-count endpoint gives for the request.
+func completedSSE(inputTokens int) string {
+	return fmt.Sprintf("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":%d,\"output_tokens\":1}}}\n\n", inputTokens)
+}
+
+// inputTokens is a request's token count: a message's content length is
+// its token count, so a test sets the window in characters.
+func inputTokens(body []byte) int {
+	msgs, _ := messagesFromResponses(body)
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Content)
+	}
+	return n
+}
 
 func writeProviderError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
 	code := "invalid_request"
 	switch {
-	case errors.Is(err, tacklr.ErrModelRefused):
+	case errors.Is(err, session.ErrModelRefused):
 		code = "content_filter"
-	case errors.Is(err, tacklr.ErrMaxTokens):
+	case errors.Is(err, session.ErrMaxTokens):
 		code = "max_tokens"
 	case errors.Is(err, tacklr.ErrNetwork):
 		status = http.StatusBadGateway
@@ -155,7 +170,7 @@ func writeProviderError(w http.ResponseWriter, err error) {
 
 func writeChunk(w http.ResponseWriter, c tacklr.LLMResponseChunk) {
 	switch c.Type {
-	case tacklr.StreamEventFunctionCall:
+	case session.EventFunctionCall:
 		for _, tc := range c.ToolCalls {
 			name := tc.Name
 			if tc.Namespace != "" {
@@ -167,7 +182,7 @@ func writeChunk(w http.ResponseWriter, c tacklr.LLMResponseChunk) {
 			})
 			_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.done\",\"item\":"+string(item)+"}\n\n")
 		}
-	case tacklr.StreamEventReasoning:
+	case session.EventReasoning:
 		if c.Content != "" {
 			delta, _ := json.Marshal(c.Content)
 			_, _ = io.WriteString(w, "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"delta\":"+string(delta)+"}\n\n")
@@ -175,7 +190,7 @@ func writeChunk(w http.ResponseWriter, c tacklr.LLMResponseChunk) {
 		if c.IsComplete {
 			_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}}\n\n")
 		}
-	case tacklr.StreamEventMessage:
+	case session.EventMessage:
 		if c.Content != "" {
 			delta, _ := json.Marshal(c.Content)
 			_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"delta\":"+string(delta)+"}\n\n")
@@ -183,7 +198,7 @@ func writeChunk(w http.ResponseWriter, c tacklr.LLMResponseChunk) {
 		if c.IsComplete {
 			_, _ = io.WriteString(w, "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"\"}]}}\n\n")
 		}
-	case tacklr.StreamEventError:
+	case session.EventError:
 		payload, _ := json.Marshal(map[string]any{
 			"type": "response.failed",
 			"response": map[string]any{
@@ -229,7 +244,7 @@ func unpairedCalls(body []byte) string {
 	return ""
 }
 
-func messagesFromResponses(body []byte) ([]*tacklr.Message, []*tacklr.Tool) {
+func messagesFromResponses(body []byte) ([]*message.Message, []*tacklr.Tool) {
 	var req struct {
 		Input json.RawMessage `json:"input"`
 		Tools json.RawMessage `json:"tools"`
@@ -241,13 +256,13 @@ func messagesFromResponses(body []byte) ([]*tacklr.Message, []*tacklr.Tool) {
 	if json.Unmarshal(req.Input, &raws) != nil {
 		return nil, toolsFromResponses(req.Tools)
 	}
-	var msgs []*tacklr.Message
-	var calls []tacklr.ToolCall
+	var msgs []*message.Message
+	var calls []message.ToolCall
 	flush := func() {
 		if len(calls) == 0 {
 			return
 		}
-		msgs = append(msgs, &tacklr.Message{Role: tacklr.RoleAssistant, ToolCalls: calls})
+		msgs = append(msgs, &message.Message{Role: message.RoleAssistant, ToolCalls: calls})
 		calls = nil
 	}
 	for _, raw := range raws {
@@ -266,14 +281,14 @@ func messagesFromResponses(body []byte) ([]*tacklr.Message, []*tacklr.Tool) {
 		switch {
 		case item.Type == "function_call":
 			ns, name := splitToolName(item.Name)
-			calls = append(calls, tacklr.ToolCall{ID: item.CallID, CallID: item.CallID, Name: name, Namespace: ns, Arguments: item.Arguments})
+			calls = append(calls, message.ToolCall{ID: item.CallID, CallID: item.CallID, Name: name, Namespace: ns, Arguments: item.Arguments})
 		case item.Type == "function_call_output":
 			flush()
-			msgs = append(msgs, &tacklr.Message{Role: tacklr.RoleTool, Content: textContent(item.Output), ToolCallID: item.CallID})
+			msgs = append(msgs, &message.Message{Role: message.RoleTool, Content: textContent(item.Output), ToolCallID: item.CallID})
 		case item.Role != "":
 			flush()
 			text, parts := messageContent(item.Content)
-			msgs = append(msgs, &tacklr.Message{Role: tacklr.MessageRole(item.Role), Content: text, ContentParts: parts})
+			msgs = append(msgs, &message.Message{Role: message.Role(item.Role), Content: text, ContentParts: parts})
 		}
 	}
 	flush()
@@ -310,7 +325,7 @@ func splitToolName(name string) (namespace, short string) {
 	return ns, short
 }
 
-func messageContent(raw json.RawMessage) (string, []tacklr.ContentPart) {
+func messageContent(raw json.RawMessage) (string, []message.ContentPart) {
 	if len(raw) == 0 {
 		return "", nil
 	}
@@ -331,20 +346,20 @@ func messageContent(raw json.RawMessage) (string, []tacklr.ContentPart) {
 		return "", nil
 	}
 	var b strings.Builder
-	var out []tacklr.ContentPart
+	var out []message.ContentPart
 	for _, p := range parts {
 		switch p.Type {
 		case "input_text", "output_text", "":
 			b.WriteString(p.Text)
 		case "input_image":
-			out = append(out, tacklr.ContentPart{
-				Type:     tacklr.ContentTypeInputImage,
-				ImageURL: &tacklr.ImageURL{URL: p.ImageURL, Detail: p.Detail},
+			out = append(out, message.ContentPart{
+				Type:     message.ContentTypeInputImage,
+				ImageURL: &message.ImageURL{URL: p.ImageURL, Detail: p.Detail},
 			})
 		case "input_file":
-			out = append(out, tacklr.ContentPart{
-				Type: tacklr.ContentTypeInputFile,
-				FileData: &tacklr.FileData{
+			out = append(out, message.ContentPart{
+				Type: message.ContentTypeInputFile,
+				FileData: &message.FileData{
 					Data:     p.FileData,
 					Filename: p.Filename,
 					FileID:   p.FileID,

@@ -126,7 +126,7 @@ func TestInvoke(t *testing.T) {
 	t.Run("handler that needs runtime fails closed without one", func(t *testing.T) {
 		tool := NewTool(ToolConfig{
 			Name: "needs_rt",
-			Handler: func(ctx context.Context, rt *HarnessRuntime) (string, error) {
+			Handler: func(ctx context.Context, cc *CallContext) (string, error) {
 				return "ok", nil
 			},
 		})
@@ -152,7 +152,21 @@ func TestInvoke(t *testing.T) {
 		}
 	})
 
-	// Parent cancel is a distinct Invoke outcome from tool Timeout (covered via harness).
+	t.Run("a tool past its timeout is a correction to narrow the request", func(t *testing.T) {
+		for name, handler := range map[string]func(context.Context) (string, error){
+			"one that stops on its deadline": func(ctx context.Context) (string, error) { <-ctx.Done(); return "", ctx.Err() },
+			"one that ignores its deadline":  func(context.Context) (string, error) { time.Sleep(50 * time.Millisecond); return "late", nil },
+		} {
+			tool := NewTool(ToolConfig{Name: "slow", Timeout: 5 * time.Millisecond, Handler: handler})
+
+			_, err := tool.invoke(context.Background(), "", nil)
+
+			if !errors.Is(err, ErrToolTimeout) {
+				t.Errorf("%s = %v, want ErrToolTimeout", name, err)
+			}
+		}
+	})
+
 	t.Run("parent cancellation is not reported as tool timeout", func(t *testing.T) {
 		tool := NewTool(ToolConfig{
 			Name:    "slow",
@@ -246,6 +260,30 @@ func TestSchema(t *testing.T) {
 		lookup := props["lookup"].(map[string]any)
 		if lookup["type"] != "object" || lookup["additionalProperties"].(map[string]any)["type"] != "integer" {
 			t.Errorf("lookup = %v", lookup)
+		}
+	})
+
+	t.Run("numbers and a recursive type", func(t *testing.T) {
+		type node struct {
+			Weight   float64 `json:"weight"`
+			Children []node  `json:"children"`
+		}
+		tool := NewTool(ToolConfig{Name: "tree", Handler: func(context.Context, node) (string, error) { return "", nil }})
+		s := asParams(t, tool)
+		props := s["properties"].(map[string]any)
+		if props["weight"].(map[string]any)["type"] != "number" {
+			t.Errorf("weight = %v, want a number", props["weight"])
+		}
+		// The schema of a recursive type stops at a fixed depth.
+		for depth := 0; ; depth++ {
+			items, ok := props["children"].(map[string]any)["items"].(map[string]any)
+			if !ok || items["type"] != "object" {
+				if depth == 0 {
+					t.Fatalf("children = %v, want nested objects", props["children"])
+				}
+				break
+			}
+			props = items["properties"].(map[string]any)
 		}
 	})
 
@@ -378,6 +416,8 @@ func TestNewTool_validation(t *testing.T) {
 		{"too many args", ToolConfig{Name: "t", Handler: func(ctx context.Context, a BasicArgs, b BasicArgs, c BasicArgs) (string, error) {
 			return "", nil
 		}}, ""}, // "too many parameters" or "unexpected parameter"
+		{"a parameter after the arguments that is not the runtime", ToolConfig{Name: "t", Handler: func(context.Context, BasicArgs, string) (string, error) { return "", nil }}, "want *CallContext"},
+		{"a nil on-call", ToolConfig{Name: "t", Handler: zeroArgsStringHandler, OnCall: []OnCallFunc{nil}}, "must not be nil"},
 		{"unregistered on-call", ToolConfig{Name: "t", Handler: zeroArgsStringHandler, OnCall: []OnCallFunc{func(ToolInvocation) Interrupt {
 			return unregisteredOnCall{}
 		}}}, "not registered"},

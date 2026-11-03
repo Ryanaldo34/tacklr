@@ -5,32 +5,34 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path"
 	"slices"
 	"strings"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
-	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-// TurnManager is one session's harness for one step: a model request, one
+// Harness is one session's harness for one step: a model request, one
 // tool call, or a commit to the window. Durable runtimes
-// construct it for each step; hosts use session.Runtime.
-type TurnManager struct {
-	model                 InferenceStrategy
+// construct it for each step; hosts use session.Client.
+type Harness struct {
+	model                 Model
 	sessionId             string
 	tools                 []*Tool
-	mcpConfigs            []mcp.MCPConfig
-	mcpCredentialResolver mcp.CredentialResolver
+	mcpConfigs            []session.MCPServer
+	mcpCredentialResolver session.MCPCredentialResolver
 	instructions          string
 	maxWindowSize         int
 	session               *sessionManager
@@ -52,12 +54,15 @@ type TurnManager struct {
 	toolRunner   *toolRunner
 	// modelSeq counts model requests, for model span sequence numbers.
 	modelSeq int
+	// usage is the provider's input token count for the last model request
+	// of this harness, so a commit far below the window skips CountTokens.
+	usage requestUsage
 }
 
 // commitRound appends one complete round to the window. A round with a
 // window effect goes in as it is, and the effect then replaces the window.
 // Any other round is fitted.
-func (a *TurnManager) commitRound(ctx context.Context, round []*Message, effect ToolResultEffect) error {
+func (a *Harness) commitRound(ctx context.Context, round []*message.Message, effect ToolResultEffect) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -70,7 +75,7 @@ func (a *TurnManager) commitRound(ctx context.Context, round []*Message, effect 
 
 // stageOverflow writes a result's full text under OverflowPath and returns
 // its virtual path, so the agent can read what a trim cut.
-func (a *TurnManager) stageOverflow(ctx context.Context, callID, content string) (string, error) {
+func (a *Harness) stageOverflow(ctx context.Context, callID, content string) (string, error) {
 	dir := path.Join(a.overflowPath, a.sessionId)
 	if err := a.session.VFS.Route(ctx, dir).MkdirAll(ctx); err != nil {
 		return "", err
@@ -82,7 +87,7 @@ func (a *TurnManager) stageOverflow(ctx context.Context, callID, content string)
 	return p, nil
 }
 
-func (a *TurnManager) constructSystemPrompt() string {
+func (a *Harness) constructSystemPrompt() string {
 	// Skills load once in finishInit / Run; do not re-init here (prompt caching).
 	// Keep this string free of per-turn mutable runtime state (plan status,
 	// session ids, etc.) so provider prompt caching can reuse the system prefix.
@@ -240,7 +245,7 @@ These instructions describe how the user generally wants you to behave, not what
 
 // applyEffect applies a round's window effect: install the plan document,
 // or hand off the remaining todos.
-func (a *TurnManager) applyEffect(ctx context.Context, effect ToolResultEffect) error {
+func (a *Harness) applyEffect(ctx context.Context, effect ToolResultEffect) error {
 	if effect == EffectHandoff {
 		return a.handoff(ctx)
 	}
@@ -252,24 +257,22 @@ func (a *TurnManager) applyEffect(ctx context.Context, effect ToolResultEffect) 
 
 // keepsHistory reports whether messages that leave the window are saved
 // for search: the session has a Brain and an id.
-func (a *TurnManager) keepsHistory() bool {
+func (a *Harness) keepsHistory() bool {
 	return a.brain != nil && strings.TrimSpace(a.sessionId) != ""
 }
 
 // saveSessionMessages saves messages that leave the window (a collapse or
 // a handoff) as this session's messages, so search finds them and open
 // reads one exactly. A store error stops the collapse or handoff.
-func (a *TurnManager) saveSessionMessages(ctx context.Context, window []*Message) error {
+func (a *Harness) saveSessionMessages(ctx context.Context, window []*message.Message) error {
 	if !a.keepsHistory() || len(window) == 0 {
 		return nil
 	}
 	msgs := make([]brain.SessionMessage, 0, len(window))
 	hash := sha256.New()
 	for _, m := range window {
-		raw, err := json.Marshal(m)
-		if err != nil {
-			return fmt.Errorf("save session messages: %w", err)
-		}
+		// A Message is strings all the way down: it always encodes.
+		raw, _ := json.Marshal(m)
 		_, _ = hash.Write(raw)
 		_, _ = hash.Write([]byte{0})
 		msgs = append(msgs, brain.SessionMessage{
@@ -285,7 +288,7 @@ func (a *TurnManager) saveSessionMessages(ctx context.Context, window []*Message
 	return nil
 }
 
-func messageSearchText(m *Message) string {
+func messageSearchText(m *message.Message) string {
 	var b strings.Builder
 	b.WriteString(string(m.Role))
 	b.WriteByte('\n')
@@ -294,7 +297,7 @@ func messageSearchText(m *Message) string {
 		b.WriteByte('\n')
 	}
 	for _, p := range m.ContentParts {
-		if p.Type != ContentTypeOutputText && p.Type != ContentTypeInputText {
+		if p.Type != message.ContentTypeOutputText && p.Type != message.ContentTypeInputText {
 			continue
 		}
 		if p.Text == "" {
@@ -316,7 +319,7 @@ func messageSearchText(m *Message) string {
 	return b.String()
 }
 
-func (a *TurnManager) findTool(name, namespace string) *Tool {
+func (a *Harness) findTool(name, namespace string) *Tool {
 	idx := slices.IndexFunc(a.tools, func(t *Tool) bool {
 		return t.name == name && t.namespace == namespace
 	})
@@ -330,30 +333,26 @@ func (a *TurnManager) findTool(name, namespace string) *Tool {
 // message cancelled before it had one.
 const CancelledToolResultContent = "cancelled: user interrupted the agent"
 
-// streamChunk maps a model chunk to a harness StreamEvent.
+// streamChunk maps a model chunk to a harness session.Event.
 // Function-call Category and Title are set on a copy; Name stays programmatic
 // so execution and model history keep using the real tool name.
-// Ignores StreamEventComplete (usage only; the wait loop ends the turn).
-func (a *TurnManager) streamChunk(chunk LLMResponseChunk, out chan<- StreamEvent) {
-	if chunk.Type == "" || chunk.Type == StreamEventComplete {
+// Ignores session.EventComplete (usage only; the wait loop ends the turn).
+func (a *Harness) streamChunk(chunk LLMResponseChunk, out chan<- session.Event) {
+	if chunk.Type == "" || chunk.Type == session.EventComplete {
 		return
 	}
 	toolCalls := chunk.ToolCalls
-	if chunk.Type == StreamEventFunctionCall && len(chunk.ToolCalls) > 0 {
-		toolCalls = append([]ToolCall(nil), chunk.ToolCalls...)
+	if chunk.Type == session.EventFunctionCall && len(chunk.ToolCalls) > 0 {
+		toolCalls = append([]message.ToolCall(nil), chunk.ToolCalls...)
 		for i := range toolCalls {
 			toolCalls[i] = a.withToolPresentation(toolCalls[i])
 		}
 	}
-	evErr := chunk.Error
-	if chunk.Type == StreamEventError && evErr == nil && chunk.Content != "" {
-		evErr = errors.New(chunk.Content)
-	}
-	out <- StreamEvent{
+	out <- session.Event{
 		Type:      chunk.Type,
 		TurnID:    chunk.TurnId,
 		MessageID: chunk.MessageId,
-		Error:     evErr,
+		Error:     chunk.Err(),
 		ToolCalls: toolCalls,
 		Content:   chunk.Content,
 	}
@@ -361,7 +360,7 @@ func (a *TurnManager) streamChunk(chunk LLMResponseChunk, out chan<- StreamEvent
 
 // withToolPresentation fills Category and Title for client-facing tool events.
 // Name is never rewritten.
-func (a *TurnManager) withToolPresentation(tc ToolCall) ToolCall {
+func (a *Harness) withToolPresentation(tc message.ToolCall) message.ToolCall {
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
 		return tc
@@ -372,13 +371,13 @@ func (a *TurnManager) withToolPresentation(tc ToolCall) ToolCall {
 }
 
 // toolResultMessage builds a tool Message (presented tc for wire/stream).
-func (a *TurnManager) toolResultMessage(tc ToolCall, content, status string) (msg *Message, presented ToolCall) {
+func (a *Harness) toolResultMessage(tc message.ToolCall, content, status string) (msg *message.Message, presented message.ToolCall) {
 	if status != "" {
 		tc.Status = status
 	}
 	presented = a.withToolPresentation(tc)
-	msg = &Message{
-		Role:       RoleTool,
+	msg = &message.Message{
+		Role:       message.RoleTool,
 		ToolCallID: presented.WireID(),
 		Content:    content,
 	}
@@ -387,34 +386,34 @@ func (a *TurnManager) toolResultMessage(tc ToolCall, content, status string) (ms
 
 // emitToolResult streams a tool result and returns its message for the
 // round.
-func (a *TurnManager) emitToolResult(out chan<- StreamEvent, tc ToolCall, content, status string) *Message {
+func (a *Harness) emitToolResult(out chan<- session.Event, tc message.ToolCall, content, status string) *message.Message {
 	msg, presented := a.toolResultMessage(tc, content, status)
-	out <- StreamEvent{
-		Type:      StreamEventToolResult,
+	out <- session.Event{
+		Type:      session.EventToolResult,
 		MessageID: presented.Key(),
 		Content:   content,
-		ToolCalls: []ToolCall{presented},
+		ToolCalls: []message.ToolCall{presented},
 	}
 	return msg
 }
 
 // emitPlanUpdate streams plan_update when a plan tool changed the todos.
-func (a *TurnManager) emitPlanUpdate(out chan<- StreamEvent) {
+func (a *Harness) emitPlanUpdate(out chan<- session.Event) {
 	todos, ok := a.session.Plan.ConsumeTodosUpdated()
 	if !ok {
 		return
 	}
 	data, _ := json.Marshal(todos)
-	out <- StreamEvent{Type: StreamEventPlanUpdate, Data: data}
+	out <- session.Event{Type: session.EventPlanUpdate, Data: data}
 }
 
 // initMCP discovers MCP tools and appends them. Skips unreachable servers.
-func (a *TurnManager) initMCP(ctx context.Context) {
+func (a *Harness) initMCP(ctx context.Context) {
 	if len(a.mcpConfigs) == 0 {
 		return
 	}
 
-	configs := make([]mcp.MCPConfig, 0, len(a.mcpConfigs))
+	configs := make([]session.MCPServer, 0, len(a.mcpConfigs))
 	for _, config := range a.mcpConfigs {
 		resolved, err := config.Resolve(ctx, a.mcpCredentialResolver)
 		if err != nil {
@@ -433,7 +432,7 @@ func (a *TurnManager) initMCP(ctx context.Context) {
 			Description: description,
 			Namespace:   namespace,
 			Schema:      schema,
-			Handler: func(ctx context.Context, args map[string]any, _ *HarnessRuntime) (string, error) {
+			Handler: func(ctx context.Context, args map[string]any, _ *CallContext) (string, error) {
 				return handler(ctx, args)
 			},
 		})
@@ -444,7 +443,7 @@ func (a *TurnManager) initMCP(ctx context.Context) {
 // Close releases the turn's MCP connections. The session runtime closes the
 // MountSession. Call after the events channel is drained, or when construct
 // fails.
-func (a *TurnManager) Close() {
+func (a *Harness) Close() {
 	if a.mcpCleanup != nil {
 		a.mcpCleanup()
 		a.mcpCleanup = nil
@@ -470,7 +469,7 @@ func EpisodeKinds() []brain.KindSpec {
 // under the session's namespace. The id comes from the namespace and the
 // result, so a retried step saves it once. A failed save is logged: the
 // result is already the call's result.
-func (a *TurnManager) keepSpecialistResult(ctx context.Context, output string) {
+func (a *Harness) keepSpecialistResult(ctx context.Context, output string) {
 	output = strings.TrimSpace(output)
 	if a.brain == nil || output == "" {
 		return

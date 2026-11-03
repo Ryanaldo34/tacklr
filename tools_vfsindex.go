@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -42,10 +44,10 @@ func (v vfsIndexTools) newIndexFile() *Tool {
 		Description: `Index one or more files into the knowledge store so later search can find them without carrying the full file body. Call for papers, protocols, notes, or specs that this plan or later todos will need, typically near the end of a research or discovery todo.
 
 Requires an active plan. Returns one status line per path: indexed, skipped (unchanged, binary, or empty), or error. Does not return file contents. The whole call fails (nothing indexed) if more than 8 paths are passed, a path is a directory, a path is missing, or indexing is disabled on that mount.`,
-		Category: ToolCategoryExecute,
+		Category: message.ToolCategoryExecute,
 		Access:   ToolWriteAccess,
 		Timeout:  120 * time.Second,
-		Handler: func(ctx context.Context, args indexFileArgs, runtime *HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args indexFileArgs, cc *CallContext) (string, error) {
 			paths, err := collectIndexPaths(args.Path, args.Paths)
 			if err != nil {
 				return "", err
@@ -71,7 +73,7 @@ Requires an active plan. Returns one status line per path: indexed, skipped (unc
 				}
 				jobs = append(jobs, job{path: p, st: st})
 			}
-			runtime.EmitUpdate(fmt.Sprintf("Indexing %d path(s)…", len(jobs)))
+			cc.EmitUpdate(fmt.Sprintf("Indexing %d path(s)…", len(jobs)))
 			var b strings.Builder
 			b.Grow(len(jobs) * 48)
 			for i, j := range jobs {
@@ -95,15 +97,15 @@ func (v vfsIndexTools) newUnindex() *Tool {
 		Name:        "unindex",
 		DisplayName: "Unindex {path}",
 		Description: `Remove a file from the knowledge index so it no longer appears in search. Call when the wrong file was indexed or it should no longer be found for this task. Does not delete the file on disk. Requires an active plan. Returns unindexed path=… when a record was removed, or noop path=… when nothing was indexed.`,
-		Category:    ToolCategoryDelete,
+		Category:    message.ToolCategoryDelete,
 		Access:      ToolWriteAccess,
 		Timeout:     30 * time.Second,
-		Handler: func(ctx context.Context, args unindexArgs, runtime *HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args unindexArgs, cc *CallContext) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", err
 			}
-			runtime.EmitUpdate("Unindexing " + p)
+			cc.EmitUpdate("Unindexing " + p)
 			removed, err := v.idx.UnindexPath(ctx, p)
 			if err != nil {
 				return "", fmt.Errorf("unindex: %w", err)

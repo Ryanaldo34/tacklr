@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/ryanaldo34/tacklr/message"
 )
 
 // pressureRatio is the fraction of MaxWindowSize a commit may fill before
@@ -13,10 +15,10 @@ import (
 const pressureRatio = 0.85
 
 // modelContextManager holds the context window: committed rounds only.
-// TurnManager commits rounds into it; window effects replace it.
+// Harness commits rounds into it; window effects replace it.
 type modelContextManager struct {
 	mu     sync.RWMutex
-	window []*Message
+	window []*message.Message
 }
 
 func newModelContextManager() *modelContextManager {
@@ -24,7 +26,7 @@ func newModelContextManager() *modelContextManager {
 }
 
 // Messages returns a retainable snapshot of the window (also used for checkpoints).
-func (m *modelContextManager) Messages() []*Message {
+func (m *modelContextManager) Messages() []*message.Message {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if len(m.window) == 0 {
@@ -34,7 +36,7 @@ func (m *modelContextManager) Messages() []*Message {
 }
 
 // Restore copies window into storage (caller keeps its slice).
-func (m *modelContextManager) Restore(window []*Message) {
+func (m *modelContextManager) Restore(window []*message.Message) {
 	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -46,7 +48,7 @@ func (m *modelContextManager) Restore(window []*Message) {
 }
 
 // Replace takes ownership of window; do not reuse the slice after.
-func (m *modelContextManager) Replace(window []*Message) {
+func (m *modelContextManager) Replace(window []*message.Message) {
 	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -55,7 +57,7 @@ func (m *modelContextManager) Replace(window []*Message) {
 
 // Add appends a round without fitting it, for a round whose window effect
 // replaces the window next.
-func (m *modelContextManager) Add(round ...*Message) {
+func (m *modelContextManager) Add(round ...*message.Message) {
 	if err := ValidateMessages(round); err != nil {
 		panic("tacklr: invalid context message: " + err.Error())
 	}
@@ -64,7 +66,7 @@ func (m *modelContextManager) Add(round ...*Message) {
 	m.window = append(m.window, round...)
 }
 
-func assertValidContextWindow(window []*Message) {
+func assertValidContextWindow(window []*message.Message) {
 	if err := ValidateMessages(window); err != nil {
 		panic("tacklr: invalid context window: " + err.Error())
 	}
@@ -80,13 +82,13 @@ func (m *modelContextManager) InstallPlanDocument(planRaw string) error {
 	if len(m.window) == 0 || m.window[0] == nil {
 		return fmt.Errorf("install plan document: empty window")
 	}
-	m.window = []*Message{m.window[0], buildPlanDocumentMessage(planRaw)}
+	m.window = []*message.Message{m.window[0], buildPlanDocumentMessage(planRaw)}
 	return nil
 }
 
 // protectedPrefixLen is what a collapse keeps: the first user message, and
 // the plan document after it.
-func protectedPrefixLen(window []*Message) int {
+func protectedPrefixLen(window []*message.Message) int {
 	if len(window) > 1 && IsPlanDocument(window[1]) {
 		return 2
 	}
@@ -110,20 +112,13 @@ func planHasOpenTodos(plan []Todo) bool {
 const planDocumentPrefix = "PROJECT PLAN\n────────────\n"
 
 // IsPlanDocument reports the durable PROJECT PLAN developer message.
-func IsPlanDocument(m *Message) bool {
+func IsPlanDocument(m *message.Message) bool {
 	return m != nil && strings.HasPrefix(m.Content, planDocumentPrefix)
 }
 
-func rawPlanFromDocumentMessage(m *Message) string {
-	if m == nil {
-		return ""
-	}
-	return strings.TrimPrefix(m.Content, planDocumentPrefix)
-}
-
-func buildPlanDocumentMessage(raw string) *Message {
-	return &Message{
-		Role:    RoleDeveloper,
+func buildPlanDocumentMessage(raw string) *message.Message {
+	return &message.Message{
+		Role:    message.RoleDeveloper,
 		Content: planDocumentPrefix + raw,
 	}
 }

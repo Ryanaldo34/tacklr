@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/ryanaldo34/tacklr/mcp"
+	"github.com/ryanaldo34/tacklr/session"
 )
 
 // httpError conveys a non-2xx HTTP response from an MCP server.
@@ -21,7 +21,7 @@ func (e *httpError) Error() string {
 // headerTransport injects configured headers and captures non-2xx bodies.
 type headerTransport struct {
 	base    http.RoundTripper
-	headers []mcp.HTTPHeader
+	headers []session.MCPHeader
 }
 
 func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -43,7 +43,7 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-func buildHTTPClient(cfg mcp.MCPConfig) *http.Client {
+func buildHTTPClient(cfg session.MCPServer) *http.Client {
 	return &http.Client{
 		Transport: &headerTransport{
 			base:    http.DefaultTransport,

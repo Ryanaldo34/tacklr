@@ -8,12 +8,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/server"
 
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
@@ -22,18 +23,18 @@ import (
 type acpWireSession struct {
 	mu           sync.Mutex
 	cwd          string
-	mcpServers   []mcp.MCPConfig
+	mcpServers   []session.MCPServer
 	configValues map[string]string
 	owner        string
-	creds        session.CredentialBag
+	creds        server.CredentialBag
 }
 
 // acpWireEnvelope is the durable JSON blob in server.ProtocolWireStore.
 type acpWireEnvelope struct {
-	CWD          string            `json:"cwd"`
-	ConfigValues map[string]string `json:"configValues"`
-	MCPServers   []mcp.MCPConfig   `json:"mcpServers"`
-	Owner        string            `json:"owner,omitempty"`
+	CWD          string              `json:"cwd"`
+	ConfigValues map[string]string   `json:"configValues"`
+	MCPServers   []session.MCPServer `json:"mcpServers"`
+	Owner        string              `json:"owner,omitempty"`
 }
 
 func (s *acpWireSession) envelope() acpWireEnvelope {
@@ -48,7 +49,7 @@ func (s *acpWireSession) envelope() acpWireEnvelope {
 	return acpWireEnvelope{
 		CWD:          s.cwd,
 		ConfigValues: cfg,
-		MCPServers:   mcp.DurableConfigs(s.mcpServers),
+		MCPServers:   session.DurableMCPServers(s.mcpServers),
 		Owner:        s.owner,
 	}
 }
@@ -67,7 +68,7 @@ func wireSessionFromEnvelope(env acpWireEnvelope) *acpWireSession {
 	}
 	return &acpWireSession{
 		cwd:          env.CWD,
-		mcpServers:   append([]mcp.MCPConfig(nil), env.MCPServers...),
+		mcpServers:   append([]session.MCPServer(nil), env.MCPServers...),
 		configValues: cfg,
 		owner:        env.Owner,
 	}
@@ -124,8 +125,8 @@ func (p *acpProtocol) createSession(ctx context.Context, env server.ProtocolEnv,
 	p.sessions[sessionID] = sess
 	p.mu.Unlock()
 	telemetry.MustInstruments(telemetry.Meter()).RecordSessionCreated(ctx)
-	if _, err := env.Runtime.CreateSession(ctx, session.CreateSession{
-		SessionID:  session.SessionID(sessionID),
+	if _, err := env.Client.CreateSession(ctx, session.CreateSession{
+		SessionID:  session.ID(sessionID),
 		MCPServers: pr.MCPServers,
 	}); err != nil {
 		return "", nil, err
@@ -159,11 +160,11 @@ func (p *acpProtocol) loadSession(ctx context.Context, env server.ProtocolEnv, p
 	if err := p.persistWire(ctx, sessionID, sess); err != nil {
 		return nil, err
 	}
-	_, err = env.Runtime.CreateSession(ctx, session.CreateSession{
-		SessionID:  session.SessionID(sessionID),
+	_, err = env.Client.CreateSession(ctx, session.CreateSession{
+		SessionID:  session.ID(sessionID),
 		MCPServers: sess.mcpServers,
 	})
-	if err != nil && !errors.Is(err, session.ErrSessionExists) {
+	if err != nil && !errors.Is(err, session.ErrExists) {
 		return nil, err
 	}
 	return map[string]any{
@@ -175,9 +176,9 @@ func (p *acpProtocol) loadSession(ctx context.Context, env server.ProtocolEnv, p
 type turnRequest struct {
 	ThreadID    string
 	Prompt      string
-	UserMessage *tacklr.Message
+	UserMessage *message.Message
 	Responses   map[string]json.RawMessage
-	MCPServers  []mcp.MCPConfig
+	MCPServers  []session.MCPServer
 	Auth        session.AuthContext
 }
 
@@ -232,7 +233,7 @@ func (p *acpProtocol) closeSession(ctx context.Context, env server.ProtocolEnv, 
 	if err := p.wire.Delete(ctx, sessionID); err != nil {
 		return err
 	}
-	_ = env.Runtime.Close(ctx, session.SessionID(sessionID))
+	_ = env.Client.Close(ctx, session.ID(sessionID))
 	return nil
 }
 

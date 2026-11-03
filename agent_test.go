@@ -9,6 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
@@ -23,7 +27,7 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 		token     = "unique-retain-handoff-token"
 		callID    = "call-session-1"
 	)
-	h := mustNewTurnManager(t, AgentOptions{
+	h := mustNewHarness(t, AgentOptions{
 		sessionID:       sessionID,
 		MaxWindowSize:   8192,
 		SearchNamespace: ns,
@@ -31,15 +35,15 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 		Model:           &scriptedModel{},
 	})
 	t.Cleanup(h.Close)
-	text := messageSearchText(&Message{
-		Role:    RoleAssistant,
+	text := messageSearchText(&message.Message{
+		Role:    message.RoleAssistant,
 		Content: "body",
-		ContentParts: []ContentPart{
-			{Type: ContentTypeOutputText, Text: "out"},
-			{Type: ContentTypeInputText, Text: ""},
-			{Type: ContentTypeInputImage},
+		ContentParts: []message.ContentPart{
+			{Type: message.ContentTypeOutputText, Text: "out"},
+			{Type: message.ContentTypeInputText, Text: ""},
+			{Type: message.ContentTypeInputImage},
 		},
-		ToolCalls: []ToolCall{
+		ToolCalls: []message.ToolCall{
 			{Name: "search", Arguments: `{"q":"1"}`},
 			{},
 		},
@@ -52,9 +56,9 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 	if err := h.applyEffect(t.Context(), EffectHandoff); err == nil || !strings.Contains(err.Error(), "empty window") {
 		t.Fatalf("empty window = %v", err)
 	}
-	h.context.Restore([]*Message{
-		{Role: RoleUser, Content: "do the work"},
-		{Role: RoleTool, ToolCallID: callID, Content: token},
+	h.context.Restore([]*message.Message{
+		{Role: message.RoleUser, Content: "do the work"},
+		{Role: message.RoleTool, ToolCallID: callID, Content: token},
 	})
 	h.session.Plan.setDocument("plan body")
 	h.session.Plan.set([]Todo{
@@ -93,24 +97,24 @@ func TestCommitRound_aCollapseSavesTheWindowForSearch(t *testing.T) {
 	// The first commit's context is cancelled once it counts tokens, so the
 	// save (the store embeds each message) fails.
 	saving, cancel := context.WithCancel(t.Context())
-	h := mustNewTurnManager(t, AgentOptions{
+	h := mustNewHarness(t, AgentOptions{
 		sessionID:       "sess-collapse",
-		MaxWindowSize:   235,
+		MaxWindowSize:   270,
 		SearchNamespace: mustNS(t, "org", "acme"),
 		Brain:           eng,
 		Model: &scriptedModel{
-			CountTokensFn: func(ctx context.Context, msgs []*Message, tools []*Tool) (int, error) {
+			CountTokensFn: func(ctx context.Context, msgs []*message.Message, tools []*Tool) (int, error) {
 				cancel()
 				return contentTokens(ctx, msgs, tools)
 			},
-			InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "summary", IsComplete: true}
+			InvokeFn: func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+				ch <- LLMResponseChunk{Type: session.EventMessage, Content: "summary", IsComplete: true}
 			},
 		},
 	})
 	t.Cleanup(h.Close)
-	collapsed := &Message{Role: RoleAssistant, Content: strings.Repeat("a", 300) + " " + token}
-	h.context.Restore([]*Message{{Role: RoleUser, Content: "goal"}, collapsed})
+	collapsed := &message.Message{Role: message.RoleAssistant, Content: strings.Repeat("a", 300) + " " + token}
+	h.context.Restore([]*message.Message{{Role: message.RoleUser, Content: "goal"}, buildPlanDocumentMessage("ship"), collapsed})
 	call := func(name, args string) string {
 		res, err := h.findTool(name, "").invoke(t.Context(), args, turnRuntime(h))
 		if err != nil {
@@ -119,21 +123,21 @@ func TestCommitRound_aCollapseSavesTheWindowForSearch(t *testing.T) {
 		return res.Output
 	}
 
-	saveErr := h.commitRound(saving, []*Message{{Role: RoleUser, Content: "follow-up"}}, EffectNone)
+	saveErr := h.commitRound(saving, []*message.Message{{Role: message.RoleUser, Content: "follow-up"}}, EffectNone)
 	kept := len(h.context.Messages())
-	commitErr := h.commitRound(t.Context(), []*Message{{Role: RoleUser, Content: "follow-up"}}, EffectNone)
+	commitErr := h.commitRound(t.Context(), []*message.Message{{Role: message.RoleUser, Content: "follow-up"}}, EffectNone)
 	var found brain.Page
 	if err := json.Unmarshal([]byte(call("search", `{"query":"`+token+`"}`)), &found); err != nil {
 		t.Fatal(err)
 	}
 	hits := slices.Collect(found.Results.Objects())
 
-	if !errors.Is(saveErr, context.Canceled) || kept != 2 {
+	if !errors.Is(saveErr, context.Canceled) || kept != 3 {
 		t.Fatalf("collapse with a failing save = %v, window %d, want the save's error and the window kept", saveErr, kept)
 	}
 	window := h.context.Messages()
-	if commitErr != nil || len(window) != 3 || !strings.Contains(window[1].Content, searchableHistoryNote) || window[2].Content != "follow-up" {
-		t.Fatalf("window = %+v %v, want the goal, a summary that points at search, and the round", window, commitErr)
+	if commitErr != nil || len(window) != 4 || !IsPlanDocument(window[1]) || !strings.Contains(window[2].Content, searchableHistoryNote) || window[3].Content != "follow-up" {
+		t.Fatalf("window = %+v %v, want the goal, the plan, a summary that points at search, and the round", window, commitErr)
 	}
 	if len(hits) != 1 || hits[0].Kind != brain.KindSessionMessage {
 		t.Fatalf("search the collapsed history = %+v, want its saved message", hits)
@@ -150,7 +154,7 @@ func TestHandoff_sessionMessageSaveErrorKeepsWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewTurnManager(t, AgentOptions{
+	h := mustNewHarness(t, AgentOptions{
 		sessionID:       "sess-save-fail",
 		MaxWindowSize:   8192,
 		SearchNamespace: mustNS(t, "org", "acme"),
@@ -158,9 +162,9 @@ func TestHandoff_sessionMessageSaveErrorKeepsWindow(t *testing.T) {
 		Model:           &scriptedModel{},
 	})
 	t.Cleanup(h.Close)
-	h.context.Restore([]*Message{
-		{Role: RoleUser, Content: "do the work"},
-		{Role: RoleAssistant, Content: "kept-detail"},
+	h.context.Restore([]*message.Message{
+		{Role: message.RoleUser, Content: "do the work"},
+		{Role: message.RoleAssistant, Content: "kept-detail"},
 	})
 	h.session.Plan.setDocument("plan body")
 	h.session.Plan.set([]Todo{
@@ -203,8 +207,8 @@ func mustSearch(t *testing.T, eng *brain.Engine, scope brain.Scope, query string
 	return page
 }
 
-func toolCall(id, name, args string) ToolCall {
-	return ToolCall{ID: id, CallID: id, Name: name, Arguments: args}
+func toolCall(id, name, args string) message.ToolCall {
+	return message.ToolCall{ID: id, CallID: id, Name: name, Arguments: args}
 }
 
 func TestTagModelAfterToolsError_wrapsProviderFailures(t *testing.T) {
@@ -213,7 +217,7 @@ func TestTagModelAfterToolsError_wrapsProviderFailures(t *testing.T) {
 
 	fromError := tagModelAfterToolsError(LLMResponseChunk{Error: base})
 	fromWrapped := tagModelAfterToolsError(LLMResponseChunk{Error: wrapped})
-	fromContent := tagModelAfterToolsError(LLMResponseChunk{Content: "provider said no"})
+	fromContent := tagModelAfterToolsError(LLMResponseChunk{Type: session.EventError, Content: "provider said no"})
 
 	if !errors.Is(fromError.Error, ErrModelAfterTools) || fromError.Content == "" {
 		t.Fatalf("from error = %+v", fromError)

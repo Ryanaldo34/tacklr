@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -15,8 +17,8 @@ type vfsAuthWire struct {
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
-func (a vfsAuthWire) credential() vfs.Credential {
-	credential := vfs.Credential{Token: a.Token}
+func (a vfsAuthWire) credential() mount.Credential {
+	credential := mount.Credential{Token: a.Token}
 	if a.ExpiresAt != nil {
 		credential.ExpiresAt = a.ExpiresAt.UTC()
 	}
@@ -50,13 +52,13 @@ type vfsUnbindParams struct {
 	Name      string `json:"name"`
 }
 
-func (item vfsBindItem) binding() vfs.Binding {
+func (item vfsBindItem) binding() mount.Binding {
 	provider := item.Provider
 	if provider == "" {
 		provider = item.Profile
 	}
 	writable := item.ReadOnly != nil && !*item.ReadOnly
-	return vfs.Binding{
+	return mount.Binding{
 		Provider: provider,
 		Point:    item.Point,
 		Auth:     item.Auth.credential(),
@@ -109,7 +111,7 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env server.ProtocolEnv,
 			errs = append(errs, itemErr{Point: item.Point, Error: err.Error()})
 			continue
 		}
-		okItems = append(okItems, mounted{Point: vfs.WorkspacePoint, Provider: b.Provider})
+		okItems = append(okItems, mounted{Point: mount.WorkspacePoint, Provider: b.Provider})
 	}
 	return map[string]any{
 		"mounted": okItems,

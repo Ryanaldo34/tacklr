@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -23,9 +25,9 @@ func TestMountSession_localSession(t *testing.T) {
 		vfs.At("work", vfs.Local(base)),
 		vfs.At("nested", vfs.Local(base)).ReadOnly(),
 		vfs.At("ab", vfs.Local(base)),
-	)(ctx, "sess-1", vfs.Request{Bindings: []vfs.Binding{
-		{Params: map[string]string{vfs.ParamName: "nested", "subpath": "nested"}},
-		{Params: map[string]string{vfs.ParamName: "ab", "subpath": "ab"}},
+	)(ctx, "sess-1", vfs.Request{Bindings: []mount.Binding{
+		{Params: map[string]string{mount.ParamName: "nested", "subpath": "nested"}},
+		{Params: map[string]string{mount.ParamName: "ab", "subpath": "ab"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -270,8 +272,8 @@ func TestDocument_session(t *testing.T) {
 	ms, err := vfs.Tree(
 		vfs.At("work", vfs.Local(base)),
 		vfs.At("ro", vfs.Local(base)).ReadOnly(),
-	)(ctx, "doc-sess", vfs.Request{Bindings: []vfs.Binding{{
-		Params: map[string]string{vfs.ParamName: "ro", "subpath": "ro"},
+	)(ctx, "doc-sess", vfs.Request{Bindings: []mount.Binding{{
+		Params: map[string]string{mount.ParamName: "ro", "subpath": "ro"},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -717,19 +719,19 @@ func (blankTypeCodec) Decode(context.Context, string, string, []byte) (vfs.Docum
 func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 	ctx := t.Context()
 	open := vfs.Local(t.TempDir())
-	if _, err := open(ctx, "s", vfs.Binding{Params: map[string]string{"subpath": ".."}}); err == nil {
+	if _, err := open(ctx, "s", mount.Binding{Params: map[string]string{"subpath": ".."}}); err == nil {
 		t.Fatal("subpath ..")
 	}
-	if _, err := open(ctx, "s", vfs.Binding{Params: map[string]string{"subpath": "/abs"}}); err == nil {
+	if _, err := open(ctx, "s", mount.Binding{Params: map[string]string{"subpath": "/abs"}}); err == nil {
 		t.Fatal("absolute subpath")
 	}
-	if _, err := open(ctx, "sess-id", vfs.Binding{Params: map[string]string{"session_scoped": "true"}}); err != nil {
+	if _, err := open(ctx, "sess-id", mount.Binding{Params: map[string]string{"session_scoped": "true"}}); err != nil {
 		t.Fatalf("session_scoped: %v", err)
 	}
-	if _, err := open(ctx, "../bad", vfs.Binding{Params: map[string]string{"session_scoped": "true"}}); err == nil {
+	if _, err := open(ctx, "../bad", mount.Binding{Params: map[string]string{"session_scoped": "true"}}); err == nil {
 		t.Fatal("unsafe session id")
 	}
-	if _, err := vfs.Local("rel")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := vfs.Local("rel")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("relative base")
 	}
 	file, err := os.CreateTemp(t.TempDir(), "notdir")
@@ -737,7 +739,7 @@ func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = file.Close()
-	if _, err := vfs.Local(file.Name())(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := vfs.Local(file.Name())(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("file as base")
 	}
 	if _, err := vfs.NewLocalProvider("relative"); err == nil {

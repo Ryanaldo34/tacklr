@@ -3,12 +3,14 @@ package tacklr
 import (
 	"context"
 	"errors"
+	"fmt"
+
+	"github.com/ryanaldo34/tacklr/message"
 
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-// Shared errors and the inference contract for harness hosts.
-// Message, StreamEvent, Todo, and related conversation types live in this package.
+// Shared errors and the inference contract (Model) for harness hosts.
 
 // Coarse categories for errors.Is. Wrap a specific message at the call site
 // (fmt.Errorf("tool %q: %w", name, ErrNotFound)) instead of a sentinel per
@@ -27,8 +29,6 @@ var (
 )
 
 var (
-	ErrModelRefused         = errors.New("model refused")
-	ErrMaxTokens            = errors.New("max tokens reached")
 	ErrModelAfterTools      = errors.New("model request failed after tools completed")
 	ErrApiKeyNotSet         = errors.New("api key not set")
 	ErrModelNotSet          = errors.New("model not set")
@@ -61,7 +61,7 @@ func Network(err error) error {
 // state: everything a request needs is here, so one strategy is safe to
 // share across sessions and calls.
 type ModelRequest struct {
-	Messages     []*Message
+	Messages     []*message.Message
 	Tools        []*Tool
 	SystemPrompt string
 	// CacheKey is the session id. A strategy may send it so the provider
@@ -69,11 +69,11 @@ type ModelRequest struct {
 	CacheKey string
 }
 
-// InferenceStrategy is the model provider interface used by the harness.
+// Model is the model provider interface used by the harness.
 // Model and endpoint settings (the fluent With* builders) live on concrete
-// providers such as *openai.OpenAIInferenceStrategy; everything per request
+// providers such as *openai.Model; everything per request
 // is in ModelRequest.
-type InferenceStrategy interface {
+type Model interface {
 	Invoke(ctx context.Context, req ModelRequest) (chan LLMResponseChunk, error)
 	// CountTokens counts what Invoke would send for req.
 	CountTokens(ctx context.Context, req ModelRequest) (int, error)
@@ -102,14 +102,14 @@ func ToolChoiceNone(ctx context.Context) bool {
 }
 
 // UnsupportedMIMEs returns mimes for which s.SupportsMIME is false (first-seen order).
-func UnsupportedMIMEs(s InferenceStrategy, mimes []string) []string {
+func UnsupportedMIMEs(s Model, mimes []string) []string {
 	if s == nil || len(mimes) == 0 {
 		return nil
 	}
 	var bad []string
 	seen := make(map[string]struct{}, len(mimes))
 	for _, m := range mimes {
-		m = NormalizeMIME(m)
+		m = message.NormalizeMIME(m)
 		if _, ok := seen[m]; ok {
 			continue
 		}
@@ -148,5 +148,10 @@ const JobRunning = "running"
 
 // RegisterInterrupt registers a custom interrupt factory for session rehydrate.
 func RegisterInterrupt(factory func() Interrupt) {
-	registerInterrupt(factory)
+	intr := factory()
+	name := intr.TypeName()
+	if _, ok := interruptFactories[name]; ok {
+		panic(fmt.Sprintf("interrupt type %q registered twice", name))
+	}
+	interruptFactories[name] = factory
 }

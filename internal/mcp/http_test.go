@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/mcp"
+	"github.com/ryanaldo34/tacklr/session"
 )
 
 func TestHeaderTransportInjectsHeaders(t *testing.T) {
@@ -21,7 +21,7 @@ func TestHeaderTransportInjectsHeaders(t *testing.T) {
 
 	transport := &headerTransport{
 		base: http.DefaultTransport,
-		headers: []mcp.HTTPHeader{
+		headers: []session.MCPHeader{
 			{Name: "Authorization", Value: "Bearer shhh"},
 			{Name: "X-Custom", Value: "value"},
 		},

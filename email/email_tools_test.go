@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr"
 )
 
@@ -52,7 +54,7 @@ func TestEmailTools_schemaAndValidation(t *testing.T) {
 	}
 
 	tool := ReadInbox(p)
-	if tool.Name() != "read_inbox" || tool.Access() != tacklr.ToolReadAccess || tool.Category() != tacklr.ToolCategoryRead {
+	if tool.Name() != "read_inbox" || tool.Access() != tacklr.ToolReadAccess || tool.Category() != message.ToolCategoryRead {
 		t.Fatalf("tool = %s access=%v category=%s", tool.Name(), tool.Access(), tool.Category())
 	}
 	props, _ := tool.AsJson()["parameters"].(map[string]any)["properties"].(map[string]any)

@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
@@ -36,7 +38,7 @@ type memFiles struct {
 	unversioned bool
 }
 
-func (m *memFiles) open(context.Context, string, vfs.Binding) (vfs.Provider, error) { return m, nil }
+func (m *memFiles) open(context.Context, string, mount.Binding) (vfs.Provider, error) { return m, nil }
 
 func (m *memFiles) put(name, body string) {
 	m.mu.Lock()

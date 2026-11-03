@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // Request is this turn's user-owned bind list (tokens + params). Host-owned
 // At members ignore it. User-owned backends (Drive, Graph) match Binding
 // params["name"] to the At name.
 type Request struct {
-	Bindings []Binding
+	Bindings []mount.Binding
 }
 
 // OpenVFS builds a turn-scoped MountSession. Nil OpenVFS means no VFS.
@@ -20,7 +22,7 @@ type OpenVFS func(ctx context.Context, sessionID string, req Request) (*MountSes
 // Open opens a Provider. Close over clients in the function. Binding carries
 // this turn's user token and params (folderId, subpath, …). A nil Provider
 // and nil error means skip (no token for a user-scoped backend).
-type Open func(ctx context.Context, sessionID string, b Binding) (Provider, error)
+type Open func(ctx context.Context, sessionID string, b mount.Binding) (Provider, error)
 
 // Member is one /workspace/<name> backend.
 type Member struct {
@@ -71,7 +73,7 @@ func Tree(members ...Member) OpenVFS {
 			seen[m.name] = struct{}{}
 			b := bindNamed(req.Bindings, m.name)
 			if strings.TrimSpace(b.Point) == "" {
-				b.Point = WorkspacePoint + "/" + m.name
+				b.Point = mount.WorkspacePoint + "/" + m.name
 			}
 			p, err := m.open(ctx, sessionID, b)
 			if err != nil {
@@ -85,9 +87,9 @@ func Tree(members ...Member) OpenVFS {
 			if params == nil {
 				params = map[string]string{}
 			}
-			params[ParamName] = m.name
+			params[mount.ParamName] = m.name
 			spec := MountSpec{
-				Point:      WorkspacePoint + "/" + m.name,
+				Point:      mount.WorkspacePoint + "/" + m.name,
 				Params:     params,
 				ReadOnly:   !writable,
 				Profile:    m.name,
@@ -101,7 +103,7 @@ func Tree(members ...Member) OpenVFS {
 	}
 }
 
-func memberWritable(m Member, b Binding) bool {
+func memberWritable(m Member, b mount.Binding) bool {
 	if strings.TrimSpace(b.Auth.Token) != "" {
 		return b.Writable
 	}
@@ -109,18 +111,18 @@ func memberWritable(m Member, b Binding) bool {
 }
 
 // BindingByName returns the bind whose alias or provider matches name.
-func BindingByName(binds []Binding, name string) (Binding, bool) {
+func BindingByName(binds []mount.Binding, name string) (mount.Binding, bool) {
 	for _, b := range binds {
-		if bindingAlias(b) == name || strings.TrimSpace(b.Provider) == name {
+		if b.Alias() == name || strings.TrimSpace(b.Provider) == name {
 			return b, true
 		}
 	}
-	return Binding{}, false
+	return mount.Binding{}, false
 }
 
-func bindNamed(binds []Binding, name string) Binding {
+func bindNamed(binds []mount.Binding, name string) mount.Binding {
 	if b, ok := BindingByName(binds, name); ok {
 		return b
 	}
-	return Binding{Params: map[string]string{ParamName: name}}
+	return mount.Binding{Params: map[string]string{mount.ParamName: name}}
 }

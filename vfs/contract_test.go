@@ -3,6 +3,8 @@ package vfs_test
 import (
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
@@ -60,7 +62,7 @@ func TestGraph_contract(t *testing.T) {
 func prefixedBackend(t *testing.T, open vfs.Open) vfstest.Backend {
 	t.Helper()
 	ms, err := vfs.Tree(vfs.At("data", open))(t.Context(), "sess-contract", vfs.Request{
-		Bindings: []vfs.Binding{{Params: map[string]string{vfs.ParamName: "data", "prefix": uuid.NewString()}}},
+		Bindings: []mount.Binding{{Params: map[string]string{mount.ParamName: "data", "prefix": uuid.NewString()}}},
 	})
 	if err != nil {
 		t.Fatal(err)

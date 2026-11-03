@@ -7,6 +7,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
@@ -86,8 +90,8 @@ func TestPostgresWireStore_acpLoadAfterRestart(t *testing.T) {
 	conn := wireConn(t)
 	wire := server.NewPostgresWireStore(conn, "acp")
 
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok", IsComplete: true}
 	})
 
 	r1 := newTestRuntime(t, strategy, tacklr.AgentOptions{})

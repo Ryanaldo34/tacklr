@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/internal/testhttp"
 )
 
@@ -83,7 +85,7 @@ func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 		}
 	}))
 
-	holder := NewTokenHolder(Credential{Token: "tok-1"})
+	holder := NewTokenHolder(mount.Credential{Token: "tok-1"})
 	api, err := newGraphSDK(holder, srv.URL, &http.Client{Timeout: time.Second, Transport: srv.Client().Transport})
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +156,7 @@ func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 		t.Fatalf("no token: %v", err)
 	}
 
-	holder.Set(Credential{Token: "tok-2"})
+	holder.Set(mount.Credential{Token: "tok-2"})
 	if _, err := api.GetItem(ctx, "drv", "root"); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +178,7 @@ func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 	if _, err := api.ListChildren(ctx, "drv", "paged"); err == nil {
 		t.Fatal("paged iterate")
 	}
-	holder.Set(Credential{})
+	holder.Set(mount.Credential{})
 	if _, err := api.GetItem(ctx, "drv", "root"); !errors.Is(err, ErrAuthExpired) {
 		t.Fatalf("empty token: %v", err)
 	}
@@ -207,7 +209,7 @@ func TestGraphSDK_ResolveRootRejectsFileAndMissingDrive(t *testing.T) {
 		}
 	}))
 
-	api, err := newGraphSDK(NewTokenHolder(Credential{Token: "tok"}), srv.URL, srv.Client())
+	api, err := newGraphSDK(NewTokenHolder(mount.Credential{Token: "tok"}), srv.URL, srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +333,7 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 		}
 	}))
 
-	holder := NewTokenHolder(Credential{Token: "tok"})
+	holder := NewTokenHolder(mount.Credential{Token: "tok"})
 	sdk, err := newGraphSDK(holder, srv.URL, srv.Client())
 	if err != nil {
 		t.Fatal(err)
@@ -512,7 +514,7 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 		t.Fatalf("validate file: %v", err)
 	}
 
-	holder.Set(Credential{Token: "stale"})
+	holder.Set(mount.Credential{Token: "stale"})
 	stale, err := p.OpenFile(ctx, "a.txt", os.O_RDONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -521,7 +523,7 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 		t.Fatalf("refresh missing: %v", err)
 	}
 	_ = stale.Close()
-	holder.Set(Credential{})
+	holder.Set(mount.Credential{})
 	if _, err := p.Stat(ctx, "a.txt"); !errors.Is(err, ErrAuthExpired) {
 		t.Fatalf("ensure valid: %v", err)
 	}

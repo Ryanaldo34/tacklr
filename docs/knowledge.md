@@ -58,7 +58,7 @@ namespace, so its messages are not in the page. `save` does not append the sessi
 deletes its session messages.
 
 Session messages are not the harness checkpoint. The checkpoint
-(`SessionCheckpoint`) is the live window the runtime saves and restores.
+(the checkpoint, `Harness.Checkpoint`) is the live window the runtime saves and restores.
 Session messages are what left the window, kept for search: `search` finds
 them and `open` reads one exactly.
 

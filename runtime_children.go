@@ -41,7 +41,7 @@ func formatJobs(rows []Job) string {
 	return b.String()
 }
 
-func spawnSpecialist(ctx context.Context, args spawnSpecialistArgs, runtime *HarnessRuntime) (string, error) {
+func spawnSpecialist(ctx context.Context, args spawnSpecialistArgs, cc *CallContext) (string, error) {
 	spec := strings.TrimSpace(args.Specialist)
 	task := strings.TrimSpace(args.TaskDescriptionAndContext)
 	if task == "" {
@@ -51,7 +51,7 @@ func spawnSpecialist(ctx context.Context, args spawnSpecialistArgs, runtime *Har
 		return "", Correctionf(ErrInvalid, "spawn_specialist: specialist is required. Pass a name from the available specialists")
 	}
 	wait := args.Block == nil || *args.Block
-	job, err := runtime.startJob(JobRequest{Name: spec, Task: task, Wait: wait}, true)
+	job, err := cc.startJob(JobRequest{Name: spec, Task: task, Wait: wait}, true)
 	if err != nil {
 		// The name and task are checked above, so the only failure is an
 		// unknown specialist.
@@ -64,16 +64,16 @@ func spawnSpecialist(ctx context.Context, args spawnSpecialistArgs, runtime *Har
 	return fmt.Sprintf("Job %s scheduled (name=%s). The result arrives as a later message. Use list_children to inspect, or cancel_child to stop it.", job.ID, job.Name), nil
 }
 
-func listChildren(_ context.Context, _ listChildrenArgs, runtime *HarnessRuntime) (string, error) {
-	return formatJobs(runtime.Jobs()), nil
+func listChildren(_ context.Context, _ listChildrenArgs, cc *CallContext) (string, error) {
+	return formatJobs(cc.Jobs()), nil
 }
 
-func cancelChild(ctx context.Context, args cancelChildArgs, runtime *HarnessRuntime) (string, error) {
+func cancelChild(ctx context.Context, args cancelChildArgs, cc *CallContext) (string, error) {
 	id := strings.TrimSpace(args.ChildID)
 	if id == "" {
 		return "", Correctionf(ErrInvalid, "cancel_child: child_id is required. Call list_children and pass a child_id from that list")
 	}
-	if err := runtime.CancelJob(ctx, id); err != nil {
+	if err := cc.CancelJob(ctx, id); err != nil {
 		return "", Correctionf(ErrNotFound, "cancel_child: that job is unknown. Call list_children, then cancel_child with an id from that list")
 	}
 	return fmt.Sprintf("Job %s cancelled and removed.", id), nil

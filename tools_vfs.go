@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/internal/command"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -72,15 +74,15 @@ func (v vfsTools) newRead() *Tool {
 Path-only returns the first page of numbered lines (Docs/Word as HTML: one block per line) plus media_type, start, end, eof, and next_start. The N| prefix is display only — it is not in the file. Spreadsheets with no window default to outline.
 
 Fails if the path is missing, the range is invalid, or block_id is unknown.`,
-		Category: ToolCategoryRead,
+		Category: message.ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args readArgs, rt *HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args readArgs, cc *CallContext) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", vfsToolErr("read", args.Path, err)
 			}
-			rt.EmitUpdate("Reading " + p)
+			cc.EmitUpdate("Reading " + p)
 
 			fi, err := v.ms.Route(ctx, p).
 				Stat(ctx)
@@ -89,11 +91,16 @@ Fails if the path is missing, the range is invalid, or block_id is unknown.`,
 			}
 			projected := vfs.IsProjected(fi.MediaType)
 
+			// A window the model passed is checked once, here, for every
+			// file kind; a read without one gets the first page.
 			explicitWindow := args.Start > 0 || args.End > 0
+			if explicitWindow && (args.Start < 1 || args.End < args.Start) {
+				return "", Correctionf(vfs.ErrLineOutOfRange, "read: invalid range start=%d end=%d. Use 1-based half-open start/end, or omit them to read the first page, or pass block_id / outline", args.Start, args.End)
+			}
 			pathOnly := !explicitWindow && args.BlockID == "" && !args.Outline
 			if pathOnly && projected && isTabularMedia(fi.MediaType) {
 				args.Outline = true
-			} else if !explicitWindow && args.BlockID == "" && !args.Outline {
+			} else if !explicitWindow && (args.BlockID != "" || !args.Outline) {
 				args.Start = 1
 				args.End = 1 + vfs.MaxLinesPerWindow
 			}
@@ -104,10 +111,6 @@ Fails if the path is missing, the range is invalid, or block_id is unknown.`,
 
 			if projected && isTabularMedia(fi.MediaType) {
 				return "", vfsToolErr("read", p, vfs.ErrProjected)
-			}
-
-			if args.Start < 1 || args.End < args.Start {
-				return "", Correctionf(vfs.ErrLineOutOfRange, "read: invalid range start=%d end=%d. Use 1-based half-open start/end, or omit them to read the first page, or pass block_id / outline", args.Start, args.End)
 			}
 
 			win, err := v.ms.Route(ctx, p).
@@ -181,16 +184,20 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs) (
 		}
 	}
 	if tabular {
-		return v.readTabular(td, args, &b)
+		out, err := readTabular(td, args, &b)
+		if err != nil {
+			return "", vfsToolErr("read", p, err)
+		}
+		return out, nil
 	}
 	start, end := args.Start, args.End
 	if args.BlockID != "" {
 		if len(blocks) == 0 {
-			return "", fmt.Errorf("read %s: this file has no structured blocks. Read the path without block_id (Docs/Word return numbered HTML lines)", p)
+			return "", Correctionf(vfs.ErrUnknownBlock, "read %s: this file has no structured blocks. Read the path without block_id (Docs/Word return numbered HTML lines)", p)
 		}
 		bl, ok := vfs.FindBlock(blocks, args.BlockID)
 		if !ok {
-			return "", fmt.Errorf("unknown block_id %q. Read the path with outline=true and use an id from that outline", args.BlockID)
+			return "", vfsToolErr("read", p, fmt.Errorf("%w %q", vfs.ErrUnknownBlock, args.BlockID))
 		}
 		fmt.Fprintf(&b, "block_id=%s\n", bl.ID)
 		if projected {
@@ -202,7 +209,7 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs) (
 	if start > 0 && end >= start {
 		win, err := lineWindowFromTextDoc(doc, start, end)
 		if err != nil {
-			return "", err
+			return "", vfsToolErr("read", p, err)
 		}
 		growLineWindow(&b, 64, win.Lines)
 		fmt.Fprintf(&b, "start=%d end=%d returned=%d eof=%v next_start=%d\n",
@@ -214,7 +221,9 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs) (
 	return b.String(), nil
 }
 
-func (v vfsTools) readTabular(td vfs.Grid, args readArgs, b *strings.Builder) (string, error) {
+// readTabular reads a sheet window, a cell or an A1 range. read checked the
+// window; A1 is parsed once, here.
+func readTabular(td vfs.Grid, args readArgs, b *strings.Builder) (string, error) {
 	if args.BlockID == "" {
 		return b.String(), nil
 	}
@@ -241,21 +250,12 @@ func (v vfsTools) readTabular(td vfs.Grid, args readArgs, b *strings.Builder) (s
 		if tsv != "" && !strings.HasSuffix(tsv, "\n") {
 			b.WriteByte('\n')
 		}
-		cells := (r2 - r1 + 1) * (c2 - c1 + 1)
-		if cells > 0 && cells <= smallFormatCells {
-			if err := writeRangeFormats(b, td, sheetKey, r1, c1, r2, c2); err != nil {
-				return "", err
-			}
+		if (r2-r1+1)*(c2-c1+1) <= smallFormatCells {
+			writeRangeFormats(b, td, sheetKey, r1, c1, r2, c2)
 		}
 		return b.String(), nil
 	}
 	start, end := args.Start, args.End
-	if start < 1 {
-		start = 1
-		end = 1 + vfs.MaxLinesPerWindow
-	} else if end < start {
-		end = start + vfs.MaxLinesPerWindow
-	}
 	sh, lines, err := td.ReadRows(sheetKey, start, end)
 	if err != nil {
 		return "", err
@@ -276,20 +276,18 @@ func formatToolCell(c vfs.Cell) string {
 	return s
 }
 
-func writeRangeFormats(b *strings.Builder, td vfs.Grid, sheet string, r1, c1, r2, c2 int) error {
+// writeRangeFormats lists the formatted cells of a range the caller already
+// read, so its sheet exists and each address is one valid cell.
+func writeRangeFormats(b *strings.Builder, td vfs.Grid, sheet string, r1, c1, r2, c2 int) {
 	for r := r1; r <= r2; r++ {
 		for c := c1; c <= c2; c++ {
-			cell, err := td.Cell(sheet, vfs.FormatA1(r, c))
-			if err != nil {
-				return err
-			}
+			cell, _ := td.Cell(sheet, vfs.FormatA1(r, c))
 			if cell.Format.IsZero() {
 				continue
 			}
 			fmt.Fprintf(b, "%s format=%s\n", vfs.FormatA1(r, c), cell.Format.String())
 		}
 	}
-	return nil
 }
 
 const (
@@ -305,10 +303,10 @@ func (v vfsTools) newWrite() *Tool {
 		Description: `Create or edit a plaintext or source file. Call when the path is new or its media_type is text or code. Pass exactly one change (content, old/new, or start/end). Do not copy the N| prefix from a prior read.
 
 May pause for write permission. On success returns path, line_count, and replacements when a substitution ran. Fails if nothing to change, more than one change is passed, old is missing, or the existing file is a document or spreadsheet.`,
-		Category: ToolCategoryEdit,
+		Category: message.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args writeTextArgs, rt *HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args writeTextArgs, cc *CallContext) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", vfsToolErr(writeToolName, args.Path, err)
@@ -341,7 +339,7 @@ May pause for write permission. On success returns path, line_count, and replace
 				End:        args.End,
 				Lines:      args.Lines,
 				Body:       args.Body,
-			}, rt)
+			}, cc)
 		},
 	}
 	return v.withWritePermission(cfg)
@@ -354,10 +352,10 @@ func (v vfsTools) newWriteDocument() *Tool {
 		Description: `Create or edit a Google Doc or Word file. Call when the path is new or its media_type is a document. Pass exactly one change.
 
 May pause for write permission. On success returns path, line_count, and an outline of blocks. Fails if nothing to change, more than one change is passed, or the existing file is plaintext or a spreadsheet.`,
-		Category: ToolCategoryEdit,
+		Category: message.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args writeDocumentArgs, rt *HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args writeDocumentArgs, cc *CallContext) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", vfsToolErr(writeDocumentToolName, args.Path, err)
@@ -389,7 +387,7 @@ May pause for write permission. On success returns path, line_count, and an outl
 				Body:    args.Body,
 				BlockID: args.BlockID,
 				TabID:   args.TabID,
-			}, rt)
+			}, cc)
 		},
 	}
 	return v.withWritePermission(cfg)
@@ -402,10 +400,10 @@ func (v vfsTools) newWriteSpreadsheet() *Tool {
 		Description: `Create a spreadsheet or edit one cell of an existing sheet.
 
 May pause for write permission. On success returns path and line_count. Fails if content is passed for an existing sheet, block_id is missing on an existing sheet, or the existing file is not a spreadsheet.`,
-		Category: ToolCategoryEdit,
+		Category: message.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args writeSpreadsheetArgs, rt *HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args writeSpreadsheetArgs, cc *CallContext) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", vfsToolErr(writeSpreadsheetToolName, args.Path, err)
@@ -418,13 +416,13 @@ May pause for write permission. On success returns path and line_count. Fails if
 			hasCell := args.BlockID != ""
 			switch {
 			case hasContent && hasCell:
-				return "", fmt.Errorf("write_spreadsheet %s: pass only one change: content on a new path, or block_id Sheet!A1 on an existing sheet", p)
+				return "", Correctionf(ErrInvalid, "write_spreadsheet %s: pass only one change: content on a new path, or block_id Sheet!A1 on an existing sheet", p)
 			case !exists && !hasContent:
-				return "", fmt.Errorf("write_spreadsheet %s: create a new spreadsheet with content, or write an existing sheet cell with block_id Sheet!A1", p)
+				return "", Correctionf(ErrInvalid, "write_spreadsheet %s: create a new spreadsheet with content, or write an existing sheet cell with block_id Sheet!A1", p)
 			case exists && hasContent:
 				return "", Correctionf(vfs.ErrProjected, "%s already exists. write_spreadsheet edits one cell with block_id Sheet!A1; it cannot replace an existing sheet in place", p)
 			case exists && !hasCell:
-				return "", fmt.Errorf("write_spreadsheet %s: nothing to change. Pass block_id Sheet!A1 with body and/or format", p)
+				return "", Correctionf(ErrInvalid, "write_spreadsheet %s: nothing to change. Pass block_id Sheet!A1 with body and/or format", p)
 			}
 			return v.applyWrite(ctx, writeSpreadsheetToolName, p, vfs.Mutation{
 				Content: args.Content,
@@ -432,7 +430,7 @@ May pause for write permission. On success returns path and line_count. Fails if
 				Body:    args.Body,
 				Lines:   args.Lines,
 				Format:  args.Format,
-			}, rt)
+			}, cc)
 		},
 	}
 	return v.withWritePermission(cfg)
@@ -445,8 +443,8 @@ func (v vfsTools) withWritePermission(cfg ToolConfig) *Tool {
 	return NewTool(cfg)
 }
 
-func (v vfsTools) applyWrite(ctx context.Context, tool, p string, mut vfs.Mutation, rt *HarnessRuntime) (string, error) {
-	rt.EmitUpdate("Writing " + p)
+func (v vfsTools) applyWrite(ctx context.Context, tool, p string, mut vfs.Mutation, cc *CallContext) (string, error) {
+	cc.EmitUpdate("Writing " + p)
 	res, err := v.ms.Apply(ctx, p, mut)
 	if err != nil {
 		return "", vfsToolErr(tool, p, err)
@@ -479,9 +477,6 @@ func (v vfsTools) requireWriteFamily(ctx context.Context, p, tool string) (exist
 
 // vfsToolErr maps usage mistakes at the VFS tool, not in the turn processor.
 func vfsToolErr(name, path string, err error) error {
-	if err == nil {
-		return nil
-	}
 	switch {
 	case errors.Is(err, vfs.ErrInvalidWrite), errors.Is(err, vfs.ErrConflict):
 		return Correctionf(vfs.ErrInvalidWrite, "%s was not saved. Some of the content may already be in the file. Read the file, then write the full HTML again", path)
@@ -509,6 +504,10 @@ func vfsToolErr(name, path string, err error) error {
 		return Correctionf(vfs.ErrPermission, "%s: permission denied on that path. Use a path the session is allowed to access", name)
 	case errors.Is(err, vfs.ErrReadOnly):
 		return Correctionf(vfs.ErrReadOnly, "%s: that mount is read-only. Read the file, or write under a writable mount", name)
+	case errors.Is(err, vfs.ErrUnknownBlock):
+		return Correctionf(vfs.ErrUnknownBlock, "%s: %v. Read the path with outline=true and use an id from that outline", name, err)
+	case errors.Is(err, vfs.ErrInvalidA1):
+		return Correctionf(vfs.ErrInvalidA1, "%s: %v. Use Sheet!A1 or Sheet!A1:C3", name, err)
 	case errors.Is(err, vfs.ErrLineOutOfRange):
 		return Correctionf(vfs.ErrLineOutOfRange, "%s: that line range is outside the file. Read the path without start/end to see line_count, then request a window that fits", name)
 	case errors.Is(err, vfs.ErrInvalidLine):
@@ -517,7 +516,7 @@ func vfsToolErr(name, path string, err error) error {
 		return Correctionf(vfs.ErrTooLarge, "%s: that payload is too large. Write a smaller window or split the document", name)
 	case errors.Is(err, vfs.ErrFuseNotMounted):
 		return Correctionf(vfs.ErrFuseNotMounted, "%s: the host shell is not mounted. Use read/write on virtual paths instead of run_command", name)
-	case errors.Is(err, vfs.ErrNotTextual):
+	case errors.Is(err, vfs.ErrNotTextual), errors.Is(err, vfs.ErrNoCodec):
 		return Correctionf(vfs.ErrNotTextual, "%s: that file is not text. Use a different path, or write a text/HTML document", name)
 	default:
 		return err
@@ -549,9 +548,6 @@ func isTabularMedia(mt string) bool {
 
 func lineWindowFromTextDoc(doc vfs.Textual, start, end int) (vfs.LineWindow, error) {
 	n := doc.LineCount()
-	if start < 1 || end < start {
-		return vfs.LineWindow{}, fmt.Errorf("invalid range")
-	}
 	eof := false
 	if end > n+1 {
 		end = n + 1
@@ -592,11 +588,11 @@ func newRunCommand(ms *vfs.MountSession) *Tool {
 		Description: `Run a host shell command as /bin/sh -c with cwd at this session's workspace root. Call for directory listings, grep, and other shell work. The shell cannot see other session mounts, system directories are read-only, and each command starts with only PATH, HOME=/tmp and TMPDIR=/tmp (HOME is not kept between commands).
 
 May pause for execute permission. Returns stdout/stderr. A non-zero process exit is still a successful tool result (exit=N in the output). Fails if no command is given or the workspace is not mounted.`,
-		Category: ToolCategoryExecute,
+		Category: message.ToolCategoryExecute,
 		Access:   ToolExecuteAccess,
 		Timeout:  runCommandTimeout,
 		OnCall:   []OnCallFunc{ToolPermissionOnCall},
-		Handler: func(ctx context.Context, args runCommandArgs, rt *HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args runCommandArgs, cc *CallContext) (string, error) {
 			dir := ms.HostDir()
 			if dir == "" {
 				return "", vfsToolErr("run_command", "", vfs.ErrFuseNotMounted)
@@ -605,7 +601,7 @@ May pause for execute permission. Returns stdout/stderr. A non-zero process exit
 			if cmdStr == "" {
 				return "", Correctionf(ErrInvalid, "run_command: command is required. Pass a shell command string, for example ls work")
 			}
-			rt.EmitUpdate("Running " + cmdStr)
+			cc.EmitUpdate("Running " + cmdStr)
 			return command.Run(ctx, dir, cmdStr)
 		},
 	}

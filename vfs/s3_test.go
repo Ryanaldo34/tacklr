@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
@@ -18,13 +20,13 @@ import (
 
 func TestS3_rejectsBadConfig(t *testing.T) {
 	ctx := t.Context()
-	if _, err := vfs.S3(nil, "")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := vfs.S3(nil, "")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("nil client")
 	}
-	if _, err := vfs.S3(vfs.AWSS3{}, "")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := vfs.S3(vfs.AWSS3{}, "")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("missing bucket")
 	}
-	if _, err := vfs.S3(vfs.AWSS3{}, "b")(ctx, "s", vfs.Binding{
+	if _, err := vfs.S3(vfs.AWSS3{}, "b")(ctx, "s", mount.Binding{
 		Params: map[string]string{"prefix": "a/../b"},
 	}); err == nil {
 		t.Fatal("bad prefix")
@@ -55,9 +57,9 @@ func TestMountSession_s3(t *testing.T) {
 	ms, err := vfs.Tree(
 		vfs.At("data", vfs.S3(vfs.AWSS3{Client: client}, bucket)),
 		vfs.At("ro", vfs.S3(vfs.AWSS3{Client: client}, bucket)).ReadOnly(),
-	)(ctx, "sess-s3", vfs.Request{Bindings: []vfs.Binding{
-		{Params: map[string]string{vfs.ParamName: "data", "prefix": "runs/1"}},
-		{Params: map[string]string{vfs.ParamName: "ro", "prefix": "readonly"}},
+	)(ctx, "sess-s3", vfs.Request{Bindings: []mount.Binding{
+		{Params: map[string]string{mount.ParamName: "data", "prefix": "runs/1"}},
+		{Params: map[string]string{mount.ParamName: "ro", "prefix": "readonly"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -253,7 +255,7 @@ func TestMountSession_s3(t *testing.T) {
 	}
 
 	open := vfs.S3(vfs.AWSS3{Client: client}, bucket)
-	p, err := open(ctx, "sess", vfs.Binding{Params: map[string]string{"prefix": "direct"}})
+	p, err := open(ctx, "sess", mount.Binding{Params: map[string]string{"prefix": "direct"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,8 +301,8 @@ func TestMountSession_s3(t *testing.T) {
 		t.Fatal("open root as file")
 	}
 
-	blobMS, err := vfs.Tree(vfs.At("data", vfs.Blob(vfs.AWSS3{Client: client}, "")))(ctx, "blob-s3", vfs.Request{Bindings: []vfs.Binding{{
-		Params: map[string]string{vfs.ParamName: "data", "container": bucket, "prefix": "blobrun"},
+	blobMS, err := vfs.Tree(vfs.At("data", vfs.Blob(vfs.AWSS3{Client: client}, "")))(ctx, "blob-s3", vfs.Request{Bindings: []mount.Binding{{
+		Params: map[string]string{mount.ParamName: "data", "container": bucket, "prefix": "blobrun"},
 	}}})
 	if err != nil {
 		t.Fatal(err)

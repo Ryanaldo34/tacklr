@@ -2,12 +2,14 @@ package tacklr
 
 import (
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/message"
 )
 
 func TestValidateMessages_rejectsUnsupportedRolesAndInvalidToolFields(t *testing.T) {
 	// Act
-	userToolErr := ValidateMessages([]*Message{{Role: RoleUser, ToolCallID: "call"}})
-	unsupportedErr := ValidateMessages([]*Message{{Role: "invalid"}})
+	userToolErr := ValidateMessages([]*message.Message{{Role: message.RoleUser, ToolCallID: "call"}})
+	unsupportedErr := ValidateMessages([]*message.Message{{Role: "invalid"}})
 
 	// Assert
 	if userToolErr == nil {

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -158,22 +160,22 @@ func TestMountSession_unionNameCollisionAfterMount(t *testing.T) {
 
 func TestUnion_constructErrors(t *testing.T) {
 	ctx := t.Context()
-	if _, err := vfs.Union()(ctx, t.Name(), vfs.Binding{}); err == nil {
+	if _, err := vfs.Union()(ctx, t.Name(), mount.Binding{}); err == nil {
 		t.Fatal("empty Union")
 	}
-	if _, err := vfs.Union(nil)(ctx, t.Name(), vfs.Binding{}); err == nil {
+	if _, err := vfs.Union(nil)(ctx, t.Name(), mount.Binding{}); err == nil {
 		t.Fatal("nil member open")
 	}
-	boom := vfs.Open(func(context.Context, string, vfs.Binding) (vfs.Provider, error) {
+	boom := vfs.Open(func(context.Context, string, mount.Binding) (vfs.Provider, error) {
 		return nil, errors.New("open failed")
 	})
-	if _, err := vfs.Union(boom)(ctx, t.Name(), vfs.Binding{}); err == nil {
+	if _, err := vfs.Union(boom)(ctx, t.Name(), mount.Binding{}); err == nil {
 		t.Fatal("member open error")
 	}
-	skip := vfs.Open(func(context.Context, string, vfs.Binding) (vfs.Provider, error) {
+	skip := vfs.Open(func(context.Context, string, mount.Binding) (vfs.Provider, error) {
 		return nil, nil
 	})
-	p, err := vfs.Union(vfs.Local(t.TempDir()), skip)(ctx, t.Name(), vfs.Binding{})
+	p, err := vfs.Union(vfs.Local(t.TempDir()), skip)(ctx, t.Name(), mount.Binding{})
 	if err != nil || p == nil {
 		t.Fatalf("nil member skipped: p=%v err=%v", p, err)
 	}
@@ -248,7 +250,7 @@ func TestMountSession_unionMissingAndCanceled(t *testing.T) {
 
 func TestUnion_providerRejectsWritesAndInvalidPaths(t *testing.T) {
 	ctx := t.Context()
-	p, err := vfs.Union(vfs.Local(t.TempDir()))(ctx, t.Name(), vfs.Binding{})
+	p, err := vfs.Union(vfs.Local(t.TempDir()))(ctx, t.Name(), mount.Binding{})
 	if err != nil {
 		t.Fatal(err)
 	}

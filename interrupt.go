@@ -265,21 +265,11 @@ var (
 // a checkpoint can rehydrate before any tool runs.
 func RegisterDefaults() {
 	defaultsOnce.Do(func() {
-		registerInterrupt(func() Interrupt { return &UserSelectionInterrupt{} })
-		registerInterrupt(func() Interrupt { return &ToolPermissionInterrupt{} })
-		registerInterrupt(func() Interrupt { return &ChildWaiting{Kind: TypeChildWaiting} })
-		registerInterrupt(func() Interrupt { return &AuthExpired{} })
+		RegisterInterrupt(func() Interrupt { return &UserSelectionInterrupt{} })
+		RegisterInterrupt(func() Interrupt { return &ToolPermissionInterrupt{} })
+		RegisterInterrupt(func() Interrupt { return &ChildWaiting{Kind: TypeChildWaiting} })
+		RegisterInterrupt(func() Interrupt { return &AuthExpired{} })
 	})
-}
-
-// registerInterrupt adds a factory under the interrupt's TypeName.
-func registerInterrupt(factory func() Interrupt) {
-	intr := factory()
-	name := intr.TypeName()
-	if _, ok := interruptFactories[name]; ok {
-		panic(fmt.Sprintf("interrupt type %q registered twice", name))
-	}
-	interruptFactories[name] = factory
 }
 
 // NewInterrupt returns a fresh Interrupt for a registered type name.

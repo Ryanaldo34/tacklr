@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -22,13 +24,13 @@ const (
 
 func TestBlob_rejectsBadConfig(t *testing.T) {
 	ctx := t.Context()
-	if _, err := vfs.Blob(nil, "")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := vfs.Blob(nil, "")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("nil client")
 	}
-	if _, err := vfs.Blob(vfs.AzureBlob{}, "")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := vfs.Blob(vfs.AzureBlob{}, "")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("missing container")
 	}
-	if _, err := vfs.Blob(vfs.AzureBlob{}, "c")(ctx, "s", vfs.Binding{
+	if _, err := vfs.Blob(vfs.AzureBlob{}, "c")(ctx, "s", mount.Binding{
 		Params: map[string]string{"prefix": "a/../b"},
 	}); err == nil {
 		t.Fatal("bad prefix")
@@ -51,7 +53,7 @@ func TestBlob_rejectsBadConfig(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := vfs.Blob(vfs.AzureBlob{}, "c")(canceled, "s", vfs.Binding{}); !errors.Is(err, context.Canceled) {
+	if _, err := vfs.Blob(vfs.AzureBlob{}, "c")(canceled, "s", mount.Binding{}); !errors.Is(err, context.Canceled) {
 		t.Fatal("Open canceled")
 	}
 }
@@ -64,9 +66,9 @@ func TestMountSession_azureBlobAzurite(t *testing.T) {
 	ms, err := vfs.Tree(
 		vfs.At("data", vfs.Blob(vfs.AzureBlob{Client: client}, container)),
 		vfs.At("ro", vfs.Blob(vfs.AzureBlob{Client: client}, container)).ReadOnly(),
-	)(ctx, "sess-blob", vfs.Request{Bindings: []vfs.Binding{
-		{Params: map[string]string{vfs.ParamName: "data", "prefix": "runs/1"}},
-		{Params: map[string]string{vfs.ParamName: "ro", "prefix": "readonly"}},
+	)(ctx, "sess-blob", vfs.Request{Bindings: []mount.Binding{
+		{Params: map[string]string{mount.ParamName: "data", "prefix": "runs/1"}},
+		{Params: map[string]string{mount.ParamName: "ro", "prefix": "readonly"}},
 	}})
 	if err != nil {
 		t.Fatal(err)

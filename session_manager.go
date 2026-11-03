@@ -11,7 +11,7 @@ import (
 
 // sessionManager is one session's committed state: plan, user state,
 // permission memory, search context, and the workspace mount table. A tool
-// call reads it through its HarnessRuntime and writes only there; Commit
+// call reads it through its CallContext and writes only there; Commit
 // applies the writes here.
 type sessionManager struct {
 	mu          sync.RWMutex

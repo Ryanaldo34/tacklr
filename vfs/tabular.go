@@ -698,7 +698,7 @@ func ParseA1(s string) (r1, c1, r2, c2 int, err error) {
 func parseA1(s string) (r1, c1, r2, c2 int, err error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0, 0, 0, 0, fmt.Errorf("vfs: empty A1")
+		return 0, 0, 0, 0, fmt.Errorf("%w: empty", ErrInvalidA1)
 	}
 	left, right, isRange := strings.Cut(s, ":")
 	r1, c1, err = parseA1Cell(left)
@@ -713,7 +713,7 @@ func parseA1(s string) (r1, c1, r2, c2 int, err error) {
 		return 0, 0, 0, 0, err
 	}
 	if r2 < r1 || c2 < c1 {
-		return 0, 0, 0, 0, fmt.Errorf("vfs: inverted A1 range %q", s)
+		return 0, 0, 0, 0, fmt.Errorf("%w: inverted range %q", ErrInvalidA1, s)
 	}
 	return r1, c1, r2, c2, nil
 }
@@ -733,11 +733,11 @@ func parseA1Cell(s string) (row, col int, err error) {
 		i++
 	}
 	if i == 0 || i == len(s) {
-		return 0, 0, fmt.Errorf("vfs: invalid A1 %q", s)
+		return 0, 0, fmt.Errorf("%w %q", ErrInvalidA1, s)
 	}
 	row, err = strconv.Atoi(s[i:])
 	if err != nil || row < 1 || col < 1 {
-		return 0, 0, fmt.Errorf("vfs: invalid A1 %q", s)
+		return 0, 0, fmt.Errorf("%w %q", ErrInvalidA1, s)
 	}
 	return row, col, nil
 }
@@ -783,7 +783,7 @@ func quoteSheetTitle(title string) string {
 func (d *gridBody) ReadRows(key string, start, end int) (Sheet, []string, error) {
 	i, ok := d.findSheet(key)
 	if !ok {
-		return Sheet{}, nil, fmt.Errorf("unknown block_id %q", key)
+		return Sheet{}, nil, fmt.Errorf("%w %q", ErrUnknownBlock, key)
 	}
 	sh := d.sheets[i]
 	if start < 1 || end < start {
@@ -814,7 +814,7 @@ func (d *gridBody) ReadCell(key, a1 string) (string, error) {
 func (d *gridBody) Cell(key, a1 string) (Cell, error) {
 	i, ok := d.findSheet(key)
 	if !ok {
-		return Cell{}, fmt.Errorf("unknown block_id %q", key)
+		return Cell{}, fmt.Errorf("%w %q", ErrUnknownBlock, key)
 	}
 	r1, c1, r2, c2, err := parseA1(a1)
 	if err != nil {
@@ -829,7 +829,7 @@ func (d *gridBody) Cell(key, a1 string) (Cell, error) {
 func (d *gridBody) ReadRangeTSV(key, a1 string) (string, error) {
 	i, ok := d.findSheet(key)
 	if !ok {
-		return "", fmt.Errorf("unknown block_id %q", key)
+		return "", fmt.Errorf("%w %q", ErrUnknownBlock, key)
 	}
 	r1, c1, r2, c2, err := parseA1(a1)
 	if err != nil {

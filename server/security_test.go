@@ -45,7 +45,7 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 	}}, true)
 	k := newTestRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
 	connection := &server.Conn{}
-	env := server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent, Conn: connection, Security: service}
+	env := server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: connection, Security: service}
 	call := func(body string) map[string]any {
 		t.Helper()
 		recorder := httptest.NewRecorder()
@@ -84,7 +84,7 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 	bobConnection := &server.Conn{Security: &bobContext}
 	bobRecorder := httptest.NewRecorder()
 	bobConnection.Writer = acp.HTTPWriter(bobRecorder)
-	bobEnv := server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent, Conn: bobConnection, Security: service}
+	bobEnv := server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: bobConnection, Security: service}
 	load := `{"jsonrpc":"2.0","id":5,"method":"session/load","params":{"sessionId":"` + sessionID + `"}}`
 	_ = protocol.HandleInbound(t.Context(), bobEnv, []byte(load))
 	var bobResponse map[string]any
@@ -120,7 +120,7 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 		}),
 	}
 	k := newTestRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
-	srv := server.NewServer(k.Runtime, k.Agent, healthProtocol{}).WithSecurity(service, func(r *http.Request) (server.Attempt, bool) {
+	srv := server.NewServer(k.Client, k.Agent, healthProtocol{}).WithSecurity(service, func(r *http.Request) (server.Attempt, bool) {
 		if token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); token != r.Header.Get("Authorization") {
 			return server.Attempt{Scheme: "bearer", Credential: server.NewSecret([]byte(token))}, true
 		}
@@ -145,7 +145,7 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 	denied := httptest.NewRecorder()
 	badReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	badReq.Header.Set("Authorization", "Bearer bad")
-	failAuth := server.NewServer(k.Runtime, k.Agent, healthProtocol{}).WithSecurity(&server.Service{
+	failAuth := server.NewServer(k.Client, k.Agent, healthProtocol{}).WithSecurity(&server.Service{
 		Authenticator: testAuthenticator(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
 			if string(attempt.Credential.Bytes()) == "bad" {
 				return server.Principal{}, errors.New("nope")
@@ -163,7 +163,7 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 		t.Fatalf("failed authenticate status = %d", denied.Code)
 	}
 
-	acp := server.NewServer(k.Runtime, k.Agent, acp.New(nil)).WithSecurity(service, func(*http.Request) (server.Attempt, bool) {
+	acp := server.NewServer(k.Client, k.Agent, acp.New(nil)).WithSecurity(service, func(*http.Request) (server.Attempt, bool) {
 		return server.Attempt{}, false
 	})
 	open := httptest.NewRecorder()

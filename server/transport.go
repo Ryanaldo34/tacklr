@@ -12,10 +12,10 @@ import (
 
 const defaultHTTPShutdown = 5 * time.Second
 
-// Server serves a session.Runtime over HTTP, with WebSocket when the request upgrades.
+// Server serves a session.Client over HTTP, with WebSocket when the request upgrades.
 // Protocols is the ordered list of wire implementations (ACP and/or host protocols).
 type Server struct {
-	Runtime   session.Runtime
+	Client    session.Client
 	Agent     tacklr.AgentOptions
 	Protocols []Protocol
 	// Connections tracks ACP WebSocket connections.
@@ -32,12 +32,12 @@ type Server struct {
 
 // NewServer wraps a Runtime and one or more Protocols.
 // The ACP built-in is acp.New. Pass more Protocols to mount them on the same mux.
-func NewServer(rt session.Runtime, agent tacklr.AgentOptions, protocols ...Protocol) *Server {
+func NewServer(rt session.Client, agent tacklr.AgentOptions, protocols ...Protocol) *Server {
 	if rt == nil || len(protocols) == 0 {
 		panic("server: Runtime and at least one Protocol are required")
 	}
 	return &Server{
-		Runtime:     rt,
+		Client:      rt,
 		Agent:       agent,
 		Protocols:   protocols,
 		Connections: NewConnectionRegistry(),
@@ -45,7 +45,7 @@ func NewServer(rt session.Runtime, agent tacklr.AgentOptions, protocols ...Proto
 }
 
 func (s *Server) env(conn *Conn) ProtocolEnv {
-	return ProtocolEnv{Runtime: s.Runtime, Agent: s.Agent, Conn: conn, Security: s.Security, Connections: s.Connections}
+	return ProtocolEnv{Client: s.Client, Agent: s.Agent, Conn: conn, Security: s.Security, Connections: s.Connections}
 }
 
 // HTTPMux mounts every Protocol's HTTP routes. Used by ServeHTTP and tests.

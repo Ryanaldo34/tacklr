@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -45,8 +47,8 @@ var askUserChoiceTool = NewTool(ToolConfig{
 	Name:        "ask_user_choice",
 	DisplayName: "Ask: {question}",
 	Description: "Park the turn and ask the user a multiple-choice question when you need a discrete decision before continuing. Returns the selected title (and description when one was given) after the user answers. Fails if the question is empty or fewer than two distinct choice titles are provided.",
-	Category:    ToolCategoryThink,
-	Handler: func(ctx context.Context, args askUserChoiceArgs, runtime *HarnessRuntime) (string, error) {
+	Category:    message.ToolCategoryThink,
+	Handler: func(ctx context.Context, args askUserChoiceArgs, cc *CallContext) (string, error) {
 		if strings.TrimSpace(args.Question) == "" {
 			return "", fmt.Errorf("question is required")
 		}
@@ -70,14 +72,12 @@ var askUserChoiceTool = NewTool(ToolConfig{
 				IsRecommended: c.IsRecommended,
 			})
 		}
-		intr, err := runtime.Park(&UserSelectionInterrupt{Question: args.Question, Options: options})
+		intr, err := cc.Park(&UserSelectionInterrupt{Question: args.Question, Options: options})
 		if err != nil {
 			return "", err
 		}
-		usi, ok := intr.(*UserSelectionInterrupt)
-		if !ok || usi.ConfirmedChoice == nil {
-			return "", fmt.Errorf("user selection missing confirmed choice")
-		}
+		// Park returns only an answer Return accepted, which sets the choice.
+		usi, _ := intr.(*UserSelectionInterrupt)
 		choice := usi.ConfirmedChoice
 		if choice.Description != "" {
 			return fmt.Sprintf("User selected %q — %s", choice.Title, choice.Description), nil
@@ -91,15 +91,15 @@ func newCreatePlanTool() *Tool {
 		Name:        "create_plan",
 		DisplayName: "Create Plan",
 		Description: "Install the project's plan and the linear todo list derived from it. Call once at the start of multi-step work. On success returns \"Plan created successfully\", installs the plan in context, marks the first incomplete todo in-progress, and unlocks write and command tools. Fails if a plan already exists, plan text is empty, or todos is empty.",
-		Category:    ToolCategoryThink,
-		Handler: func(ctx context.Context, args createTodosArgs, rt *HarnessRuntime) (ToolOutcome, error) {
+		Category:    message.ToolCategoryThink,
+		Handler: func(ctx context.Context, args createTodosArgs, cc *CallContext) (ToolOutcome, error) {
 			if strings.TrimSpace(args.Plan) == "" {
 				return ToolOutcome{}, fmt.Errorf("plan document text is required")
 			}
 			if len(args.Todos) == 0 {
 				return ToolOutcome{}, fmt.Errorf("plan must include at least one todo")
 			}
-			return rt.changePlan(planOp{Create: &args})
+			return cc.changePlan(planOp{Create: &args})
 		},
 	})
 }
@@ -109,9 +109,9 @@ func newListPlanTool() *Tool {
 		Name:        "list_plan",
 		DisplayName: "List Plan",
 		Description: "Return the active todo list exactly as stored: titles, statuses, and descriptions, in order. Call after a handoff or whenever titles or statuses are unclear so later plan edits match exactly. Returns the numbered list. Fails if no plan exists yet.",
-		Category:    ToolCategoryRead,
-		Handler: func(ctx context.Context, rt *HarnessRuntime) (string, error) {
-			plan, _ := rt.plan()
+		Category:    message.ToolCategoryRead,
+		Handler: func(ctx context.Context, cc *CallContext) (string, error) {
+			plan, _ := cc.plan()
 			if len(plan) == 0 {
 				return "", fmt.Errorf("no plan exists yet; call create_plan first")
 			}
@@ -133,9 +133,9 @@ func newCompleteTodoTool() *Tool {
 		Name:        "complete_todo",
 		DisplayName: "Complete {title}",
 		Description: "Mark a todo completed when its acceptance criteria are met. Before closing a research or discovery todo, durable findings and indexed files should already be saved so later work can find them. If open todos remain, the next incomplete item is marked in-progress, a handoff is written into context, and the return names the todo now starting. If this was the last open todo, returns that all todos completed and leaves context intact so you can give the user-facing answer. Fails if no plan exists, the title is missing from the plan, or the todo is already completed. If the handoff cannot save the current window as session messages, the todo stays completed and the current window stays in place.",
-		Category:    ToolCategoryEdit,
-		Handler: func(ctx context.Context, args completeTodoArgs, rt *HarnessRuntime) (ToolOutcome, error) {
-			return rt.changePlan(planOp{Complete: &args})
+		Category:    message.ToolCategoryEdit,
+		Handler: func(ctx context.Context, args completeTodoArgs, cc *CallContext) (ToolOutcome, error) {
+			return cc.changePlan(planOp{Complete: &args})
 		},
 	})
 }
@@ -145,9 +145,9 @@ func newEditPlanTool() *Tool {
 		Name:        "edit_plan",
 		DisplayName: "Edit Plan",
 		Description: "Change an existing plan's todos and, when needed, the plan document. On success returns \"Plan edited successfully\". If the plan document text changed, a handoff is written into context for remaining work. Fails if no plan exists, the plan document is unchanged, a delete title is missing, a completed todo is deleted, or order is out of bounds.",
-		Category:    ToolCategoryEdit,
-		Handler: func(ctx context.Context, args editTodosArgs, rt *HarnessRuntime) (ToolOutcome, error) {
-			return rt.changePlan(planOp{Edit: &args})
+		Category:    message.ToolCategoryEdit,
+		Handler: func(ctx context.Context, args editTodosArgs, cc *CallContext) (ToolOutcome, error) {
+			return cc.changePlan(planOp{Edit: &args})
 		},
 	})
 }

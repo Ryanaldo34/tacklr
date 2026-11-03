@@ -14,7 +14,7 @@ import (
 
 func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 	ctx := context.Background()
-	ms, rt := newRunCommandSession(t)
+	ms, cc := newRunCommandSession(t)
 	const body = "dirty body unique phrase xyzzy-tacklr\n"
 
 	if err := ms.Route(ctx, "/workspace/work/note.md").
@@ -40,7 +40,7 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 	t.Cleanup(func() { _ = ms.Close() })
 
 	tool := newRunCommand(ms)
-	res, err := tool.invoke(ctx, `{"command":"ls"}`, rt)
+	res, err := tool.invoke(ctx, `{"command":"ls"}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 		t.Fatalf("ls cwd: %s", res.Output)
 	}
 
-	res, err = tool.invoke(ctx, `{"command":"cat workspace/work/note.md"}`, rt)
+	res, err = tool.invoke(ctx, `{"command":"cat workspace/work/note.md"}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 		t.Fatalf("cat dirty: %s", res.Output)
 	}
 
-	res, err = tool.invoke(ctx, `{"command":"false"}`, rt)
+	res, err = tool.invoke(ctx, `{"command":"false"}`, cc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,11 +64,11 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 		t.Fatalf("false: %s", res.Output)
 	}
 
-	if _, err := tool.invoke(ctx, `{"command":"   "}`, rt); err == nil {
+	if _, err := tool.invoke(ctx, `{"command":"   "}`, cc); err == nil {
 		t.Fatal("empty command")
 	}
 
-	res, err = tool.invoke(ctx, `{"command":"mkdir -p workspace/work/fromsh && printf 'from-sh\n' > workspace/work/fromsh/x.txt"}`, rt)
+	res, err = tool.invoke(ctx, `{"command":"mkdir -p workspace/work/fromsh && printf 'from-sh\n' > workspace/work/fromsh/x.txt"}`, cc)
 	if err != nil || !strings.Contains(res.Output, "exit=0") {
 		t.Fatalf("host write: %s err=%v", res.Output, err)
 	}
@@ -83,7 +83,7 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 	}
 
 	if _, err := exec.LookPath("rg"); err == nil {
-		res, err = tool.invoke(ctx, `{"command":"rg -F xyzzy-tacklr workspace/work"}`, rt)
+		res, err = tool.invoke(ctx, `{"command":"rg -F xyzzy-tacklr workspace/work"}`, cc)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,7 +94,7 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 }
 
 func TestRunCommand_deadlineKillsProcess(t *testing.T) {
-	ms, rt := newRunCommandSession(t)
+	ms, cc := newRunCommandSession(t)
 	if err := ms.FuseMount(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestRunCommand_deadlineKillsProcess(t *testing.T) {
 	tool := newRunCommand(ms)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	_, err := tool.invoke(ctx, `{"command":"sleep 10"}`, rt)
+	_, err := tool.invoke(ctx, `{"command":"sleep 10"}`, cc)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("want DeadlineExceeded, got %v", err)
 	}
@@ -125,10 +125,10 @@ func TestRunCommand_cdIntoQuotedPath(t *testing.T) {
 	}
 }
 
-func newRunCommandSession(t *testing.T) (*vfs.MountSession, *HarnessRuntime) {
+func newRunCommandSession(t *testing.T) (*vfs.MountSession, *CallContext) {
 	t.Helper()
 	ms := mustMountTree(t, t.Name(), vfs.At("work", vfs.Local(t.TempDir())))
-	h := mustNewTurnManager(t, AgentOptions{
+	h := mustNewHarness(t, AgentOptions{
 		sessionID:    t.Name(),
 		mountSession: ms,
 		Model:        &scriptedModel{},

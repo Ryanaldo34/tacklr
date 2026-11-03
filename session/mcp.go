@@ -1,4 +1,4 @@
-package mcp
+package session
 
 import (
 	"context"
@@ -7,57 +7,57 @@ import (
 	"strings"
 )
 
-// Transport types for MCP server connections. The set mirrors the transports
+// MCP transports for MCPServer.Type. The set mirrors the transports
 // an ACP client may specify in session lifecycle requests.
 const (
-	// TransportStdio launches the MCP server as a subprocess and communicates
+	// MCPStdio launches the MCP server as a subprocess and communicates
 	// over stdin/stdout. It is the default when Type is empty.
-	TransportStdio = "stdio"
-	// TransportHTTP connects to a remote MCP server over streamable HTTP.
-	TransportHTTP = "http"
-	// TransportSSE connects to a remote MCP server over server-sent events.
-	// Deprecated by the MCP spec; prefer TransportHTTP.
-	TransportSSE = "sse"
+	MCPStdio = "stdio"
+	// MCPHTTP connects to a remote MCP server over streamable HTTP.
+	MCPHTTP = "http"
+	// MCPSSE connects to a remote MCP server over server-sent events.
+	// Deprecated by the MCP spec; prefer MCPHTTP.
+	MCPSSE = "sse"
 )
 
-// EnvVariable is a single environment variable for a stdio MCP server.
-type EnvVariable struct {
+// MCPEnv is a single environment variable for a stdio MCP server.
+type MCPEnv struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
 }
 
-// HTTPHeader is a single HTTP header sent with requests to an HTTP-based MCP
+// MCPHeader is a single HTTP header sent with requests to an HTTP-based MCP
 // server.
-type HTTPHeader struct {
+type MCPHeader struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
 }
 
-// Credentials are ephemeral values returned for a durable CredentialRef.
-type Credentials struct {
-	Env     []EnvVariable
-	Headers []HTTPHeader
+// MCPCredentials are ephemeral values returned for a durable CredentialRef.
+type MCPCredentials struct {
+	Env     []MCPEnv
+	Headers []MCPHeader
 }
 
-// CredentialResolver resolves host-owned references immediately before an MCP
+// MCPCredentialResolver resolves host-owned MCP credential references immediately before an MCP
 // connection. Implementations should return short-lived credentials.
-type CredentialResolver interface {
-	ResolveMCP(context.Context, string) (Credentials, error)
+type MCPCredentialResolver interface {
+	ResolveMCP(context.Context, string) (MCPCredentials, error)
 }
 
-// MCPConfig describes a single MCP server connection for the harness or ACP
-// session lifecycle. It matches the ACP mcpServers wire shape: a stdio server
+// MCPServer is one MCP server a session connects to, for the harness or
+// the ACP session lifecycle. It matches the ACP mcpServers wire shape: a stdio server
 // sets Command/Args/Env with no Type, while HTTP and SSE servers set Type plus
 // URL/Headers. Connection and tool discovery are handled internally by the
 // harness — library consumers only supply configs.
-type MCPConfig struct {
+type MCPServer struct {
 	// Name is a human-readable identifier for the server. It is used as the
 	// tool namespace so that tools from this server are grouped together and
 	// disambiguated from tools provided by other servers or the harness itself.
 	Name string `json:"name"`
 
-	// Type selects the MCP transport: TransportHTTP ("http") or
-	// TransportSSE ("sse"). When empty or TransportStdio ("stdio"), the
+	// Type selects the MCP transport: MCPHTTP ("http") or
+	// MCPSSE ("sse"). When empty or MCPStdio ("stdio"), the
 	// server is launched as a subprocess over stdio.
 	Type string `json:"type,omitempty"`
 
@@ -69,14 +69,14 @@ type MCPConfig struct {
 
 	// Env are explicit environment variables set when launching the server.
 	// Host process variables are inherited only through host-only policy.
-	Env []EnvVariable `json:"env,omitempty"`
+	Env []MCPEnv `json:"env,omitempty"`
 
 	// URL is the endpoint URL (http and sse transports).
 	URL string `json:"url,omitempty"`
 
 	// Headers are HTTP headers included in requests to the server (http and
 	// sse transports). Authorization and other credentials are carried here.
-	Headers []HTTPHeader `json:"headers,omitempty"`
+	Headers []MCPHeader `json:"headers,omitempty"`
 
 	// CredentialRef is a durable opaque reference resolved by the host. Inline
 	// Env and Headers remain connection-scoped and are never persisted.
@@ -92,7 +92,7 @@ type MCPConfig struct {
 }
 
 // Durable returns the non-secret topology safe for a wire session store.
-func (c MCPConfig) Durable() MCPConfig {
+func (c MCPServer) Durable() MCPServer {
 	c.Args = append([]string(nil), c.Args...)
 	c.Env = nil
 	c.Headers = nil
@@ -101,12 +101,12 @@ func (c MCPConfig) Durable() MCPConfig {
 	return c
 }
 
-// DurableConfigs copies MCP topology while removing inline credentials.
-func DurableConfigs(configs []MCPConfig) []MCPConfig {
+// DurableMCPServers copies MCP server topology while removing inline credentials.
+func DurableMCPServers(configs []MCPServer) []MCPServer {
 	if len(configs) == 0 {
 		return nil
 	}
-	out := make([]MCPConfig, len(configs))
+	out := make([]MCPServer, len(configs))
 	for i := range configs {
 		out[i] = configs[i].Durable()
 	}
@@ -114,33 +114,33 @@ func DurableConfigs(configs []MCPConfig) []MCPConfig {
 }
 
 // Resolve applies a host credential reference to an ephemeral config copy.
-func (c MCPConfig) Resolve(ctx context.Context, resolver CredentialResolver) (MCPConfig, error) {
+func (c MCPServer) Resolve(ctx context.Context, resolver MCPCredentialResolver) (MCPServer, error) {
 	if c.CredentialRef == "" {
 		return c, nil
 	}
 	if resolver == nil {
-		return MCPConfig{}, fmt.Errorf("mcp server %q: credential resolver is required for reference %q", c.Name, c.CredentialRef)
+		return MCPServer{}, fmt.Errorf("mcp server %q: credential resolver is required for reference %q", c.Name, c.CredentialRef)
 	}
 	credentials, err := resolver.ResolveMCP(ctx, c.CredentialRef)
 	if err != nil {
-		return MCPConfig{}, fmt.Errorf("mcp server %q: resolve credential %q: %w", c.Name, c.CredentialRef, err)
+		return MCPServer{}, fmt.Errorf("mcp server %q: resolve credential %q: %w", c.Name, c.CredentialRef, err)
 	}
-	c.Env = append(append([]EnvVariable(nil), c.Env...), credentials.Env...)
-	c.Headers = append(append([]HTTPHeader(nil), c.Headers...), credentials.Headers...)
+	c.Env = append(append([]MCPEnv(nil), c.Env...), credentials.Env...)
+	c.Headers = append(append([]MCPHeader(nil), c.Headers...), credentials.Headers...)
 	return c, nil
 }
 
 // Validate rejects incomplete transports and unsafe environment/header names.
-func (c MCPConfig) Validate() error {
+func (c MCPServer) Validate() error {
 	if strings.TrimSpace(c.Name) == "" {
 		return fmt.Errorf("mcp: server name is required")
 	}
 	switch c.Type {
-	case "", TransportStdio:
+	case "", MCPStdio:
 		if strings.TrimSpace(c.Command) == "" {
 			return fmt.Errorf("mcp server %q: command is required for stdio transport", c.Name)
 		}
-	case TransportHTTP, TransportSSE:
+	case MCPHTTP, MCPSSE:
 		parsed, err := url.Parse(c.URL)
 		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 			return fmt.Errorf("mcp server %q: valid http(s) URL is required", c.Name)

@@ -8,6 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
 
@@ -21,17 +25,17 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		if n := len(msgs); n > 0 {
 			last := msgs[n-1]
-			if last != nil && last.Role == tacklr.RoleTool {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: last.Content, IsComplete: true}
+			if last != nil && last.Role == message.RoleTool {
+				ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: last.Content, IsComplete: true}
 				return
 			}
 		}
 		ch <- tacklr.LLMResponseChunk{
-			Type: tacklr.StreamEventFunctionCall,
-			ToolCalls: []tacklr.ToolCall{{
+			Type: session.EventFunctionCall,
+			ToolCalls: []message.ToolCall{{
 				ID: "read-1", CallID: "read-1", Name: "read",
 				Arguments: `{"path":"/workspace/docs/hello.txt"}`,
 			}},
@@ -54,7 +58,7 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	bridge := acp.NewClientBridge(w)
 	bridge.SetCaps(acp.ClientCapabilities{VFSTokenRefresh: true})
 	proto := acpProtocolFor(r)
-	env := server.ProtocolEnv{Runtime: r.Runtime, Agent: r.Agent, Conn: &server.Conn{Writer: w, Ask: bridge}}
+	env := server.ProtocolEnv{Client: r.Client, Agent: r.Agent, Conn: &server.Conn{Writer: w, Ask: bridge}}
 	bind := `{"jsonrpc":"2.0","id":2,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[{"provider":"local","params":{"name":"docs"},"auth":{"token":"tok1"}}]}}`
 	if err := proto.HandleInbound(t.Context(), env, []byte(bind)); err != nil {
 		t.Fatal(err)

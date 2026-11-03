@@ -1,90 +1,71 @@
 package session
 
 import (
-	"encoding/json"
 	"errors"
-	"strconv"
 	"sync"
 	"testing"
-
-	"github.com/ryanaldo34/tacklr"
 )
 
 // checkpointOf is a checkpoint holding s, so a test can tell saves apart.
-func checkpointOf(t *testing.T, s string) tacklr.SessionCheckpoint {
+func checkpointOf(t *testing.T, s string) []byte {
 	t.Helper()
-	var cp tacklr.SessionCheckpoint
-	if err := json.Unmarshal([]byte(strconv.Quote(s)), &cp); err != nil {
-		t.Fatal(err)
-	}
-	return cp
+	return []byte(s)
 }
 
-func holds(cp tacklr.SessionCheckpoint) string {
-	raw, _ := json.Marshal(cp)
-	s, _ := strconv.Unquote(string(raw))
-	return s
-}
+func holds(cp []byte) string { return string(cp) }
 
-func TestMemorySnapshot_revisionRejectsStaleSave(t *testing.T) {
-	store := NewMemorySnapshot()
-	id := SessionID("s")
-	rev, err := store.Save(t.Context(), id, checkpointOf(t, "a"), "")
-	if err != nil || rev == "" {
-		t.Fatal(err)
-	}
-	if _, err := store.Save(t.Context(), id, checkpointOf(t, "b"), ""); !errors.Is(err, ErrStaleCheckpoint) {
-		t.Fatalf("stale: %v", err)
-	}
-	rev2, err := store.Save(t.Context(), id, checkpointOf(t, "b"), rev)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snap, got, err := store.Load(t.Context(), id)
-	if err != nil || holds(snap) != "b" || got != rev2 {
-		t.Fatalf("load %+v rev %q err %v", snap, got, err)
-	}
-	if err := store.Delete(t.Context(), id); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := store.Load(t.Context(), id); !errors.Is(err, ErrSessionNotFound) {
-		t.Fatalf("deleted: %v", err)
-	}
-}
-
-func TestMemorySnapshot_concurrentSaveOneWins(t *testing.T) {
-	store := NewMemorySnapshot()
-	id := SessionID("s")
+// TestMemorySnapshot_keepsASessionsStateByCompareAndSwap: a save needs a
+// session id and the revision of the last load; of two saves from one
+// revision one wins; a call's outcome record is replaced by a later Put of
+// its key, and an unknown key is absent; Delete removes the snapshot and
+// the records.
+func TestMemorySnapshot_keepsASessionsStateByCompareAndSwap(t *testing.T) {
+	store := NewMemoryStore()
+	id := ID("s")
+	_, noID := store.Save(t.Context(), "", checkpointOf(t, "a"), "")
+	empty, emptyErr := store.Revision(t.Context(), id)
 	rev, err := store.Save(t.Context(), id, checkpointOf(t, "base"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, stale := store.Save(t.Context(), id, checkpointOf(t, "b"), "")
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var wins, stale int
+	var wins, lost int
 	for _, name := range []string{"left", "right"} {
-		cp := checkpointOf(t, name)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, err := store.Save(t.Context(), id, cp, rev)
+		wg.Go(func() {
+			_, err := store.Save(t.Context(), id, checkpointOf(t, name), rev)
 			mu.Lock()
 			defer mu.Unlock()
 			if err == nil {
 				wins++
-				return
+			} else if errors.Is(err, ErrStaleCheckpoint) {
+				lost++
 			}
-			if errors.Is(err, ErrStaleCheckpoint) {
-				stale++
-			}
-		}()
+		})
 	}
 	wg.Wait()
-	if wins != 1 || stale != 1 {
-		t.Fatalf("wins=%d stale=%d", wins, stale)
+	snap, loaded, loadErr := store.Load(t.Context(), id)
+	current, _ := store.Revision(t.Context(), id)
+	for _, rec := range []string{"first", "second"} {
+		if err := store.PutOutcome(t.Context(), id, "call", Outcome{Record: []byte(rec)}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	snap, _, err := store.Load(t.Context(), id)
-	if err != nil || (holds(snap) != "left" && holds(snap) != "right") {
-		t.Fatalf("winner %+v err %v", snap, err)
+	records, _ := store.Outcomes(t.Context(), id, []string{"call", "unknown"})
+	if err := store.Delete(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	_, _, deleted := store.Load(t.Context(), id)
+	gone, _ := store.Outcomes(t.Context(), id, []string{"call"})
+
+	if noID == nil || empty != "" || emptyErr != nil || !errors.Is(stale, ErrStaleCheckpoint) {
+		t.Fatalf("no id %v, revision before a save %q %v, stale %v; want errors for both saves and no revision", noID, empty, emptyErr, stale)
+	}
+	if wins != 1 || lost != 1 || loadErr != nil || (holds(snap) != "left" && holds(snap) != "right") || loaded != current {
+		t.Fatalf("wins %d lost %d, loaded %q at %s (current %s) %v; want one winner loaded at the current revision", wins, lost, holds(snap), loaded, current, loadErr)
+	}
+	if string(records["call"].Record) != "second" || len(records) != 1 || !errors.Is(deleted, ErrNotFound) || len(gone) != 0 {
+		t.Fatalf("records %q, after delete %v %q; want the later record only, then nothing", records, deleted, gone)
 	}
 }

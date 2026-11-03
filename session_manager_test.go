@@ -4,6 +4,10 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
@@ -13,16 +17,16 @@ import (
 func TestCall_readsItsOwnWritesAndCommitAppliesThem(t *testing.T) {
 	sm := newSessionManager()
 	sm.setState(map[string]any{"k": "committed", "gone": 1, "kept": true})
-	rt := callRuntime(sm, "c1")
+	cc := callRuntime(sm, "c1")
 
-	setErr := rt.StateSet("k", "mine")
-	rt.StateDelete("gone")
-	badErr := rt.StateSet("fn", func() {})
-	mine, _ := rt.StateGet("k")
-	_, gone := rt.StateGet("gone")
-	kept, _ := rt.StateGet("kept")
+	setErr := cc.StateSet("k", "mine")
+	cc.StateDelete("gone")
+	badErr := cc.StateSet("fn", func() {})
+	mine, _ := cc.StateGet("k")
+	_, gone := cc.StateGet("gone")
+	kept, _ := cc.StateGet("kept")
 	before, _ := sm.state("k")
-	rt.commit()
+	cc.commit()
 	after, _ := sm.state("k")
 	_, goneAfter := sm.state("gone")
 
@@ -39,13 +43,13 @@ func TestCall_readsItsOwnWritesAndCommitAppliesThem(t *testing.T) {
 
 // TestRuntime_emitUpdateNamesTheCallAndNeverBlocks covers EmitUpdate.
 func TestRuntime_emitUpdateNamesTheCallAndNeverBlocks(t *testing.T) {
-	ch := make(chan StreamEvent, 1)
-	rt := newHarnessRuntime(ch, &TurnManager{session: newSessionManager()}, nil, roundCall{Call: ToolCall{ID: "id1", CallID: "id1"}}, callWrites{})
+	ch := make(chan session.Event, 1)
+	cc := newCallContext(ch, &Harness{session: newSessionManager()}, ToolRun{}, roundCall{Call: message.ToolCall{ID: "id1", CallID: "id1"}}, callWrites{})
 
-	rt.EmitUpdate("hello")
-	rt.EmitUpdate("dropped: the channel is full")
+	cc.EmitUpdate("hello")
+	cc.EmitUpdate("dropped: the channel is full")
 
-	if ev := <-ch; ev.Type != StreamEventToolUpdate || ev.Content != "hello" || ev.MessageID != "id1" {
+	if ev := <-ch; ev.Type != session.EventToolUpdate || ev.Content != "hello" || ev.MessageID != "id1" {
 		t.Fatalf("update = %+v", ev)
 	}
 }
@@ -54,16 +58,16 @@ func TestRuntime_emitUpdateNamesTheCallAndNeverBlocks(t *testing.T) {
 // invalid answer leaves it unanswered, a valid one answers it, and the
 // call's next run takes the answer.
 func TestCall_parkResumeAndRunAgain(t *testing.T) {
-	rt := callRuntime(newSessionManager(), "tc1")
+	cc := callRuntime(newSessionManager(), "tc1")
 
-	_, unknownType := rt.Park(&ChildWaiting{Kind: "nope"})
-	noPark := rt.resume([]byte(`{"selectionIdx":0}`))
-	_, parked := rt.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}})
-	invalid := rt.resume([]byte(`{}`))
-	_, beforeAnswer := rt.takeAnswer("user_selection_choice")
-	answerErr := rt.resume([]byte(`{"selectionIdx":1}`))
-	twice := rt.resume([]byte(`{"selectionIdx":1}`))
-	got, runErr := rt.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}})
+	_, unknownType := cc.Park(&ChildWaiting{Kind: "nope"})
+	noPark := cc.resume([]byte(`{"selectionIdx":0}`))
+	_, parked := cc.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}})
+	invalid := cc.resume([]byte(`{}`))
+	_, beforeAnswer := cc.takeAnswer("user_selection_choice")
+	answerErr := cc.resume([]byte(`{"selectionIdx":1}`))
+	twice := cc.resume([]byte(`{"selectionIdx":1}`))
+	got, runErr := cc.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}})
 
 	var intr Interrupt
 	if unknownType == nil || !errors.Is(noPark, ErrInterruptNotFound) || !errors.As(parked, &intr) {
@@ -72,7 +76,7 @@ func TestCall_parkResumeAndRunAgain(t *testing.T) {
 	if invalid == nil || beforeAnswer || answerErr != nil || !errors.Is(twice, ErrInterruptNotFound) {
 		t.Fatalf("invalid %v, taken before an answer %v, answer %v, twice %v", invalid, beforeAnswer, answerErr, twice)
 	}
-	if usi, ok := got.(*UserSelectionInterrupt); runErr != nil || !ok || usi.ConfirmedChoice.Title != "B" || rt.call.Park != nil {
+	if usi, ok := got.(*UserSelectionInterrupt); runErr != nil || !ok || usi.ConfirmedChoice.Title != "B" || cc.call.Park != nil {
 		t.Fatalf("run after resume = %+v %v, want the answer taken", got, runErr)
 	}
 }

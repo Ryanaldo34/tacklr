@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Connection is one WebSocket. Harness sessions live on session.Runtime.
+// Connection is one WebSocket. Harness sessions live on session.Client.
 type Connection struct {
 	ID     string
 	Writer MessageWriter

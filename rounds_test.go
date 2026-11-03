@@ -8,6 +8,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -15,22 +19,22 @@ import (
 // roundsHarness is a turn whose model answers each request with the calls
 // of calls, then "done"; gate parks for permission and free does not. runs
 // counts each tool's runs.
-func roundsHarness(t *testing.T, opts AgentOptions, calls ...ToolCall) (*TurnManager, AgentOptions, map[string]int) {
+func roundsHarness(t *testing.T, opts AgentOptions, calls ...message.ToolCall) (*Harness, AgentOptions, map[string]int) {
 	t.Helper()
 	runs := map[string]int{}
 	gate := NewTool(ToolConfig{Name: "gate", OnCall: []OnCallFunc{ToolPermissionOnCall}, Handler: func(context.Context) (string, error) { runs["gate"]++; return "gate-ok", nil }})
 	free := NewTool(ToolConfig{Name: "free", Handler: func(context.Context) (string, error) { runs["free"]++; return "free-ok", nil }})
 	asked := false
-	opts.Model = &scriptedModel{InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+	opts.Model = &scriptedModel{InvokeFn: func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 		if asked {
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+			ch <- LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
 			return
 		}
 		asked = true
-		ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: calls, IsComplete: true}
+		ch <- LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: calls, IsComplete: true}
 	}}
 	opts.Tools = append(opts.Tools, gate, free)
-	h := mustNewTurnManager(t, opts)
+	h := mustNewHarness(t, opts)
 	t.Cleanup(h.Close)
 	return h, opts, runs
 }
@@ -38,10 +42,10 @@ func roundsHarness(t *testing.T, opts AgentOptions, calls ...ToolCall) (*TurnMan
 // replyRound runs one round the way a runtime does: commit the prompt,
 // infer, run each call, and commit the round once each call has its
 // result. It returns the round and the commit's error.
-func replyRound(t *testing.T, h *TurnManager) (*Round, error) {
+func replyRound(t *testing.T, h *Harness) (*Round, error) {
 	t.Helper()
 	out := drainEventCh()
-	if err := h.Commit(t.Context(), CommitIn{Users: []*Message{userMsg("go")}}, out); err != nil {
+	if err := h.Commit(t.Context(), CommitIn{Users: []*message.Message{userMsg("go")}}, out); err != nil {
 		t.Fatal(err)
 	}
 	reply, err := h.Infer(t.Context(), out)
@@ -60,7 +64,7 @@ func replyRound(t *testing.T, h *TurnManager) (*Round, error) {
 	return r, h.Commit(t.Context(), CommitIn{Round: r}, out)
 }
 
-func contents(msgs []*Message) []string {
+func contents(msgs []*message.Message) []string {
 	var out []string
 	for _, m := range msgs {
 		out = append(out, m.Content)
@@ -79,7 +83,7 @@ func TestCommit_aPromptPastAnOpenRoundCancelsItsOpenCalls(t *testing.T) {
 	before := contents(h.context.Messages())
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
-	in := CommitIn{Round: r, Users: []*Message{userMsg("instead")}}
+	in := CommitIn{Round: r, Users: []*message.Message{userMsg("instead")}}
 
 	failedErr := h.Commit(cancelled, in, drainEventCh())
 	unchanged := contents(h.context.Messages())
@@ -171,13 +175,13 @@ func TestRunTool_aChildResultIsTheCallsResultWhenItsEpisodeCannotBeKept(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewTurnManager(t, AgentOptions{sessionID: "episode-fails", MaxWindowSize: 8192, Model: &scriptedModel{}, Brain: eng, SearchNamespace: mustNS(t, "org", "acme")})
+	h := mustNewHarness(t, AgentOptions{sessionID: "episode-fails", MaxWindowSize: 8192, Model: &scriptedModel{}, Brain: eng, SearchNamespace: mustNS(t, "org", "acme")})
 	t.Cleanup(h.Close)
 	call := toolCall("sp1", "spawn_specialist", "{}")
-	h.context.Restore([]*Message{userMsg("go")})
-	r := NewRound(Reply{Messages: []*Message{{Role: RoleAssistant, ToolCalls: []ToolCall{call}}}, Calls: []ToolCall{call}})
+	h.context.Restore([]*message.Message{userMsg("go")})
+	r := NewRound(Reply{Messages: []*message.Message{{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{call}}}, Calls: []message.ToolCall{call}})
 
-	r.Outcomes[0], err = h.RunTool(t.Context(), ToolRun{Call: call, Child: &ChildResult{Output: "found it"}}, drainEventCh())
+	r.Outcomes[0], err = h.RunTool(t.Context(), ToolRun{Call: call, Child: &session.JobResult{Output: "found it"}}, drainEventCh())
 	commitErr := h.Commit(t.Context(), CommitIn{Round: r}, drainEventCh())
 
 	if got := contents(h.context.Messages()); err != nil || commitErr != nil || len(got) != 3 || got[2] != "found it" {
@@ -191,20 +195,20 @@ func TestRunTool_aChildResultIsTheCallsResultWhenItsEpisodeCannotBeKept(t *testi
 // round's Commit applies every write in order, and a later call of the
 // gated tool runs without a prompt.
 func TestRunTool_aCallsWritesFromEachRunLandAtCommit(t *testing.T) {
-	note := NewTool(ToolConfig{Name: "note", Handler: func(_ context.Context, rt *HarnessRuntime) (string, error) {
-		if _, err := rt.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}}); err != nil {
-			return "", errors.Join(rt.StateSet("k", "before"), err)
+	note := NewTool(ToolConfig{Name: "note", Handler: func(_ context.Context, cc *CallContext) (string, error) {
+		if _, err := cc.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}}); err != nil {
+			return "", errors.Join(cc.StateSet("k", "before"), err)
 		}
-		rt.StateDelete("old")
-		return "noted", errors.Join(rt.StateSet("k", "after"), rt.StateSet("new", 1))
+		cc.StateDelete("old")
+		return "noted", errors.Join(cc.StateSet("k", "after"), cc.StateSet("new", 1))
 	}})
 	h, _, runs := roundsHarness(t, AgentOptions{sessionID: "writes", MaxWindowSize: 8192, Tools: []*Tool{note}})
 	out := drainEventCh()
-	if err := h.Commit(t.Context(), CommitIn{State: map[string]any{"old": true}, Users: []*Message{userMsg("go")}}, out); err != nil {
+	if err := h.Commit(t.Context(), CommitIn{State: map[string]any{"old": true}, Users: []*message.Message{userMsg("go")}}, out); err != nil {
 		t.Fatal(err)
 	}
-	calls := []ToolCall{toolCall("n1", "note", "{}"), toolCall("g1", "gate", "{}")}
-	r := NewRound(Reply{Messages: []*Message{{Role: RoleAssistant, ToolCalls: calls}}, Calls: calls})
+	calls := []message.ToolCall{toolCall("n1", "note", "{}"), toolCall("g1", "gate", "{}")}
+	r := NewRound(Reply{Messages: []*message.Message{{Role: message.RoleAssistant, ToolCalls: calls}}, Calls: calls})
 	answers := []string{`{"selectionIdx":1}`, `{"optionId":"allow-always"}`}
 
 	for i, call := range calls {
@@ -236,8 +240,8 @@ func TestRunTool_aCallsWritesFromEachRunLandAtCommit(t *testing.T) {
 // that is not an outcome, fails the step, and so does its Commit; a tool
 // that stores a value JSON cannot encode gets the error as its result.
 func TestRunTool_failsOnAnOutcomeItCannotReadOrAStateValueItCannotKeep(t *testing.T) {
-	keep := NewTool(ToolConfig{Name: "keep", Handler: func(_ context.Context, rt *HarnessRuntime) (string, error) {
-		return "kept", rt.StateSet("fn", func() {})
+	keep := NewTool(ToolConfig{Name: "keep", Handler: func(_ context.Context, cc *CallContext) (string, error) {
+		return "kept", cc.StateSet("fn", func() {})
 	}})
 	h, _, _ := roundsHarness(t, AgentOptions{sessionID: "unreadable", MaxWindowSize: 8192, Tools: []*Tool{keep}})
 	call := toolCall("c1", "gate", "{}")
@@ -252,7 +256,7 @@ func TestRunTool_failsOnAnOutcomeItCannotReadOrAStateValueItCannotKeep(t *testin
 			t.Errorf("%s: run = nil, want it to fail", name)
 		}
 	}
-	bad := NewRound(Reply{Messages: []*Message{{Role: RoleAssistant, ToolCalls: []ToolCall{call}}}, Calls: []ToolCall{call}})
+	bad := NewRound(Reply{Messages: []*message.Message{{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{call}}}, Calls: []message.ToolCall{call}})
 	bad.Outcomes[0] = CallOutcome{Call: call, Done: true, Record: json.RawMessage(`[`)}
 	if err := h.Commit(t.Context(), CommitIn{Round: bad}, drainEventCh()); err == nil {
 		t.Error("commit of an unreadable outcome = nil, want it to fail")
@@ -280,9 +284,9 @@ func TestRunTool_aSearchCursorCarriesToTheNextStepThroughCommit(t *testing.T) {
 		}
 	}
 	h, _, _ := roundsHarness(t, AgentOptions{sessionID: "cursor", MaxWindowSize: 8192, Brain: eng, SearchNamespace: ns})
-	h.context.Restore([]*Message{userMsg("go")})
+	h.context.Restore([]*message.Message{userMsg("go")})
 	first := toolCall("s1", "search", `{"query":"cursor"}`)
-	r := NewRound(Reply{Messages: []*Message{{Role: RoleAssistant, ToolCalls: []ToolCall{first}}}, Calls: []ToolCall{first}})
+	r := NewRound(Reply{Messages: []*message.Message{{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{first}}}, Calls: []message.ToolCall{first}})
 
 	r.Outcomes[0], err = h.RunTool(t.Context(), ToolRun{Call: first}, drainEventCh())
 	before, beforeErr := h.RunTool(t.Context(), ToolRun{Call: toolCall("s2", "search", `{"more":true}`)}, drainEventCh())
@@ -306,23 +310,23 @@ func TestRunTool_callsOfOneReplyRunAtOnceOnOneHarness(t *testing.T) {
 	both.Add(2)
 	set := NewTool(ToolConfig{Name: "set", Handler: func(_ context.Context, args struct {
 		Value string `json:"value"`
-	}, rt *HarnessRuntime) (string, error) {
-		if err := rt.StateSet("k", args.Value); err != nil {
+	}, cc *CallContext) (string, error) {
+		if err := cc.StateSet("k", args.Value); err != nil {
 			return "", err
 		}
 		both.Done()
 		both.Wait() // the other call has written k too
-		seen, _ := rt.StateGet("k")
+		seen, _ := cc.StateGet("k")
 		return seen.(string), nil
 	}})
-	h := mustNewTurnManager(t, AgentOptions{MaxWindowSize: 8192, Model: &scriptedModel{}, Tools: []*Tool{set}})
+	h := mustNewHarness(t, AgentOptions{MaxWindowSize: 8192, Model: &scriptedModel{}, Tools: []*Tool{set}})
 	t.Cleanup(h.Close)
 	out := drainEventCh()
-	if err := h.Commit(t.Context(), CommitIn{Users: []*Message{userMsg("go")}}, out); err != nil {
+	if err := h.Commit(t.Context(), CommitIn{Users: []*message.Message{userMsg("go")}}, out); err != nil {
 		t.Fatal(err)
 	}
-	calls := []ToolCall{toolCall("a", "set", `{"value":"a"}`), toolCall("b", "set", `{"value":"b"}`)}
-	r := NewRound(Reply{Messages: []*Message{{Role: RoleAssistant, ToolCalls: calls}}, Calls: calls})
+	calls := []message.ToolCall{toolCall("a", "set", `{"value":"a"}`), toolCall("b", "set", `{"value":"b"}`)}
+	r := NewRound(Reply{Messages: []*message.Message{{Role: message.RoleAssistant, ToolCalls: calls}}, Calls: calls})
 
 	var runs sync.WaitGroup
 	errs := make([]error, len(calls))
@@ -342,5 +346,66 @@ func TestRunTool_callsOfOneReplyRunAtOnceOnOneHarness(t *testing.T) {
 	}
 	if k != "b" {
 		t.Fatalf("committed k = %v, want the writes applied in call order", k)
+	}
+}
+
+// TestCommit_countsTokensOnlyNearTheWindow: with the provider's count of
+// the last request, a round far below the window commits without a
+// CountTokens request, and one near it is counted.
+func TestCommit_countsTokensOnlyNearTheWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		inputTokens int
+		wantCounts  int
+	}{
+		{"far below the window", 100, 0},
+		{"near the window", 7000, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counts := 0
+			model := &scriptedModel{
+				InvokeFn: func(_ context.Context, _ []*message.Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+					ch <- LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{toolCall("f1", "free", `{}`)}, InputTokens: tc.inputTokens, IsComplete: true}
+				},
+				CountTokensFn: func(context.Context, []*message.Message, []*Tool) (int, error) { counts++; return tc.inputTokens, nil },
+			}
+			free := NewTool(ToolConfig{Name: "free", Handler: func(context.Context) (string, error) { return "free-ok", nil }})
+			h := mustNewHarness(t, AgentOptions{MaxWindowSize: 8192, Model: model, Tools: []*Tool{free}})
+			t.Cleanup(h.Close)
+			out := drainEventCh()
+			reply, err := h.Infer(t.Context(), out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := NewRound(reply)
+			if r.Outcomes[0], err = h.RunTool(t.Context(), ToolRun{Call: reply.Calls[0]}, out); err != nil {
+				t.Fatal(err)
+			}
+			counts = 0
+
+			err = h.Commit(t.Context(), CommitIn{Round: r}, out)
+
+			if err != nil || counts != tc.wantCounts {
+				t.Fatalf("commit = %v with %d CountTokens requests, want %d", err, counts, tc.wantCounts)
+			}
+		})
+	}
+}
+
+// TestSchedule_aSessionAtItsChildLimitGetsACorrection: a start past the
+// runtime's limit on running children is the model's to correct; a child
+// already running is not started again, so it does not count twice.
+func TestSchedule_aSessionAtItsChildLimitGetsACorrection(t *testing.T) {
+	h := mustNewHarness(t, AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}})
+	t.Cleanup(h.Close)
+	h.jobs = []string{"ci"}
+	call := toolCall("c1", "x", `{}`)
+	running := ChildID(h.sessionId, "ci", "other", false)
+	cc := newCallContext(drainEventCh(), h, ToolRun{Call: call, Children: []string{running}, MaxChildren: 1}, roundCall{Call: call}, callWrites{})
+
+	_, err := cc.Schedule(t.Context(), JobRequest{Name: "ci", Task: "build"})
+
+	if !errors.Is(err, ErrCorrection) || !strings.Contains(err.Error(), "already runs 1 jobs") {
+		t.Fatalf("schedule past the limit = %v, want a correction naming the limit", err)
 	}
 }

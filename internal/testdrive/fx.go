@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/internal/testhttp"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -127,7 +129,7 @@ func (d *FX) FailMeta(status int) {
 func Open(t testing.TB, fx *FX, holder *vfs.TokenHolder) vfs.Open {
 	t.Helper()
 	if holder == nil {
-		holder = vfs.NewTokenHolder(vfs.Credential{Token: "tok"})
+		holder = vfs.NewTokenHolder(mount.Credential{Token: "tok"})
 	}
 	srv := testhttp.New(t, fx)
 	base, hc := srv.URL+"/", srv.Client()
@@ -143,7 +145,7 @@ func Open(t testing.TB, fx *FX, holder *vfs.TokenHolder) vfs.Open {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return vfs.DriveWith(api, docs, sheets)
+	return vfs.DriveWith(api, docs, sheets, holder)
 }
 
 func (d *FX) ServeHTTP(w http.ResponseWriter, r *http.Request) {

@@ -13,7 +13,7 @@
 
 ## Overview
 
-Phases 0–2 of this train are in the tree. A live Runtime turn with a VFS and a FUSE device gets a kernel projection. `run_command` runs `/bin/sh -c` with cwd at that root. Providers persist on write. The harness and the mount table are turn-scoped: Runtime injects a `MountSession` at construct and the turn owner unmounts it.
+Phases 0–2 of this train are in the tree. A live session turn with a VFS and a FUSE device gets a kernel projection. `run_command` runs `/bin/sh -c` with cwd at that root. Providers persist on write. The harness and the mount table are turn-scoped: The worker injects a `MountSession` at construct and the turn owner unmounts it.
 
 The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`), line editors (`read_lines`, `replace_lines`, `replace_text`), and directory tools (`list`, `stat`, `mkdir`, `remove`) are gone. The model sees `read`, `write`, and `run_command`. Live names and grep go through `run_command` → `ls` / `rg` / `fd` on the FUSE tree. Writable FUSE, jail, broker, and a custom shell stay out.
 
@@ -23,11 +23,11 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 
 ```text
   Model
-    → TurnManager (one turn: tools, plan, checkpoint)
+    → tacklr.Harness (one turn: tools, plan, checkpoint)
          → MountSession (injected; closed with the turn)
               → providers (local / S3 / brain)     persist immediately
               → FuseMount (read-only kernel tree)  HostDir = cwd for run_command
-    → session.Runtime
+    → session.Client
          Prompt/Resume.Auth    work-item tokens + bindings (next turn)
          SecretStorage         Temporal: those tokens (not history, not snapshot)
          Identity.Mounts       secret-free recipes (source ids, no bytes)
@@ -37,9 +37,9 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 
 | Layer | Owner | Rule |
 |-------|--------|------|
-| `MountSession` | Injector (`OpenTurnVFS`, or embedder) | Fresh `/workspace` tree each turn from `OpenVFS` + bind tokens |
-| FUSE | Runtime via `vfs.Projection.Attach` | Attach after construct; skip if `HostDir() != ""` |
-| TurnManager | Turn | `NewTurnManager` with `MountSession` set; `Close` parks MCP and the turn indexer — **does not** unmount FUSE |
+| `MountSession` | Injector (the worker's `openTurnVFS`, or embedder) | Fresh `/workspace` tree each turn from `OpenVFS` + bind tokens |
+| FUSE | Worker via `vfs.Projection.Attach` | Attach after construct; skip if `HostDir() != ""` |
+| `tacklr.Harness` | Turn | `NewHarness` with `MountSession` set; `Close` parks MCP and the turn indexer — **does not** unmount FUSE |
 | IR | Provider | `WriteDocument` / `WriteFile` persist now. There is no session dirty cache (`vfs/cache.go` is gone). `ReadText` is provider plaintext. |
 | Tests and in-process hosts | nil `Projection` | `MountSession` is the tree; `run_command` still needs `HostDir` |
 
@@ -60,8 +60,8 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 | Zero FUSE TTLs; single-segment reject; `HostDir`; `FuseMount` error; `ErrFuseNotMounted` | `vfs/fuse_node.go`, `vfs/errors.go` |
 | Kernel identity smoke (skip without device) | `vfs/fuse_test.go` |
 | `VFSProjection` / `FuseProjection` / `DirectProjection` | `server/projection.go` |
-| FUSE attach; fail-hard on device + mount fail; skip remount if `HostDir` set | `OpenTurnVFS` in `session/internal/vfs.go` |
-| Turn-scoped mounts; TurnManager Close does not unmount | `openTurnVFS`, `EventStream.Close`, `TurnManager.Close` |
+| FUSE attach; fail-hard on device + mount fail; skip remount if `HostDir` set | `openTurnVFS` in `session/temporal/worker/turn_vfs.go` |
+| Turn-scoped mounts; Harness Close does not unmount | `openTurnVFS`, `EventStream.Close`, `Harness.Close` |
 | host `/workspace/work` | `OpenVFS` `At("work", Local(jail))` |
 | skills directory | `SkillsPath` (on the workspace when mounted, otherwise a local directory) |
 | `run_command` | `tools_vfs.go` |
@@ -183,7 +183,7 @@ Update `docs/vfs.md`, `docs/knowledge.md`, `README.md`, `vfs/doc.go` so they mat
 | Writable FUSE | Next plan so bash can `mkdir` / `rm` / `echo >` |
 | Jail, broker, eBPF, custom shell | After this train |
 | Auto `FuseMount` in `NewMountSession` | Host starts it |
-| FUSE methods on `TurnManager` | Host owns projection |
+| FUSE methods on `tacklr.Harness` | Host owns projection |
 | Path rewrite | Kernel tree is the identity |
 | Worker / subagent FUSE | `workerOptsFromSpec` still omits `MountSession` |
 | Non-Linux hosts | Tacklr runs on Linux: `/bin/sh`, `/dev/fuse`, user namespaces |
@@ -265,12 +265,12 @@ Each PR is independently reviewable. Do not combine Phase 3 removal with the `wr
 - `vfs/fuse_test.go` — kernel identity smoke
 - `vfs/document_session.go` — write-through `WriteDocument`
 - `server/projection.go` — `VFSProjection`
-- `session/internal/vfs.go` — `OpenTurnVFS`, `CloseTurnVFS`
+- `session/temporal/worker/turn_vfs.go` — `openTurnVFS`, `closeTurnVFS`
 - `tools_vfs.go` — `read`, `write`, `run_command`
 - `tools_vfsindex.go` — `index_file` / `unindex` / `find_content` (until PR A)
 - `agent.go` — turn-scoped `Close` (does not close MountSession)
 - `agent_construct.go` — `injectBuiltinTools`
-- Runtime catalog `OpenVFS` — `At("work", Local(jail))`
+- Worker agent `OpenVFS` — `At("work", Local(jail))`
 - `docs/vfs.md`, `docs/knowledge.md`, `README.md` — update in PR D
 
 ---
@@ -279,4 +279,4 @@ Each PR is independently reviewable. Do not combine Phase 3 removal with the `wr
 
 2026-08-13 — Initial train (start FUSE, `run_command`, collapse tools).
 
-2026-08-15 — Reoriented after the host-owned session refactor. Phases 0–2 are shipped (`vfs.Projection`, `OpenTurnVFS`, `run_command`, write-through IR, turn-scoped harness). This file now covers only Phase 3–5 and names the next plan (writable FUSE). Production without a FUSE device no longer gets an in-process VFS tree; tests use `DirectProjection`.
+2026-08-15 — Reoriented after the host-owned session refactor. Phases 0–2 are shipped (`vfs.Projection`, `openTurnVFS`, `run_command`, write-through IR, turn-scoped harness). This file now covers only Phase 3–5 and names the next plan (writable FUSE). Production without a FUSE device no longer gets an in-process VFS tree; tests use `DirectProjection`.

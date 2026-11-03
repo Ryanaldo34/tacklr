@@ -1,8 +1,10 @@
-package adapter
+package worker
 
 import (
 	"context"
 	"os"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 
 	"go.opentelemetry.io/otel/attribute"
 
@@ -11,8 +13,8 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// CloseTurnVFS unmounts a turn-scoped MountSession (FUSE telemetry, Close, host dir).
-func CloseTurnVFS(ms *vfs.MountSession) {
+// closeTurnVFS unmounts a turn-scoped MountSession (FUSE telemetry, Close, host dir).
+func closeTurnVFS(ms *vfs.MountSession) {
 	if ms == nil {
 		return
 	}
@@ -26,9 +28,9 @@ func CloseTurnVFS(ms *vfs.MountSession) {
 	}
 }
 
-// OpenTurnVFS builds the turn-scoped MountSession from AgentOptions.OpenVFS.
+// openTurnVFS builds the turn-scoped MountSession from AgentOptions.OpenVFS.
 // Nil OpenVFS returns nil. A nil projection leaves the session in-process.
-func OpenTurnVFS(ctx context.Context, threadID string, agent tacklr.AgentOptions, bindings []vfs.Binding, proj vfs.Projection) (*vfs.MountSession, error) {
+func openTurnVFS(ctx context.Context, threadID string, agent tacklr.AgentOptions, bindings []mount.Binding, proj vfs.Projection) (*vfs.MountSession, error) {
 	if agent.OpenVFS == nil {
 		return nil, nil
 	}
@@ -41,7 +43,7 @@ func OpenTurnVFS(ctx context.Context, threadID string, agent tacklr.AgentOptions
 	}
 	if err := proj.Attach(ms, threadID); err != nil {
 		telemetry.InstrumentsFromContext(ctx).RecordFuseMount(ctx, telemetry.FuseMountOutcomeError)
-		CloseTurnVFS(ms)
+		closeTurnVFS(ms)
 		return nil, err
 	}
 	telemetry.EmitEvent(ctx, telemetry.EventFuseMount,

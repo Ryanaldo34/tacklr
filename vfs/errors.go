@@ -27,10 +27,14 @@ var (
 	ErrAlreadyRegistered = errors.New("vfs: media type already registered")
 	ErrNotTextual        = errors.New("vfs: not a textual document")
 	ErrLineOutOfRange    = errors.New("vfs: line out of range")
-	ErrInvalidUTF8       = errors.New("vfs: invalid utf-8")
-	ErrInvalidLine       = errors.New("vfs: line contains newline")
-	ErrLineTooLong       = errors.New("vfs: line too long")
-	ErrTooLarge          = errors.New("vfs: file too large")
+	// ErrUnknownBlock is a block_id (heading, block, sheet) the file does not have.
+	ErrUnknownBlock = errors.New("vfs: unknown block_id")
+	// ErrInvalidA1 is a cell or range address that is not A1 notation.
+	ErrInvalidA1   = errors.New("vfs: invalid A1 address")
+	ErrInvalidUTF8 = errors.New("vfs: invalid utf-8")
+	ErrInvalidLine = errors.New("vfs: line contains newline")
+	ErrLineTooLong = errors.New("vfs: line too long")
+	ErrTooLarge    = errors.New("vfs: file too large")
 	// ErrProjected is returned when a line/HTML/SetText mutation is applied to a
 	// projected spreadsheet. Docs/Word accept HTML line and full-content writes.
 	ErrProjected = errors.New("that write is not supported on this file type")

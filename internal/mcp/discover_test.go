@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/ryanaldo34/tacklr/session"
 
-	"github.com/ryanaldo34/tacklr/mcp"
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestDiscoverAllTools_listFailureSkipsServer(t *testing.T) {
@@ -21,8 +21,8 @@ func TestDiscoverAllTools_listFailureSkipsServer(t *testing.T) {
 	t.Cleanup(hs.Close)
 
 	var names []string
-	cleanup := DiscoverAllTools(context.Background(), []mcp.MCPConfig{
-		{Type: mcp.TransportHTTP, Name: "broken", URL: hs.URL},
+	cleanup := DiscoverAllTools(context.Background(), []session.MCPServer{
+		{Type: session.MCPHTTP, Name: "broken", URL: hs.URL},
 	}, func(name, description, namespace string, schema map[string]any, handler ToolHandler) {
 		names = append(names, name)
 	})
@@ -58,8 +58,8 @@ func TestClient_callToolResultShapes(t *testing.T) {
 		desc    string
 		handler ToolHandler
 	}{}
-	cleanup := DiscoverAllTools(t.Context(), []mcp.MCPConfig{
-		{Type: mcp.TransportHTTP, Name: "svc", URL: hs.URL},
+	cleanup := DiscoverAllTools(t.Context(), []session.MCPServer{
+		{Type: session.MCPHTTP, Name: "svc", URL: hs.URL},
 	}, func(name, description, namespace string, schema map[string]any, handler ToolHandler) {
 		byName[name] = struct {
 			desc    string

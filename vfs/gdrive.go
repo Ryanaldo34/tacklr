@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/googleapi"
 )
@@ -302,30 +304,32 @@ func mapDriveError(err error) error {
 }
 
 // Drive opens a Google Drive folder. api is required (NewGoogleDrive).
-// folderId and writable come from this turn's Binding.
-func Drive(api DriveAPI) Open {
-	return DriveWith(api, nil, nil)
+// holder is the token holder api authenticates with, so a near-expiry or
+// rejected token refreshes there; nil uses the binding's token without
+// refresh. folderId and writable come from this turn's Binding.
+func Drive(api DriveAPI, holder *TokenHolder) Open {
+	return DriveWith(api, nil, nil, holder)
 }
 
 // DriveWith is Drive plus Docs/Sheets clients for native Google files.
-func DriveWith(api DriveAPI, docs DocsAPI, sheets SheetsAPI) Open {
+func DriveWith(api DriveAPI, docs DocsAPI, sheets SheetsAPI, holder *TokenHolder) Open {
 	if api == nil {
 		panic("vfs: Drive requires a DriveAPI client")
 	}
-	return func(ctx context.Context, _ string, b Binding) (Provider, error) {
+	return func(ctx context.Context, _ string, b mount.Binding) (Provider, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		holder := b.Live
-		if holder == nil && strings.TrimSpace(b.Auth.Token) != "" {
-			holder = NewTokenHolder(b.Auth)
+		h := holder
+		if h == nil && strings.TrimSpace(b.Auth.Token) != "" {
+			h = NewTokenHolder(b.Auth)
 		}
-		folderID := strings.TrimSpace(b.Params[ParamFolderID])
+		folderID := strings.TrimSpace(b.Params[mount.ParamFolderID])
 		if folderID == "" {
 			folderID = driveMyDriveRoot
 		}
 		return &driveProvider{
-			api: api, docs: docs, sheets: sheets, rootID: folderID, holder: holder, writable: b.Writable,
+			api: api, docs: docs, sheets: sheets, rootID: folderID, holder: h, writable: b.Writable,
 			zipCache: newFIFO[[]byte](32), getCache: newFIFO[DocsSnapshot](32),
 			sheetCache: newFIFO[SheetsSnapshot](32),
 		}, nil

@@ -11,12 +11,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testhttp"
 )
 
 func TestSupportsMIME_visionAndPDF(t *testing.T) {
-	s := NewOpenAIInferenceStrategy(nil).WithModel("gpt-4o")
+	s := New(nil).WithModel("gpt-4o")
 	if !s.SupportsMIME("text/plain") || !s.SupportsMIME("") {
 		t.Fatal("text always supported")
 	}
@@ -29,41 +33,41 @@ func TestSupportsMIME_visionAndPDF(t *testing.T) {
 	if s.SupportsMIME("application/zip") {
 		t.Fatal("unknown binary rejected")
 	}
-	s2 := NewOpenAIInferenceStrategy(nil).WithModel("unknown-local-llm")
+	s2 := New(nil).WithModel("unknown-local-llm")
 	if s2.SupportsMIME("image/png") || s2.SupportsMIME("application/pdf") {
 		t.Fatal("unknown model rejects binary")
 	}
 	if !s2.SupportsMIME("text/markdown") {
 		t.Fatal("text/* always true")
 	}
-	s3 := NewOpenAIInferenceStrategy(nil)
+	s3 := New(nil)
 	if s3.SupportsMIME("image/png") {
 		t.Fatal("empty model rejects image")
 	}
 }
 
 func TestMaxContextWindow_knownPrefixAndUnknown(t *testing.T) {
-	s := NewOpenAIInferenceStrategy(nil).WithModel("gpt-5.4")
+	s := New(nil).WithModel("gpt-5.4")
 	n, err := s.MaxContextWindow()
 	if err != nil || n != 1000000 {
 		t.Fatalf("gpt-5.4: n=%d err=%v", n, err)
 	}
-	n, err = NewOpenAIInferenceStrategy(nil).WithModel("o3-custom").MaxContextWindow()
+	n, err = New(nil).WithModel("o3-custom").MaxContextWindow()
 	if err != nil || n != 200000 {
 		t.Fatalf("o3 prefix: n=%d err=%v", n, err)
 	}
-	n, err = NewOpenAIInferenceStrategy(nil).WithModel("gpt-5-preview").MaxContextWindow()
+	n, err = New(nil).WithModel("gpt-5-preview").MaxContextWindow()
 	if err != nil || n != 1000000 {
 		t.Fatalf("gpt-5 prefix: n=%d err=%v", n, err)
 	}
-	_, err = NewOpenAIInferenceStrategy(nil).WithModel("mystery-model").MaxContextWindow()
+	_, err = New(nil).WithModel("mystery-model").MaxContextWindow()
 	if err == nil || !errors.Is(err, tacklr.ErrUnknownModel) {
 		t.Fatalf("unknown: err=%v", err)
 	}
 }
 
 func TestUnsupportedMIMEs(t *testing.T) {
-	s := NewOpenAIInferenceStrategy(nil).WithModel("unknown")
+	s := New(nil).WithModel("unknown")
 	bad := tacklr.UnsupportedMIMEs(s, []string{"text/plain", "image/png", "image/png", "application/pdf"})
 	if len(bad) != 2 {
 		t.Fatalf("bad=%v", bad)
@@ -82,21 +86,21 @@ func TestInvoke_truncatedStreamDoesNotCommitPartialAssistant(t *testing.T) {
 		_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","item_id":"msg","delta":"partial"}`+"\n")
 	}))
 	t.Cleanup(server.Close)
-	strategy := NewOpenAIInferenceStrategy(server.Client()).
+	strategy := New(server.Client()).
 		WithApiKey("test-key").
 		WithModel("gpt-5.4").
 		WithURL(server.URL)
-	ch, err := strategy.Invoke(t.Context(), tacklr.ModelRequest{Messages: []*tacklr.Message{{Role: tacklr.RoleUser, Content: "hello"}}})
+	ch, err := strategy.Invoke(t.Context(), tacklr.ModelRequest{Messages: []*message.Message{{Role: message.RoleUser, Content: "hello"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var streamErr error
 	var committed string
 	for ev := range ch {
-		if ev.Type == tacklr.StreamEventError {
+		if ev.Type == session.EventError {
 			streamErr = ev.Error
 		}
-		if ev.Type == tacklr.StreamEventMessage && ev.IsComplete {
+		if ev.Type == session.EventMessage && ev.IsComplete {
 			committed += ev.Content
 		}
 	}
@@ -115,13 +119,13 @@ func TestCountTokens_404WithoutLocalFallback_returnsAPIError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	s := NewOpenAIInferenceStrategy(srv.Client()).
+	s := New(srv.Client()).
 		WithApiKey("k").
 		WithModel("m").
 		WithURL(srv.URL)
 
-	_, err := s.CountTokens(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{
-		{Role: tacklr.RoleUser, Content: "count these tokens please"},
+	_, err := s.CountTokens(context.Background(), tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, Content: "count these tokens please"},
 	}})
 	var apiErr *APIStatusError
 	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
@@ -136,14 +140,14 @@ func TestCountTokens_fallsBackToTiktokenOn404(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	s := NewOpenAIInferenceStrategy(srv.Client()).
+	s := New(srv.Client()).
 		WithApiKey("k").
 		WithModel("m").
 		WithURL(srv.URL).
 		WithLocalTokenFallback()
 
-	n, err := s.CountTokens(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{
-		{Role: tacklr.RoleUser, Content: "count these tokens please"},
+	n, err := s.CountTokens(context.Background(), tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, Content: "count these tokens please"},
 	}})
 	if err != nil {
 		t.Fatalf("CountTokens: %v", err)
@@ -175,13 +179,13 @@ func TestInvoke_contextCancel_stopsStream(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	s := NewOpenAIInferenceStrategy(srv.Client()).
+	s := New(srv.Client()).
 		WithApiKey("k").
 		WithModel("m").
 		WithURL(srv.URL)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	ch, err := s.Invoke(ctx, tacklr.ModelRequest{Messages: []*tacklr.Message{{Role: tacklr.RoleUser, Content: "hi"}}})
+	ch, err := s.Invoke(ctx, tacklr.ModelRequest{Messages: []*message.Message{{Role: message.RoleUser, Content: "hi"}}})
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -226,28 +230,28 @@ func TestInvoke_namespacedToolCallOnTheWire(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	s := NewOpenAIInferenceStrategy(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
+	s := New(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
 	s.WithReasoningLevel("high")
 	tool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "greet", Namespace: "ado",
 		Handler: func(ctx context.Context) (string, error) { return "", nil },
 	})
-	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{
-		{Role: tacklr.RoleUser, Content: "hi"},
-		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
+	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, Content: "hi"},
+		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{
 			{CallID: "call_1", Name: "greet", Namespace: "ado"},
 			{ID: "fc_item", CallID: "call_2", Name: "greet", Namespace: "ado", Arguments: `{}`},
 		}},
-		{Role: tacklr.RoleTool, ToolCallID: "call_1", Content: "ok"},
-		{Role: tacklr.RoleTool, ToolCallID: "call_2", Content: "ok2"},
-		{Role: tacklr.RoleTool, ToolCallID: "fc_ghost", Content: "nope"},
+		{Role: message.RoleTool, ToolCallID: "call_1", Content: "ok"},
+		{Role: message.RoleTool, ToolCallID: "call_2", Content: "ok2"},
+		{Role: message.RoleTool, ToolCallID: "fc_ghost", Content: "nope"},
 		{
-			Role:             tacklr.RoleReasoning,
+			Role:             message.RoleReasoning,
 			MessageID:        "rs_store",
 			EncryptedContent: "gAAAAABcipher",
 			Content:          "plan",
 		},
-		{Role: tacklr.RoleReasoning, MessageID: "rs_orphan", Content: "after"},
+		{Role: message.RoleReasoning, MessageID: "rs_orphan", Content: "after"},
 	}, Tools: []*tacklr.Tool{tool}})
 	if err != nil {
 		t.Fatal(err)
@@ -280,7 +284,7 @@ func TestInvoke_namespacedToolCallOnTheWire(t *testing.T) {
 }
 
 func TestInvoke_requiresKeyAndModel(t *testing.T) {
-	s := NewOpenAIInferenceStrategy(http.DefaultClient)
+	s := New(http.DefaultClient)
 	if _, err := s.Invoke(context.Background(), tacklr.ModelRequest{}); !errors.Is(err, tacklr.ErrApiKeyNotSet) {
 		t.Fatalf("%v", err)
 	}
@@ -309,24 +313,24 @@ func TestInvoke_promptCacheGrokCompat(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	s := NewOpenAIInferenceStrategy(srv.Client()).
+	s := New(srv.Client()).
 		WithApiKey("k").
 		WithModel("grok-4.6").
 		WithURL(srv.URL)
 
-	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{
-		{Role: tacklr.RoleUser, Content: "ask"},
-		{Role: tacklr.RoleDeveloper, Content: "PROJECT PLAN\n────────────\nDo the work"},
+	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, Content: "ask"},
+		{Role: message.RoleDeveloper, Content: "PROJECT PLAN\n────────────\nDo the work"},
 	}, SystemPrompt: "stable system", CacheKey: "sess-grok-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var usage tacklr.LLMResponseChunk
 	for c := range ch {
-		if c.Type == tacklr.StreamEventComplete {
+		if c.Type == session.EventComplete {
 			usage = c
 		}
-		if c.Type == tacklr.StreamEventError {
+		if c.Type == session.EventError {
 			t.Fatalf("stream: %s", c.Content)
 		}
 	}
@@ -362,30 +366,30 @@ func TestInvoke_promptCacheGPT56BreakpointsAndToolChoiceNone(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	s := NewOpenAIInferenceStrategy(srv.Client()).
+	s := New(srv.Client()).
 		WithApiKey("k").
 		WithModel("gpt-5.6").
 		WithURL(srv.URL)
 	tool := tacklr.NewTool(tacklr.ToolConfig{Name: "echo", Handler: func(context.Context) (string, error) { return "ok", nil }})
 
 	ctx := tacklr.ContextWithToolChoiceNone(context.Background())
-	ch, err := s.Invoke(ctx, tacklr.ModelRequest{Messages: []*tacklr.Message{
-		{Role: tacklr.RoleUser, Content: "ask"},
-		{Role: tacklr.RoleDeveloper, Content: "PROJECT PLAN\n────────────\nDo the work"},
-		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
+	ch, err := s.Invoke(ctx, tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, Content: "ask"},
+		{Role: message.RoleDeveloper, Content: "PROJECT PLAN\n────────────\nDo the work"},
+		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{
 			{ID: "call_1", CallID: "call_1", Name: "echo", Arguments: "{}"},
 		}},
-		{Role: tacklr.RoleTool, ToolCallID: "call_1", Content: "tool-out"},
+		{Role: message.RoleTool, ToolCallID: "call_1", Content: "tool-out"},
 	}, Tools: []*tacklr.Tool{tool}, SystemPrompt: "stable system", CacheKey: "sess-oai-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var usage tacklr.LLMResponseChunk
 	for c := range ch {
-		if c.Type == tacklr.StreamEventComplete {
+		if c.Type == session.EventComplete {
 			usage = c
 		}
-		if c.Type == tacklr.StreamEventError {
+		if c.Type == session.EventError {
 			t.Fatalf("stream: %s", c.Content)
 		}
 	}
@@ -424,19 +428,19 @@ func TestInvoke_openRouterStrategySendsCacheKeyOnly(t *testing.T) {
 
 	// A model string that contains the old GPT-5.6 trigger must still get the
 	// OpenRouter key-only profile: the strategy decides, not the model name.
-	s := NewOpenRouterInferenceStrategy(srv.Client()).
+	s := NewOpenRouter(srv.Client()).
 		WithApiKey("k").
 		WithModel("openai/gpt-5.6").
 		WithURL(srv.URL)
 
-	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{
-		{Role: tacklr.RoleUser, Content: "ask"},
+	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, Content: "ask"},
 	}, SystemPrompt: "stable system", CacheKey: "sess-openrouter-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for c := range ch {
-		if c.Type == tacklr.StreamEventError {
+		if c.Type == session.EventError {
 			t.Fatalf("stream: %s", c.Content)
 		}
 	}
@@ -480,7 +484,7 @@ func TestPromptCache_grokAndGPTShapes(t *testing.T) {
 		t.Fatalf("gpt cache = %+v", req)
 	}
 
-	s := NewOpenAIInferenceStrategy(nil).WithModel("gpt-5.6-sol")
+	s := New(nil).WithModel("gpt-5.6-sol")
 	req = &responsesRequest{}
 	s.promptCache("  abc  ").apply(req)
 	if req.PromptCacheKey != "abc" {
@@ -498,17 +502,17 @@ func TestPromptCache_grokAndGPTShapes(t *testing.T) {
 	s.WithReasoningSummary("auto")
 	s.WithReasoningSummary("")
 
-	orphans := marshalMessagesToInput([]*tacklr.Message{
-		{Role: tacklr.RoleTool, ToolCallID: "orphan", Content: "x"},
+	orphans := marshalMessagesToInput([]*message.Message{
+		{Role: message.RoleTool, ToolCallID: "orphan", Content: "x"},
 	}, "", false)
 	if len(orphans) != 0 {
 		t.Fatalf("orphan tool output = %d", len(orphans))
 	}
-	ns := marshalMessagesToInput([]*tacklr.Message{
-		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
+	ns := marshalMessagesToInput([]*message.Message{
+		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{
 			{ID: "call_1", CallID: "call_1", Name: "echo", Namespace: "svc", Arguments: "{}"},
 		}},
-		{Role: tacklr.RoleTool, ToolCallID: "call_1", Content: "ok"},
+		{Role: message.RoleTool, ToolCallID: "call_1", Content: "ok"},
 	}, "sys", true)
 	joined := string(ns[0]) + string(ns[1]) + string(ns[2])
 	if !strings.Contains(joined, "svc__echo") || !strings.Contains(joined, "prompt_cache_breakpoint") {
@@ -541,10 +545,10 @@ func collectSSE(t *testing.T, body string) []tacklr.LLMResponseChunk {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, body)
 	}))
-	s := NewOpenAIInferenceStrategy(srv.Client()).WithApiKey("test-key").WithModel("gpt-4o").WithURL(srv.URL)
-	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*tacklr.Message{{Role: tacklr.RoleUser, Content: "hi"}}})
+	s := New(srv.Client()).WithApiKey("test-key").WithModel("gpt-4o").WithURL(srv.URL)
+	ch, err := s.Invoke(context.Background(), tacklr.ModelRequest{Messages: []*message.Message{{Role: message.RoleUser, Content: "hi"}}})
 	if err != nil {
-		return []tacklr.LLMResponseChunk{{Type: tacklr.StreamEventError, Error: err, Content: err.Error(), IsComplete: true}}
+		return []tacklr.LLMResponseChunk{{Type: session.EventError, Error: err, Content: err.Error(), IsComplete: true}}
 	}
 	var out []tacklr.LLMResponseChunk
 	for c := range ch {
@@ -555,7 +559,7 @@ func collectSSE(t *testing.T, body string) []tacklr.LLMResponseChunk {
 
 func collectRawSSE(t *testing.T, reader io.Reader) []tacklr.LLMResponseChunk {
 	t.Helper()
-	strategy := NewOpenAIInferenceStrategy(nil)
+	strategy := New(nil)
 	ch := make(chan tacklr.LLMResponseChunk, 16)
 	strategy.parseSSEResponse(t.Context(), reader, ch, "")
 	close(ch)
@@ -599,7 +603,7 @@ func TestParseSSE_requiresTerminalResponseEvent(t *testing.T) {
 
 func TestParseSSE_outputTextAlwaysMessage_likeMain(t *testing.T) {
 	// DeepSeek/Foundry thinking often arrives as output_text on a reasoning or
-	// message item. Main always classifies output_text as StreamEventMessage so
+	// message item. Main always classifies output_text as session.EventMessage so
 	// ACP agent_message_chunk carries the stream (client demuxes <think> etc.).
 	body := strings.Join([]string{
 		`data: {"type":"response.output_item.added","item":{"id":"rs_1","type":"reasoning"}}`,
@@ -619,8 +623,8 @@ func TestParseSSE_outputTextAlwaysMessage_likeMain(t *testing.T) {
 		if c.IsComplete || c.Content == "" {
 			continue
 		}
-		if c.Type != tacklr.StreamEventMessage {
-			t.Fatalf("output_text must be StreamEventMessage (main behavior), got type=%v content=%q", c.Type, c.Content)
+		if c.Type != session.EventMessage {
+			t.Fatalf("output_text must be session.EventMessage (main behavior), got type=%v content=%q", c.Type, c.Content)
 		}
 		messages = append(messages, c.Content)
 	}
@@ -642,7 +646,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 	if len(chunks) == 0 || chunks[0].Error == nil {
 		t.Fatalf("incomplete chunks = %+v", chunks)
 	}
-	if !errors.Is(chunks[0].Error, tacklr.ErrMaxTokens) {
+	if !errors.Is(chunks[0].Error, session.ErrMaxTokens) {
 		t.Fatalf("want ErrMaxTokens, got %v", chunks[0].Error)
 	}
 
@@ -653,7 +657,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		"",
 	}, "\n")
 	chunks = collectSSE(t, bodyFailed)
-	if len(chunks) == 0 || !errors.Is(chunks[0].Error, tacklr.ErrModelRefused) {
+	if len(chunks) == 0 || !errors.Is(chunks[0].Error, session.ErrModelRefused) {
 		t.Fatalf("failed chunks = %+v", chunks)
 	}
 
@@ -678,7 +682,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		"",
 	}, "\n")
 	chunks = collectSSE(t, bodyCompletedInc)
-	if len(chunks) == 0 || !errors.Is(chunks[0].Error, tacklr.ErrMaxTokens) {
+	if len(chunks) == 0 || !errors.Is(chunks[0].Error, session.ErrMaxTokens) {
 		t.Fatalf("completed+incomplete = %+v", chunks)
 	}
 
@@ -690,7 +694,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 	}, "\n")
 	chunks = collectSSE(t, bodyOK)
 	for _, c := range chunks {
-		if c.Type == tacklr.StreamEventError {
+		if c.Type == session.EventError {
 			t.Fatalf("successful completed should not error: %+v", c)
 		}
 	}
@@ -702,7 +706,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		"",
 	}, "\n")
 	chunks = collectSSE(t, bodyStreamError)
-	if len(chunks) == 0 || chunks[len(chunks)-1].Type != tacklr.StreamEventError {
+	if len(chunks) == 0 || chunks[len(chunks)-1].Type != session.EventError {
 		t.Fatalf("stream error chunks = %+v", chunks)
 	}
 
@@ -715,7 +719,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 	chunks = collectSSE(t, bodyUsage)
 	var complete *tacklr.LLMResponseChunk
 	for i := range chunks {
-		if chunks[i].Type == tacklr.StreamEventComplete {
+		if chunks[i].Type == session.EventComplete {
 			complete = &chunks[i]
 			break
 		}
@@ -731,7 +735,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		"",
 	}, "\n")
 	chunks = collectSSE(t, bodyErrObj)
-	if len(chunks) == 0 || !errors.Is(chunks[0].Error, tacklr.ErrModelRefused) {
+	if len(chunks) == 0 || !errors.Is(chunks[0].Error, session.ErrModelRefused) {
 		t.Fatalf("failed+error object = %+v", chunks)
 	}
 
@@ -753,10 +757,10 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		"",
 	}, "\n")
 	chunks = collectSSE(t, bodyRefusal)
-	if len(chunks) != 1 || chunks[0].Type != tacklr.StreamEventError {
+	if len(chunks) != 1 || chunks[0].Type != session.EventError {
 		t.Fatalf("refusal chunks = %+v", chunks)
 	}
-	if !errors.Is(chunks[0].Error, tacklr.ErrModelRefused) {
+	if !errors.Is(chunks[0].Error, session.ErrModelRefused) {
 		t.Fatalf("err = %v", chunks[0].Error)
 	}
 	if !strings.Contains(chunks[0].Content, "I cannot help") {
@@ -770,7 +774,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		"",
 	}, "\n")
 	chunks = collectSSE(t, bodyMixed)
-	if len(chunks) != 1 || chunks[0].Type != tacklr.StreamEventMessage || chunks[0].Error != nil {
+	if len(chunks) != 1 || chunks[0].Type != session.EventMessage || chunks[0].Error != nil {
 		t.Fatalf("mixed = %+v", chunks)
 	}
 
@@ -781,7 +785,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		"",
 	}, "\n")
 	chunks = collectSSE(t, bodyEmptyRefusal)
-	if len(chunks) != 1 || !errors.Is(chunks[0].Error, tacklr.ErrModelRefused) {
+	if len(chunks) != 1 || !errors.Is(chunks[0].Error, session.ErrModelRefused) {
 		t.Fatalf("empty refusal = %+v", chunks)
 	}
 	if !strings.Contains(chunks[0].Content, "model refused") {
@@ -799,7 +803,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 	chunks = collectSSE(t, bodyReason)
 	var thought string
 	for _, c := range chunks {
-		if c.Type == tacklr.StreamEventReasoning {
+		if c.Type == session.EventReasoning {
 			thought += c.Content
 		}
 	}
@@ -816,7 +820,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 	chunks = collectSSE(t, bodyReasonSummary)
 	var summary string
 	for _, c := range chunks {
-		if c.Type == tacklr.StreamEventReasoning && c.Content != "" {
+		if c.Type == session.EventReasoning && c.Content != "" {
 			summary = c.Content
 		}
 	}
@@ -825,7 +829,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 	}
 
 	// Context cancel stops mid-parse.
-	s := NewOpenAIInferenceStrategy(nil)
+	s := New(nil)
 	ch := make(chan tacklr.LLMResponseChunk, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

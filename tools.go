@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/ryanaldo34/tacklr/message"
 )
 
 // Tool definitions, JSON schema, and tool outcomes.
@@ -36,7 +38,7 @@ const (
 // Allows reports whether a includes p.
 func (a ToolAccess) Allows(p ToolPermission) bool { return a&ToolAccess(p) != 0 }
 
-type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (string, error)
+type ToolHandlerFunc func(ctx context.Context, args map[string]any, cc *CallContext) (string, error)
 
 // Tool is a registered harness tool. Construct with NewTool(ToolConfig{...}).
 // Fields are unexported; hosts read metadata through the getters below.
@@ -45,14 +47,14 @@ type Tool struct {
 	name        string
 	description string
 	namespace   string
-	category    ToolCategory
+	category    message.ToolCategory
 	access      ToolAccess
 	// timeout is an optional per-invocation deadline. Zero means none.
 	timeout time.Duration
 	// onCall is the pre-invoke middleware stack. Each constructor may park.
 	onCall []OnCallFunc
 
-	handlerFunc func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (ToolOutcome, error)
+	handlerFunc func(ctx context.Context, args map[string]any, cc *CallContext) (ToolOutcome, error)
 	parameters  map[string]any
 	strict      bool
 }
@@ -73,7 +75,7 @@ func (t *Tool) QualifiedName() string {
 }
 
 // Category is the coarse streaming category for client presentation.
-func (t *Tool) Category() ToolCategory { return t.category }
+func (t *Tool) Category() message.ToolCategory { return t.category }
 
 // Access is the permission bitmask for this tool.
 func (t *Tool) Access() ToolAccess { return t.access }
@@ -83,7 +85,7 @@ type ToolConfig struct {
 	Description string
 	DisplayName string
 	Namespace   string
-	Category    ToolCategory
+	Category    message.ToolCategory
 	Access      ToolAccess
 	Timeout     time.Duration
 	// OnCall is the pre-invoke middleware stack. Each constructor may park.
@@ -91,7 +93,7 @@ type ToolConfig struct {
 	OnCall []OnCallFunc
 
 	// Handler is a Go function. Close over clients in the constructor that calls NewTool.
-	// Optional parameters: context.Context, an args struct, HarnessRuntime.
+	// Optional parameters: context.Context, an args struct, CallContext.
 	Handler any
 }
 
@@ -110,7 +112,7 @@ type mcpToolConfig struct {
 }
 
 var timeType = reflect.TypeOf(time.Time{})
-var harnessRuntimeType = reflect.TypeOf((*HarnessRuntime)(nil))
+var harnessRuntimeType = reflect.TypeOf((*CallContext)(nil))
 var ctxType = reflect.TypeOf((*context.Context)(nil)).Elem()
 
 func NewTool(cfg ToolConfig) *Tool {
@@ -160,12 +162,12 @@ func NewTool(cfg ToolConfig) *Tool {
 				if idx < numIn {
 					rType := fnType.In(idx)
 					if rType != harnessRuntimeType {
-						panic(fmt.Sprintf("tool %q: unexpected parameter type %v (want *HarnessRuntime)", cfg.Name, rType))
+						panic(fmt.Sprintf("tool %q: unexpected parameter type %v (want *CallContext)", cfg.Name, rType))
 					}
 					hasRuntime = true
 				}
 			} else {
-				panic(fmt.Sprintf("tool %q: handler parameter must be a struct or *HarnessRuntime, got %v", cfg.Name, pType))
+				panic(fmt.Sprintf("tool %q: handler parameter must be a struct or *CallContext, got %v", cfg.Name, pType))
 			}
 		}
 	}
@@ -183,7 +185,7 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 	for _, ctor := range cfg.OnCall {
 		if ctor == nil {
-			continue
+			panic(fmt.Sprintf("tool %q: OnCall entries must not be nil", cfg.Name))
 		}
 		if sample := ctor(ToolInvocation{Tool: t}); sample != nil {
 			if _, ok := NewInterrupt(sample.TypeName()); !ok {
@@ -204,7 +206,7 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	handlerValue := reflect.ValueOf(cfg.Handler)
-	t.handlerFunc = func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (ToolOutcome, error) {
+	t.handlerFunc = func(ctx context.Context, args map[string]any, cc *CallContext) (ToolOutcome, error) {
 		var callArgs []reflect.Value
 
 		callArgs = append(callArgs, reflect.ValueOf(ctx))
@@ -212,10 +214,8 @@ func NewTool(cfg ToolConfig) *Tool {
 		if argsType != nil {
 			argPtr := reflect.New(argsType)
 			if len(args) > 0 {
-				b, err := json.Marshal(args)
-				if err != nil {
-					return ToolOutcome{}, fmt.Errorf("marshal args: %w", err)
-				}
+				// args were decoded from JSON, so they encode.
+				b, _ := json.Marshal(args)
 				if err := json.Unmarshal(b, argPtr.Interface()); err != nil {
 					return ToolOutcome{}, fmt.Errorf("unmarshal args: %w", err)
 				}
@@ -228,10 +228,10 @@ func NewTool(cfg ToolConfig) *Tool {
 		}
 
 		if hasRuntime {
-			if runtime == nil {
-				return ToolOutcome{}, fmt.Errorf("%w: tool %q requires a HarnessRuntime", ErrFailed, t.name)
+			if cc == nil {
+				return ToolOutcome{}, fmt.Errorf("%w: tool %q requires a CallContext", ErrFailed, t.name)
 			}
-			callArgs = append(callArgs, reflect.ValueOf(runtime))
+			callArgs = append(callArgs, reflect.ValueOf(cc))
 		}
 
 		results := handlerValue.Call(callArgs)
@@ -271,8 +271,8 @@ func newMCPTool(cfg mcpToolConfig) *Tool {
 		timeout:     cfg.Timeout,
 		strict:      false,
 		parameters:  params,
-		handlerFunc: func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (ToolOutcome, error) {
-			out, err := cfg.Handler(ctx, args, runtime)
+		handlerFunc: func(ctx context.Context, args map[string]any, cc *CallContext) (ToolOutcome, error) {
+			out, err := cfg.Handler(ctx, args, cc)
 			return ToolOutcome{Output: out}, err
 		},
 	}
@@ -303,15 +303,15 @@ func ResolveToolTitle(displayName, toolName, argsJSON string) string {
 
 // invoke runs the tool handler. Only the harness tool runner should call this
 // so interceptors, permissions, and effects apply.
-func (t *Tool) invoke(ctx context.Context, argsJson string, runtime *HarnessRuntime) (ToolOutcome, error) {
-	res, err := t.invokeRaw(ctx, argsJson, runtime)
+func (t *Tool) invoke(ctx context.Context, argsJson string, cc *CallContext) (ToolOutcome, error) {
+	res, err := t.invokeRaw(ctx, argsJson, cc)
 	if err != nil {
 		return res, presentToolError(t.name, err)
 	}
 	return res, nil
 }
 
-func (t *Tool) invokeRaw(ctx context.Context, argsJson string, runtime *HarnessRuntime) (ToolOutcome, error) {
+func (t *Tool) invokeRaw(ctx context.Context, argsJson string, cc *CallContext) (ToolOutcome, error) {
 	var args map[string]any
 	if argsJson != "" {
 		if err := json.Unmarshal([]byte(argsJson), &args); err != nil {
@@ -320,7 +320,7 @@ func (t *Tool) invokeRaw(ctx context.Context, argsJson string, runtime *HarnessR
 	}
 
 	if t.timeout <= 0 {
-		return t.handlerFunc(ctx, args, runtime)
+		return t.handlerFunc(ctx, args, cc)
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, t.timeout)
@@ -332,7 +332,7 @@ func (t *Tool) invokeRaw(ctx context.Context, argsJson string, runtime *HarnessR
 	}
 	done := make(chan result, 1)
 	go func() {
-		outcome, err := t.handlerFunc(callCtx, args, runtime)
+		outcome, err := t.handlerFunc(callCtx, args, cc)
 		done <- result{outcome: outcome, err: err}
 	}()
 
@@ -374,21 +374,12 @@ func (t *Tool) AsJson() map[string]any {
 // When strict is true (OpenAI/DeepSeek function tools), every property name is
 // listed in required, and omitempty/pointer fields are typed as T|null so the
 // model may pass null for unused optionals.
-func typeToJSONSchema(rt reflect.Type, depth int, strict bool, skipTypes ...reflect.Type) map[string]any {
+func typeToJSONSchema(rt reflect.Type, depth int, strict bool) map[string]any {
 	if depth > 10 {
 		return map[string]any{"type": "string"}
 	}
 	for rt.Kind() == reflect.Ptr {
 		rt = rt.Elem()
-	}
-
-	shouldSkip := func(ft reflect.Type) bool {
-		for _, st := range skipTypes {
-			if ft == st {
-				return true
-			}
-		}
-		return false
 	}
 
 	if rt.Kind() == reflect.Struct {
@@ -402,14 +393,6 @@ func typeToJSONSchema(rt reflect.Type, depth int, strict bool, skipTypes ...refl
 		for i := 0; i < rt.NumField(); i++ {
 			f := rt.Field(i)
 			if !f.IsExported() {
-				continue
-			}
-
-			ft := f.Type
-			for ft.Kind() == reflect.Ptr {
-				ft = ft.Elem()
-			}
-			if shouldSkip(ft) {
 				continue
 			}
 
@@ -435,7 +418,7 @@ func typeToJSONSchema(rt reflect.Type, depth int, strict bool, skipTypes ...refl
 			}
 
 			if f.Anonymous && name == f.Name && f.Type.Kind() == reflect.Struct {
-				emb := typeToJSONSchema(f.Type, depth+1, strict, skipTypes...)
+				emb := typeToJSONSchema(f.Type, depth+1, strict)
 				if p, ok := emb["properties"].(map[string]any); ok {
 					for k, v := range p {
 						properties[k] = v
@@ -448,7 +431,7 @@ func typeToJSONSchema(rt reflect.Type, depth int, strict bool, skipTypes ...refl
 			}
 
 			isOptional := f.Type.Kind() == reflect.Ptr || strings.Contains(opts, "omitempty")
-			schema := typeToJSONSchema(f.Type, depth+1, strict, skipTypes...)
+			schema := typeToJSONSchema(f.Type, depth+1, strict)
 
 			if desc := f.Tag.Get("desc"); desc != "" {
 				schema["description"] = desc
@@ -482,14 +465,14 @@ func typeToJSONSchema(rt reflect.Type, depth int, strict bool, skipTypes ...refl
 	if rt.Kind() == reflect.Slice || rt.Kind() == reflect.Array {
 		return map[string]any{
 			"type":  "array",
-			"items": typeToJSONSchema(rt.Elem(), depth+1, strict, skipTypes...),
+			"items": typeToJSONSchema(rt.Elem(), depth+1, strict),
 		}
 	}
 
 	if rt.Kind() == reflect.Map {
 		return map[string]any{
 			"type":                 "object",
-			"additionalProperties": typeToJSONSchema(rt.Elem(), depth+1, strict, skipTypes...),
+			"additionalProperties": typeToJSONSchema(rt.Elem(), depth+1, strict),
 		}
 	}
 
@@ -508,29 +491,10 @@ func typeToJSONSchema(rt reflect.Type, depth int, strict bool, skipTypes ...refl
 	return map[string]any{"type": jsonType}
 }
 
-// makeSchemaNullable rewrites a schema type to accept null (strict optional fields).
+// makeSchemaNullable lets a strict optional field be null. A generated
+// schema's type is one JSON type name.
 func makeSchemaNullable(schema map[string]any) map[string]any {
-	if schema == nil {
-		return map[string]any{"type": []any{"string", "null"}}
-	}
-	switch t := schema["type"].(type) {
-	case string:
-		if t == "null" {
-			return schema
-		}
-		schema["type"] = []any{t, "null"}
-	case []any:
-		hasNull := false
-		for _, x := range t {
-			if s, ok := x.(string); ok && s == "null" {
-				hasNull = true
-				break
-			}
-		}
-		if !hasNull {
-			schema["type"] = append(append([]any{}, t...), "null")
-		}
-	}
+	schema["type"] = []any{schema["type"], "null"}
 	return schema
 }
 

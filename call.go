@@ -8,22 +8,26 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ryanaldo34/tacklr/session"
+
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-// HarnessRuntime is what a tool call's tool gets: progress events, the
+// CallContext is what a tool call's tool gets: progress events, the
 // session's user state, Park, and the session's Runtime jobs. Each call of
 // a reply gets its own, so calls run at once without sharing state. A call
 // reads its own writes first, then the committed state; it writes only
 // here, and Commit applies its writes in call order. A tool may use it from
 // goroutines. Only the harness makes one.
-type HarnessRuntime struct {
-	out     chan StreamEvent
-	turn    *TurnManager
+type CallContext struct {
+	out     chan session.Event
+	turn    *Harness
 	session *sessionManager
-	// running are the session's running children, from the run.
-	running []string
-	mu      sync.Mutex
+	// running are the session's running children, from the run, and
+	// maxChildren how many it may run at once (zero: no limit).
+	running     []string
+	maxChildren int
+	mu          sync.Mutex
 	// call is the call with its park and the OnCall layers it completed.
 	call   roundCall
 	writes callWrites
@@ -40,98 +44,98 @@ type userValue struct {
 	deleted bool
 }
 
-// newHarnessRuntime opens call's run on sm. prior is what the call's
+// newCallContext opens call's run on sm. prior is what the call's
 // earlier runs wrote (before a park), which this run reads and keeps.
-func newHarnessRuntime(out chan StreamEvent, turn *TurnManager, running []string, call roundCall, prior callWrites) *HarnessRuntime {
-	rt := &HarnessRuntime{out: out, turn: turn, session: turn.session, running: running, call: call, writes: prior, user: map[string]userValue{}}
+func newCallContext(out chan session.Event, turn *Harness, run ToolRun, call roundCall, prior callWrites) *CallContext {
+	cc := &CallContext{out: out, turn: turn, session: turn.session, running: run.Children, maxChildren: run.MaxChildren, call: call, writes: prior, user: map[string]userValue{}}
 	for _, w := range prior.State {
 		v := userValue{deleted: w.Deleted}
 		// The value is JSON a StateSet of this call encoded.
 		_ = json.Unmarshal(w.Value, &v.value)
-		rt.user[w.Key] = v
+		cc.user[w.Key] = v
 	}
-	return rt
+	return cc
 }
 
 // CurrentToolCallID is this call's id. A runtime may run a call's step
 // again when it did not record the step's result (a worker died), so a
 // tool with external side effects (a write, a send, a charge) passes the
 // id as its idempotency key.
-func (rt *HarnessRuntime) CurrentToolCallID() string {
-	return rt.call.Call.Key()
+func (cc *CallContext) CurrentToolCallID() string {
+	return cc.call.Call.Key()
 }
 
 // EmitUpdate sends a non-blocking progress update for the call.
-func (rt *HarnessRuntime) EmitUpdate(message string) {
+func (cc *CallContext) EmitUpdate(message string) {
 	select {
-	case rt.out <- StreamEvent{Type: StreamEventToolUpdate, Content: message, MessageID: rt.CurrentToolCallID()}:
+	case cc.out <- session.Event{Type: session.EventToolUpdate, Content: message, MessageID: cc.CurrentToolCallID()}:
 	default:
 	}
 }
 
 // StateGet reads the call's own write of key first, then committed state.
-func (rt *HarnessRuntime) StateGet(key string) (any, bool) {
-	rt.mu.Lock()
-	v, ok := rt.user[key]
-	rt.mu.Unlock()
+func (cc *CallContext) StateGet(key string) (any, bool) {
+	cc.mu.Lock()
+	v, ok := cc.user[key]
+	cc.mu.Unlock()
 	if ok {
 		return v.value, !v.deleted
 	}
-	return rt.session.state(key)
+	return cc.session.state(key)
 }
 
 // StateSet records a write of key on the call; Commit applies it.
-func (rt *HarnessRuntime) StateSet(key string, value any) error {
+func (cc *CallContext) StateSet(key string, value any) error {
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("state %q: %w", key, err)
 	}
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.user[key] = userValue{value: value}
-	rt.writes.State = append(rt.writes.State, stateWrite{Key: key, Value: raw})
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	cc.user[key] = userValue{value: value}
+	cc.writes.State = append(cc.writes.State, stateWrite{Key: key, Value: raw})
 	return nil
 }
 
 // StateDelete records a delete of key on the call; Commit applies it.
-func (rt *HarnessRuntime) StateDelete(key string) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.user[key] = userValue{deleted: true}
-	rt.writes.State = append(rt.writes.State, stateWrite{Key: key, Deleted: true})
+func (cc *CallContext) StateDelete(key string) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	cc.user[key] = userValue{deleted: true}
+	cc.writes.State = append(cc.writes.State, stateWrite{Key: key, Deleted: true})
 }
 
 // Park parks the call on intr and returns it as the error the tool
 // propagates. The call's run after resume gets the answered interrupt of
 // intr's type and a nil error. intr's type must be registered
 // (RegisterInterrupt), so a parked call can be read back.
-func (rt *HarnessRuntime) Park(intr Interrupt) (Interrupt, error) {
-	if answered, ok := rt.takeAnswer(intr.TypeName()); ok {
+func (cc *CallContext) Park(intr Interrupt) (Interrupt, error) {
+	if answered, ok := cc.takeAnswer(intr.TypeName()); ok {
 		return answered, nil
 	}
 	if _, ok := NewInterrupt(intr.TypeName()); !ok {
 		return nil, fmt.Errorf("interrupt type %q is not registered: %w", intr.TypeName(), ErrInvalid)
 	}
-	return nil, rt.park(intr)
+	return nil, cc.park(intr)
 }
 
 // park makes intr the call's park and returns it as the error tools
 // propagate.
-func (rt *HarnessRuntime) park(intr Interrupt) error {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.call.Park = &callPark{Interrupt: intr}
+func (cc *CallContext) park(intr Interrupt) error {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	cc.call.Park = &callPark{Interrupt: intr}
 	return intr
 }
 
 // resume answers the call's park through Interrupt.Return. An invalid
 // payload leaves it unanswered.
-func (rt *HarnessRuntime) resume(payload []byte) error {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	p := rt.call.Park
+func (cc *CallContext) resume(payload []byte) error {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	p := cc.call.Park
 	if p == nil || p.Answered {
-		return fmt.Errorf("interrupt %q: %w", rt.call.Call.Key(), ErrInterruptNotFound)
+		return fmt.Errorf("interrupt %q: %w", cc.call.Call.Key(), ErrInterruptNotFound)
 	}
 	if err := p.Interrupt.Return(payload); err != nil {
 		return err
@@ -141,49 +145,49 @@ func (rt *HarnessRuntime) resume(payload []byte) error {
 }
 
 // takeAnswer removes and returns the call's answered park of typeName.
-func (rt *HarnessRuntime) takeAnswer(typeName string) (Interrupt, bool) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	p := rt.call.Park
+func (cc *CallContext) takeAnswer(typeName string) (Interrupt, bool) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	p := cc.call.Park
 	if p == nil || !p.Answered || p.Interrupt.TypeName() != typeName {
 		return nil, false
 	}
-	rt.call.Park = nil
+	cc.call.Park = nil
 	return p.Interrupt, true
 }
 
 // layer is the call's completed OnCall layer of typeName.
-func (rt *HarnessRuntime) layer(typeName string) (onCallLayer, bool) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	return rt.call.layer(typeName)
+func (cc *CallContext) layer(typeName string) (onCallLayer, bool) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	return cc.call.layer(typeName)
 }
 
 // recordLayer keeps a completed OnCall layer, so the call's run after a
 // later park skips it.
-func (rt *HarnessRuntime) recordLayer(l onCallLayer) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.call.Layers = append(rt.call.Layers, l)
+func (cc *CallContext) recordLayer(l onCallLayer) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	cc.call.Layers = append(cc.call.Layers, l)
 }
 
 // decision is the permission answer for the tool qualified-named name: the
 // call's own answer, else the committed one.
-func (rt *HarnessRuntime) decision(name string) permissionDecision {
-	rt.mu.Lock()
-	for i := len(rt.writes.Permissions) - 1; i >= 0; i-- {
-		if w := rt.writes.Permissions[i]; w.Tool == name {
-			rt.mu.Unlock()
+func (cc *CallContext) decision(name string) permissionDecision {
+	cc.mu.Lock()
+	for i := len(cc.writes.Permissions) - 1; i >= 0; i-- {
+		if w := cc.writes.Permissions[i]; w.Tool == name {
+			cc.mu.Unlock()
 			return w.Decision
 		}
 	}
-	rt.mu.Unlock()
-	return rt.session.Permissions.Decision(name)
+	cc.mu.Unlock()
+	return cc.session.Permissions.Decision(name)
 }
 
 // rememberAnswer keeps the always-answer a resolved permission prompt
 // carries; a once-answer is not remembered.
-func (rt *HarnessRuntime) rememberAnswer(perm *ToolPermissionInterrupt) {
+func (cc *CallContext) rememberAnswer(perm *ToolPermissionInterrupt) {
 	var d permissionDecision
 	switch perm.SelectedKind {
 	case PermissionAllowAlways:
@@ -193,38 +197,38 @@ func (rt *HarnessRuntime) rememberAnswer(perm *ToolPermissionInterrupt) {
 	default:
 		return
 	}
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.writes.Permissions = append(rt.writes.Permissions, permissionWrite{Tool: perm.ToolName, Decision: d})
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	cc.writes.Permissions = append(cc.writes.Permissions, permissionWrite{Tool: perm.ToolName, Decision: d})
 }
 
 // rest is the ranked remainder of the last call of tool: the call's own,
 // else the committed one.
-func (rt *HarnessRuntime) rest(tool string) brain.Rest {
-	rt.mu.Lock()
-	for i := len(rt.writes.Rests) - 1; i >= 0; i-- {
-		if w := rt.writes.Rests[i]; w.Key == tool {
-			rt.mu.Unlock()
+func (cc *CallContext) rest(tool string) brain.Rest {
+	cc.mu.Lock()
+	for i := len(cc.writes.Rests) - 1; i >= 0; i-- {
+		if w := cc.writes.Rests[i]; w.Key == tool {
+			cc.mu.Unlock()
 			return w.Rest
 		}
 	}
-	rt.mu.Unlock()
-	return rt.session.Search.Rest(tool)
+	cc.mu.Unlock()
+	return cc.session.Search.Rest(tool)
 }
 
-func (rt *HarnessRuntime) setRest(tool string, rest brain.Rest) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.writes.Rests = append(rt.writes.Rests, restWrite{Key: tool, Rest: rest})
+func (cc *CallContext) setRest(tool string, rest brain.Rest) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	cc.writes.Rests = append(cc.writes.Rests, restWrite{Key: tool, Rest: rest})
 }
 
 // plan is the plan the call sees: the committed plan with the call's own
 // plan changes on top.
-func (rt *HarnessRuntime) plan() ([]Todo, string) {
-	todos, doc := rt.session.Plan.snapshot()
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	for _, op := range rt.writes.Plan {
+func (cc *CallContext) plan() ([]Todo, string) {
+	todos, doc := cc.session.Plan.snapshot()
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	for _, op := range cc.writes.Plan {
 		if next, nextDoc, _, err := op.change()(todos, doc); err == nil {
 			todos, doc = next, nextDoc
 		}
@@ -234,15 +238,15 @@ func (rt *HarnessRuntime) plan() ([]Todo, string) {
 
 // changePlan applies a plan tool's change to the plan the call sees and
 // keeps it for Commit, which replays it on the committed plan.
-func (rt *HarnessRuntime) changePlan(op planOp) (ToolOutcome, error) {
-	todos, doc := rt.plan()
+func (cc *CallContext) changePlan(op planOp) (ToolOutcome, error) {
+	todos, doc := cc.plan()
 	_, _, out, err := op.change()(todos, doc)
 	if err != nil {
 		return ToolOutcome{}, err
 	}
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.writes.Plan = append(rt.writes.Plan, op)
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	cc.writes.Plan = append(cc.writes.Plan, op)
 	return out, nil
 }
 
@@ -251,17 +255,17 @@ func (rt *HarnessRuntime) changePlan(op planOp) (ToolOutcome, error) {
 // model starts them with spawn_specialist. With JobRequest.Wait the call
 // waits and the job's output is its result; otherwise the output arrives
 // later as an inbox message. Pass the id to Jobs or CancelJob.
-func (rt *HarnessRuntime) Schedule(_ context.Context, job JobRequest) (Job, error) {
-	return rt.startJob(job, false)
+func (cc *CallContext) Schedule(_ context.Context, job JobRequest) (Job, error) {
+	return cc.startJob(job, false)
 }
 
 // startJob starts the child job names, once: a call that runs again names
 // the same child. specialist says which kind job must name; only
 // spawn_specialist starts specialists. With Wait the call waits for it and
 // the child's output is the call's result.
-func (rt *HarnessRuntime) startJob(job JobRequest, specialist bool) (Job, error) {
+func (cc *CallContext) startJob(job JobRequest, specialist bool) (Job, error) {
 	name, task := strings.TrimSpace(job.Name), strings.TrimSpace(job.Task)
-	isSpecialist := rt.turn.specialists[name] != nil
+	isSpecialist := cc.turn.specialists[name] != nil
 	switch {
 	case name == "":
 		return Job{}, fmt.Errorf("job name is required: %w", ErrInvalid)
@@ -269,19 +273,22 @@ func (rt *HarnessRuntime) startJob(job JobRequest, specialist bool) (Job, error)
 		return Job{}, fmt.Errorf("%w: %s is a specialist; the model starts specialists with spawn_specialist", ErrInvalid, name)
 	case !isSpecialist && specialist:
 		return Job{}, fmt.Errorf("%w: %s is not a specialist", ErrNotFound, name)
-	case !specialist && !slices.Contains(rt.turn.jobs, name):
+	case !specialist && !slices.Contains(cc.turn.jobs, name):
 		return Job{}, fmt.Errorf("%w: %s is not a registered job", ErrNotFound, name)
 	case task == "":
 		return Job{}, fmt.Errorf("task is required: %w", ErrInvalid)
 	}
-	s := JobStart{ID: ChildID(rt.turn.sessionId, name, rt.CurrentToolCallID(), specialist), Name: name, Task: task, Specialist: specialist}
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if !slices.Contains(rt.running, s.ID) && !slices.ContainsFunc(rt.starts, func(o JobStart) bool { return o.ID == s.ID }) {
-		rt.starts = append(rt.starts, s)
+	s := JobStart{ID: ChildID(cc.turn.sessionId, name, cc.CurrentToolCallID(), specialist), Name: name, Task: task, Specialist: specialist}
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if !slices.Contains(cc.running, s.ID) && !slices.ContainsFunc(cc.starts, func(o JobStart) bool { return o.ID == s.ID }) {
+		if n := len(cc.running) + len(cc.starts); cc.maxChildren > 0 && n >= cc.maxChildren {
+			return Job{}, Correctionf(ErrInvalid, "%s: this session already runs %d jobs, the most it may run at once. Wait for one to finish, or stop one with cancel_child", name, n)
+		}
+		cc.starts = append(cc.starts, s)
 	}
 	if job.Wait {
-		rt.await = s.ID
+		cc.await = s.ID
 	}
 	return Job{ID: s.ID, Name: s.Name, State: JobRunning}, nil
 }
@@ -289,26 +296,26 @@ func (rt *HarnessRuntime) startJob(job JobRequest, specialist bool) (Job, error)
 // Jobs is the session's running children and the ones this call started
 // (a call records a start only for a child that is not running yet).
 // Waiting specialist children appear as running.
-func (rt *HarnessRuntime) Jobs() []Job {
-	out := make([]Job, 0, len(rt.running))
-	for _, id := range rt.running {
+func (cc *CallContext) Jobs() []Job {
+	out := make([]Job, 0, len(cc.running))
+	for _, id := range cc.running {
 		out = append(out, Job{ID: id, State: JobRunning})
 	}
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	for _, s := range rt.starts {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	for _, s := range cc.starts {
 		out = append(out, Job{ID: s.ID, Name: s.Name, State: JobRunning})
 	}
 	return out
 }
 
 // CancelJob stops one job of this session and drops it from Jobs.
-func (rt *HarnessRuntime) CancelJob(_ context.Context, id string) error {
-	if !slices.ContainsFunc(rt.Jobs(), func(j Job) bool { return j.ID == id }) {
+func (cc *CallContext) CancelJob(_ context.Context, id string) error {
+	if !slices.ContainsFunc(cc.Jobs(), func(j Job) bool { return j.ID == id }) {
 		return fmt.Errorf("job %q is unknown: %w", id, ErrNotFound)
 	}
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.cancels = append(rt.cancels, id)
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	cc.cancels = append(cc.cancels, id)
 	return nil
 }

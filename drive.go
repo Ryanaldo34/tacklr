@@ -2,50 +2,68 @@ package tacklr
 
 import (
 	"encoding/json"
+	"time"
+
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
 )
 
 // Reply is one model reply: its messages (text, reasoning, and the message
 // that carries its calls) and its calls. A reply without calls is complete,
 // and Result is its text.
 type Reply struct {
-	Messages []*Message `json:"messages"`
-	Calls    []ToolCall `json:"calls,omitempty"`
-	Result   string     `json:"result,omitempty"`
+	Messages []*message.Message `json:"messages"`
+	Calls    []message.ToolCall `json:"calls,omitempty"`
+	Result   string             `json:"result,omitempty"`
+	// Timeouts are each call's tool timeout (ToolConfig.Timeout), by call
+	// index; zero is none. A runtime bounds the call's step by it.
+	Timeouts []time.Duration `json:"timeouts,omitempty"`
 }
 
-// ChildResult is a blocking specialist's output for the call that waited
-// on it. Failed is a child that failed: Output is then its error.
-type ChildResult struct {
-	Output string `json:"output"`
-	Failed bool   `json:"failed,omitempty"`
+// Timeout is call i's tool timeout, zero when it has none.
+func (r Reply) Timeout(i int) time.Duration {
+	if i < len(r.Timeouts) {
+		return r.Timeouts[i]
+	}
+	return 0
 }
 
 // ToolRun is one run of one call. Prior is the call's last outcome, when it
 // parked or waited on a child: Answer is the answer to its park, Child the
 // result of its child.
 type ToolRun struct {
-	Call   ToolCall     `json:"call"`
-	Prior  *CallOutcome `json:"prior,omitempty"`
-	Answer []byte       `json:"answer,omitempty"`
-	Child  *ChildResult `json:"child,omitempty"`
+	Call   message.ToolCall   `json:"call"`
+	Prior  *CallOutcome       `json:"prior,omitempty"`
+	Answer []byte             `json:"answer,omitempty"`
+	Child  *session.JobResult `json:"child,omitempty"`
 	// Children are the session's running children in start order. The
 	// runtime holds them and sets them before the run.
 	Children []string `json:"children,omitempty"`
+	// MaxChildren is how many children the session may run at once; zero
+	// is no limit. The runtime sets it from its own limits.
+	MaxChildren int `json:"maxChildren,omitempty"`
+	// Timeout is the call's tool timeout (Reply.Timeout).
+	Timeout time.Duration `json:"timeout,omitempty"`
 }
 
 // CallOutcome is what one run of a call produced: a result (Done), a park,
 // or a wait on a child (AwaitID), and the children it starts or cancels.
 // Record is the harness's own part (the result message, its window effect,
 // the park, completed OnCall layers, and the shared-state writes the call
-// made); only Commit and the call's next run read it.
+// made); only Commit and the call's next run read it. Stored says the
+// runtime moved Record into the session's outcome store, under the call
+// key, so its history does not hold the result; a step that reads the
+// outcome loads it back.
 type CallOutcome struct {
-	Call    ToolCall        `json:"call"`
-	Done    bool            `json:"done,omitempty"`
-	Park    *Park           `json:"park,omitempty"`
-	AwaitID string          `json:"awaitId,omitempty"`
-	Starts  []JobStart      `json:"starts,omitempty"`
-	Cancels []string        `json:"cancels,omitempty"`
-	Record  json.RawMessage `json:"record,omitempty"`
+	Call    message.ToolCall `json:"call"`
+	Done    bool             `json:"done,omitempty"`
+	Park    *Park            `json:"park,omitempty"`
+	AwaitID string           `json:"awaitId,omitempty"`
+	Starts  []JobStart       `json:"starts,omitempty"`
+	Cancels []string         `json:"cancels,omitempty"`
+	Record  json.RawMessage  `json:"record,omitempty"`
+	Stored  bool             `json:"stored,omitempty"`
 }
 
 // Park is a call's interrupt as the client sees it. InterruptID is the call
@@ -94,17 +112,17 @@ func (r *Round) Complete() bool {
 // (its calls' state writes in call order), then user messages, each a round
 // of its own.
 type CommitIn struct {
-	State map[string]any `json:"state,omitempty"`
-	Round *Round         `json:"round,omitempty"`
-	Users []*Message     `json:"users,omitempty"`
+	State map[string]any     `json:"state,omitempty"`
+	Round *Round             `json:"round,omitempty"`
+	Users []*message.Message `json:"users,omitempty"`
 }
 
 const streamEventBuffer = 64
 
-// PipeStreamEvents copies channel events to emit. Durable backends adapt
-// emit callbacks to the harness chan StreamEvent API.
-func PipeStreamEvents(emit func(StreamEvent)) (chan StreamEvent, func()) {
-	out := make(chan StreamEvent, streamEventBuffer)
+// PipeEvents copies channel events to emit. Durable backends adapt
+// emit callbacks to the harness chan session.Event API.
+func PipeEvents(emit func(session.Event)) (chan session.Event, func()) {
+	out := make(chan session.Event, streamEventBuffer)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

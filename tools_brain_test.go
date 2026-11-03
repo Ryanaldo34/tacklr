@@ -7,6 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/session"
+
+	"github.com/ryanaldo34/tacklr/message"
+
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
@@ -37,12 +41,12 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns, BrainWriteKinds: []string{"Fact"}, sessionID: "brain-tools-1"}
-	h := mustNewTurnManager(t, opts)
+	h := mustNewHarness(t, opts)
 	// Each call is a round of its own: its writes commit before the next.
-	call := func(h *TurnManager, name, args string) (string, error) {
-		rt := turnRuntime(h)
-		out, err := h.findTool(name, "").invoke(ctx, args, rt)
-		rt.commit()
+	call := func(h *Harness, name, args string) (string, error) {
+		cc := turnRuntime(h)
+		out, err := h.findTool(name, "").invoke(ctx, args, cc)
+		cc.commit()
 		return out.Output, err
 	}
 	var saved []brain.RichObject
@@ -179,7 +183,7 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 		t.Fatal(err)
 	}
 	ms := mustMountTree(t, "link-graph", vfs.At("work", vfs.Local(t.TempDir())))
-	h := mustNewTurnManager(t, AgentOptions{sessionID: "link-graph", mountSession: ms, Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns})
+	h := mustNewHarness(t, AgentOptions{sessionID: "link-graph", mountSession: ms, Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns})
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
 	call := func(name, args string) (string, error) {
@@ -202,6 +206,10 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	removed, removeErr := call("link", `{"from":"`+deal.ID.String()+`","to":"`+person.ID.String()+`","relation":"about","remove":true}`)
 	after, _ := call("related", `{"ref":"`+deal.ID.String()+`","relation":"about"}`)
 	_, noTo := call("link", `{"from":"`+deal.ID.String()+`","to":"","relation":"about"}`)
+	_, noRelation := call("link", `{"from":"`+deal.ID.String()+`","to":"`+person.ID.String()+`","relation":" "}`)
+	reserved := `"namespace":[{"name":"session","value":"x"}]`
+	_, linkReserved := call("link", `{"from":"`+deal.ID.String()+`","to":"`+person.ID.String()+`","relation":"about",`+reserved+`}`)
+	_, openReserved := call("open", `{"ref":"`+deal.ID.String()+`",`+reserved+`}`)
 
 	if linkErr != nil || !strings.Contains(linked, `"linked": true`) || !strings.Contains(linked, person.ID.String()) {
 		t.Errorf("link = %s %v, want it linked", linked, linkErr)
@@ -224,6 +232,14 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	if noTo == nil || !strings.Contains(noTo.Error(), "to is required") {
 		t.Errorf("link with no to = %v, want it named", noTo)
 	}
+	if noRelation == nil || !strings.Contains(noRelation.Error(), "relation are required") {
+		t.Errorf("link with no relation = %v, want it rejected", noRelation)
+	}
+	for name, err := range map[string]error{"link": linkReserved, "open": openReserved} {
+		if err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Errorf("%s in the reserved session namespace = %v, want it rejected", name, err)
+		}
+	}
 }
 
 func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
@@ -238,20 +254,20 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	workerModel := &scriptedModel{
-		InvokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
+		InvokeFn: func(ctx context.Context, msgs []*message.Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{Type: session.EventMessage, Content: "ok", IsComplete: true}
 		},
 	}
 	parentOpts := AgentOptions{
 		MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns,
 		Specialists: []*Specialist{{Name: "researcher", Model: workerModel}},
 	}
-	parentH := mustNewTurnManager(t, parentOpts)
+	parentH := mustNewHarness(t, parentOpts)
 	t.Cleanup(parentH.Close)
 	workerOpts := parentOpts.WithSpecialist(parentH.specialists["researcher"])
 	workerOpts.SearchNamespace = ns
 	workerOpts.sessionID = "w/researcher/spawn_tc1"
-	worker := mustNewTurnManager(t, workerOpts)
+	worker := mustNewHarness(t, workerOpts)
 	t.Cleanup(worker.Close)
 
 	opened, openErr := worker.findTool("open", "").invoke(ctx, `{"ref":"`+doc.ID.String()+`"}`, turnRuntime(worker))

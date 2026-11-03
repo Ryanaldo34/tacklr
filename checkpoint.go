@@ -4,36 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"slices"
+
+	"github.com/ryanaldo34/tacklr/message"
 
 	"github.com/ryanaldo34/tacklr/brain"
 )
-
-// SessionCheckpoint is a session's committed state, encoded: the window of
-// complete rounds, the plan, user state, permission decisions, and search
-// rests. A round in progress is not in it: the runtime records each step's
-// result and holds the open round. A runtime stores it whole
-// (session.SnapshotStore) and only the harness reads it. It is an encoding,
-// so it shares nothing with the live session it came from.
-type SessionCheckpoint struct {
-	data json.RawMessage
-}
-
-func (c SessionCheckpoint) MarshalJSON() ([]byte, error) {
-	if len(c.data) == 0 {
-		return []byte("null"), nil
-	}
-	return c.data, nil
-}
-
-func (c *SessionCheckpoint) UnmarshalJSON(b []byte) error {
-	if string(b) == "null" {
-		c.data = nil
-		return nil
-	}
-	c.data = slices.Clone(b)
-	return nil
-}
 
 // checkpointVersion is the schema of checkpointState. A checkpoint of
 // another version fails to restore.
@@ -44,7 +19,7 @@ const checkpointVersion = 5
 // takes that from AgentOptions.
 type checkpointState struct {
 	Version     int                           `json:"version"`
-	Window      []*Message                    `json:"window"`
+	Window      []*message.Message            `json:"window"`
 	Todos       []Todo                        `json:"todos,omitempty"`
 	Plan        string                        `json:"plan,omitempty"`
 	UserState   map[string]any                `json:"userState,omitempty"`
@@ -52,8 +27,11 @@ type checkpointState struct {
 	Rests       map[string]brain.Rest         `json:"rests,omitempty"`
 }
 
-// Checkpoint encodes the session's durable state.
-func (a *TurnManager) Checkpoint() (SessionCheckpoint, error) {
+// Checkpoint encodes the session's committed state: the window of complete
+// rounds, the plan, user state, permission decisions and search rests. A
+// round in progress is not in it. A runtime stores the bytes whole
+// (session.Store) and only the harness reads them.
+func (a *Harness) Checkpoint() ([]byte, error) {
 	st := checkpointState{
 		Version:     checkpointVersion,
 		Window:      a.context.Messages(),
@@ -67,15 +45,15 @@ func (a *TurnManager) Checkpoint() (SessionCheckpoint, error) {
 	st.UserState = sm.userState
 	data, err := json.Marshal(st)
 	if err != nil {
-		return SessionCheckpoint{}, fmt.Errorf("checkpoint: %w", err)
+		return nil, fmt.Errorf("checkpoint: %w", err)
 	}
-	return SessionCheckpoint{data: data}, nil
+	return data, nil
 }
 
 // RestoreCheckpoint replaces the session's durable state with cp's.
-func (a *TurnManager) RestoreCheckpoint(cp SessionCheckpoint) error {
+func (a *Harness) RestoreCheckpoint(cp []byte) error {
 	var st checkpointState
-	if err := json.Unmarshal(cp.data, &st); err != nil {
+	if err := json.Unmarshal(cp, &st); err != nil {
 		return fmt.Errorf("checkpoint: %w", err)
 	}
 	if st.Version != checkpointVersion {
@@ -85,6 +63,7 @@ func (a *TurnManager) RestoreCheckpoint(cp SessionCheckpoint) error {
 		return fmt.Errorf("checkpoint: invalid context window: %w", err)
 	}
 	a.context.Restore(st.Window)
+	a.usage = requestUsage{}
 	a.session.Plan.restore(st.Todos, st.Plan)
 	a.session.Permissions.restore(st.Permissions)
 	a.session.Search.SetRests(st.Rests)

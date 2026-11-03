@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/vfs/mount"
+
 	"github.com/ryanaldo34/tacklr/internal/testgit"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -79,18 +81,18 @@ func TestGit_rejectsBadConfigAndCredentials(t *testing.T) {
 		}),
 	}
 	for name, repo := range cases {
-		if _, err := vfs.Git(repo)(ctx, "s3", vfs.Binding{Params: map[string]string{vfs.ParamName: "code"}}); err == nil {
+		if _, err := vfs.Git(repo)(ctx, "s3", mount.Binding{Params: map[string]string{mount.ParamName: "code"}}); err == nil {
 			t.Errorf("%s: open succeeded", name)
 		}
 	}
-	if _, err := vfs.Git(good)(ctx, "..", vfs.Binding{Params: map[string]string{vfs.ParamName: "code"}}); err == nil {
+	if _, err := vfs.Git(good)(ctx, "..", mount.Binding{Params: map[string]string{mount.ParamName: "code"}}); err == nil {
 		t.Error("unsafe session id accepted")
 	}
 	blocked := withRepo(func(*vfs.GitRepo) {})
 	if err := os.WriteFile(filepath.Join(blocked.Dir, "s3"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := vfs.Git(blocked)(ctx, "s3", vfs.Binding{Params: map[string]string{vfs.ParamName: "code"}}); err == nil {
+	if _, err := vfs.Git(blocked)(ctx, "s3", mount.Binding{Params: map[string]string{mount.ParamName: "code"}}); err == nil {
 		t.Error("checkout under a file accepted")
 	}
 }

@@ -8,14 +8,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/session"
+
 	mcpjsonrpc "github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/ryanaldo34/tacklr/mcp"
 )
 
 func TestInterpretError_surfacesRPCHTTPAndSessionCauses(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "test"}}
+	c := &client{config: session.MCPServer{Name: "test"}}
 	rpcWithData := &mcpjsonrpc.Error{Code: -32602, Message: "invalid params", Data: []byte(`{"detail":"missing field"}`)}
 	rpcNoData := &mcpjsonrpc.Error{Code: -32601, Message: "method not found"}
 	forbidden := &httpError{Status: http.StatusForbidden, Body: "insufficient authentication scopes"}
@@ -103,7 +103,7 @@ func TestBuildTransportStdio_hostEnvironmentRequiresExplicitPolicy(t *testing.T)
 	t.Setenv("TACKLR_ALLOWED", "allowed")
 	t.Setenv("TACKLR_SECRET", "secret")
 
-	allowlisted := &client{config: mcp.MCPConfig{
+	allowlisted := &client{config: session.MCPServer{
 		Name:    "allowlisted",
 		Command: "server",
 		HostEnv: []string{"TACKLR_ALLOWED"},
@@ -118,7 +118,7 @@ func TestBuildTransportStdio_hostEnvironmentRequiresExplicitPolicy(t *testing.T)
 		t.Fatalf("allowlisted environment = %v", allowlistedCommand.Env)
 	}
 
-	trusted := &client{config: mcp.MCPConfig{
+	trusted := &client{config: session.MCPServer{
 		Name:           "trusted",
 		Command:        "server",
 		InheritHostEnv: true,
@@ -135,7 +135,7 @@ func TestBuildTransportStdio_hostEnvironmentRequiresExplicitPolicy(t *testing.T)
 func TestAppendExplicitEnvironment_skipsMalformedEntries(t *testing.T) {
 	out := appendExplicitEnvironment(
 		[]string{"PLAIN", "A=1"},
-		[]mcp.EnvVariable{{Name: "", Value: "x"}, {Name: "B=C", Value: "x"}, {Name: "OK", Value: "2"}},
+		[]session.MCPEnv{{Name: "", Value: "x"}, {Name: "B=C", Value: "x"}, {Name: "OK", Value: "2"}},
 	)
 	if !slices.Contains(out, "A=1") || !slices.Contains(out, "OK=2") {
 		t.Fatalf("out = %v", out)
@@ -149,9 +149,9 @@ func TestAppendExplicitEnvironment_skipsMalformedEntries(t *testing.T) {
 
 func TestCommandEnvironment_skipsInvalidNames(t *testing.T) {
 	t.Setenv("GOOD", "yes")
-	out := commandEnvironment(mcp.MCPConfig{
+	out := commandEnvironment(session.MCPServer{
 		HostEnv: []string{"", "BAD=NAME", "GOOD"},
-		Env:     []mcp.EnvVariable{{Name: "", Value: "x"}, {Name: "A=B", Value: "x"}, {Name: "OK", Value: "1"}},
+		Env:     []session.MCPEnv{{Name: "", Value: "x"}, {Name: "A=B", Value: "x"}, {Name: "OK", Value: "1"}},
 	})
 	if !slices.Contains(out, "GOOD=yes") || !slices.Contains(out, "OK=1") {
 		t.Fatalf("out = %v", out)
@@ -164,7 +164,7 @@ func TestCommandEnvironment_skipsInvalidNames(t *testing.T) {
 }
 
 func TestBuildTransportStdioRequiresCommand(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "fs"}}
+	c := &client{config: session.MCPServer{Name: "fs"}}
 	_, err := c.buildTransport()
 	if err == nil {
 		t.Fatal("expected error for missing command")
@@ -175,9 +175,9 @@ func TestBuildTransportStdioRequiresCommand(t *testing.T) {
 }
 
 func TestBuildTransportSSE(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{
+	c := &client{config: session.MCPServer{
 		Name: "events",
-		Type: mcp.TransportSSE,
+		Type: session.MCPSSE,
 		URL:  "https://events.example.com/mcp",
 	}}
 	transport, err := c.buildTransport()
@@ -194,8 +194,8 @@ func TestBuildTransportSSE(t *testing.T) {
 }
 
 func TestBuildTransportHTTPRequiresURL(t *testing.T) {
-	for _, typ := range []string{mcp.TransportHTTP, mcp.TransportSSE} {
-		c := &client{config: mcp.MCPConfig{Name: "api", Type: typ}}
+	for _, typ := range []string{session.MCPHTTP, session.MCPSSE} {
+		c := &client{config: session.MCPServer{Name: "api", Type: typ}}
 		_, err := c.buildTransport()
 		if err == nil {
 			t.Fatalf("type=%q: expected error for missing url", typ)
@@ -207,7 +207,7 @@ func TestBuildTransportHTTPRequiresURL(t *testing.T) {
 }
 
 func TestBuildTransportUnsupported(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "weird", Type: "grpc"}}
+	c := &client{config: session.MCPServer{Name: "weird", Type: "grpc"}}
 	_, err := c.buildTransport()
 	if !errors.Is(err, errTransportNotSupported) {
 		t.Errorf("expected errTransportNotSupported, got %v", err)
@@ -215,7 +215,7 @@ func TestBuildTransportUnsupported(t *testing.T) {
 }
 
 func TestCloseIgnores405(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "drive"}}
+	c := &client{config: session.MCPServer{Name: "drive"}}
 	err := c.close()
 	if err != nil {
 		t.Errorf("expected nil error when session is nil, got %v", err)
