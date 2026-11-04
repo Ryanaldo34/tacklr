@@ -10,7 +10,7 @@ import (
 	"net/textproto"
 	"net/url"
 
-	"github.com/ryanaldo34/tacklr/vfs/internal/rest"
+	"github.com/ryanaldo34/tacklr/internal/rest"
 )
 
 // Upload sends meta and media as one multipart/related upload through c and

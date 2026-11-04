@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/internal/rest"
 	"github.com/ryanaldo34/tacklr/vfs/internal/httprange"
-	"github.com/ryanaldo34/tacklr/vfs/internal/rest"
 )
 
 // graphItemFields is the driveItem $select: only what GraphItem keeps.

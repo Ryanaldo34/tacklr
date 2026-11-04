@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/api/docs/v1"
+	"github.com/ryanaldo34/tacklr/internal/google/docs"
 
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 

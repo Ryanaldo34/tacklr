@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/vfs/internal/google"
-	"github.com/ryanaldo34/tacklr/vfs/internal/google/drive"
+	"github.com/ryanaldo34/tacklr/internal/google"
+	"github.com/ryanaldo34/tacklr/internal/google/drive"
+	"github.com/ryanaldo34/tacklr/internal/rest"
 	"github.com/ryanaldo34/tacklr/vfs/internal/httprange"
-	"github.com/ryanaldo34/tacklr/vfs/internal/rest"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 

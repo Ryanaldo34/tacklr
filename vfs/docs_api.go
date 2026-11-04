@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/vfs/internal/google/docs"
-	"github.com/ryanaldo34/tacklr/vfs/internal/rest"
+	"github.com/ryanaldo34/tacklr/internal/google/docs"
+	"github.com/ryanaldo34/tacklr/internal/rest"
 )
 
 // DocsAPI is the Docs subset used by the provider.

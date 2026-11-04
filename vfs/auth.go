@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/vfs/internal/rest"
+	"github.com/ryanaldo34/tacklr/internal/rest"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 

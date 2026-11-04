@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/vfs/internal/google/docs"
+	"github.com/ryanaldo34/tacklr/internal/google/docs"
 )
 
 func TestMapReplace_imageAndEmptyAndTableMarks(t *testing.T) {

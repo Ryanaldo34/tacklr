@@ -10,8 +10,8 @@ import (
 
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 
-	"github.com/ryanaldo34/tacklr/vfs/internal/google/docs"
-	"github.com/ryanaldo34/tacklr/vfs/internal/rest"
+	"github.com/ryanaldo34/tacklr/internal/google/docs"
+	"github.com/ryanaldo34/tacklr/internal/rest"
 )
 
 func TestMapDocsError(t *testing.T) {

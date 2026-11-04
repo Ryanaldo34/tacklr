@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/vfs/internal/google/sheets"
-	"github.com/ryanaldo34/tacklr/vfs/internal/rest"
+	"github.com/ryanaldo34/tacklr/internal/google/sheets"
+	"github.com/ryanaldo34/tacklr/internal/rest"
 )
 
 // SheetsAPI is the Sheets subset used by the provider. MemorySheets is the

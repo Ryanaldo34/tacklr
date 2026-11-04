@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"google.golang.org/api/docs/v1"
+	"github.com/ryanaldo34/tacklr/internal/google/docs"
 
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -105,7 +105,7 @@ func (d *FX) serveDocsBatch(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	s := d.ensureDoc(id)
-	if body.WriteControl != nil && body.WriteControl.RequiredRevisionId != "" && s.snap.RevisionID != "" && body.WriteControl.RequiredRevisionId != s.snap.RevisionID {
+	if body.WriteControl != nil && body.WriteControl.RequiredRevisionID != "" && s.snap.RevisionID != "" && body.WriteControl.RequiredRevisionID != s.snap.RevisionID {
 		writeDriveErr(w, http.StatusBadRequest, "requiredRevisionId must be the latest revision")
 		return
 	}
@@ -322,7 +322,7 @@ func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
 		}
 		if del := r.DeleteContentRange; del != nil && del.Range != nil {
 			start, end := int(del.Range.StartIndex), int(del.Range.EndIndex)
-			tab := tabOf(del.Range.TabId)
+			tab := tabOf(del.Range.TabID)
 			var next []vfs.DocsSpan
 			for _, sp := range s.Body {
 				if !sameTab(sp.TabID, tab) {
@@ -356,7 +356,7 @@ func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
 		}
 		if ins := r.InsertText; ins != nil && ins.Location != nil {
 			idx := int(ins.Location.Index)
-			tab := tabOf(ins.Location.TabId)
+			tab := tabOf(ins.Location.TabID)
 			text := ins.Text
 			filled := false
 			for i := range s.Body {
@@ -391,7 +391,7 @@ func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
 		if st := r.UpdateParagraphStyle; st != nil && st.ParagraphStyle != nil && st.Range != nil {
 			named := st.ParagraphStyle.NamedStyleType
 			start := int(st.Range.StartIndex)
-			tab := tabOf(st.Range.TabId)
+			tab := tabOf(st.Range.TabID)
 			if strings.HasPrefix(named, "HEADING_") {
 				n, _ := strconv.Atoi(strings.TrimPrefix(named, "HEADING_"))
 				for i := range s.Body {
@@ -405,7 +405,7 @@ func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
 		}
 		if b := r.CreateParagraphBullets; b != nil && b.Range != nil {
 			start, end := int(b.Range.StartIndex), int(b.Range.EndIndex)
-			tab := tabOf(b.Range.TabId)
+			tab := tabOf(b.Range.TabID)
 			for i := range s.Body {
 				if !sameTab(s.Body[i].TabID, tab) {
 					continue
@@ -421,7 +421,7 @@ func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
 		}
 		if tbl := r.InsertTable; tbl != nil && tbl.Location != nil {
 			idx := int(tbl.Location.Index)
-			tab := tabOf(tbl.Location.TabId)
+			tab := tabOf(tbl.Location.TabID)
 			rows, cols := int(tbl.Rows), int(tbl.Columns)
 			var cells []vfs.DocsCell
 			base := idx + 2
