@@ -12,6 +12,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/session"
+	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/vfs/fuse"
 )
 
@@ -101,7 +102,7 @@ func TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes(t *testing.T) {
 	runTool := func(run tacklr.ToolRun) func(*harnessCache, session.Store, harnessSpec) error {
 		return func(ws *harnessCache, store session.Store, w harnessSpec) error {
 			return ws.Read(t.Context(), store, w, func(h *tacklr.Harness) error {
-				_, err := runTool(t.Context(), store, w.ID, h, run, events())
+				_, err := adapter.RunTool(t.Context(), store, w.ID, h, run, events())
 				return err
 			})
 		}

@@ -1,0 +1,155 @@
+package durableobject
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"maps"
+	"slices"
+	"sync"
+
+	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/session"
+	adapter "github.com/ryanaldo34/tacklr/session/internal"
+)
+
+// harnessState is the object's one harness. It is built on the first step
+// that needs it, and again when what it is built from changes (the
+// session's MCP servers) or a failed Commit left it ahead of the store.
+// Committed state stays the store's: a step loads it into the harness only
+// when the store's revision moved past the one the harness holds.
+type harnessState struct {
+	mu     sync.Mutex
+	h      *tacklr.Harness
+	key    string
+	rev    session.Revision
+	loaded bool
+	stale  bool
+}
+
+// read is the harness at the store's revision, for a step that reads
+// committed state (Infer, the tool calls of a reply).
+func (hs *harnessState) read(ctx context.Context, e *executor) (*tacklr.Harness, error) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	return hs.current(ctx, e)
+}
+
+// commit is the Commit step: it applies in and saves, unless the snapshot
+// is already past base (an earlier attempt of this Commit saved), and
+// returns the snapshot's revision.
+func (hs *harnessState) commit(ctx context.Context, e *executor, base session.Revision, in tacklr.CommitIn) (session.Revision, error) {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	h, err := hs.current(ctx, e)
+	if err != nil {
+		return "", err
+	}
+	if hs.rev != base {
+		return hs.rev, nil
+	}
+	id := e.init.SessionID
+	if in.Round != nil {
+		r := *in.Round
+		r.Outcomes = slices.Clone(r.Outcomes)
+		if err := adapter.LoadRecords(ctx, e.o.snapshots, id, r.Outcomes); err != nil {
+			return "", err
+		}
+		in.Round = &r
+	}
+	// A failed Commit may leave the harness ahead of the store.
+	hs.stale = true
+	out, stop := tacklr.PipeEvents(e.emitter(ctx))
+	err = h.Commit(ctx, in, out)
+	stop()
+	if err != nil {
+		return "", err
+	}
+	cp, err := h.Checkpoint()
+	if err != nil {
+		return "", err
+	}
+	rev, err := e.o.snapshots.Save(ctx, id, cp, hs.rev)
+	if err != nil {
+		return "", err
+	}
+	hs.rev, hs.stale = rev, false
+	return rev, nil
+}
+
+// current builds or rebuilds the harness as needed and brings it to the
+// store's revision. Call it with hs.mu held.
+func (hs *harnessState) current(ctx context.Context, e *executor) (*tacklr.Harness, error) {
+	t := e.turn
+	// Strings and slices of them: the key always encodes.
+	key, _ := json.Marshal(struct {
+		Specialist string
+		MCP        []session.MCPServer
+	}{t.Specialist, t.MCP})
+	if hs.h != nil && (hs.key != string(key) || hs.stale) {
+		hs.closeLocked()
+	}
+	if hs.h == nil {
+		h, err := e.build(ctx)
+		if err != nil {
+			return nil, err
+		}
+		hs.h, hs.key = h, string(key)
+	}
+	rev, err := e.o.snapshots.Revision(ctx, e.init.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if hs.loaded && rev == hs.rev {
+		return hs.h, nil
+	}
+	if rev == "" {
+		if hs.loaded {
+			return nil, fmt.Errorf("snapshot of %s was deleted: %w", e.init.SessionID, session.ErrNotFound)
+		}
+		hs.loaded = true
+		return hs.h, nil
+	}
+	cp, rev, err := e.o.snapshots.Load(ctx, e.init.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if err := hs.h.RestoreCheckpoint(cp); err != nil {
+		return nil, err
+	}
+	hs.rev, hs.loaded = rev, true
+	return hs.h, nil
+}
+
+// close closes the harness, when the session ends.
+func (hs *harnessState) close() {
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	hs.closeLocked()
+}
+
+func (hs *harnessState) closeLocked() {
+	if hs.h != nil {
+		hs.h.Close()
+	}
+	hs.h, hs.key, hs.rev, hs.loaded, hs.stale = nil, "", "", false, false
+}
+
+// build is a harness for the session: the agent, or its specialist, with
+// the session's MCP servers and the deployment's job names. A durable
+// object has no workspace.
+func (e *executor) build(ctx context.Context) (*tacklr.Harness, error) {
+	spec := e.o.cfg.Agent
+	if s := e.turn.Specialist; s != "" {
+		over, err := adapter.OverlaySpecialist(spec, s)
+		if err != nil {
+			return nil, err
+		}
+		spec = over
+	}
+	opts := tacklr.BindTurn(spec, string(e.init.SessionID), slices.Sorted(maps.Keys(e.o.cfg.Jobs)))
+	if len(e.turn.MCP) > 0 {
+		opts.MCPConfigs = append(slices.Clone(spec.MCPConfigs), e.turn.MCP...)
+	}
+	return tacklr.NewHarness(ctx, opts)
+}

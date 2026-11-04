@@ -8,7 +8,6 @@ package temporal
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -22,6 +21,7 @@ import (
 	"go.temporal.io/sdk/converter"
 
 	"github.com/ryanaldo34/tacklr/session"
+	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
 )
 
@@ -134,7 +134,7 @@ func (r *Client) CreateSession(ctx context.Context, req session.CreateSession) (
 	if id == "" {
 		id = session.ID(uuid.NewString())
 	}
-	seed, err := encodeState(req.State)
+	seed, err := adapter.EncodeState(req.State)
 	if err != nil {
 		return "", err
 	}
@@ -154,28 +154,6 @@ func (r *Client) CreateSession(ctx context.Context, req session.CreateSession) (
 		return "", err
 	}
 	return id, nil
-}
-
-// encodeState JSON-roundtrips host session state so checkpoint types are
-// stable (numbers become float64) and values JSON cannot hold fail now.
-func encodeState(state map[string]any) (map[string]any, error) {
-	if len(state) == 0 {
-		return nil, nil
-	}
-	out := make(map[string]any, len(state))
-	for key, value := range state {
-		if key == "" {
-			return nil, fmt.Errorf("%w: session state key must not be empty", session.ErrInvalid)
-		}
-		raw, err := json.Marshal(value)
-		if err != nil {
-			return nil, fmt.Errorf("%w: session state %q: %w", session.ErrInvalid, key, err)
-		}
-		var decoded any
-		_ = json.Unmarshal(raw, &decoded)
-		out[key] = decoded
-	}
-	return out, nil
 }
 
 func (r *Client) markClosed(id session.ID) {
@@ -211,7 +189,7 @@ func missing(err error) error {
 
 // Prompt implements session.Client.
 func (r *Client) Prompt(ctx context.Context, sessionID session.ID, msg session.Prompt) error {
-	encoded, err := encodeState(msg.State)
+	encoded, err := adapter.EncodeState(msg.State)
 	if err != nil {
 		return err
 	}
@@ -229,7 +207,7 @@ func (r *Client) Prompt(ctx context.Context, sessionID session.ID, msg session.P
 
 // Resume implements session.Client.
 func (r *Client) Resume(ctx context.Context, sessionID session.ID, resume session.Resume) error {
-	encoded, err := encodeState(resume.State)
+	encoded, err := adapter.EncodeState(resume.State)
 	if err != nil {
 		return err
 	}

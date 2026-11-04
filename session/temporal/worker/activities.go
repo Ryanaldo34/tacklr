@@ -174,7 +174,7 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (tacklr.CallOutcome
 	})
 	var o tacklr.CallOutcome
 	err = a.harnesses.Read(ctx, a.Store, w, func(h *tacklr.Harness) error {
-		o, err = runTool(ctx, a.Store, in.SessionID, h, in.Run, out)
+		o, err = adapter.RunTool(ctx, a.Store, in.SessionID, h, in.Run, out)
 		return err
 	})
 	stop()
@@ -253,7 +253,7 @@ func (a *activities) harness(ctx context.Context, in stepSession) (harnessSpec, 
 	return harnessSpec{ID: in.SessionID, Key: hex.EncodeToString(sum[:]), Build: func(ctx context.Context) (*tacklr.Harness, *fuse.Server, error) {
 		spec := a.Agent
 		if in.Identity.Specialist != "" {
-			over, err := overlaySpecialist(spec, in.Identity.Specialist)
+			over, err := adapter.OverlaySpecialist(spec, in.Identity.Specialist)
 			if err != nil {
 				return nil, nil, err
 			}

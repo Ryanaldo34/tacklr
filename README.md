@@ -98,7 +98,7 @@ flowchart LR
 
 A session's steps go to the worker that already has it loaded. If that worker stops, any other worker rebuilds the session from Postgres and continues.
 
-A Cloudflare Durable Objects runtime is planned. The core already builds for WebAssembly; the runtime that would hold a session in a Durable Object does not exist yet.
+Package `session/durableobject` runs sessions as durable objects: one object per session, with journal replay over the object's own storage, so a session needs no Temporal. It is plain Go and builds for WebAssembly; the Cloudflare Workers platform that hosts it is next. See [docs/session.md](docs/session.md#durable-objects).
 
 ## Getting started
 
@@ -337,7 +337,7 @@ func stores(ctx context.Context, pool *pgxpool.Pool, key []byte) (session.Store,
 	if err := db.Setup(ctx); err != nil { // creates the tables if they do not exist
 		return nil, nil, err
 	}
-	sealer, err := sessionpg.NewAESGCM(key) // 32 bytes, or your own Sealer over a KMS
+	sealer, err := session.NewAESGCM(key) // 32 bytes, or your own session.Sealer over a KMS
 	if err != nil {
 		return nil, nil, err
 	}
@@ -356,7 +356,7 @@ func stores(ctx context.Context, pool *pgxpool.Pool, key []byte) (session.Store,
 | Session storage | `session.Store`, `session.SecretStorage`, `session.EventLog` | memory, `session/postgres` |
 | Knowledge storage | `brain.Store`, `brain.Graph` | memory, `brain/postgres`, `brain/helixgraph` |
 | The protocol clients speak | `server.Protocol` | ACP (`server/acp`) |
-| Where sessions run | `session.Client` and `loop.Executor` | Temporal (`session/temporal`) |
+| Where sessions run | `session.Client` and `loop.Executor` | Temporal (`session/temporal`), durable objects (`session/durableobject`) |
 
 Custom stores can check themselves against the shared tests in `session/storetest` and `brain/storetest`. Tacklr also ships web search and fetch tools (`web`), MCP servers (`AgentOptions.MCPConfigs` with `mcp.Client`), and skill files the agent can read (`AgentOptions.SkillsLoader`).
 

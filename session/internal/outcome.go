@@ -1,4 +1,4 @@
-package worker
+package adapter
 
 import (
 	"context"
@@ -8,15 +8,15 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 )
 
-// runTool is the Tool step on h. The outcome's record (its result, writes,
+// RunTool is the Tool step on h. The outcome's record (its result, writes,
 // park and layers) goes to store under the call key, and the outcome keeps
 // only that it is stored: the step's result, which a durable runtime keeps
 // in its history, stays small. A call's earlier record, from a run that
 // parked or waited on a child, is loaded back first.
-func runTool(ctx context.Context, store session.Store, id session.ID, h *tacklr.Harness, run tacklr.ToolRun, out chan session.Event) (tacklr.CallOutcome, error) {
+func RunTool(ctx context.Context, store session.Store, id session.ID, h *tacklr.Harness, run tacklr.ToolRun, out chan session.Event) (tacklr.CallOutcome, error) {
 	if p := run.Prior; p != nil && p.Stored {
 		prior := []tacklr.CallOutcome{*p}
-		if err := loadRecords(ctx, store, id, prior); err != nil {
+		if err := LoadRecords(ctx, store, id, prior); err != nil {
 			return tacklr.CallOutcome{Call: run.Call}, err
 		}
 		run.Prior = &prior[0]
@@ -36,8 +36,8 @@ func runTool(ctx context.Context, store session.Store, id session.ID, h *tacklr.
 	return o, nil
 }
 
-// loadRecords puts each stored outcome's record back from store.
-func loadRecords(ctx context.Context, store session.Store, id session.ID, outcomes []tacklr.CallOutcome) error {
+// LoadRecords puts each stored outcome's record back from store.
+func LoadRecords(ctx context.Context, store session.Store, id session.ID, outcomes []tacklr.CallOutcome) error {
 	var keys []string
 	for _, o := range outcomes {
 		if o.Stored {

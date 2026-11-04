@@ -92,6 +92,31 @@ sessions := temporal.Open(c, temporal.Config{Store: store, Secrets: secrets})
 
 The worker registers `SessionWorkflow`, `Commit`, `Inference`, `Tool`, `EmitEvent`, `RunJob`, `WorkerQueue`, `CloseHarness` and `Forget`. A closed session runs `Forget`, which deletes its saved messages and its jobs' from the brain, then `CloseHarness`. Steps do not publish complete, yield, or turn-ending error. The workflow commits `Status`, then `EmitEvent` publishes the matching stream event. A blocking specialist's `Tool` outcome names the child; the session loop starts it, waits, and runs a `Tool` step for that call with the child's result. It does not park the parent.
 
+## Durable objects
+
+Package `session/durableobject` runs one session per durable object: an object with its own ordered storage, alarm and address, as a Cloudflare Durable Object has. The package is plain Go and builds for WebAssembly. A platform implements `Host` for each object (its storage, its alarm, and the other objects) and `Platform` for reaching objects by id, and calls the session's `Object` for every request and alarm. `NewClient` is the `session.Client` over a `Platform`. The Cloudflare Workers platform is the next package.
+
+```go
+obj := durableobject.NewObject(host, durableobject.Config{Agent: agent, Sealer: sealer, Jobs: jobs})
+sessions := durableobject.NewClient(platform)
+```
+
+| Tacklr concept | Durable objects |
+|----------------|-----------------|
+| Agent session | One object, which holds the session's storage |
+| Harness loop | `loop.Run` over the object's `loop.Executor`, on a goroutine of the object |
+| Steps | Calls of the object: `Commit`, `Infer` (one model request), `Tools` (one goroutine per call, at most `Config.MaxToolCalls` at once; zero: 32), `Job` (a named `JobHandler`) |
+| Durability | A journal in the object's storage: each executor call writes its result as one entry. An object that stopped (evicted, redeployed) runs `loop.Run` again on its next request or alarm, and each call returns its entry until the journal ends; the first call past the end acts. Wakes go into a mailbox in storage first, and an entry records the wakes its call took in the same write, so each wake is taken once. |
+| Restart mid-step | A step sets the object's alarm `Config.Watchdog` ahead (zero: one minute), and sets it again while it runs; the session clears it when it waits for a wake. An object that stops mid-step is restarted by the alarm, and the unfinished step runs again (a tool with side effects uses its call id as the idempotency key). |
+| Journal size | A parent session whose journal holds `Config.JournalLimit` entries (zero: 1,000) restarts when it next waits: its state goes to a carry, and the journal and the wakes it took are deleted in one write. |
+| Step retries | A step that fails on the network (`tacklr.ErrNetwork`), on a refusal or on a stale checkpoint runs again, up to `Config.StepAttempts` runs (zero: 3), backing off from one second, doubling, to thirty. Each run again is an event on the retry topic. |
+| Tool results | As on Temporal: a call's `session.Outcome` goes to the object's store under the call key, and the journal keeps only that it is stored. |
+| Progress | The object's event log. An event can repeat when the object stops between publishing it and journaling its step. |
+| Credentials | `Prompt`, `Resume` and a child's start carry them to the object, which seals them with `Config.Sealer` into its storage. The mailbox and the journal get them without tokens. |
+| Children | A child is its own object, started with its parent's credentials. Its end reaches the parent's mailbox as a job wake. The parent records every child it starts, so its close also reaches children that already ended. |
+| Close | Callers see the session as gone at once. The object then stops its running jobs, closes every child, deletes its jobs' and its own messages from the brain, and deletes its storage. Closing again is not an error. |
+| Workspace | None: a durable object has no FUSE and no shell. |
+
 ## Child sessions
 
 A child is a nested session, not a host-owned supervisor. Specialist ids are `{parent}/w/{specialist}/{call}`. Named worker ids are `{parent}/j/{name}/{call}`. Both are child sessions: `Client.Jobs` lists them with their status, `Status` reports one, Cancel/Close recurse. Specialists run the same wait loop with that specialist's model, tools, and instructions. Workers run `worker.Config.Jobs[name]` instead of a model (Temporal: `RunJob` activity with the same retry policy as Inference/Tool). Tokens come from `SecretStorage` (child id, then parent id). Each specialist turn opens its own VFS on the child id. It does not reuse the parent’s live `MountSession`.
@@ -210,7 +235,7 @@ Recipes are on the session's `Identity` (`Identity.Mounts`), which the runtime h
 ```go
 db, err := sessionpg.New(pool, sessionpg.Options{}) // schema "tacklr"; tables are schema-qualified
 if err := db.Setup(ctx); err != nil { /* ... */ }    // idempotent; run on each deploy
-sealer, err := sessionpg.NewAESGCM(key)               // 32 bytes; or a Sealer over the host's KMS
+sealer, err := session.NewAESGCM(key)                 // 32 bytes; or a session.Sealer over the host's KMS
 store, secrets, events := db.Store(), db.Secrets(sealer), db.EventLog()
 defer events.Close()
 ```
@@ -266,18 +291,18 @@ Three stores. Do not add a fourth. Do not copy a field from one into another exc
 
 Session messages live in the brain table `session_messages`, not in `session.Store`. A collapse or a plan handoff writes the exact messages that leave the window there, so this session can search them later. They are not the checkpoint.
 
-## Map to Azure / Lambda (later)
+## Map to other runtimes
 
-| Tacklr | Temporal (now) | Azure DF (later) | Lambda (later) |
-|--------|----------------|------------------|----------------|
-| `session.Client` | `temporal.Client` + `worker.New` | Same | Same |
-| Session workflow | Workflow | Orchestration | Durable execution |
-| Inference / tool | Activity | Activity | Invoke + heartbeat |
-| Child / specialist | Child workflow | Sub-orchestration | Nested execution |
-| HITL | Signal Resume | WaitForExternalEvent | waitForEvent |
-| Progress | Workflow Streams | Event Hubs / queue | SQS / stream |
-| Auth | SecretStorage + secret-free signal | orchestration input / event | invocation payload |
-| Session record | `session.Store` | Same | Same |
+| Tacklr | Temporal (now) | Durable objects (now) | Azure DF (later) | Lambda (later) |
+|--------|----------------|-----------------------|------------------|----------------|
+| `session.Client` | `temporal.Client` + `worker.New` | `durableobject.Client` + `NewObject` | Same | Same |
+| Session workflow | Workflow | One object | Orchestration | Durable execution |
+| Inference / tool | Activity | Journaled call | Activity | Invoke + heartbeat |
+| Child / specialist | Child workflow | Child object | Sub-orchestration | Nested execution |
+| HITL | Signal Resume | Mailbox wake | WaitForExternalEvent | waitForEvent |
+| Progress | Workflow Streams | Object event log | Event Hubs / queue | SQS / stream |
+| Auth | SecretStorage + secret-free signal | Sealed in the object | orchestration input / event | invocation payload |
+| Session record | `session.Store` | The object's storage | Same | Same |
 
 Do not put Temporal `workflow.Context` on `session.Client`.
 

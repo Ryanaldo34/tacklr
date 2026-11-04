@@ -10,6 +10,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
+	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/vfs/fuse"
 )
 
@@ -140,7 +141,7 @@ func (c *entry) commitAt(ctx context.Context, store session.Store, id session.ID
 	if in.Round != nil {
 		r := *in.Round
 		r.Outcomes = slices.Clone(r.Outcomes)
-		if err := loadRecords(ctx, store, id, r.Outcomes); err != nil {
+		if err := adapter.LoadRecords(ctx, store, id, r.Outcomes); err != nil {
 			return "", err
 		}
 		in.Round = &r

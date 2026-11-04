@@ -1,4 +1,4 @@
-package worker
+package adapter
 
 import (
 	"fmt"
@@ -6,8 +6,9 @@ import (
 	"github.com/ryanaldo34/tacklr"
 )
 
-// overlaySpecialist copies the named specialist onto the parent agent.
-func overlaySpecialist(parent tacklr.AgentOptions, specialist string) (tacklr.AgentOptions, error) {
+// OverlaySpecialist is parent with the named specialist on it: the agent a
+// specialist session runs.
+func OverlaySpecialist(parent tacklr.AgentOptions, specialist string) (tacklr.AgentOptions, error) {
 	spec := tacklr.FindSpecialist(parent.Specialists, specialist)
 	if spec == nil {
 		return tacklr.AgentOptions{}, fmt.Errorf("%w: specialist %q", tacklr.ErrNotFound, specialist)

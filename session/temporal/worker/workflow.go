@@ -68,29 +68,7 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 		childDoneCh: workflow.GetSignalChannel(ctx, signalChildDone),
 	}
 	_ = workflow.SetQueryHandler(ctx, protocol.QueryStatus, func() (session.Status, error) {
-		id := turn.Identity
-		st := session.Status{
-			ID:         turn.SessionID,
-			Parent:     id.Parent,
-			Specialist: id.Specialist,
-			State:      session.Running,
-			Waiting:    turn.Yielded,
-			Result:     turn.Result,
-		}
-		if id.Worker != "" {
-			st.Kind = session.KindWorker
-			st.Specialist = id.Worker
-		} else if id.Specialist != "" {
-			st.Kind = session.KindSpecialist
-		}
-		if turn.Terminal != "" {
-			st.State = turn.Terminal
-			st.Waiting = false
-		} else if turn.Closed {
-			st.State = session.Complete
-			st.Waiting = false
-		}
-		return st, nil
+		return turn.Status(), nil
 	})
 	_ = workflow.SetQueryHandler(ctx, protocol.QueryJobs, func() ([]session.ID, error) {
 		out := make([]session.ID, len(turn.Jobs))

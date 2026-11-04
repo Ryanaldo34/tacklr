@@ -38,9 +38,9 @@ func testDB(t *testing.T) (*postgres.DB, *pgxpool.Pool, string) {
 	return db, pool, schema
 }
 
-func sealer(t *testing.T) *postgres.AESGCM {
+func sealer(t *testing.T) *session.AESGCM {
 	t.Helper()
-	s, err := postgres.NewAESGCM(bytes.Repeat([]byte{7}, 32))
+	s, err := session.NewAESGCM(bytes.Repeat([]byte{7}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,15 +92,6 @@ func TestSecrets_sealATokenToItsSession(t *testing.T) {
 	}
 	if swapped == nil || ownErr != nil || own.Auth.Bindings[0].Auth.Token != "user-refresh-token" {
 		t.Fatalf("another session's row %v, own %+v %v; want it refused and the owner's token back", swapped, own, ownErr)
-	}
-}
-
-func TestAESGCM_needsA32ByteKeyAndAWholeCiphertext(t *testing.T) {
-	_, short := postgres.NewAESGCM([]byte("too short"))
-	_, truncated := sealer(t).Open(t.Context(), []byte("x"), []byte("s"))
-
-	if short == nil || truncated == nil {
-		t.Fatalf("short key %v, truncated ciphertext %v; want both refused", short, truncated)
 	}
 }
 

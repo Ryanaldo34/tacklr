@@ -62,7 +62,7 @@ func stores(t testing.TB) (session.Store, session.EventLog, session.SecretStorag
 	if err := db.Setup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	sealer, err := sessionpg.NewAESGCM(make([]byte, 32))
+	sealer, err := session.NewAESGCM(make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
