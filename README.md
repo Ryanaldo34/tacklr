@@ -28,17 +28,18 @@ Tacklr is a Go SDK for running AI agents as long-lived sessions in the cloud. Yo
 
 ### The generic shape
 
-Every deployment has the same three parts. Only the durable runtime in the middle changes.
+Every deployment has the same parts. Only the runtime changes: it supplies a client library that runs in your host, and a durable service that runs the session.
 
 ```mermaid
 flowchart LR
     clients["Clients<br/>editors · apps · APIs"]
-    subgraph host["Host · stateless"]
+    subgraph host["Host process · stateless"]
         proto["Protocol server<br/>server · server/acp"]
+        rc["Runtime client library<br/>implements session.Client"]
     end
     subgraph runtime["Durable runtime · pluggable"]
-        rc["Client half<br/>implements session.Client"]
-        rx["Executor half<br/>implements loop.Executor"]
+        svc["History and wakes<br/>recorded step results"]
+        rx["Executor<br/>implements loop.Executor"]
     end
     subgraph sess["Inside a session · the same code in every runtime"]
         loop["loop.Run<br/>decides every step"]
@@ -48,8 +49,9 @@ flowchart LR
     model["Model API"]
 
     clients -- "ACP" --> proto
-    proto -- "session.Client" --> rc
-    rc -- "wakes, in order" --> rx
+    proto -- "calls" --> rc
+    rc -- "RPC: start · signal · query · events" --> svc
+    svc -- "wakes, in order" --> rx
     loop -- "calls" --> rx
     rx -- "runs each step once" --> harness
     harness --> model
@@ -57,7 +59,7 @@ flowchart LR
     harness --> stores
 ```
 
-- **`session.Client`** is what a host calls from outside a session: create, prompt, resume, cancel, and subscribe to events.
+- **`session.Client`** is what a host calls from outside a session: create, prompt, resume, cancel, and subscribe to events. The runtime supplies it as a client library that runs in the host (on Temporal, `session/temporal`) and reaches the runtime over RPC.
 - **`loop.Executor`** is what the turn loop calls from inside one: run a model request, run the tool calls, commit the state, wait for the next wake.
 - **`loop.Run`** makes every decision. The runtime only carries out the steps durably, so a new runtime never changes how an agent behaves.
 
