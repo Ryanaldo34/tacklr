@@ -158,14 +158,18 @@ type EventLog interface {
 type Revision string
 
 // Store keeps each session's checkpoint: what the harness needs to
-// think again after a park or a worker recycle. Tokens, file bytes, MCP env
+// think again after a park or a worker recycle, as rows (CheckpointEntry),
+// so a commit writes only the rows it changed. Tokens, file bytes, MCP env
 // and headers, the session's identity, and child handles are not in it.
 //
 // Save's expected Revision must match the last Load (zero if no row).
 // Mismatch means another writer already saved — reload and retry.
 type Store interface {
-	Save(ctx context.Context, sessionID ID, cp []byte, expected Revision) (Revision, error)
-	Load(ctx context.Context, sessionID ID) ([]byte, Revision, error)
+	// Save applies changes to the checkpoint, all of them or none, when it
+	// is at expected, and returns its new revision.
+	Save(ctx context.Context, sessionID ID, changes []CheckpointChange, expected Revision) (Revision, error)
+	// Load is the checkpoint's rows, in no set order, and its revision.
+	Load(ctx context.Context, sessionID ID) ([]CheckpointEntry, Revision, error)
 	// Revision is the snapshot's current revision, "" when none exists. A
 	// worker reads it to learn whether the committed state it holds is
 	// current, without loading the snapshot.

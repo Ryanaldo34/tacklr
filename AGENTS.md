@@ -20,7 +20,7 @@ Tacklr is meant to run in the cloud: Go, JSON-RPC protocols, and Temporal so a s
 
 ### A bounded agent world
 
-The virtual filesystem gives the agent one read/write interface over the mounts the host chose (local disk, object storage, Drive, Graph, knowledge objects). The agent sees virtual paths. It does not see host paths, other sessions, or credentials. Checkpoints store mount recipes, not tokens or file bytes.
+The virtual filesystem gives the agent one read/write interface over the mounts the host chose (local disk, object storage, Drive, Graph, knowledge objects). The agent sees virtual paths. It does not see host paths, other sessions, or credentials. Checkpoints and session state store mount recipes, not tokens or file bytes.
 
 ### Knowledge base
 

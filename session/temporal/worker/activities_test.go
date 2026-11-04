@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -127,14 +128,20 @@ func TestActivities_commitIsTheOnlyWriterAndAppliesItsInputOnce(t *testing.T) {
 	if afterTools != rev || again != committed {
 		t.Fatalf("revisions: after the commit %s, tools %s, commit %s, again %s; want tools to save nothing and the second commit to apply nothing", rev, afterTools, committed, again)
 	}
-	raw := cp
-	for _, want := range []string{`"by-a":true`, `"by-b":true`, `"last":"b"`} {
-		if !strings.Contains(string(raw), want) {
-			t.Fatalf("checkpoint %s, want %s: both calls' writes, the later call's last", raw, want)
+	state, results := map[string]string{}, 0
+	for _, row := range cp {
+		switch row.Kind {
+		case "state":
+			state[row.Key] = string(row.Value)
+		case "message":
+			results += strings.Count(string(row.Value), `"content":"set"`)
 		}
 	}
-	if n := strings.Count(string(raw), `"content":"set"`); n != 2 {
-		t.Fatalf("checkpoint has %d tool results, want the round committed once", n)
+	if !maps.Equal(state, map[string]string{"by-a": "true", "by-b": "true", "last": `"b"`}) {
+		t.Fatalf("checkpoint state %v; want both calls' writes, the later call's last", state)
+	}
+	if results != 2 {
+		t.Fatalf("checkpoint has %d tool results, want the round committed once", results)
 	}
 }
 

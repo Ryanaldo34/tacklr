@@ -132,7 +132,7 @@ func TestStores_failEveryCallOnAClosedPool(t *testing.T) {
 	store, secrets, log := db.Store(), db.Secrets(sealer(t)), db.EventLog()
 	defer log.Close()
 	bag := session.Secrets{Auth: session.AuthContext{Bindings: []mount.Binding{{Provider: "gdrive", Auth: mount.Credential{Token: "t"}}}}}
-	_, saveErr := store.Save(ctx, "s", []byte("cp"), "")
+	_, saveErr := store.Save(ctx, "s", nil, "")
 	_, _, loadErr := store.Load(ctx, "s")
 	_, revErr := store.Revision(ctx, "s")
 	_, outcomesErr := store.Outcomes(ctx, "s", []string{"k"})

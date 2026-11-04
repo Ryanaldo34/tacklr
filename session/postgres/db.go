@@ -69,8 +69,15 @@ CREATE SCHEMA IF NOT EXISTS {s};
 CREATE TABLE IF NOT EXISTS {s}.session_checkpoints (
 	session_id text PRIMARY KEY,
 	revision   bigint NOT NULL,
-	checkpoint bytea NOT NULL,
 	updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS {s}.session_checkpoint_rows (
+	session_id text NOT NULL,
+	kind       text NOT NULL,
+	key        text NOT NULL,
+	value      bytea NOT NULL,
+	PRIMARY KEY (session_id, kind, key)
 );
 
 CREATE TABLE IF NOT EXISTS {s}.session_outcomes (

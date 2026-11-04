@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"sync"
@@ -16,8 +17,8 @@ type MemoryStore struct {
 }
 
 type snapRecord struct {
-	cp  []byte
-	gen uint64
+	rows map[CheckpointRow][]byte
+	gen  uint64
 }
 
 // NewMemoryStore returns an empty Store.
@@ -31,7 +32,7 @@ func revisionOf(gen uint64) Revision {
 
 // Save implements Store. expected must equal the revision
 // from the last Load (zero if the row does not exist).
-func (s *MemoryStore) Save(_ context.Context, sessionID ID, cp []byte, expected Revision) (Revision, error) {
+func (s *MemoryStore) Save(_ context.Context, sessionID ID, changes []CheckpointChange, expected Revision) (Revision, error) {
 	if sessionID == "" {
 		return "", fmt.Errorf("snapshot: session id is required")
 	}
@@ -45,21 +46,36 @@ func (s *MemoryStore) Save(_ context.Context, sessionID ID, cp []byte, expected 
 	if expected != current {
 		return "", ErrStaleCheckpoint
 	}
+	rows := maps.Clone(cur.rows)
+	if rows == nil {
+		rows = map[CheckpointRow][]byte{}
+	}
+	for _, c := range changes {
+		if c.Delete {
+			delete(rows, CheckpointRow{c.Kind, c.Key})
+			continue
+		}
+		rows[CheckpointRow{c.Kind, c.Key}] = slices.Clone(c.Value)
+	}
 	cur.gen++
-	cur.cp = slices.Clone(cp)
+	cur.rows = rows
 	s.records[sessionID] = cur
 	return revisionOf(cur.gen), nil
 }
 
 // Load implements Store.
-func (s *MemoryStore) Load(_ context.Context, sessionID ID) ([]byte, Revision, error) {
+func (s *MemoryStore) Load(_ context.Context, sessionID ID) ([]CheckpointEntry, Revision, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, ok := s.records[sessionID]
 	if !ok {
 		return nil, "", fmt.Errorf("load snapshot %q: %w", sessionID, ErrNotFound)
 	}
-	return cur.cp, revisionOf(cur.gen), nil
+	entries := make([]CheckpointEntry, 0, len(cur.rows))
+	for row, v := range cur.rows {
+		entries = append(entries, CheckpointEntry{Kind: row.Kind, Key: row.Key, Value: slices.Clone(v)})
+	}
+	return entries, revisionOf(cur.gen), nil
 }
 
 // Revision implements Store.

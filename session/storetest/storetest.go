@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"testing"
@@ -19,36 +20,45 @@ import (
 
 // Store runs the Store contract against a fresh store from newStore.
 func Store(t *testing.T, newStore func(t *testing.T) session.Store) {
-	t.Run("a save needs the revision of the last load, and one of two saves from it wins", func(t *testing.T) {
+	t.Run("a save applies its changes on the revision of the last load, and one of two saves from it wins", func(t *testing.T) {
 		ctx, store, id := t.Context(), newStore(t), session.ID("s")
-		_, noID := store.Save(ctx, "", []byte("a"), "")
+		_, noID := store.Save(ctx, "", []session.CheckpointChange{put("a", "", "a")}, "")
 		before, beforeErr := store.Revision(ctx, id)
 		_, _, unknown := store.Load(ctx, id)
-		rev, err := store.Save(ctx, id, []byte("base"), "")
+		rev, err := store.Save(ctx, id, []session.CheckpointChange{put("message", "0", "a"), put("message", "1", "b"), put("state", "k/1", "v")}, "")
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, again := store.Save(ctx, id, []byte("b"), "")
-		_, foreign := store.Save(ctx, id, []byte("b"), "not-a-revision")
+		_, again := store.Save(ctx, id, []session.CheckpointChange{put("message", "0", "x")}, "")
+		_, foreign := store.Save(ctx, id, []session.CheckpointChange{put("message", "0", "x")}, "not-a-revision")
+		saves := map[string][]session.CheckpointChange{
+			"left":  {put("message", "1", "left"), remove("state", "k/1")},
+			"right": {put("message", "2", "right")},
+		}
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		var wins, lost int
-		for _, name := range []string{"left", "right"} {
+		var winner string
+		var lost int
+		for name, changes := range saves {
 			wg.Go(func() {
-				_, err := store.Save(ctx, id, []byte(name), rev)
+				_, err := store.Save(ctx, id, changes, rev)
 				mu.Lock()
 				defer mu.Unlock()
 				switch {
 				case err == nil:
-					wins++
+					winner = name
 				case errors.Is(err, session.ErrStaleCheckpoint):
 					lost++
 				}
 			})
 		}
 		wg.Wait()
-		cp, loaded, loadErr := store.Load(ctx, id)
+		rows, loaded, loadErr := store.Load(ctx, id)
 		current, _ := store.Revision(ctx, id)
+		want := map[string]map[session.CheckpointRow]string{
+			"left":  {{Kind: "message", Key: "0"}: "a", {Kind: "message", Key: "1"}: "left"},
+			"right": {{Kind: "message", Key: "0"}: "a", {Kind: "message", Key: "1"}: "b", {Kind: "message", Key: "2"}: "right", {Kind: "state", Key: "k/1"}: "v"},
+		}[winner]
 
 		if noID == nil || before != "" || beforeErr != nil || !errors.Is(unknown, session.ErrNotFound) {
 			t.Fatalf("save without id %v, revision before a save %q %v, load before %v; want an error, no revision, not found", noID, before, beforeErr, unknown)
@@ -56,14 +66,14 @@ func Store(t *testing.T, newStore func(t *testing.T) session.Store) {
 		if !errors.Is(again, session.ErrStaleCheckpoint) || !errors.Is(foreign, session.ErrStaleCheckpoint) {
 			t.Fatalf("a second first save %v, a save from a revision the store never issued %v; want both stale", again, foreign)
 		}
-		if wins != 1 || lost != 1 || loadErr != nil || (string(cp) != "left" && string(cp) != "right") || loaded != current || loaded == rev {
-			t.Fatalf("wins %d lost %d, loaded %q at %s (current %s, base %s) %v; want one winner loaded at a new current revision", wins, lost, cp, loaded, current, rev, loadErr)
+		if winner == "" || lost != 1 || loadErr != nil || !maps.Equal(rowMap(rows), want) || loaded != current || loaded == rev {
+			t.Fatalf("winner %q, lost %d, loaded %v at %s (current %s, base %s) %v; want the base with only the winner's changes, at a new current revision", winner, lost, rowMap(rows), loaded, current, rev, loadErr)
 		}
 	})
 
 	t.Run("a call's outcome is replaced by a later put, a clear drops outcomes only, and delete removes the session", func(t *testing.T) {
 		ctx, store, id := t.Context(), newStore(t), session.ID("s")
-		if _, err := store.Save(ctx, id, []byte("cp"), ""); err != nil {
+		if _, err := store.Save(ctx, id, []session.CheckpointChange{put("message", "0", "cp")}, ""); err != nil {
 			t.Fatal(err)
 		}
 		for _, rec := range []string{"first", "second"} {
@@ -270,6 +280,22 @@ func EventLog(t *testing.T, newLog func(t *testing.T) session.EventLog) {
 			t.Fatalf("head %d, trim of an unknown session %v, from the start %v, after 5 %v; want 6, nil, [4 5 6], [6]", head, unknownTrim, kept, after)
 		}
 	})
+}
+
+func put(kind, key, value string) session.CheckpointChange {
+	return session.CheckpointChange{CheckpointEntry: session.CheckpointEntry{Kind: kind, Key: key, Value: []byte(value)}}
+}
+
+func remove(kind, key string) session.CheckpointChange {
+	return session.CheckpointChange{CheckpointEntry: session.CheckpointEntry{Kind: kind, Key: key}, Delete: true}
+}
+
+func rowMap(rows []session.CheckpointEntry) map[session.CheckpointRow]string {
+	out := make(map[session.CheckpointRow]string, len(rows))
+	for _, r := range rows {
+		out[session.CheckpointRow{Kind: r.Kind, Key: r.Key}] = string(r.Value)
+	}
+	return out
 }
 
 func appendEvent(t *testing.T, log session.EventLog, id session.ID, topic string, ev session.Event) {

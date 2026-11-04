@@ -3,8 +3,6 @@ package worker
 import (
 	"context"
 	"errors"
-	"fmt"
-	"slices"
 	"sync"
 	"time"
 
@@ -50,13 +48,10 @@ type entry struct {
 	last  uint64
 	gone  bool
 	timer *time.Timer
-	// state guards committed state: steps read it, Commit and a reload
-	// write it.
+	// state guards committed state (snap): steps read it, Commit and a
+	// reload write it.
 	state sync.RWMutex
-	rev   session.Revision
-	// loaded says h holds the snapshot at rev; stale that a failed Commit
-	// left h with state the store does not hold.
-	loaded, stale bool
+	snap  adapter.Snapshot
 }
 
 // newHarnessCache returns an empty cache whose harnesses close after idle unused.
@@ -121,45 +116,11 @@ func (ws *harnessCache) Commit(ctx context.Context, store session.Store, w harne
 			ws.replace(w.ID, cur)
 			continue
 		}
-		rev, err := cur.commitAt(ctx, store, w.ID, base, in, out)
+		rev, err := cur.snap.Commit(ctx, store, w.ID, cur.h, base, in, out)
 		cur.state.Unlock()
 		ws.release(w.ID, cur)
 		return rev, err
 	}
-}
-
-// commitAt brings the harness to the store's revision, then commits in on
-// it unless the snapshot is already past base. Call it with state held for
-// writing.
-func (c *entry) commitAt(ctx context.Context, store session.Store, id session.ID, base session.Revision, in tacklr.CommitIn, out chan session.Event) (session.Revision, error) {
-	if err := c.sync(ctx, store, id); err != nil {
-		return "", err
-	}
-	if c.rev != base {
-		return c.rev, nil
-	}
-	if in.Round != nil {
-		r := *in.Round
-		r.Outcomes = slices.Clone(r.Outcomes)
-		if err := adapter.LoadRecords(ctx, store, id, r.Outcomes); err != nil {
-			return "", err
-		}
-		in.Round = &r
-	}
-	// A failed Commit may leave the harness ahead of the store.
-	c.stale = true
-	if err := c.h.Commit(ctx, in, out); err != nil {
-		return "", err
-	}
-	cp, err := c.h.Checkpoint()
-	if err == nil {
-		c.rev, err = store.Save(ctx, id, cp, c.rev)
-	}
-	if err != nil {
-		return "", err
-	}
-	c.stale = false
-	return c.rev, nil
 }
 
 // Close closes id's harness now, when its session ends. A step still using
@@ -194,7 +155,7 @@ func (ws *harnessCache) CloseAll() {
 func (ws *harnessCache) acquire(ctx context.Context, w harnessSpec) (*entry, error) {
 	ws.mu.Lock()
 	cur := ws.byID[w.ID]
-	if cur != nil && (cur.key != w.Key || cur.stale) {
+	if cur != nil && (cur.key != w.Key || cur.snap.Stale()) {
 		ws.drop(w.ID, cur)
 		cur = nil
 	}
@@ -254,7 +215,7 @@ func (c *entry) rlock(ctx context.Context, store session.Store, id session.ID) e
 	held := false
 	for {
 		c.state.RLock()
-		current, err := c.current(ctx, store, id)
+		current, err := c.snap.Current(ctx, store, id)
 		if err != nil || current {
 			if err != nil {
 				c.state.RUnlock()
@@ -272,47 +233,12 @@ func (c *entry) rlock(ctx context.Context, store session.Store, id session.ID) e
 			held = true
 			continue
 		}
-		err = c.sync(ctx, store, id)
+		err = c.snap.Sync(ctx, store, id, c.h)
 		c.state.Unlock()
 		if err != nil {
 			return err
 		}
 	}
-}
-
-// current reports whether the harness holds the store's revision. Call it
-// with state held.
-func (c *entry) current(ctx context.Context, store session.Store, id session.ID) (bool, error) {
-	rev, err := store.Revision(ctx, id)
-	return err == nil && c.loaded && rev == c.rev, err
-}
-
-// sync loads the snapshot into the harness when the store's revision is not
-// the one it holds. Call it with state held for writing.
-func (c *entry) sync(ctx context.Context, store session.Store, id session.ID) error {
-	rev, err := store.Revision(ctx, id)
-	if err != nil {
-		return err
-	}
-	if c.loaded && rev == c.rev {
-		return nil
-	}
-	if rev == "" {
-		if c.loaded {
-			return fmt.Errorf("snapshot of %s was deleted: %w", id, session.ErrNotFound)
-		}
-		c.loaded = true
-		return nil
-	}
-	cp, rev, err := store.Load(ctx, id)
-	if err != nil {
-		return err
-	}
-	if err := c.h.RestoreCheckpoint(cp); err != nil {
-		return err
-	}
-	c.rev, c.loaded = rev, true
-	return nil
 }
 
 // release ends one step's use. The last user of a dropped harness closes it;

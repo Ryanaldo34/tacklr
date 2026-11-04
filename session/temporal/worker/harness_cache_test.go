@@ -45,7 +45,7 @@ func (s *failingStore) Revision(ctx context.Context, id session.ID) (session.Rev
 	return s.MemoryStore.Revision(ctx, id)
 }
 
-func (s *failingStore) Load(ctx context.Context, id session.ID) ([]byte, session.Revision, error) {
+func (s *failingStore) Load(ctx context.Context, id session.ID) ([]session.CheckpointEntry, session.Revision, error) {
 	if s.load != nil {
 		return nil, "", s.load
 	}
@@ -56,7 +56,7 @@ func (s *failingStore) Load(ctx context.Context, id session.ID) ([]byte, session
 	return cp, rev, err
 }
 
-func (s *failingStore) Save(ctx context.Context, id session.ID, cp []byte, expected session.Revision) (session.Revision, error) {
+func (s *failingStore) Save(ctx context.Context, id session.ID, cp []session.CheckpointChange, expected session.Revision) (session.Revision, error) {
 	if s.save != nil {
 		return "", s.save
 	}

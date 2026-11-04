@@ -6,87 +6,108 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/session"
 )
 
-// snapshots is session.Store on an object's storage: the snapshot with its
-// revision, and each tool call's outcome by call key.
+// snapshots is session.Store on an object's storage: the checkpoint's rows,
+// one key each, its revision, and each tool call's outcome by call key.
 type snapshots struct {
 	s  Storage
 	mu sync.Mutex
 }
 
-type snapshotRecord struct {
-	Gen uint64 `json:"gen"`
-	CP  []byte `json:"cp"`
-}
-
-func (st *snapshots) record(id session.ID) (snapshotRecord, bool, error) {
+// gen is id's checkpoint generation, its revision; ok is false when it has
+// none.
+func (st *snapshots) gen(id session.ID) (uint64, bool, error) {
 	raw, ok, err := st.s.Get(key(kindSnapshot, id))
 	if err != nil || !ok {
-		return snapshotRecord{}, false, err
+		return 0, false, err
 	}
-	var rec snapshotRecord
-	err = json.Unmarshal(raw, &rec)
-	return rec, true, err
+	n, err := strconv.ParseUint(string(raw), 10, 64)
+	return n, true, err
 }
 
 func revisionOf(gen uint64) session.Revision {
 	return session.Revision(strconv.FormatUint(gen, 10))
 }
 
-// Save implements session.Store.
-func (st *snapshots) Save(_ context.Context, id session.ID, cp []byte, expected session.Revision) (session.Revision, error) {
+// rowKey is the key of one checkpoint row of id.
+func rowKey(id session.ID, kind, k string) string {
+	return prefix(kindCheckpoint, id) + url.PathEscape(kind) + "/" + url.PathEscape(k)
+}
+
+// Save implements session.Store: the changed rows and the new revision in
+// one write.
+func (st *snapshots) Save(_ context.Context, id session.ID, changes []session.CheckpointChange, expected session.Revision) (session.Revision, error) {
 	if id == "" {
 		return "", fmt.Errorf("snapshot: session id is required")
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	rec, ok, err := st.record(id)
+	gen, ok, err := st.gen(id)
 	if err != nil {
 		return "", err
 	}
 	var current session.Revision
 	if ok {
-		current = revisionOf(rec.Gen)
+		current = revisionOf(gen)
 	}
 	if expected != current {
 		return "", session.ErrStaleCheckpoint
 	}
-	rec.Gen++
-	rec.CP = cp
-	raw, _ := json.Marshal(rec) // a counter and bytes always encode
-	if err := st.s.Write(put(key(kindSnapshot, id), raw)); err != nil {
+	ops := make([]Op, 0, len(changes)+1)
+	for _, c := range changes {
+		if c.Delete {
+			ops = append(ops, del(rowKey(id, c.Kind, c.Key)))
+			continue
+		}
+		ops = append(ops, put(rowKey(id, c.Kind, c.Key), c.Value))
+	}
+	gen++
+	if err := st.s.Write(append(ops, put(key(kindSnapshot, id), []byte(strconv.FormatUint(gen, 10))))...); err != nil {
 		return "", err
 	}
-	return revisionOf(rec.Gen), nil
+	return revisionOf(gen), nil
 }
 
 // Load implements session.Store.
-func (st *snapshots) Load(_ context.Context, id session.ID) ([]byte, session.Revision, error) {
+func (st *snapshots) Load(_ context.Context, id session.ID) ([]session.CheckpointEntry, session.Revision, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	rec, ok, err := st.record(id)
+	gen, ok, err := st.gen(id)
 	if err != nil {
 		return nil, "", err
 	}
 	if !ok {
 		return nil, "", fmt.Errorf("load snapshot %q: %w", id, session.ErrNotFound)
 	}
-	return rec.CP, revisionOf(rec.Gen), nil
+	stored, err := st.s.Scan(prefix(kindCheckpoint, id), "", 0)
+	if err != nil {
+		return nil, "", err
+	}
+	rows := make([]session.CheckpointEntry, len(stored))
+	for i, e := range stored {
+		// rowKey escaped both parts, so the one slash splits them.
+		kind, k, _ := strings.Cut(e.Key[len(prefix(kindCheckpoint, id)):], "/")
+		rows[i].Kind, _ = url.PathUnescape(kind)
+		rows[i].Key, _ = url.PathUnescape(k)
+		rows[i].Value = e.Value
+	}
+	return rows, revisionOf(gen), nil
 }
 
 // Revision implements session.Store.
 func (st *snapshots) Revision(_ context.Context, id session.ID) (session.Revision, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	rec, ok, err := st.record(id)
+	gen, ok, err := st.gen(id)
 	if err != nil || !ok {
 		return "", err
 	}
-	return revisionOf(rec.Gen), nil
+	return revisionOf(gen), nil
 }
 
 func outcomeKey(id session.ID, callKey string) string {
@@ -132,9 +153,13 @@ func (st *snapshots) ClearOutcomes(_ context.Context, id session.ID) error {
 func (st *snapshots) Delete(_ context.Context, id session.ID) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	ops, err := deleteAll(st.s, prefix(kindOutcome, id))
-	if err != nil {
-		return err
+	var ops []Op
+	for _, kind := range []string{kindOutcome, kindCheckpoint} {
+		more, err := deleteAll(st.s, prefix(kind, id))
+		if err != nil {
+			return err
+		}
+		ops = append(ops, more...)
 	}
 	return st.s.Write(append(ops, del(key(kindSnapshot, id)))...)
 }

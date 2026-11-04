@@ -405,7 +405,7 @@ func TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth(t *testing.T) {
 		t.Fatalf("after close: parent %v, job %v, second close %v; want both gone and the close safe to repeat", parentGone, childGone, again)
 	}
 	left := func() int {
-		return f.p.Stored(id, id, "snapshot") + f.p.Stored(id, id, "event") + f.p.Stored(id, id, "secrets")
+		return f.p.Stored(id, id, "snapshot") + f.p.Stored(id, id, "checkpoint") + f.p.Stored(id, id, "event") + f.p.Stored(id, id, "secrets")
 	}
 	for range 200 {
 		if left() == 0 {

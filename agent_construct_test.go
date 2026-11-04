@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -254,13 +255,21 @@ func TestHarness_checkpointAfterRun(t *testing.T) {
 		t.Fatal("system prompt missing specialists")
 	}
 
+	h.session.Plan.restore([]Todo{{Title: "check", Status: "pending"}}, "the plan")
+	h.session.Permissions.set("lookup", permAllowAlways)
+	h.session.Search.SetRests(map[string]brain.Rest{"search": {}})
+	h.session.setState(map[string]any{"tier": "pro"})
 	cp, err := h.Checkpoint()
 	if err != nil {
 		t.Fatal(err)
 	}
 	restored := mustNewHarness(t, AgentOptions{Model: &scriptedModel{}})
-	if err := restored.RestoreCheckpoint(cp); err != nil || len(restored.context.Messages()) != len(h.context.Messages()) {
-		t.Fatalf("restore = %v with %d messages, want the window back", err, len(restored.context.Messages()))
+	restoreErr := restored.RestoreCheckpoint(cp)
+	again, _ := restored.Checkpoint()
+	if restoreErr != nil || !slices.EqualFunc(again, cp, func(a, b session.CheckpointEntry) bool {
+		return a.Kind == b.Kind && a.Key == b.Key && string(a.Value) == string(b.Value)
+	}) {
+		t.Fatalf("restore = %v giving %+v; want every row of %+v back", restoreErr, again, cp)
 	}
 }
 

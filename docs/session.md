@@ -16,7 +16,7 @@ The packages split along that line. A host that only talks to sessions imports `
 | **Child** | Nested session job. Agent tools `list_children` / `cancel_child` |
 | **Park** | Session idle waiting for `Resume`. Parent-facing `Status` stays `running`; `Waiting` is true until the interrupt is resolved. Parent park does not stop children |
 | **Cancel** | Abort the in-flight turn and stop child sessions (`Client.Cancel`, original Prompt/Resume context cancel, client stop). The parent session stays open for a later Prompt |
-| **Checkpoint** | Committed harness state inside the snapshot: the window of complete rounds, plan, user state, permission decisions, search cursors. Opaque bytes (`Harness.Checkpoint`) in `session.Store`. Only a Commit step saves it |
+| **Checkpoint** | Committed harness state inside the snapshot: the window of complete rounds, plan, user state, permission decisions, search cursors. Rows (`Harness.Checkpoint`, `session.CheckpointEntry`) in `session.Store`: one per window message, todo, user-state key, permission decision and search rest, plus the plan and the schema version. A Commit diffs them against the rows it last saved (`session.Diff`) and saves only the changed ones, so an append writes the new messages, not the window. Only a Commit step saves it |
 | **Session messages** | Messages that left the context window (a collapse or a plan handoff), saved in the brain, searchable for this session only. Not the checkpoint. Deleted on Close |
 | **Close** | Destroy the session, stop children, and delete its session messages |
 
@@ -252,7 +252,7 @@ store, secrets, events := db.Store(), db.Secrets(sealer), db.EventLog()
 defer events.Close()
 ```
 
-- **Store:** one row per session checkpoint. `Save` compares and bumps the revision in one statement, so of two saves from one revision exactly one wins. Outcomes are keyed by session and call key; `Outcomes` reads every key in one query; `Delete` removes the checkpoint and its outcomes together.
+- **Store:** one row per checkpoint row (`session_checkpoint_rows`) and one per session holding its revision. `Save` compares and bumps the revision and applies the changes in one transaction, so of two saves from one revision exactly one wins and the loser's changes are not applied. Outcomes are keyed by session and call key; `Outcomes` reads every key in one query; `Delete` removes the checkpoint and its outcomes together.
 - **SecretStorage:** each session's bag is sealed before it is written, with the session id as associated data, so the row holds no plaintext token and one session's row does not open as another's.
 - **EventLog:** a counter row numbers each session's events in the statement that writes them, so sequences have no gaps. The statement also `NOTIFY`s the session id (never the event: a payload is at most 8000 bytes). One listening connection per `EventLog` wakes its subscribers, which read what they have not seen; after a reconnect it wakes them all, so nothing appended meanwhile is missed. `CloseSession` deletes the log and ends its subscribers in every process.
 
@@ -293,7 +293,7 @@ Three stores. Do not add a fourth. Do not copy a field from one into another exc
 
 | Plane | Lifetime | Owns | Never |
 |-------|----------|------|-------|
-| **session.Store** | One session | The checkpoint (opaque bytes): window of complete rounds, plan, `userState`, permission decisions, search rests; each tool call's `Outcome` (`PutOutcome`/`Outcomes`), cleared when the next turn starts and deleted with the session | Tokens, file bytes, MCP env/headers, identity (specialist, parent, mounts), child workflow futures, host config (search namespace, principals, `AllowTools`) |
+| **session.Store** | One session | The checkpoint (rows only the harness reads): window of complete rounds, plan, `userState`, permission decisions, search rests; each tool call's `Outcome` (`PutOutcome`/`Outcomes`), cleared when the next turn starts and deleted with the session | Tokens, file bytes, MCP env/headers, identity (specialist, parent, mounts), child workflow futures, host config (search namespace, principals, `AllowTools`) |
 | **Wait loop** | In-process `sessionProc` / Temporal workflow replay | `Identity` (specialist, parent, mount recipes), MCP Durable topology, child futures, the open round (each call's last outcome), the last Commit's snapshot revision, Prompt/job inbox (steer + auto-collected jobs), host state not yet committed, secret-free `ApplyAuth` on the current signal, `Status` | Window, plan, tokens, file bytes, `userState`. Inbox is not `session.Store`. |
 | **SecretStorage** | Session, deleted on Close | VFS credentials | Snapshot rows, Temporal payloads |
 

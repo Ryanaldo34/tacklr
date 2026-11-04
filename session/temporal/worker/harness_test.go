@@ -147,7 +147,7 @@ type countingStore struct {
 	loads atomic.Int32
 }
 
-func (s *countingStore) Load(ctx context.Context, id session.ID) ([]byte, session.Revision, error) {
+func (s *countingStore) Load(ctx context.Context, id session.ID) ([]session.CheckpointEntry, session.Revision, error) {
 	s.loads.Add(1)
 	return s.MemoryStore.Load(ctx, id)
 }
