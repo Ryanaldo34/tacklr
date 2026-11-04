@@ -13,24 +13,43 @@ import (
 )
 
 // snapshots is session.Store on an object's storage: the checkpoint's rows,
-// one key each, its revision, and each tool call's outcome by call key.
+// one key each, its revision, and each tool call's outcome by call key. It
+// keeps each session's revision in memory as storage has it, since the
+// object is its storage's only writer.
 type snapshots struct {
-	s  Storage
-	mu sync.Mutex
+	s    Storage
+	mu   sync.Mutex
+	gens map[session.ID]uint64
 }
 
-// gen is id's checkpoint generation, its revision; ok is false when it has
-// none.
-func (st *snapshots) gen(id session.ID) (uint64, bool, error) {
-	raw, ok, err := st.s.Get(key(kindSnapshot, id))
-	if err != nil || !ok {
-		return 0, false, err
+func newSnapshots(s Storage) *snapshots {
+	return &snapshots{s: s, gens: map[session.ID]uint64{}}
+}
+
+// gen is id's checkpoint generation, its revision; 0 when it has none. Call
+// it with st.mu held.
+func (st *snapshots) gen(id session.ID) (uint64, error) {
+	if n, ok := st.gens[id]; ok {
+		return n, nil
 	}
-	n, err := strconv.ParseUint(string(raw), 10, 64)
-	return n, true, err
+	raw, ok, err := st.s.Get(key(kindSnapshot, id))
+	if err != nil {
+		return 0, err
+	}
+	var n uint64
+	if ok {
+		if n, err = strconv.ParseUint(string(raw), 10, 64); err != nil {
+			return 0, err
+		}
+	}
+	st.gens[id] = n
+	return n, nil
 }
 
 func revisionOf(gen uint64) session.Revision {
+	if gen == 0 {
+		return ""
+	}
 	return session.Revision(strconv.FormatUint(gen, 10))
 }
 
@@ -42,21 +61,31 @@ func rowKey(id session.ID, kind, k string) string {
 // Save implements session.Store: the changed rows and the new revision in
 // one write.
 func (st *snapshots) Save(_ context.Context, id session.ID, changes []session.CheckpointChange, expected session.Revision) (session.Revision, error) {
-	if id == "" {
-		return "", fmt.Errorf("snapshot: session id is required")
-	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	gen, ok, err := st.gen(id)
+	ops, gen, err := st.saveOps(id, changes, expected)
 	if err != nil {
 		return "", err
 	}
-	var current session.Revision
-	if ok {
-		current = revisionOf(gen)
+	if err := st.s.Write(ops...); err != nil {
+		return "", err
 	}
-	if expected != current {
-		return "", session.ErrStaleCheckpoint
+	st.gens[id] = gen
+	return revisionOf(gen), nil
+}
+
+// saveOps are the writes of a Save, and the generation they make. Call it
+// with st.mu held; once the writes are done, the generation is id's.
+func (st *snapshots) saveOps(id session.ID, changes []session.CheckpointChange, expected session.Revision) ([]Op, uint64, error) {
+	if id == "" {
+		return nil, 0, fmt.Errorf("snapshot: session id is required")
+	}
+	gen, err := st.gen(id)
+	if err != nil {
+		return nil, 0, err
+	}
+	if expected != revisionOf(gen) {
+		return nil, 0, session.ErrStaleCheckpoint
 	}
 	ops := make([]Op, 0, len(changes)+1)
 	for _, c := range changes {
@@ -67,47 +96,42 @@ func (st *snapshots) Save(_ context.Context, id session.ID, changes []session.Ch
 		ops = append(ops, put(rowKey(id, c.Kind, c.Key), c.Value))
 	}
 	gen++
-	if err := st.s.Write(append(ops, put(key(kindSnapshot, id), []byte(strconv.FormatUint(gen, 10))))...); err != nil {
-		return "", err
-	}
-	return revisionOf(gen), nil
+	return append(ops, put(key(kindSnapshot, id), []byte(strconv.FormatUint(gen, 10)))), gen, nil
 }
 
 // Load implements session.Store.
 func (st *snapshots) Load(_ context.Context, id session.ID) ([]session.CheckpointEntry, session.Revision, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	gen, ok, err := st.gen(id)
+	gen, err := st.gen(id)
 	if err != nil {
 		return nil, "", err
 	}
-	if !ok {
+	if gen == 0 {
 		return nil, "", fmt.Errorf("load snapshot %q: %w", id, session.ErrNotFound)
 	}
-	stored, err := st.s.Scan(prefix(kindCheckpoint, id), "", 0)
-	if err != nil {
-		return nil, "", err
-	}
-	rows := make([]session.CheckpointEntry, len(stored))
-	for i, e := range stored {
+	var rows []session.CheckpointEntry
+	err = scanAll(st.s, prefix(kindCheckpoint, id), func(e Entry) error {
 		// rowKey escaped both parts, so the one slash splits them.
 		kind, k, _ := strings.Cut(e.Key[len(prefix(kindCheckpoint, id)):], "/")
-		rows[i].Kind, _ = url.PathUnescape(kind)
-		rows[i].Key, _ = url.PathUnescape(k)
-		rows[i].Value = e.Value
+		row := session.CheckpointEntry{Value: e.Value}
+		row.Kind, _ = url.PathUnescape(kind)
+		row.Key, _ = url.PathUnescape(k)
+		rows = append(rows, row)
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
 	}
 	return rows, revisionOf(gen), nil
 }
 
-// Revision implements session.Store.
+// Revision implements session.Store. A live object answers from memory.
 func (st *snapshots) Revision(_ context.Context, id session.ID) (session.Revision, error) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	gen, ok, err := st.gen(id)
-	if err != nil || !ok {
-		return "", err
-	}
-	return revisionOf(gen), nil
+	gen, err := st.gen(id)
+	return revisionOf(gen), err
 }
 
 func outcomeKey(id session.ID, callKey string) string {
@@ -116,8 +140,12 @@ func outcomeKey(id session.ID, callKey string) string {
 
 // PutOutcome implements session.Store.
 func (st *snapshots) PutOutcome(_ context.Context, id session.ID, callKey string, o session.Outcome) error {
+	return st.s.Write(outcomeOp(id, callKey, o))
+}
+
+func outcomeOp(id session.ID, callKey string, o session.Outcome) Op {
 	raw, _ := json.Marshal(o) // a string and bytes always encode
-	return st.s.Write(put(outcomeKey(id, callKey), raw))
+	return put(outcomeKey(id, callKey), raw)
 }
 
 // Outcomes implements session.Store.
@@ -161,10 +189,63 @@ func (st *snapshots) Delete(_ context.Context, id session.ID) error {
 		}
 		ops = append(ops, more...)
 	}
-	return st.s.Write(append(ops, del(key(kindSnapshot, id)))...)
+	if err := st.s.Write(append(ops, del(key(kindSnapshot, id)))...); err != nil {
+		return err
+	}
+	st.gens[id] = 0
+	return nil
 }
 
 var _ session.Store = (*snapshots)(nil)
+
+// forget drops id's revision from memory, when its checkpoint was deleted
+// in a write of the object's.
+func (st *snapshots) forget(id session.ID) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.gens[id] = 0
+}
+
+// staged is one step's view of the session store: its Save and its
+// PutOutcome become writes of the step's one write (ops), so the step's
+// journal entry, its events and what it stored land together or not at
+// all. Call applied once that write is done.
+type staged struct {
+	*snapshots
+	ops   []Op
+	id    session.ID
+	gen   uint64
+	saved bool
+}
+
+// Save implements session.Store.
+func (s *staged) Save(_ context.Context, id session.ID, changes []session.CheckpointChange, expected session.Revision) (session.Revision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ops, gen, err := s.saveOps(id, changes, expected)
+	if err != nil {
+		return "", err
+	}
+	s.ops = append(s.ops, ops...)
+	s.id, s.gen, s.saved = id, gen, true
+	return revisionOf(gen), nil
+}
+
+// PutOutcome implements session.Store.
+func (s *staged) PutOutcome(_ context.Context, id session.ID, callKey string, o session.Outcome) error {
+	s.ops = append(s.ops, outcomeOp(id, callKey, o))
+	return nil
+}
+
+// applied takes the revision the step's write saved.
+func (s *staged) applied() {
+	if !s.saved {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gens[s.id] = s.gen
+}
 
 // secretStore is session.SecretStorage on an object's storage. Each bag is
 // sealed before it is written, so storage never holds a plaintext token.
@@ -262,26 +343,42 @@ func (l *eventLog) log(id session.ID) (*sessionLog, error) {
 
 // Append implements session.EventLog.
 func (l *eventLog) Append(_ context.Context, id session.ID, topic string, ev session.Event) error {
-	if ev.Error != nil && ev.Fail == "" {
-		ev.Fail = ev.Error.Error()
-	}
+	return l.commit(id, []storedEvent{{Topic: topic, Event: ev}})
+}
+
+// commit writes evs, numbered after id's head, and ops in one write, then
+// wakes id's tails. Every write of a step goes through it, so a step's
+// events and its journal entry land together.
+func (l *eventLog) commit(id session.ID, evs []storedEvent, ops ...Op) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	sl, err := l.log(id)
 	if err != nil {
 		return err
 	}
-	n := sl.head + 1
-	raw, err := json.Marshal(storedEvent{Topic: topic, Event: ev})
-	if err != nil {
+	head := sl.head
+	for _, se := range evs {
+		if se.Event.Error != nil && se.Event.Fail == "" {
+			se.Event.Fail = se.Event.Error.Error()
+		}
+		raw, err := json.Marshal(se)
+		if err != nil {
+			return err
+		}
+		head++
+		ops = append(ops, put(seqKey(kindEvent, id, head), raw))
+	}
+	if head != sl.head {
+		ops = append(ops, put(key(kindEventHead, id), []byte(strconv.FormatUint(head, 10))))
+	}
+	if err := l.s.Write(ops...); err != nil {
 		return err
 	}
-	if err := l.s.Write(put(seqKey(kindEvent, id, n), raw), put(key(kindEventHead, id), []byte(strconv.FormatUint(n, 10)))); err != nil {
-		return err
+	if head != sl.head {
+		sl.head = head
+		close(sl.changed)
+		sl.changed = make(chan struct{})
 	}
-	sl.head = n
-	close(sl.changed)
-	sl.changed = make(chan struct{})
 	return nil
 }
 
@@ -374,6 +471,18 @@ func (l *eventLog) trimOps(id session.ID, through session.Seq) ([]Op, error) {
 			return ops, nil
 		}
 		after = entries[len(entries)-1].Key
+	}
+}
+
+// forget ends id's tails and drops its head from memory, when its log was
+// deleted in a write of the object's.
+func (l *eventLog) forget(_ context.Context, id session.ID) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if sl, ok := l.logs[id]; ok {
+		sl.closed = true
+		close(sl.changed)
+		delete(l.logs, id)
 	}
 }
 

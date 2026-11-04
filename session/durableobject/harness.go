@@ -34,16 +34,17 @@ func (hs *harnessState) read(ctx context.Context, e *executor) (*tacklr.Harness,
 	return hs.h, hs.snap.Sync(ctx, e.o.snapshots, e.init.SessionID, hs.h)
 }
 
-// commit is the Commit step (adapter.Snapshot.Commit).
-func (hs *harnessState) commit(ctx context.Context, e *executor, base session.Revision, in tacklr.CommitIn) (session.Revision, error) {
+// commit is the Commit step (adapter.Snapshot.Commit) over store, which
+// stages its writes for the step's one write; its events go to the step's.
+func (hs *harnessState) commit(ctx context.Context, e *executor, store session.Store, base session.Revision, in tacklr.CommitIn) (session.Revision, error) {
 	hs.mu.Lock()
 	defer hs.mu.Unlock()
 	if err := hs.build(ctx, e); err != nil {
 		return "", err
 	}
-	out, stop := tacklr.PipeEvents(e.emitter(ctx))
+	out, stop := tacklr.PipeEvents(e.emitter(&e.events))
 	defer stop()
-	return hs.snap.Commit(ctx, e.o.snapshots, e.init.SessionID, hs.h, base, in, out)
+	return hs.snap.Commit(ctx, store, e.init.SessionID, hs.h, base, in, out)
 }
 
 // build builds or rebuilds the harness as needed. Call it with hs.mu held.

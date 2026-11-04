@@ -46,7 +46,7 @@ One Temporal workflow per session runs the turn. HITL parks that workflow until 
 A subscriber gets two kinds of event:
 
 - **Durable events** are stored in the session's event log: complete messages and reasoning (with their full text), tool calls, tool results, plan updates, and turn ends. A message is stored only when it is complete.
-- **Deltas** (`Event.Delta`) are pieces of a message's text as the model streams it. They go straight from where the model call runs to the subscribers that listen now, and are never stored. `Event.Offset` is where a delta starts in its message's text.
+- **Live events** (`Event.Live`) are deltas (`Event.Delta`: pieces of a message's text as the model streams it) and tool progress updates. They go straight from where the step runs to the subscribers that listen now, and are never stored. `Event.Offset` is where a delta starts in its message's text.
 
 `Subscribe` merges both (`session.Merge`). It sends each message's deltas in order without gaps or repeats, and none after the message's complete event. `server.RunTurn` sets `Event.Streamed` on a complete event to the bytes its reader already got as deltas, so a protocol sends only the rest: a reader that joins in the middle of a message, or misses deltas, still gets the whole text once.
 
@@ -106,7 +106,7 @@ The worker registers `SessionWorkflow`, `Commit`, `Inference`, `Tool`, `EmitEven
 
 ## Durable objects
 
-Package `session/durableobject` runs one session per durable object: an object with its own ordered storage, alarm and address, as a Cloudflare Durable Object has. The package is plain Go and builds for WebAssembly. A platform implements `Host` for each object (its storage, its alarm, and the other objects) and `Platform` for reaching objects by id, and calls the session's `Object` for every request and alarm. `NewClient` is the `session.Client` over a `Platform`. The Cloudflare Workers platform is the next package.
+Package `session/durableobject` runs one session per durable object: an object with its own ordered storage, alarm and address, as a Cloudflare Durable Object has. The package is plain Go and builds for WebAssembly. A platform implements `Host` for each object (its storage, its alarm, and the other objects) and `Platform` for reaching objects by id, calls the session's `Object` for every request and alarm, and keeps the object alive until `Object.Idle` returns. `NewClient` is the `session.Client` over a `Platform`. The Cloudflare Workers platform is the next package. `dotest.Platform` runs objects in memory for tests: it stops them, fires their alarms and fails chosen writes the way a platform can.
 
 ```go
 obj := durableobject.NewObject(host, durableobject.Config{Agent: agent, Sealer: sealer, Jobs: jobs})
@@ -116,17 +116,19 @@ sessions := durableobject.NewClient(platform)
 | Tacklr concept | Durable objects |
 |----------------|-----------------|
 | Agent session | One object, which holds the session's storage |
-| Harness loop | `loop.Run` over the object's `loop.Executor`, on a goroutine of the object |
-| Steps | Calls of the object: `Commit`, `Infer` (one model request), `Tools` (one goroutine per call, at most `Config.MaxToolCalls` at once; zero: 32), `Job` (a named `JobHandler`) |
-| Durability | A journal in the object's storage: each executor call writes its result as one entry. An object that stopped (evicted, redeployed) runs `loop.Run` again on its next request or alarm, and each call returns its entry until the journal ends; the first call past the end acts. Wakes go into a mailbox in storage first, and an entry records the wakes its call took in the same write, so each wake is taken once. |
-| Restart mid-step | A step sets the object's alarm `Config.Watchdog` ahead (zero: one minute), and sets it again while it runs; the session clears it when it waits for a wake. An object that stops mid-step is restarted by the alarm, and the unfinished step runs again (a tool with side effects uses its call id as the idempotency key). |
-| Journal size | A session whose journal holds `Config.JournalLimit` entries (zero: 1,000) restarts when it next waits: its state goes to a carry, and the journal and the wakes it took are deleted in one write. |
-| Step retries | A step that fails on the network (`tacklr.ErrNetwork`), on a refusal or on a stale checkpoint runs again, up to `Config.StepAttempts` runs (zero: 3), backing off from one second, doubling, to thirty. Each run again is an event on the retry topic. |
-| Tool results | As on Temporal: a call's `session.Outcome` goes to the object's store under the call key, and the journal keeps only that it is stored. |
-| Progress | Durable events: the object's event log. An event can repeat when the object stops between publishing it and journaling its step. Deltas: from the object's memory to its subscribers, never stored. |
-| Credentials | `Prompt`, `Resume` and a child's start carry them to the object, which seals them with `Config.Sealer` into its storage. The mailbox and the journal get them without tokens. |
-| Children | A child is its own object, started with its parent's credentials. Its end reaches the parent's mailbox as a job wake. The parent records every child it starts, so its close also reaches children that already ended. |
-| Close | Callers see the session as gone at once. The object then stops its running jobs, closes every child, deletes its jobs' and its own messages from the brain, and deletes its storage. Closing again is not an error. |
+| State | In memory while the object lives: the session's meta, mailbox, status, outbox and store heads. The object reads storage once when it starts and writes every change to storage before it changes memory. |
+| Harness loop | `loop.Run` over the object's `loop.Executor`, on a goroutine of the object. The goroutine ends whenever the session has nothing to do; the next wake starts it again. |
+| Steps | Calls of the object: `Commit`, `Infer` (one model request), `Tools` (one goroutine per call, at most `Config.MaxToolCalls` at once; zero: 32), `Job` (a named `session.JobHandler`) |
+| Durability | A journal in the object's storage. Each executor call writes once: its journal entry, the mailbox wakes it took, its durable events, what it stored (a commit's changed checkpoint rows) and its letters to other objects land together or not at all. An object that stopped (evicted, redeployed) runs `loop.Run` again on its next request or alarm, and each call returns its entry until the journal ends; the first call past the end acts. |
+| Journal size | One turn. When the session would wait, it suspends instead: its state goes to its carry (`loop.Carry`), and the journal and the wakes it took are deleted in one write. |
+| Restart mid-step | A step sets the object's alarm `Config.Watchdog` ahead (zero: one minute), and sets it again while it runs. An object that stops mid-step is restarted by the alarm, and the unfinished step runs again (a tool with side effects uses its call id as the idempotency key). |
+| Step retries | A step that fails on the network (`tacklr.ErrNetwork`), on a refusal or on a stale checkpoint runs again, up to `Config.StepAttempts` runs (zero: 3), backing off from `Config.RetryBackoff` (zero: one second), doubling, to thirty seconds. |
+| Tool results | A call writes its outcome (by call key), its result event and its result in one write when it ends, so a step that runs again runs only the calls that did not end. |
+| Progress | Durable events: the object's event log, each event once. Deltas and tool updates: from the object's memory to its subscribers, never stored. |
+| Status | `Status` and `Jobs` answer from the session's last write, without running the session. |
+| Credentials | `Prompt`, `Resume` and a child's start carry them to the object, which seals them with `Config.Sealer` into its storage. The mailbox, the journal and the outbox hold them only sealed or not at all. |
+| Children | A child is its own object. Its start, a cancel, a close and its end are letters: written with the step that sends them, then delivered in order until each is done, again on the alarm after a failure. A child starts with its parent's credentials, sealed for it. Once the parent took a child's end, it closes the child, whose object deletes what it saved. |
+| Close | Callers see the session as gone at once. The object then stops its running jobs, closes the children it still has, deletes its messages from the brain and deletes its storage. Closing again is not an error. |
 | Workspace | None: a durable object has no FUSE and no shell. |
 
 ## Child sessions

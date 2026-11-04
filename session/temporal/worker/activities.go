@@ -349,9 +349,10 @@ func (a *activities) emitter(ctx context.Context, stream *workflowstreams.Client
 		if ctx.Err() != nil {
 			return
 		}
-		if ev.Delta {
-			// Live only: the message's complete event carries the text. A
-			// worker with no live endpoint sends none.
+		if ev.Live() {
+			// Live only: a message's complete event carries its text, and a
+			// tool's result its outcome. A worker with no live endpoint
+			// sends none.
 			if a.live != nil {
 				a.live.Publish(sessionID, ev)
 			}

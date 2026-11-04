@@ -24,7 +24,16 @@ const (
 	kindEvent       = "event"
 	kindEventHead   = "eventhead"
 	kindChild       = "child"
+	kindOutbox      = "outbox"
+	kindCall        = "call"
 )
+
+// statusKey holds what Status and Jobs answer, so a cold object answers
+// without running its session.
+const statusKey = "status"
+
+// scanPage is how many entries one read of a scan returns.
+const scanPage = 256
 
 // key is kind's key for session id.
 func key(kind string, id session.ID) string {
@@ -58,15 +67,33 @@ func put(key string, value []byte) Op { return Op{Key: key, Value: value} }
 // del is an Op that deletes key.
 func del(key string) Op { return Op{Key: key, Delete: true} }
 
+// scanAll calls fn for every entry under prefix, in key order, reading
+// scanPage entries at a time.
+func scanAll(s Storage, prefix string, fn func(Entry) error) error {
+	after := ""
+	for {
+		entries, err := s.Scan(prefix, after, scanPage)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if err := fn(e); err != nil {
+				return err
+			}
+		}
+		if len(entries) < scanPage {
+			return nil
+		}
+		after = entries[len(entries)-1].Key
+	}
+}
+
 // deleteAll is a delete of every entry under prefix.
 func deleteAll(s Storage, prefix string) ([]Op, error) {
-	entries, err := s.Scan(prefix, "", 0)
-	if err != nil {
-		return nil, err
-	}
-	ops := make([]Op, len(entries))
-	for i, e := range entries {
-		ops[i] = del(e.Key)
-	}
-	return ops, nil
+	var ops []Op
+	err := scanAll(s, prefix, func(e Entry) error {
+		ops = append(ops, del(e.Key))
+		return nil
+	})
+	return ops, err
 }

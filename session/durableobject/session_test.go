@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -16,13 +17,14 @@ import (
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/durableobject"
+	"github.com/ryanaldo34/tacklr/session/durableobject/dotest"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // fixture is a platform, a client over it, and a model that counts its
 // requests.
 type fixture struct {
-	p      *durableobject.MemPlatform
+	p      *dotest.Platform
 	c      *durableobject.Client
 	infers *atomic.Int32
 }
@@ -50,15 +52,30 @@ func newFixture(t *testing.T, answer reply, tools []*tacklr.Tool, configure ...f
 		t.Fatal(err)
 	}
 	cfg := durableobject.Config{
-		Agent:  tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: tools},
-		Sealer: sealer,
+		Agent:        tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: tools},
+		Sealer:       sealer,
+		RetryBackoff: time.Millisecond,
 	}
 	for _, f := range configure {
 		f(&cfg)
 	}
-	p := durableobject.NewMemPlatform(cfg)
+	p := dotest.New(cfg)
 	return fixture{p: p, c: durableobject.NewClient(p), infers: &infers}
 }
+
+// stored is how many keys of kind id's storage holds for its session.
+func stored(p *dotest.Platform, id session.ID, kind string) int {
+	n := 0
+	for _, k := range p.Keys(id) {
+		if strings.HasPrefix(k, kind+"/"+url.PathEscape(string(id))) {
+			n++
+		}
+	}
+	return n
+}
+
+// always fails every write.
+func always([]durableobject.Op) bool { return true }
 
 // callThenAnswer calls tool once, then answers with the tool's result.
 func callThenAnswer(tool, args string) reply {
@@ -142,7 +159,7 @@ func TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents(t *testing.T) {
 		}
 		return untilEnd(t, sub)
 	}
-	stored := func() []session.Event {
+	fromStart := func() []session.Event {
 		sub, err := f.c.Subscribe(ctx, id, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -153,9 +170,9 @@ func TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents(t *testing.T) {
 
 	evs := turn()
 	st, stErr := f.c.Status(ctx, id)
-	logged := stored()
+	logged := fromStart()
 	turn()
-	events, outcomes := f.p.Stored(id, id, "event"), f.p.Stored(id, id, "outcome")
+	events, outcomes := stored(f.p, id, "event"), stored(f.p, id, "outcome")
 
 	if last(evs).Type != session.EventComplete || toolResult(evs) != "42" {
 		t.Fatalf("events %+v; want the tool's result, then the end of the turn", evs)
@@ -241,8 +258,9 @@ func TestSession_anObjectStoppedMidToolReplaysAndFinishesTheTurn(t *testing.T) {
 }
 
 // TestSession_aParkedTurnResumesAfterItsObjectStopped: a tool asks the user
-// and the turn parks. The object stops. The answer restarts it, the parked
-// call returns the answer, and the turn ends with it.
+// and the turn parks. The object stops; the next one reports the turn
+// waiting from storage. The answer restarts it, the parked call returns
+// the answer, and the turn ends with it.
 func TestSession_aParkedTurnResumesAfterItsObjectStopped(t *testing.T) {
 	confirm := tacklr.NewTool(tacklr.ToolConfig{Name: "confirm", Handler: func(_ context.Context, cc *tacklr.CallContext) (string, error) {
 		answer, err := cc.Park(&tacklr.UserSelectionInterrupt{Question: "Delete?", Options: []tacklr.UserChoice{{Title: "Delete"}, {Title: "Keep"}}})
@@ -262,15 +280,17 @@ func TestSession_aParkedTurnResumesAfterItsObjectStopped(t *testing.T) {
 		t.Fatal(err)
 	}
 	parked := last(untilEnd(t, sub))
-	waiting, _ := f.c.Status(ctx, id)
 
 	f.p.Evict(id)
+	// A new object answers from storage, without running the session.
+	waiting, _ := f.c.Status(ctx, id)
+	idle := f.p.Idle(ctx, id)
 	sub = f.subscribe(t, id)
 	err = f.c.Resume(ctx, id, session.Resume{Responses: map[string][]byte{parked.MessageID: []byte(`{"selectionIdx":0}`)}, Auth: driveAuth("refreshed")})
 	evs := untilEnd(t, sub)
 
-	if parked.Type != session.EventInterrupt || !waiting.Waiting {
-		t.Fatalf("parked %+v, status %+v; want the turn waiting on the question", parked, waiting)
+	if parked.Type != session.EventInterrupt || !waiting.Waiting || idle != nil {
+		t.Fatalf("parked %+v, status %+v %v; want the turn waiting on the question", parked, waiting, idle)
 	}
 	if err != nil || last(evs).Type != session.EventComplete || toolResult(evs) != "chose Delete" {
 		t.Fatalf("resume %v, events %+v; want the answer as the call's result and the turn ended", err, evs)
@@ -351,8 +371,9 @@ func TestSession_aCancelStopsWhatRunsAndTheSessionGoesOn(t *testing.T) {
 
 // TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth: a tool schedules a
 // named job and waits for it. The job runs as a child session in its own
-// object and its output is the call's result. Closing the parent deletes it
-// and its job.
+// object, started with the session's credentials, and its output is the
+// call's result. Once the session has that result it closes the job's
+// object, and closing the session deletes what it saved.
 func TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth(t *testing.T) {
 	var jobID atomic.Value
 	export := tacklr.NewTool(tacklr.ToolConfig{Name: "export", Handler: func(ctx context.Context, cc *tacklr.CallContext) (string, error) {
@@ -385,36 +406,35 @@ func TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth(t *testing.T) {
 	}
 	evs := untilEnd(t, sub)
 	child := jobID.Load().(session.ID)
-	job, jobErr := f.c.Status(ctx, child)
-
-	ended := f.c.Prompt(ctx, child, session.Prompt{Text: "more"})
+	for _, obj := range []session.ID{id, child, id} {
+		if err := f.p.Idle(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, jobGone := f.c.Status(ctx, child)
 	if err := f.c.Close(ctx, id); err != nil {
 		t.Fatal(err)
 	}
+	if err := f.p.Idle(ctx, id); err != nil {
+		t.Fatal(err)
+	}
 	_, parentGone := f.c.Status(ctx, id)
-	_, childGone := eventually(t, func() (session.Status, error) { return f.c.Status(ctx, child) })
 	again := f.c.Close(ctx, id)
+	left := 0
+	for _, obj := range []session.ID{id, child} {
+		for _, kind := range []string{"snapshot", "checkpoint", "event", "secrets", "journal", "mailbox", "outcome", "child", "outbox"} {
+			left += stored(f.p, obj, kind)
+		}
+	}
 
 	if last(evs).Type != session.EventComplete || toolResult(evs) != "exported q3" {
 		t.Fatalf("events %+v; want the job's output as the call's result", evs)
 	}
-	if jobErr != nil || job.State != session.Complete || job.Kind != session.KindWorker || job.Parent != id || !errors.Is(ended, session.ErrNotFound) {
-		t.Fatalf("job status %+v %v, prompt after it ended %v; want the finished job of this session, taking no more prompts", job, jobErr, ended)
+	if !errors.Is(jobGone, session.ErrNotFound) || !errors.Is(parentGone, session.ErrNotFound) || again != nil {
+		t.Fatalf("job once its result was taken %v, session after close %v, second close %v; want both gone and the close safe to repeat", jobGone, parentGone, again)
 	}
-	if !errors.Is(parentGone, session.ErrNotFound) || !errors.Is(childGone, session.ErrNotFound) || again != nil {
-		t.Fatalf("after close: parent %v, job %v, second close %v; want both gone and the close safe to repeat", parentGone, childGone, again)
-	}
-	left := func() int {
-		return f.p.Stored(id, id, "snapshot") + f.p.Stored(id, id, "checkpoint") + f.p.Stored(id, id, "event") + f.p.Stored(id, id, "secrets")
-	}
-	for range 200 {
-		if left() == 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if n := left(); n != 0 {
-		t.Fatalf("%d entries left after close; want none", n)
+	if left != 0 {
+		t.Fatalf("%d entries left; want none", left)
 	}
 }
 
@@ -427,23 +447,11 @@ func driveAuth(token string) session.AuthContext {
 	}}}
 }
 
-// eventually retries f until it returns an error: a close queues, and the
-// object applies it on its own goroutine.
-func eventually(t *testing.T, f func() (session.Status, error)) (session.Status, error) {
-	t.Helper()
-	for range 200 {
-		if st, err := f(); err != nil {
-			return st, err
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return f()
-}
-
-// TestSession_aLongJournalSuspendsAndTheConversationGoesOn: a session whose
-// journal passes its limit restarts from its state with an empty journal,
-// and its next turn still sees the whole conversation.
-func TestSession_aLongJournalSuspendsAndTheConversationGoesOn(t *testing.T) {
+// TestSession_eachTurnEndsItsJournalAndTheConversationGoesOn: once a turn
+// ends, the session restarts from its state with an empty journal, so its
+// storage holds one turn's journal at most; the next turn still sees the
+// whole conversation.
+func TestSession_eachTurnEndsItsJournalAndTheConversationGoesOn(t *testing.T) {
 	var sawFirst atomic.Bool
 	answer := func(msgs []*message.Message) tacklr.LLMResponseChunk {
 		if strings.Contains(msgs[len(msgs)-1].Content, "third") {
@@ -451,14 +459,14 @@ func TestSession_aLongJournalSuspendsAndTheConversationGoesOn(t *testing.T) {
 		}
 		return tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok", IsComplete: true}
 	}
-	f := newFixture(t, answer, nil, func(cfg *durableobject.Config) { cfg.JournalLimit = 4 })
+	f := newFixture(t, answer, nil)
 	ctx := t.Context()
 	id, err := f.c.CreateSession(ctx, session.CreateSession{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	sub := f.subscribe(t, id)
-
+	var journals []int
 	for _, text := range []string{"first", "second", "third"} {
 		if err := f.c.Prompt(ctx, id, session.Prompt{Text: text}); err != nil {
 			t.Fatal(err)
@@ -466,20 +474,14 @@ func TestSession_aLongJournalSuspendsAndTheConversationGoesOn(t *testing.T) {
 		if ev := last(untilEnd(t, sub)); ev.Type != session.EventComplete {
 			t.Fatalf("turn %q ended with %+v", text, ev)
 		}
+		if err := f.p.Idle(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		journals = append(journals, stored(f.p, id, "journal")+stored(f.p, id, "mailbox"))
 	}
 
-	if !sawFirst.Load() || f.p.Stored(id, id, "carry") != 1 {
-		t.Fatalf("third turn saw the first prompt %v, carried state %d; want a suspended session that kept the conversation", sawFirst.Load(), f.p.Stored(id, id, "carry"))
-	}
-	// The session suspends at its next wait, after the turn's last event.
-	for range 200 {
-		if f.p.Stored(id, id, "journal") == 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if n := f.p.Stored(id, id, "journal"); n != 0 {
-		t.Fatalf("journal holds %d entries; want it emptied by the suspend", n)
+	if !sawFirst.Load() || stored(f.p, id, "carry") != 1 || !slices.Equal(journals, []int{0, 0, 0}) {
+		t.Fatalf("third turn saw the first prompt %v, carried state %d, journal and mailbox after each turn %v; want the conversation kept and each turn's journal gone", sawFirst.Load(), stored(f.p, id, "carry"), journals)
 	}
 }
 
@@ -495,7 +497,6 @@ func contents(msgs []*message.Message) []string {
 // first answer is a network failure; the request runs again and the turn
 // ends with the second answer.
 func TestSession_aModelRequestThatFailsOnTheNetworkRunsAgain(t *testing.T) {
-	durableobject.FastRetries(t)
 	var calls atomic.Int32
 	answer := func([]*message.Message) tacklr.LLMResponseChunk {
 		if calls.Add(1) == 1 {
@@ -568,7 +569,6 @@ func TestClient_refusesBadAndUnknownSessions(t *testing.T) {
 // keeps refusing fails the turn as refused once its retries ran out, and
 // one that hits the token limit fails it as max tokens.
 func TestSession_aRefusalOrTheTokenLimitFailsTheTurnWithItsKind(t *testing.T) {
-	durableobject.FastRetries(t)
 	answer := func(msgs []*message.Message) tacklr.LLMResponseChunk {
 		if msgs[len(msgs)-1].Content == "long" {
 			return tacklr.LLMResponseChunk{Type: session.EventError, Error: session.ErrMaxTokens}
@@ -661,21 +661,21 @@ func TestSession_aStorageOutageStopsTheObjectAndTheAlarmFinishesTheTurn(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.p.FailWrites(id, true)
+	f.p.FailWrites(id, always)
 	refused := f.c.Prompt(ctx, id, session.Prompt{Text: "go"})
 	_, noCreate := f.c.CreateSession(ctx, session.CreateSession{SessionID: id + "-x", State: nil})
-	f.p.FailWrites(id, false)
+	f.p.FailWrites(id, nil)
 	if err := f.c.Prompt(ctx, id, session.Prompt{Text: "go"}); err != nil {
 		t.Fatal(err)
 	}
 	<-started
 
-	f.p.FailWrites(id, true)
+	f.p.FailWrites(id, always)
 	close(release)
-	for !f.p.Stopped(id) {
-		time.Sleep(5 * time.Millisecond)
+	if err := f.p.Idle(ctx, id); err != nil {
+		t.Fatal(err)
 	}
-	f.p.FailWrites(id, false)
+	f.p.FailWrites(id, nil)
 	sub := f.subscribe(t, id)
 	if err := f.p.FireAlarm(ctx, id); err != nil {
 		t.Fatal(err)
@@ -716,5 +716,115 @@ func TestObject_refusesAnInitWithoutAnIDAndNeedsItsParts(t *testing.T) {
 			}()
 			build()
 		}()
+	}
+}
+
+// TestSession_anObjectStoppedAtAnyWriteGoesOnToTheSameTurn: the object
+// stops at the write of each kind of step: taking the prompt, a commit,
+// the model's reply, the tool calls' results, the turn's end. A new object
+// over the same storage ends the same turn, with each event once and the
+// tool run once.
+func TestSession_anObjectStoppedAtAnyWriteGoesOnToTheSameTurn(t *testing.T) {
+	for _, kind := range []string{"next", "commit", "infer", "tools", "emit"} {
+		t.Run(kind, func(t *testing.T) {
+			var runs atomic.Int32
+			lookup := tacklr.NewTool(tacklr.ToolConfig{Name: "lookup", Handler: func(context.Context) (string, error) {
+				runs.Add(1)
+				return "42", nil
+			}})
+			f := newFixture(t, callThenAnswer("lookup", `{}`), []*tacklr.Tool{lookup})
+			ctx := t.Context()
+			id, err := f.c.CreateSession(ctx, session.CreateSession{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var failed atomic.Bool
+			f.p.FailWrites(id, func(ops []durableobject.Op) bool {
+				return slices.ContainsFunc(ops, func(op durableobject.Op) bool {
+					return strings.HasPrefix(op.Key, "journal/") && strings.Contains(string(op.Value), `"kind":"`+kind+`"`)
+				}) && failed.CompareAndSwap(false, true)
+			})
+
+			if err := f.c.Prompt(ctx, id, session.Prompt{Text: "what is it?"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.p.Idle(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			f.p.FailWrites(id, nil)
+			f.p.Evict(id)
+			if err := f.p.FireAlarm(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.p.Idle(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			sub, err := f.c.Subscribe(ctx, id, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = sub.Close() }()
+			evs := untilEnd(t, sub)
+			st, _ := f.c.Status(ctx, id)
+
+			var types []session.EventType
+			for _, ev := range evs {
+				types = append(types, ev.Type)
+			}
+			want := []session.EventType{session.EventFunctionCall, session.EventToolResult, session.EventMessage, session.EventComplete}
+			if !failed.Load() || !slices.Equal(types, want) || toolResult(evs) != "42" || runs.Load() != 1 || st.State != session.Complete {
+				t.Fatalf("stopped %v; events %v, tool runs %d, status %+v; want each event once, the tool run once, and the turn complete", failed.Load(), types, runs.Load(), st)
+			}
+		})
+	}
+}
+
+// TestSession_aJobThatCannotStartYetStartsOnARetry: while the job's object
+// cannot write, the session's start of it fails; the session sets its
+// alarm to try again. The session's object stops; once the job's object
+// works, the alarm wakes the next one, which starts the job from what the
+// first one stored, and the job's output is the call's result.
+func TestSession_aJobThatCannotStartYetStartsOnARetry(t *testing.T) {
+	var parent atomic.Value
+	var f fixture
+	down := make(chan session.ID, 1)
+	export := tacklr.NewTool(tacklr.ToolConfig{Name: "export", Handler: func(ctx context.Context, cc *tacklr.CallContext) (string, error) {
+		child := session.ID(tacklr.ChildID(string(parent.Load().(session.ID)), "export", cc.CurrentToolCallID(), false))
+		f.p.FailWrites(child, always)
+		down <- child
+		_, err := cc.Schedule(ctx, tacklr.JobRequest{Name: "export", Task: "q3", Wait: true})
+		return "", err
+	}})
+	f = newFixture(t, callThenAnswer("export", `{}`), []*tacklr.Tool{export}, func(cfg *durableobject.Config) {
+		cfg.RetryBackoff = time.Hour // only the alarm tries again
+		cfg.Jobs = map[string]session.JobHandler{"export": func(_ context.Context, task string) (string, error) { return "exported " + task, nil }}
+	})
+	ctx := t.Context()
+	id, err := f.c.CreateSession(ctx, session.CreateSession{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent.Store(id)
+
+	if err := f.c.Prompt(ctx, id, session.Prompt{Text: "export"}); err != nil {
+		t.Fatal(err)
+	}
+	child := <-down
+	if err := f.p.Idle(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	retry := f.p.Alarm(id)
+	// The letter that starts the job is in storage: an object that took
+	// the session's place delivers it.
+	f.p.Evict(id)
+	f.p.FailWrites(child, nil)
+	sub := f.subscribe(t, id)
+	if err := f.p.FireAlarm(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	evs := untilEnd(t, sub)
+
+	if retry.IsZero() || last(evs).Type != session.EventComplete || toolResult(evs) != "exported q3" {
+		t.Fatalf("retry alarm %v, events %+v; want an alarm set for the start, then the job's output as the call's result", retry, evs)
 	}
 }

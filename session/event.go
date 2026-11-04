@@ -50,6 +50,10 @@ type Event struct {
 	FailKind FailKind `json:"failKind,omitempty"`
 }
 
+// Live reports whether ev goes only to the subscribers that listen now and
+// is never stored: a delta, or a tool's progress update.
+func (ev Event) Live() bool { return ev.Delta || ev.Type == EventToolUpdate }
+
 // FailKind names a turn failure a client acts on: a refusal, the token
 // limit, or a cancel. Empty is any other failure.
 type FailKind string
