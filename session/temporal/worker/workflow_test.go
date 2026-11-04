@@ -675,7 +675,7 @@ func TestSessionWorkflow_failedWorkerEndsTheChild(t *testing.T) {
 	env := newTestWorkflow(t)
 	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{watch}}
 	acts, log := registerSession(env, agent)
-	acts.Jobs = map[string]JobHandler{
+	acts.Jobs = map[string]session.JobHandler{
 		"ci": func(context.Context, string) (string, error) { return "", errors.New("ci broke") },
 	}
 	id := session.ID("sess-worker-fail")
@@ -908,7 +908,7 @@ func TestSessionWorkflow_aToolSchedulingAJobTwiceStartsItOnceAndListsIt(t *testi
 			return fmt.Sprintf("same=%v jobs=%v", first.ID == again.ID, ids), nil
 		}})}}
 	acts, _ := registerSession(env, agent)
-	acts.Jobs = map[string]JobHandler{"ci": func(context.Context, string) (string, error) { return "job-done", nil }}
+	acts.Jobs = map[string]session.JobHandler{"ci": func(context.Context, string) (string, error) { return "job-done", nil }}
 	var started atomic.Int32
 	env.SetOnChildWorkflowStartedListener(func(*workflow.Info, workflow.Context, converter.EncodedValues) { started.Add(1) })
 	id := session.ID("sess-schedule-twice")
@@ -1224,7 +1224,7 @@ func TestSessionWorkflow_jobRequestsTheRuntimeCannotServeFail(t *testing.T) {
 	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{jobs},
 		Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}}
 	acts, _ := registerSession(env, agent)
-	acts.Jobs = map[string]JobHandler{"indexer": func(context.Context, string) (string, error) { return "", nil }}
+	acts.Jobs = map[string]session.JobHandler{"indexer": func(context.Context, string) (string, error) { return "", nil }}
 	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
 	signalAt(env, 100*time.Millisecond, session.Wake{Kind: session.WakeClose})
 	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-bad-jobs"})
@@ -1557,7 +1557,7 @@ func TestSessionWorkflow_aParkedCallRunAgainDoesNotRestartItsRunningJob(t *testi
 	}})
 	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{sched}}
 	acts, _ := registerSession(env, agent)
-	acts.Jobs = map[string]JobHandler{"ci": func(context.Context, string) (string, error) { <-release; return "found", nil }}
+	acts.Jobs = map[string]session.JobHandler{"ci": func(context.Context, string) (string, error) { <-release; return "found", nil }}
 	var started atomic.Int32
 	env.SetOnChildWorkflowStartedListener(func(*workflow.Info, workflow.Context, converter.EncodedValues) { started.Add(1) })
 	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
@@ -1709,7 +1709,7 @@ func TestSessionWorkflow_aSpecialistThatParksIsResumedAndItsResultReachesItsCall
 func TestSessionWorkflow_aWorkerSessionRunsEachPromptAsItsJob(t *testing.T) {
 	env := newTestWorkflow(t)
 	acts, _ := registerSession(env, tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192})
-	acts.Jobs = map[string]JobHandler{"ci": func(_ context.Context, task string) (string, error) { return "built " + task, nil }}
+	acts.Jobs = map[string]session.JobHandler{"ci": func(_ context.Context, task string) (string, error) { return "built " + task, nil }}
 	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "main"}})
 	signalAt(env, time.Minute, session.Wake{Kind: session.WakeClose})
 

@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"maps"
-	"slices"
 	"time"
 
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
@@ -19,7 +17,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
-	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/session/loop"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
@@ -41,22 +38,12 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 
 	wakeCh := workflow.GetSignalChannel(ctx, protocol.SignalWake)
 
-	turn := &loop.Turn{
-		SessionID: in.SessionID,
-		Identity: loop.Identity{
-			Specialist: in.Specialist,
-			Worker:     in.Worker,
-			Parent:     in.Parent,
-			Mounts:     adapter.ApplyAuth(in.Mounts, session.AuthContext{}),
-		},
-		MCP:   in.MCPServers,
-		State: maps.Clone(in.State),
-	}
+	ident := loop.Identity{Specialist: in.Specialist, Worker: in.Worker, Parent: in.Parent, Mounts: in.Mounts, Task: in.Task != ""}
+	var prev *loop.Carry
 	if len(in.Carry) > 0 {
-		turn.Mounts, turn.Inbox, turn.NextMCP, turn.State = carry.Mounts, carry.Inbox, carry.NextMCP, carry.State
-		turn.Round, turn.Rev, turn.Result, turn.Terminal, turn.Yielded = carry.Round, carry.Rev, carry.Result, carry.Terminal, carry.Yielded
-		turn.Finished, turn.Suspended, turn.Jobs = carry.Finished, carry.Suspended, carry.Jobs
+		prev = &carry.Turn
 	}
+	turn := loop.NewTurn(in.SessionID, ident, in.MCPServers, in.State, prev)
 	ex := &executor{
 		ctx:         ctx,
 		in:          in,
@@ -71,6 +58,10 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 	}
 	// Route now, so a client that subscribes before the first step finds
 	// the worker whose live endpoint streams the session's deltas.
+	if in.Task != "" && prev == nil {
+		// A task session's first run: its task is its first prompt.
+		ex.queue = []session.Wake{{Kind: session.WakePrompt, Prompt: session.Prompt{Text: in.Task}}}
+	}
 	ex.route()
 	_ = workflow.SetQueryHandler(ctx, protocol.QueryLive, func() (string, error) {
 		return ex.liveURL, nil
@@ -85,17 +76,12 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 		}
 		return out, nil
 	})
-	result, err := loop.Run(ex, turn, in.Prompt)
+	result, err := loop.Run(ex, turn)
 	if errors.Is(err, loop.ErrSuspended) {
 		// Continue as new from the main loop, not a signal handler, once
 		// every handler finished; the stream's log and offsets carry over.
 		next := in
-		c := carried{
-			Mounts: turn.Mounts, Inbox: turn.Inbox, NextMCP: turn.NextMCP, State: turn.State,
-			Round: turn.Round, Rev: turn.Rev, Result: turn.Result, Terminal: turn.Terminal, Yielded: turn.Yielded,
-			Finished: turn.Finished, Suspended: turn.Suspended, Jobs: turn.Jobs,
-			TaskQueue: ex.taskQueue, LiveURL: ex.liveURL,
-		}
+		c := carried{Turn: turn.Carry(), TaskQueue: ex.taskQueue, LiveURL: ex.liveURL}
 		return "", stream.NewContinueAsNewError(ctx, protocol.Workflow, func(state *workflowstreams.WorkflowStreamState) []any {
 			c.Stream = state
 			// The carry is plain data: it encodes.
@@ -103,26 +89,18 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 			return []any{next}
 		})
 	}
-	// Children are abandoned on close, so the session stops its own; a
+	// Children are abandoned on close, and Run stopped the session's own; a
 	// child tells its parent its result, which reaches a parent that
 	// continued as new. A cancelled session still does both.
 	dctx, _ := workflow.NewDisconnectedContext(ctx)
 	ex.ctx = dctx
-	for _, j := range turn.Jobs {
-		if !j.Ended {
-			ex.Cancel(j.ID)
-		}
-	}
 	if turn.Closed {
 		if forgot := ex.forget(); err == nil {
 			err = forgot
 		}
 	}
 	if in.Parent != "" {
-		done := childDone{ID: in.SessionID, Result: result}
-		if err != nil {
-			done.Err = err.Error()
-		}
+		done := loop.JobEnd(in.SessionID, result, err)
 		_ = workflow.SignalExternalWorkflow(dctx, string(in.Parent), "", signalChildDone, done).Get(dctx, nil)
 	}
 	ex.closeHarness()
@@ -143,10 +121,6 @@ func activityOptions(in protocol.Input) workflow.ActivityOptions {
 		},
 	}
 }
-
-// toolTimeoutMargin is what a Tool step adds to its tool's own timeout:
-// the step also builds or reads the harness around the call.
-const toolTimeoutMargin = time.Minute
 
 // shortTimeout bounds the steps that only touch the worker's own state
 // (asking for its queue, closing a harness).
@@ -332,7 +306,7 @@ func (w *executor) Tools(runs []tacklr.ToolRun) []loop.ToolResult {
 	futs := make([]workflow.Future, len(runs))
 	start := func(i int) {
 		runs[i].MaxChildren = cmp.Or(w.in.MaxChildren, defaultMaxChildren)
-		ctx := workflow.WithStartToCloseTimeout(w.harnessCtx(cctx), max(w.opts.StartToCloseTimeout, runs[i].Timeout+toolTimeoutMargin))
+		ctx := workflow.WithStartToCloseTimeout(w.harnessCtx(cctx), max(w.opts.StartToCloseTimeout, runs[i].Timeout+loop.ToolTimeoutMargin))
 		futs[i] = workflow.ExecuteActivity(ctx, act.Tool, toolInput{stepSession: sess, Run: runs[i]})
 	}
 	limit := cmp.Or(w.in.MaxToolCalls, defaultMaxToolCalls)
@@ -444,31 +418,17 @@ func (w *executor) stepErr(err error) error {
 	if app, ok := errors.AsType[*temporal.ApplicationError](err); ok {
 		switch kind := session.FailKind(app.Type()); kind {
 		case session.FailRefused, session.FailMaxTokens:
-			return kindError{text: text, kind: kind.Err(text)}
+			return kind.WithText(text)
 		}
 	}
 	return errors.New(text)
 }
 
-// kindError is a step failure's text with the sentinel its kind names, so
-// errors.Is finds it after the activity boundary.
-type kindError struct {
-	text string
-	kind error
-}
-
-func (e kindError) Error() string { return e.text }
-
-func (e kindError) Unwrap() error { return e.kind }
-
 // continueAsNew reports whether the session should continue as new now:
-// it is a parent session (a child runs one task and ends) and its history
-// is long. Running children carry over by id. Every child end and
-// child-waiting signal already delivered is taken first, so none is lost.
+// its history is long. Running children carry over by id. Every child end
+// and child-waiting signal already delivered is taken first, so none is
+// lost.
 func (w *executor) continueAsNew() bool {
-	if w.in.Prompt != "" || w.in.Worker != "" {
-		return false
-	}
 	info := workflow.GetInfo(w.ctx)
 	if n := w.in.ContinueAsNewEvents; n > 0 {
 		if info.GetCurrentHistoryLength() < n {
@@ -516,7 +476,10 @@ func (w *executor) Start(s tacklr.JobStart) error {
 
 // Cancel asks the job id names to stop.
 func (w *executor) Cancel(id session.ID) {
-	_ = workflow.RequestCancelExternalWorkflow(w.ctx, string(id), "").Get(w.ctx, nil)
+	// Disconnected: a cancel goes out even when the session's own run was
+	// cancelled, as at its end.
+	ctx, _ := workflow.NewDisconnectedContext(w.ctx)
+	_ = workflow.RequestCancelExternalWorkflow(ctx, string(id), "").Get(ctx, nil)
 }
 
 // fill moves every wake already delivered on wakeCh into the queue, in
@@ -527,10 +490,10 @@ func (w *executor) fill() {
 		w.queue = append(w.queue, wake)
 		wake = session.Wake{}
 	}
-	var done childDone
+	var done session.JobEnd
 	for w.childDoneCh.ReceiveAsync(&done) {
-		w.queue = append(w.queue, done.wake())
-		done = childDone{}
+		w.queue = append(w.queue, session.Wake{Kind: session.WakeJob, Job: done})
+		done = session.JobEnd{}
 	}
 }
 
@@ -544,9 +507,9 @@ func (w *executor) listen(sel workflow.Selector, after func()) {
 		}
 	})
 	sel.AddReceive(w.childDoneCh, func(c workflow.ReceiveChannel, more bool) {
-		var done childDone
+		var done session.JobEnd
 		c.Receive(w.ctx, &done)
-		w.queue = append(w.queue, done.wake())
+		w.queue = append(w.queue, session.Wake{Kind: session.WakeJob, Job: done})
 	})
 }
 
@@ -561,18 +524,9 @@ func (w *executor) receive(c workflow.ReceiveChannel) {
 // together with the prompts queued before it: those were steering for the
 // turn the cancel ends. Wakes queued after the cancel stay, in order.
 func (w *executor) takeCancel() bool {
-	i := slices.IndexFunc(w.queue, func(wake session.Wake) bool { return wake.Kind == session.WakeCancel })
-	if i < 0 {
-		return false
-	}
-	kept := make([]session.Wake, 0, len(w.queue)-1)
-	for j, wake := range w.queue {
-		if j > i || (j < i && wake.Kind != session.WakePrompt) {
-			kept = append(kept, wake)
-		}
-	}
+	kept, _, ok := loop.TakeCancel(w.queue)
 	w.queue = kept
-	return true
+	return ok
 }
 
 // failureText reads ApplicationError.Message. Error() appends the cause,

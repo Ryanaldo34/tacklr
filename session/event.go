@@ -74,6 +74,26 @@ func FailureEvent(err error) Event {
 	return Event{Type: EventError, Fail: err.Error(), Content: err.Error(), FailKind: kind}
 }
 
+// WithText is a failure of kind k with its text: errors.Is finds k's
+// sentinel (Err) after the failure crossed a step boundary as text. With no
+// kind it is an error with text.
+func (k FailKind) WithText(text string) error {
+	if k == "" {
+		return errors.New(text)
+	}
+	return kindError{text: text, kind: k.Err(text)}
+}
+
+// kindError is a failure's text that unwraps to its kind's sentinel.
+type kindError struct {
+	text string
+	kind error
+}
+
+func (e kindError) Error() string { return e.text }
+
+func (e kindError) Unwrap() error { return e.kind }
+
 // Err is the failure a FailureEvent carried: the sentinel kind names, else
 // an error with text.
 func (k FailKind) Err(text string) error {

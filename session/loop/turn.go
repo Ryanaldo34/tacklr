@@ -119,6 +119,9 @@ type Turn struct {
 	Closed bool
 	// cancelled says a cancel came in while the turn ran.
 	cancelled bool
+	// held are the wakes that wait for the running turn to end (a resume,
+	// a close). They carry over a suspend.
+	held []session.Wake
 }
 
 // Job is one job the session started, by a deterministic id. Call is the

@@ -6,7 +6,6 @@ package worker
 
 import (
 	"cmp"
-	"context"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,10 +18,6 @@ import (
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
 	"github.com/ryanaldo34/tacklr/workspace"
 )
-
-// JobHandler runs a named background job. A worker registers handlers by
-// name on Config.Jobs; a tool's Schedule starts one.
-type JobHandler func(ctx context.Context, task string) (string, error)
 
 // The defaults of a session's step policy, which its client sends in the
 // workflow input; zero there means these.
@@ -89,7 +84,7 @@ type Config struct {
 	FuseRoot string
 	// Jobs are named background workers Schedule can start. A specialist
 	// of the same name takes precedence.
-	Jobs map[string]JobHandler
+	Jobs map[string]session.JobHandler
 	// HarnessIdle is how long the worker keeps a session's harness after
 	// its last step. Zero is 10 minutes.
 	HarnessIdle time.Duration

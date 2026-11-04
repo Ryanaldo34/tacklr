@@ -321,7 +321,7 @@ func withReviewer(agent tacklr.AgentOptions) tacklr.AgentOptions {
 }
 ```
 
-For long work that is not an agent, such as a data export, register a `worker.JobHandler` in `worker.Config.Jobs` and start it from a tool with `cc.Schedule`. See [docs/session.md](docs/session.md).
+For long work that is not an agent, such as a data export, register a `session.JobHandler` in the runtime's `Config.Jobs` and start it from a tool with `cc.Schedule`. See [docs/session.md](docs/session.md).
 
 ### Run in production
 

@@ -23,10 +23,6 @@ var (
 	retryBackoffMax = 30 * time.Second
 )
 
-// toolTimeoutMargin is what a tool call's step adds to the tool's own
-// timeout.
-const toolTimeoutMargin = time.Minute
-
 // executor is the durable-object loop.Executor for one run of a session.
 //
 // Every call that loop.Run makes is one journal entry. A run first replays:
@@ -99,22 +95,9 @@ func (e *stepError) err() error {
 		return nil
 	case e.Kind == session.FailCancelled:
 		return context.Canceled
-	case e.Kind != "":
-		return kindError{text: e.Text, kind: e.Kind.Err(e.Text)}
 	}
-	return errors.New(e.Text)
+	return e.Kind.WithText(e.Text)
 }
-
-// kindError is a failure's text with the sentinel its kind names, so
-// errors.Is finds it.
-type kindError struct {
-	text string
-	kind error
-}
-
-func (e kindError) Error() string { return e.text }
-
-func (e kindError) Unwrap() error { return e.kind }
 
 // toolResult is one loop.ToolResult as the journal keeps it.
 type toolResult struct {
@@ -234,7 +217,7 @@ func (e *executor) Begin(kind string, _, _ int) {
 func (e *executor) End() {}
 
 // Next implements loop.Executor: the oldest wake in the mailbox. With block
-// it waits for one, or suspends a parent session whose journal is long.
+// it waits for one, or suspends a session whose journal is long.
 func (e *executor) Next(block bool) session.Wake {
 	var w session.Wake
 	if ok, _ := e.replay("next", &w); ok {
@@ -252,7 +235,7 @@ func (e *executor) Next(block bool) session.Wake {
 		if !block {
 			break
 		}
-		if e.init.Task == "" && e.init.Worker == "" && e.entries >= e.o.cfg.JournalLimit {
+		if e.entries >= e.o.cfg.JournalLimit {
 			w = session.Wake{Kind: session.WakeSuspend}
 			break
 		}
@@ -286,23 +269,18 @@ func (e *executor) fill() {
 }
 
 // takeCancel reports whether a cancel is queued and takes the first one,
-// with the prompts queued before it: they steered the turn the cancel
-// ends. Wakes queued after the cancel stay, in order.
+// with the prompts queued before it (loop.TakeCancel).
 func (e *executor) takeCancel() bool {
-	i := slices.IndexFunc(e.queue, func(q queued) bool { return q.wake.Kind == session.WakeCancel })
-	if i < 0 {
-		return false
+	wakes := make([]session.Wake, len(e.queue))
+	for i, q := range e.queue {
+		wakes[i] = q.wake
 	}
-	kept := make([]queued, 0, len(e.queue)-1)
-	for j, q := range e.queue {
-		if j > i || (j < i && q.wake.Kind != session.WakePrompt) {
-			kept = append(kept, q)
-			continue
-		}
-		e.taken = append(e.taken, q.seq)
+	_, taken, ok := loop.TakeCancel(wakes)
+	for _, i := range slices.Backward(taken) {
+		e.taken = append(e.taken, e.queue[i].seq)
+		e.queue = slices.Delete(e.queue, i, i+1)
 	}
-	e.queue = kept
-	return true
+	return ok
 }
 
 // busy sets the watchdog alarm while a step runs, so a platform that stops
@@ -471,7 +449,7 @@ func (e *executor) runTool(ctx context.Context, h *tacklr.Harness, run tacklr.To
 	run.MaxChildren = e.o.cfg.MaxChildren
 	if run.Timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, run.Timeout+toolTimeoutMargin)
+		ctx, cancel = context.WithTimeout(ctx, run.Timeout+loop.ToolTimeoutMargin)
 		defer cancel()
 	}
 	var o tacklr.CallOutcome
@@ -604,7 +582,7 @@ func (e *executor) suspend() {
 			ops = append(ops, del(seqKey(kindMailbox, id, n)))
 		}
 	}
-	raw, err := json.Marshal(carryOf(e.turn))
+	raw, err := json.Marshal(e.turn.Carry())
 	if err != nil {
 		panic(stopped{err})
 	}
@@ -613,17 +591,13 @@ func (e *executor) suspend() {
 	}
 }
 
-// finish ends the session after loop.Run returned: it stops its running
-// jobs, tells its parent how it ended, and keeps only its final status. A
+// finish ends the session after loop.Run returned (which stopped its
+// running jobs): it tells its parent how it ended, and keeps only its final
+// status. A
 // closed session also closes its jobs and deletes what it saved. Each step
 // is safe to repeat: a run that stopped part way does them again.
 func (e *executor) finish(m meta, result string, runErr error) {
 	ctx, id, t := e.ctx, e.init.SessionID, e.turn
-	for _, j := range t.Jobs {
-		if !j.Ended {
-			_ = e.o.host.Object(j.ID).Wake(ctx, session.Wake{Kind: session.WakeCancel})
-		}
-	}
 	if t.Closed {
 		ids := []session.ID{id}
 		children, err := e.o.host.Scan(prefix(kindChild, id), "", 0)
@@ -642,11 +616,7 @@ func (e *executor) finish(m meta, result string, runErr error) {
 		}
 	}
 	if parent := e.init.Parent; parent != "" {
-		res := session.JobResult{Output: result}
-		if runErr != nil {
-			res = session.JobResult{Output: runErr.Error(), Failed: true}
-		}
-		_ = e.o.host.Object(parent).Wake(ctx, session.Wake{Kind: session.WakeJob, Job: session.JobEnd{ID: id, Result: res}})
+		_ = e.o.host.Object(parent).Wake(ctx, session.Wake{Kind: session.WakeJob, Job: loop.JobEnd(id, result, runErr)})
 	}
 	e.o.harness.close()
 	e.o.mu.Lock()

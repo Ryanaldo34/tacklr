@@ -7,22 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
-	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/session/loop"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
-
-// JobHandler runs a named job: the body of a job session that a tool starts
-// with CallContext.Schedule.
-type JobHandler func(ctx context.Context, task string) (string, error)
 
 // Config is what every session object of a deployment runs with.
 type Config struct {
@@ -32,7 +25,7 @@ type Config struct {
 	// Sealer seals each session's credentials before they are stored.
 	Sealer session.Sealer
 	// Jobs are the named jobs a session can start.
-	Jobs map[string]JobHandler
+	Jobs map[string]session.JobHandler
 	// MaxToolCalls bounds how many tool calls of one reply run at once
 	// (default 32).
 	MaxToolCalls int
@@ -41,7 +34,7 @@ type Config struct {
 	// StepAttempts is how many times a step that failed on the network
 	// runs (default 3).
 	StepAttempts int
-	// JournalLimit is how many entries a parent session journals before it
+	// JournalLimit is how many entries a session journals before it
 	// restarts from its state with an empty journal (default 1000).
 	JournalLimit int
 	// Watchdog is how long the alarm waits before it restarts a session
@@ -165,7 +158,13 @@ func (o *Object) Create(ctx context.Context, init Init) error {
 		return err
 	}
 	init.Auth = session.AuthContext{}
-	if err := o.host.Write(writeMeta(meta{Init: init})); err != nil {
+	ops := []Op{writeMeta(meta{Init: init})}
+	if init.Task != "" {
+		// A task session's task is its first prompt, in the same write.
+		raw, _ := json.Marshal(session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: init.Task}}) // plain data
+		ops = append(ops, put(seqKey(kindMailbox, init.SessionID, 1), raw), put(key(kindMailboxHead, init.SessionID), []byte("1")))
+	}
+	if err := o.host.Write(ops...); err != nil {
 		return err
 	}
 	o.start()
@@ -425,7 +424,7 @@ func (o *Object) runOnce() (again bool) {
 		panic(stopped{err})
 	}
 	ex := newExecutor(o, m.Init, turn)
-	result, runErr := loop.Run(ex, turn, m.Init.Task)
+	result, runErr := loop.Run(ex, turn)
 	if errors.Is(runErr, loop.ErrSuspended) {
 		ex.suspend()
 		return true
@@ -434,59 +433,22 @@ func (o *Object) runOnce() (again bool) {
 	return false
 }
 
-// carry is a session's state across a suspend: everything the session
-// holds that is not in its snapshot. The session continues with no step
-// running: idle, or in a turn that waits on jobs (Suspended).
-type carry struct {
-	MCP       []session.MCPServer `json:"mcp,omitempty"`
-	Mounts    []session.MountRecipe
-	Inbox     []*message.Message
-	NextMCP   []session.MCPServer
-	State     map[string]any
-	Round     *tacklr.Round
-	Rev       session.Revision
-	Result    string
-	Terminal  session.State
-	Yielded   bool
-	Finished  bool
-	Suspended bool
-	Jobs      []loop.Job
-}
-
-// turn is the session's Turn: from init, then from its carry when it
-// suspended before.
+// turn is the session's Turn: from init, then from its carry
+// (loop.Carry) when it suspended before.
 func (o *Object) turn(init Init) (*loop.Turn, error) {
-	t := &loop.Turn{
-		SessionID: init.SessionID,
-		Identity: loop.Identity{
-			Specialist: init.Specialist,
-			Worker:     init.Worker,
-			Parent:     init.Parent,
-			Mounts:     adapter.ApplyAuth(init.Mounts, session.AuthContext{}),
-		},
-		MCP:   init.MCPServers,
-		State: maps.Clone(init.State),
-	}
+	ident := loop.Identity{Specialist: init.Specialist, Worker: init.Worker, Parent: init.Parent, Mounts: init.Mounts, Task: init.Task != ""}
 	raw, ok, err := o.host.Get(key(kindCarry, init.SessionID))
-	if err != nil || !ok {
-		return t, err
+	if err != nil {
+		return nil, err
 	}
-	var c carry
+	if !ok {
+		return loop.NewTurn(init.SessionID, ident, init.MCPServers, init.State, nil), nil
+	}
+	var c loop.Carry
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil, err
 	}
-	t.MCP, t.Mounts, t.Inbox, t.NextMCP, t.State = c.MCP, c.Mounts, c.Inbox, c.NextMCP, c.State
-	t.Round, t.Rev, t.Result, t.Terminal, t.Yielded = c.Round, c.Rev, c.Result, c.Terminal, c.Yielded
-	t.Finished, t.Suspended, t.Jobs = c.Finished, c.Suspended, c.Jobs
-	return t, nil
-}
-
-func carryOf(t *loop.Turn) carry {
-	return carry{
-		MCP: t.MCP, Mounts: t.Mounts, Inbox: t.Inbox, NextMCP: t.NextMCP, State: t.State,
-		Round: t.Round, Rev: t.Rev, Result: t.Result, Terminal: t.Terminal, Yielded: t.Yielded,
-		Finished: t.Finished, Suspended: t.Suspended, Jobs: t.Jobs,
-	}
+	return loop.NewTurn(init.SessionID, ident, init.MCPServers, init.State, &c), nil
 }
 
 // publish copies what Status and Jobs report from t. The executor calls it

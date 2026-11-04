@@ -68,7 +68,7 @@ type activities struct {
 	Fallback       session.EventLog
 	DisableStreams bool
 	Secrets        session.SecretStorage
-	Jobs           map[string]JobHandler
+	Jobs           map[string]session.JobHandler
 	harnesses      *harnessCache
 	queue          string
 	// live sends the deltas of this worker's model calls to the clients

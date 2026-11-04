@@ -599,7 +599,7 @@ func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
 	}})
 	agent := liveAgent(t, model, tacklr.AgentOptions{Tools: []*tacklr.Tool{start}, Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}})
 	stack := newLiveStack(t, agent, func(c *Config) {
-		c.Jobs = map[string]JobHandler{"ci": func(context.Context, string) (string, error) { <-release; return "built", nil }}
+		c.Jobs = map[string]session.JobHandler{"ci": func(context.Context, string) (string, error) { <-release; return "built", nil }}
 	})
 	t.Cleanup(let) // before the stack stops its worker
 	rt := stack.Client

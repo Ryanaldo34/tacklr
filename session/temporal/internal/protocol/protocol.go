@@ -72,8 +72,9 @@ type Input struct {
 	// ActivityAttempts is Temporal MaximumAttempts for a wrapped network
 	// error, a model refusal, or a stale checkpoint. Zero means 3.
 	ActivityAttempts int32
-	// Prompt, when set, runs one turn then completes the workflow (spawn_specialist child).
-	Prompt     string
+	// Task, when set, makes a task session (a child a tool started): its
+	// first prompt is Task, and the workflow completes when that turn ends.
+	Task       string
 	Parent     session.ID
 	Specialist string
 	Worker     string

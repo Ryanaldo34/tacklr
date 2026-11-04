@@ -13,4 +13,7 @@ type Identity struct {
 	Worker string
 	Parent session.ID
 	Mounts []session.MountRecipe
+	// Task says the session runs its first prompt, its task, then ends: a
+	// child a tool started. Its runtime puts the task first in its mailbox.
+	Task bool `json:",omitempty"`
 }

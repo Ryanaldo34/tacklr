@@ -25,7 +25,7 @@ func startChild(ctx workflow.Context, parent session.ID, specialist, worker, tas
 		Parent:             parent,
 		Specialist:         specialist,
 		Worker:             worker,
-		Prompt:             task,
+		Task:               task,
 		Mounts:             mounts,
 		WorkerQueueTimeout: in.WorkerQueueTimeout,
 		ActivityTimeout:    in.ActivityTimeout,

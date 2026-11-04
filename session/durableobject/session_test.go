@@ -301,7 +301,7 @@ func TestSession_aCancelStopsWhatRunsAndTheSessionGoesOn(t *testing.T) {
 		return callThenAnswer("block", `{}`)(msgs)
 	}
 	f := newFixture(t, answer, []*tacklr.Tool{block, wait}, func(cfg *durableobject.Config) {
-		cfg.Jobs = map[string]durableobject.JobHandler{"long": func(ctx context.Context, _ string) (string, error) {
+		cfg.Jobs = map[string]session.JobHandler{"long": func(ctx context.Context, _ string) (string, error) {
 			started <- struct{}{}
 			<-ctx.Done()
 			return "", ctx.Err()
@@ -370,7 +370,7 @@ func TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth(t *testing.T) {
 			t.Fatal(err)
 		}
 		cfg.Agent.Brain, cfg.Agent.SearchNamespace = eng, ns
-		cfg.Jobs = map[string]durableobject.JobHandler{"export": func(_ context.Context, task string) (string, error) {
+		cfg.Jobs = map[string]session.JobHandler{"export": func(_ context.Context, task string) (string, error) {
 			return "exported " + task, nil
 		}}
 	})
