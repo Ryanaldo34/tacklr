@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/awss3"
 )
 
 // pattern is n deterministic bytes that differ from one offset to the next,
@@ -28,13 +29,12 @@ func pattern(n int) []byte {
 func TestS3_anObjectLargerThanTheReadCapStreamsAndReadsAtOffsets(t *testing.T) {
 	ctx := t.Context()
 	client, bucket := startS3(ctx, t)
-	ms, err := vfs.Tree(vfs.At("data", vfs.S3(vfs.AWSS3{Client: client}, bucket)))(ctx, "sess-s3-read", vfs.Request{
+	ms, err := vfs.Tree(vfs.At("data", vfs.S3(awss3.API{Client: client}, bucket)))(ctx, "sess-s3-read", vfs.Request{
 		Bindings: []mount.Binding{{Params: map[string]string{mount.ParamName: "data", "prefix": "reads"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 	// Larger than ReadFile and OpenDocument allow: only a streaming handle reads it.
 	want := pattern(vfs.MaxReadFileBytes + 1<<20 + 7)
 	if _, err := client.PutObject(ctx, &s3.PutObjectInput{
@@ -68,7 +68,6 @@ func TestLocal_aSymlinkReportsItsTargetsVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 	if err := ms.Route(ctx, "/workspace/w/a.txt").WriteFile(ctx, []byte("target")); err != nil {
 		t.Fatal(err)
 	}

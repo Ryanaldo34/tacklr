@@ -19,10 +19,12 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/loop"
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 // mcpServer is an MCP server over HTTP with one tool, ping. It counts the
@@ -93,11 +95,12 @@ func TestSessionWorkflow_aSessionsStepsShareOneHarness(t *testing.T) {
 		ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true,
 			ToolCalls: []message.ToolCall{ping("p1"), ping("p2"), ping("p3")}}
 	})
-	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, OpenVFS: func(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, error) {
+	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, MCP: mcp.Client{}}
+	acts, _ := registerSession(env, agent)
+	acts.Workspace = workspace.Config{Open: func(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, error) {
 		opens.Add(1)
 		return tree(ctx, id, req)
 	}}
-	registerSession(env, agent)
 	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go", MCPServers: []session.MCPServer{first.config}}})
 	// A steer that changes the MCP servers joins the running turn (queued
 	// before its first request, it is in that request), which keeps its
@@ -126,7 +129,7 @@ func TestSessionWorkflow_aSessionsStepsShareOneHarness(t *testing.T) {
 // A harness nobody uses for the idle time closes.
 func TestActivities_anIdleHarnessCloses(t *testing.T) {
 	server := newMCPServer(t, "idle")
-	acts := newActs(tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192}, session.NewMemoryEventLog(), true)
+	acts := newActs(tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192, MCP: mcp.Client{}}, session.NewMemoryEventLog(), true)
 	acts.harnesses = newHarnessCache(20*time.Millisecond, 0)
 	in := commitInput{stepSession: stepSession{SessionID: "idle", MCPServers: []session.MCPServer{server.config}},
 		In: tacklr.CommitIn{Users: []*message.Message{{Role: message.RoleUser, Content: "hi"}}}}

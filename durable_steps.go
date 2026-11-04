@@ -15,7 +15,6 @@ import (
 	"github.com/ryanaldo34/tacklr/message"
 
 	"github.com/ryanaldo34/tacklr/telemetry"
-	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // Commit is the Commit step: it applies in to the committed state (host
@@ -231,7 +230,7 @@ func (a *Harness) executeToolCall(ctx context.Context, cc *CallContext) toolRun 
 		CallContext: cc,
 	})
 	var parked Interrupt
-	if err != nil && !errors.As(err, &parked) && (errors.Is(err, ErrAuthExpired) || errors.Is(err, vfs.ErrAuthExpired)) {
+	if err != nil && !errors.As(err, &parked) && errors.Is(err, ErrAuthExpired) {
 		err = cc.park(&AuthExpired{Tool: tc.Name})
 	}
 	if errors.As(err, &parked) {

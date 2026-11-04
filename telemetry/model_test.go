@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -24,8 +24,7 @@ func (e stubProviderErr) ProviderHTTPStatus() int {
 func (e stubProviderErr) ProviderErrorCode() string { return e.code }
 
 func TestModelSpan_lifecycleAndClassify(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	mp := MeterProviderFromPrometheusRegisterer(reg, "model-cov", "v0")
+	mp := sdkmetric.NewMeterProvider()
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 	SetMeterProvider(mp)
 	t.Cleanup(func() { SetMeterProvider(nil) })

@@ -157,11 +157,11 @@ func (p localProvider) OpenDocument(ctx context.Context, name string, reg *Conte
 }
 
 // WriteDocument encodes IR and writes the file immediately.
-func (p localProvider) WriteDocument(ctx context.Context, name string, doc Document) error {
+func (p localProvider) WriteDocument(ctx context.Context, name string, doc Document, reg *ContentRegistry) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	data, err := EncodeDocument(ctx, doc)
+	data, err := reg.Encode(ctx, doc)
 	if err != nil {
 		return err
 	}

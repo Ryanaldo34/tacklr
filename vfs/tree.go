@@ -19,6 +19,26 @@ type Request struct {
 // OpenVFS builds a turn-scoped MountSession. Nil OpenVFS means no VFS.
 type OpenVFS func(ctx context.Context, sessionID string, req Request) (*MountSession, error)
 
+// WithCodecs opens the tree with codecs added to the text codec and the
+// codecs of the mounted backends' own types, for example vfs/adapters' Word
+// and Excel:
+//
+//	vfs.Tree(members...).WithCodecs(adapters.Codecs()...)
+//
+// Only the codecs a host names are linked into its binary.
+func (o OpenVFS) WithCodecs(codecs ...Codec) OpenVFS {
+	return func(ctx context.Context, sessionID string, req Request) (*MountSession, error) {
+		ms, err := o(ctx, sessionID, req)
+		if err != nil {
+			return nil, err
+		}
+		if ms.codecs, err = ms.codecs.with(codecs...); err != nil {
+			return nil, err
+		}
+		return ms, nil
+	}
+}
+
 // Open opens a Provider. Close over clients in the function. Binding carries
 // this turn's user token and params (folderId, subpath, …). A nil Provider
 // and nil error means skip (no token for a user-scoped backend).
@@ -81,6 +101,9 @@ func Tree(members ...Member) OpenVFS {
 			}
 			if p == nil {
 				continue
+			}
+			if cs, ok := p.(codecSource); ok {
+				ms.codecs = ms.codecs.adding(cs.codecs())
 			}
 			writable := memberWritable(m, b)
 			params := maps.Clone(b.Params)

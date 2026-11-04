@@ -3,11 +3,12 @@ package vfs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"path"
 	"strings"
-	"sync"
 	"unicode/utf8"
 )
 
@@ -31,8 +32,8 @@ type Creator interface {
 	Create(path, mediaType string, mut Mutation) (Document, error)
 }
 
-func createDocument(path, mediaType string, mut Mutation) (Document, error) {
-	if c, ok := defaultContentRegistry.codec(mediaType); ok {
+func (r *ContentRegistry) create(path, mediaType string, mut Mutation) (Document, error) {
+	if c, ok := r.codec(mediaType); ok {
 		if cr, ok := c.(Creator); ok {
 			return cr.Create(path, mediaType, mut)
 		}
@@ -57,14 +58,88 @@ type IdentityCodec interface {
 	Identity()
 }
 
-// codecKind is one registry lookup. identity is true for IdentityCodec owners.
-// Empty, octet-stream, and unregistered types are neither identity nor projected.
-func codecKind(mediaType string) (identity, registered bool) {
+// ContentRegistry maps media types to the codecs a MountSession reads and
+// writes documents with. It is immutable: NewContentRegistry builds one, and
+// a host adds codecs to its tree with OpenVFS.WithCodecs.
+type ContentRegistry struct {
+	codecs map[string]Codec
+}
+
+// builtinCodecs is TextCodec for the text types, which every registry has.
+// A host adds the rest with OpenVFS.WithCodecs (package vfs/adapters has
+// Word and Excel); a mounted backend adds the codecs of its own native
+// types (codecSource).
+var builtinCodecs = textRegistry(textMediaTypes)
+
+// textRegistry takes the text types as an argument so they are initialized
+// first.
+func textRegistry(textTypes []string) *ContentRegistry {
+	r := &ContentRegistry{codecs: make(map[string]Codec, len(textTypes))}
+	for _, mt := range textTypes {
+		r.codecs[mt] = TextCodec{}
+	}
+	return r
+}
+
+// codecSource is a backend with native file types of its own (Drive's
+// Google Docs and Sheets). Mounting it adds those codecs to the session.
+type codecSource interface {
+	codecs() []Codec
+}
+
+// adding returns r plus the codecs of types r does not have yet, so two
+// mounts of one backend add its codecs once.
+func (r *ContentRegistry) adding(codecs []Codec) *ContentRegistry {
+	out := &ContentRegistry{codecs: maps.Clone(r.codecs)}
+	for _, c := range codecs {
+		for _, mt := range c.MediaTypes() {
+			if _, ok := out.codecs[mt]; !ok {
+				out.codecs[mt] = c
+			}
+		}
+	}
+	return out
+}
+
+// NewContentRegistry returns TextCodec for the text types plus codecs. Two
+// codecs for one media type is ErrAlreadyRegistered.
+func NewContentRegistry(codecs ...Codec) (*ContentRegistry, error) {
+	return builtinCodecs.with(codecs...)
+}
+
+// with returns r plus codecs, leaving r as it is.
+func (r *ContentRegistry) with(codecs ...Codec) (*ContentRegistry, error) {
+	out := &ContentRegistry{codecs: maps.Clone(r.codecs)}
+	for _, c := range codecs {
+		if c == nil {
+			return nil, errors.New("vfs: codec required")
+		}
+		types := c.MediaTypes()
+		if len(types) == 0 {
+			return nil, errors.New("vfs: codec media types required")
+		}
+		for _, mt := range types {
+			mt = normalizeMediaType(mt)
+			if mt == "" {
+				return nil, errors.New("vfs: codec media type required")
+			}
+			if _, exists := out.codecs[mt]; exists {
+				return nil, fmt.Errorf("%w: %s", ErrAlreadyRegistered, mt)
+			}
+			out.codecs[mt] = c
+		}
+	}
+	return out, nil
+}
+
+// kind is one lookup: identity is true for IdentityCodec owners. Empty,
+// octet-stream, and unregistered types are neither identity nor projected.
+func (r *ContentRegistry) kind(mediaType string) (identity, registered bool) {
 	mediaType = normalizeMediaType(mediaType)
 	if mediaType == "" || mediaType == "application/octet-stream" {
 		return false, false
 	}
-	c, ok := defaultContentRegistry.codec(mediaType)
+	c, ok := r.codecs[mediaType]
 	if !ok {
 		return false, false
 	}
@@ -72,71 +147,42 @@ func codecKind(mediaType string) (identity, registered bool) {
 	return id, true
 }
 
-func identityBody(mediaType string) bool {
-	id, _ := codecKind(mediaType)
-	return id
-}
-
-// IsProjected reports whether mediaType is a registered rich/grid codec.
-// Projected bodies are not FUSE raw-byte writes; identity/text bodies are.
-func IsProjected(mediaType string) bool {
-	id, ok := codecKind(mediaType)
+// Projected reports whether mediaType has a rich or grid codec. Projected
+// bodies are not raw-byte writes (FUSE, shell); identity/text bodies are.
+func (r *ContentRegistry) Projected(mediaType string) bool {
+	id, ok := r.kind(mediaType)
 	return ok && !id
 }
 
-func kernelWritable(mediaType string) bool { return identityBody(mediaType) }
-
-func kernelWritableFile(st FileInfo) bool {
-	return identityBody(st.MediaType)
+// Identity reports whether mediaType's stored bytes are its text: an
+// IdentityCodec owns it, so raw byte writes (FUSE, shell) are safe.
+func (r *ContentRegistry) Identity(mediaType string) bool {
+	id, _ := r.kind(mediaType)
+	return id
 }
 
-// KernelCreateOK reports whether a new name may be created via FUSE.
-// Unknown types (temps, README) are allowed; projected codecs are not.
-func kernelCreateOK(name string) bool {
-	id, ok := codecKind(DetectMediaType(name, nil))
-	return !ok || id
+// HasStructure reports whether documents of mediaType expose a block tree
+// (Structured.Blocks): Markdown headings, or a projected rich or grid codec.
+func (r *ContentRegistry) HasStructure(mediaType string) bool {
+	return normalizeMediaType(mediaType) == "text/markdown" || r.Projected(mediaType)
 }
 
-// ContentRegistry maps media type → Codec (process-scoped).
-type ContentRegistry struct {
-	mu     sync.RWMutex
-	codecs map[string]Codec
-}
-
-// NewContentRegistry returns an empty content registry.
-func NewContentRegistry() *ContentRegistry {
-	return &ContentRegistry{codecs: make(map[string]Codec)}
-}
-
-// Register binds c for each of c.MediaTypes(). It does not replace an existing
-// binding; first registration wins.
-func (r *ContentRegistry) Register(c Codec) error {
-	if c == nil {
-		return fmt.Errorf("vfs: codec required")
+// Encode is doc as the bytes its codec stores, or its text when the codec
+// does not encode.
+func (r *ContentRegistry) Encode(ctx context.Context, doc Document) ([]byte, error) {
+	if doc == nil {
+		return nil, ErrNotTextual
 	}
-	types := c.MediaTypes()
-	if len(types) == 0 {
-		return fmt.Errorf("vfs: codec media types required")
-	}
-	normalized := make([]string, 0, len(types))
-	for _, mt := range types {
-		mt = normalizeMediaType(mt)
-		if mt == "" {
-			return fmt.Errorf("vfs: codec media type required")
-		}
-		normalized = append(normalized, mt)
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, mt := range normalized {
-		if _, exists := r.codecs[mt]; exists {
-			return fmt.Errorf("%w: %s", ErrAlreadyRegistered, mt)
+	if c, ok := r.codec(doc.MediaType()); ok {
+		if enc, ok := c.(Encoder); ok {
+			return enc.Encode(ctx, doc)
 		}
 	}
-	for _, mt := range normalized {
-		r.codecs[mt] = c
+	text, ok := doc.(Textual)
+	if !ok {
+		return nil, ErrNotTextual
 	}
-	return nil
+	return EncodeTextual(text)
 }
 
 // Lookup returns the codec bound to mediaType, if any.
@@ -152,13 +198,7 @@ func normalizeMediaType(mediaType string) string {
 }
 
 func (r *ContentRegistry) codec(mediaType string) (Codec, bool) {
-	if r == nil {
-		return nil, false
-	}
-	mediaType = normalizeMediaType(mediaType)
-	r.mu.RLock()
-	c, ok := r.codecs[mediaType]
-	r.mu.RUnlock()
+	c, ok := r.codecs[normalizeMediaType(mediaType)]
 	return c, ok
 }
 
@@ -170,30 +210,6 @@ func (r *ContentRegistry) Decode(ctx context.Context, path, mediaType string, da
 		return nil, ErrNoCodec
 	}
 	return c.Decode(ctx, path, mediaType, data)
-}
-
-// DefaultContentRegistry returns the process-wide registry with TextCodec registered.
-func DefaultContentRegistry() *ContentRegistry {
-	return defaultContentRegistry
-}
-
-var defaultContentRegistry = mustDefaultContentRegistry(textMediaTypes)
-
-func mustDefaultContentRegistry(types []string) *ContentRegistry {
-	if len(types) == 0 {
-		panic("vfs: text media types required before default registry init")
-	}
-	r := NewContentRegistry()
-	if err := r.Register(TextCodec{}); err != nil {
-		panic(err)
-	}
-	if err := r.Register(DocsCodec{}); err != nil {
-		panic(err)
-	}
-	if err := r.Register(SheetsCodec{}); err != nil {
-		panic(err)
-	}
-	return r
 }
 
 // DetectMediaType is a helper for providers filling FileInfo.MediaType.
@@ -266,9 +282,8 @@ func IsTextLike(mediaType string) bool {
 	}
 }
 
-// textMediaTypes is the unique set of extension-map media types for TextCodec
-// registration. Computed as a package var (not init) so DefaultContentRegistry
-// can register TextCodec during variable initialization.
+// textMediaTypes is the unique set of extension-map media types TextCodec
+// owns.
 var textMediaTypes = uniqueMediaTypes(extMediaTypes)
 
 func uniqueMediaTypes(m map[string]string) []string {

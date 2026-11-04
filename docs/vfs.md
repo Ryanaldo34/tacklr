@@ -9,8 +9,8 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
 ## Big picture
 
 ```text
-  Host OpenVFS (Tree/At); client binds credentials before the turn
-  SkillsPath is a directory on that tree, or a local directory when no tree is mounted
+  Host workspace.Config.Open (Tree/At); client binds credentials before the turn
+  workspace.Config.SkillsPath is a directory on that tree (default /workspace/skills)
            │
            ▼
   MountSession (injected if configured)  ── /workspace/work/main.go
@@ -58,7 +58,7 @@ ReadText → provider OpenDocument (service is source of truth)
 
 ## Mounts
 
-The only top-level mount is **`/workspace`**. Hosts close over clients in `vfs.Open` funcs and name each backend with `vfs.At`. `AgentOptions.OpenVFS` (usually `vfs.Tree`) builds a fresh `MountSession` each turn. Durable child sessions do not share the parent’s live tree.
+The only top-level mount is **`/workspace`**. Hosts close over clients in `vfs.Open` funcs and name each backend with `vfs.At`. `workspace.Config.Open` (usually `vfs.Tree`), set on `worker.Config.Workspace`, builds a fresh `MountSession` each turn, and `workspace.Config.Bind` adds its tools, skills and overflow to the turn. The harness core does not import the vfs. Durable child sessions do not share the parent’s live tree.
 
 ```go
 open := vfs.Tree(
@@ -74,17 +74,13 @@ func openVFS(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession
 	members := []vfs.Member{vfs.At("work", vfs.Local(jail))}
 	if b, ok := vfs.BindingByName(req.Bindings, "drive"); ok && b.Auth.Token != "" {
 		h := vfs.NewTokenHolder(b.Auth)
-		api, err := vfs.NewGoogleDrive(ctx, h)
-		if err != nil {
-			return nil, err
-		}
-		members = append(members, vfs.At("drive", vfs.Drive(api, h)))
+		members = append(members, vfs.At("drive", vfs.Drive(vfs.NewGoogleDrive(h, "", nil), h)))
 	}
 	return vfs.Tree(members...)(ctx, id, req)
 }
 ```
 
-Tests point the official SDKs at httptest: `NewGoogleDriveHTTP` and `NewGraph(holder, srv.URL, srv.Client())`.
+The Google adapters (`NewGoogleDrive`, `NewGoogleDocs`, `NewGoogleSheets`) and the Graph adapter (`NewMicrosoftGraph`) call the REST APIs over `net/http`; they link no Google or Microsoft SDK. Tests point them at httptest with a base URL and client (`vfs.NewGoogleDrive(holder, srv.URL+"/", srv.Client())`, `vfs.NewMicrosoftGraph(holder, srv.URL+"/", srv.Client())`). A Graph `base` is also how a host reaches a national cloud.
 
 | Type | Meaning |
 |------|---------|
@@ -98,7 +94,7 @@ Tests point the official SDKs at httptest: `NewGoogleDriveHTTP` and `NewGraph(ho
 
 ### Skills
 
-`SkillsPath` is one directory. When the turn has a workspace, it is a virtual path (empty means `/workspace/skills` on that tree). When it does not, it is a local directory. Full instructions load only through `read_skill`. A `Union` of skill packs is just a member of the workspace, for example `At("skills", vfs.Union(...))`. Overlapping first-level names in a Union are `ErrAmbiguous`.
+Skills load from `workspace.Config.SkillsPath` on the workspace (empty means `/workspace/skills`) unless the agent sets its own `AgentOptions.SkillsLoader` (`skills.Loader{Root: dir}` reads a local directory). Full instructions load only through `read_skill`. A `Union` of skill packs is just a member of the workspace, for example `At("skills", vfs.Union(...))`. Overlapping first-level names in a Union are `ErrAmbiguous`.
 
 Host-owned roots and secrets (local jail, S3 / Azure Blob client) live in the Open closures, not on mounts or checkpoints.
 
@@ -114,7 +110,7 @@ _tacklr/vfs/bind     { sessionId, backends: [{ provider, point, auth.token, para
                      gdrive: omit folderId for My Drive; folders are path names under /workspace/<alias>.
                      msgraph: account (empty → organization), driveId, itemId, siteId.
                      organization (default) requires siteId or driveId. personal uses /me/drive.
-session/prompt       → worker OpenVFS (Tree + this turn's binds); agent sees /workspace/work, /workspace/contracts
+session/prompt       → worker workspace.Config.Open (Tree + this turn's binds); agent sees /workspace/work, /workspace/contracts
 _tacklr/vfs/refresh  → new access token for a provider (gdrive and msgraph are different holders); next prompt
 _tacklr/vfs/token    ← agent asks the client after a 401 (if the client advertised tokenRefresh)
 _tacklr/vfs/unbind   → by alias (point leftover /contracts, or point /workspace + name); next prompt
@@ -128,7 +124,7 @@ Go zero-value `Binding` and ACP `readOnly` omitted stay **read-only**. Writable 
 
 Drive scopes: read-only `drive.readonly` (export-only). Writable needs **`drive`**, **`documents`**, and **`spreadsheets`**. `drive` is a restricted (CASA) scope; the token is not folder-scoped.
 
-Graph (OneDrive and SharePoint libraries): **`account`** is `organization` (default) or `personal`. Organization Open without `siteId` or `driveId` fails (`vfs: msgraph organization account requires siteId or driveId`). Personal uses `/me/drive`. Aliases: `enterprise` / `work` / `tenant` → organization; `consumer` / `msa` → personal. Read-only **`Files.Read`**; writable **`Files.ReadWrite`**. A SharePoint library also needs **`Sites.Read.All`** or **`Sites.ReadWrite.All`** as the **client** already consented. CASA: prefer `Files.ReadWrite` (user files) over `Files.ReadWrite.All` when it covers the bound drive. Graph files are real `.docx` / `.xlsx` (Word/Excel codecs). Native Google Docs/Sheets on a Drive member still use Docs/Sheets APIs. Hosts pass `vfs.Graph(api, holder, account)`; `account` on Graph is the default when a bind omits it.
+Graph (OneDrive and SharePoint libraries): **`account`** is `organization` (default) or `personal`. Organization Open without `siteId` or `driveId` fails (`vfs: msgraph organization account requires siteId or driveId`). Personal uses `/me/drive`. Aliases: `enterprise` / `work` / `tenant` → organization; `consumer` / `msa` → personal. Read-only **`Files.Read`**; writable **`Files.ReadWrite`**. A SharePoint library also needs **`Sites.Read.All`** or **`Sites.ReadWrite.All`** as the **client** already consented. CASA: prefer `Files.ReadWrite` (user files) over `Files.ReadWrite.All` when it covers the bound drive. Graph files are real `.docx` / `.xlsx` (Word/Excel codecs). Native Google Docs/Sheets on a Drive member still use Docs/Sheets APIs. Hosts pass `vfs.Graph(vfs.NewMicrosoftGraph(holder, "", nil), holder, account)`; `account` on Graph is the default when a bind omits it.
 
 Two surfaces, one document:
 
@@ -144,10 +140,9 @@ Read-only bind: official ZIP export (`application/zip`, 10 MiB). Writable bind
 Docs **tables**: `kind=table` body is TSV (`A\tB`) **or** a GFM pipe table (`| A | B |` plus optional `| --- | --- |` separator). Pipe markdown is split into real Docs cells; it is not inserted as a 1-column table with the pipes still in the cell. `content` lift on create does the same for a pipe-table paragraph.
 
 ```go
-// Host OpenVFS, after a drive bind:
+// Host workspace.Config.Open, after a drive bind:
 h := vfs.NewTokenHolder(b.Auth)
-api, err := vfs.NewGoogleDrive(ctx, h)
-members = append(members, vfs.At("drive", vfs.Drive(api, h)))
+members = append(members, vfs.At("drive", vfs.Drive(vfs.NewGoogleDrive(h, "", nil), h)))
 ```
 
 Raw path I/O (absolute virtual paths only):
@@ -261,17 +256,17 @@ Tool guidance:
 |------|------|
 | Read | `ReadFile` once (32 MiB cap) |
 | Detect | **Provider** sets `FileInfo.MediaType` on Stat (S3 Content-Type or key/name; local extension + peek). Session does not sniff. |
-| Lookup | `ContentRegistry` media type → `Codec` (`Lookup`) |
-| Register | First binding wins. A second `Register` for the same media type returns `ErrAlreadyRegistered`. `adapters.RegisterCommon` is idempotent (skips DOCX/XLSX when already bound). Importing `tacklr` registers Word/Excel on the process default registry. |
+| Lookup | The session's `ContentRegistry` (`MountSession.Codecs`) media type → `Codec` (`Lookup`) |
+| Register | Each `MountSession` has its own codecs: `TextCodec` for the text types, the codecs of a mounted backend's own types (Drive adds Google Docs and Sheets), and the codecs the host passes: `vfs.Tree(members...).WithCodecs(adapters.Codecs()...)` for Word and Excel. Nothing registers a codec on import, so a host links only the codecs it names. A second codec for one media type returns `ErrAlreadyRegistered`. |
 | Fallback | Unregistered but text-like (`text/*`, JSON, YAML, …) → `TextCodec` |
 | Decode | `Codec.Decode(path, mediaType, data)` — no second read or re-sniff |
 | Else | `ErrNoCodec` (e.g. PNG) |
 
 `DetectMediaType` is a helper **providers** call when filling `MediaType`. Empty / missing type is treated as `application/octet-stream` (no IR).
 
-FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **The only mount point is `/workspace`**. Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `Tree` attaches `/workspace`; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseMount` returns the kernel error when FUSE is unavailable. `Close` unmounts. Host `ls`/`rg` from HostDir see `workspace/work/…`.
+FUSE: package `vfs/fuse` shows a `MountSession` on the host kernel. `fuse.Mount(ms, dir)` mounts it at `dir` (created mode `0700` when missing) and returns a `*fuse.Server`; `Server.Close` unmounts and removes `dir`. `vfs` itself does not import go-fuse. The kernel tree root is virtual `/`, so host `ls`/`rg` in `dir` see `workspace/work/…`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `ms.Codecs().Identity` (an `IdentityCodec` owns the type). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `Mount` returns the kernel error when FUSE is unavailable.
 
-The worker injects a **turn-scoped** `MountSession` from `AgentOptions.OpenVFS`. A nil `Projection` leaves that session in-process. `vfs.FuseProjection` mounts it at `$TMP/tacklr-fuse/<session>` mode `0700`, and `FuseMount`'s error is how the host learns the kernel mount failed. The activity closes that tree when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
+The worker builds a **turn-scoped** `MountSession` from `worker.Config.Workspace.Open`. With `worker.Config.FuseRoot` set, it mounts that tree at `FuseRoot/<session>` and adds `shell.RunCommand(dir)` (package `shell`) to the turn's tools, so `run_command` runs there. With no `FuseRoot`, the tree stays in-process and the agent has no `run_command`. A host that mounts the tree itself adds `shell.RunCommand(dir)` to `AgentOptions.Tools`. The worker unmounts when it drops the session's harness. Bind/unbind only record credentials; they do not keep a live tree between prompts.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 
@@ -382,7 +377,7 @@ Write:  WriteDocument              // PutObject / UploadStream with Text() bytes
 
 The agent always uses `/data/app.go`. It never sees the bucket or container name.
 
-A custom `S3API` implements `Head` (returns `S3Object` with size, mtime, content type and ETag) and `Get(ctx, bucket, key, off, n)`, which opens `n` bytes from `off` (`n < 0` reads to the end). `AWSS3` sends `Range: bytes=…`; `AzureBlob` sets `DownloadStreamOptions.Range`.
+A custom `S3API` implements `Head` (returns `S3Object` with size, mtime, content type and ETag) and `Get(ctx, bucket, key, off, n)`, which opens `n` bytes from `off` (`n < 0` reads to the end). The SDK adapters live in their own packages, so `vfs` does not link the cloud SDKs: `vfs.S3(awss3.API{Client: c}, bucket)` (package `vfs/awss3`, which sends `Range: bytes=…`) and `vfs.Blob(azureblob.API{Client: c}, container)` (package `vfs/azureblob`, which sets `DownloadStreamOptions.Range`).
 
 ### Git repositories
 
@@ -550,7 +545,7 @@ write  → exactly one mode; harness lastRev; mismatch → ErrStaleContent
 WriteDocument → provider translates IR and persists now
 ```
 
-No FUSE and no shell are required for this IR edit path. `run_command` needs a live `FuseMount` (`HostDir` set).
+No FUSE and no shell are required for this IR edit path. `run_command` exists only when the host adds `shell.RunCommand` for a mounted tree (`worker.Config.FuseRoot`).
 
 ---
 
@@ -566,7 +561,6 @@ No FUSE and no shell are required for this IR edit path. `run_command` needs a l
 | Docs insert/write location invalid | `ErrInvalidWrite` — read again and retry (no provider SDK text) |
 | Line/HTML write on a Sheet | `ErrProjected` |
 | Path not under a mount | `ErrNotMounted` |
-| `run_command` with no FUSE mount | `ErrFuseNotMounted` |
 | Write on read-only mount | `ErrReadOnly` |
 | Missing file | `ErrNotExist` |
 | No codec for media type | `ErrNoCodec` |

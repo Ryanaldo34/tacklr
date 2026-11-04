@@ -10,6 +10,8 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
 	"github.com/ryanaldo34/tacklr/internal/testhttp"
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/awss3"
+	"github.com/ryanaldo34/tacklr/vfs/azureblob"
 	"github.com/ryanaldo34/tacklr/vfs/internal/vfstest"
 )
 
@@ -23,7 +25,6 @@ func TestLocal_contract(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = ms.Close() })
 		return vfstest.Backend{Session: ms, Root: "/workspace/data", ReadsAfterRemove: true}
 	})
 }
@@ -31,14 +32,14 @@ func TestLocal_contract(t *testing.T) {
 func TestS3_contract(t *testing.T) {
 	client, bucket := startS3(t.Context(), t)
 	vfstest.Run(t, func(t *testing.T) vfstest.Backend {
-		return prefixedBackend(t, vfs.S3(vfs.AWSS3{Client: client}, bucket))
+		return prefixedBackend(t, vfs.S3(awss3.API{Client: client}, bucket))
 	})
 }
 
 func TestBlob_contract(t *testing.T) {
 	client, container := startAzurite(t.Context(), t)
 	vfstest.Run(t, func(t *testing.T) vfstest.Backend {
-		return prefixedBackend(t, vfs.Blob(vfs.AzureBlob{Client: client}, container))
+		return prefixedBackend(t, vfs.Blob(azureblob.API{Client: client}, container))
 	})
 }
 
@@ -67,6 +68,5 @@ func prefixedBackend(t *testing.T, open vfs.Open) vfstest.Backend {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 	return vfstest.Backend{Session: ms, Root: "/workspace/data"}
 }

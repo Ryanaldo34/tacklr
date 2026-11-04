@@ -233,8 +233,8 @@ const summaryInstruction = "<instructions>\nSummarize the entire message history
 const searchableHistoryNote = "The full earlier conversation is saved. Use the search tool to find its exact messages, and open to read one."
 
 // trim cuts the round's largest results until the window and round fit
-// MaxWindowSize. Before a result's first cut, its full text is staged
-// under OverflowPath when that is set, and the cut result says where.
+// MaxWindowSize. Before a result's first cut, its full text is kept in
+// Overflow when that is set, and the cut result says where.
 func (a *Harness) trim(ctx context.Context, window, round []*message.Message, n int) ([]*message.Message, error) {
 	round = slices.Clone(round)
 	full := map[int]string{}
@@ -258,8 +258,8 @@ func (a *Harness) trim(ctx context.Context, window, round []*message.Message, n 
 		}
 		if _, ok := full[i]; !ok {
 			full[i] = round[i].Content
-			if a.overflowPath != "" {
-				path, err := a.stageOverflow(ctx, round[i].ToolCallID, full[i])
+			if a.overflow != nil {
+				path, err := a.overflow.Keep(ctx, a.sessionId, round[i].ToolCallID, full[i])
 				if err != nil {
 					return nil, fmt.Errorf("stage full tool result: %w", err)
 				}

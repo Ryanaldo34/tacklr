@@ -9,7 +9,6 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 
 	"github.com/ryanaldo34/tacklr/server"
-	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 type vfsAuthWire struct {
@@ -85,8 +84,6 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env server.ProtocolEnv,
 	if len(params.Backends) == 0 {
 		return nil, server.Errorf(server.ErrInvalidRequest, "backends is required")
 	}
-	spec := env.Agent
-
 	type mounted struct {
 		Point    string `json:"point"`
 		Provider string `json:"provider"`
@@ -99,11 +96,11 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env server.ProtocolEnv,
 	var errs []itemErr
 	for _, item := range params.Backends {
 		b := item.binding()
-		if err := vfs.ValidateBinding(b); err != nil {
+		if err := b.Validate(); err != nil {
 			errs = append(errs, itemErr{Point: item.Point, Error: err.Error()})
 			continue
 		}
-		if spec.OpenVFS == nil {
+		if !env.Workspace {
 			errs = append(errs, itemErr{Point: item.Point, Error: "unknown vfs profile " + b.Provider})
 			continue
 		}

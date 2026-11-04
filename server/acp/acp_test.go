@@ -22,11 +22,12 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/session"
-	"github.com/ryanaldo34/tacklr/telemetry"
+	"github.com/ryanaldo34/tacklr/telemetry/export"
+	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 func TestMain(m *testing.M) {
-	shutdown, err := telemetry.Init(context.Background(), telemetry.Config{})
+	shutdown, err := export.Init(context.Background(), export.Config{})
 	if err != nil {
 		panic(err)
 	}
@@ -38,7 +39,7 @@ func TestMain(m *testing.M) {
 
 func newEmptyRuntime(t *testing.T) *acptest.Runtime {
 	t.Helper()
-	return &acptest.Runtime{Client: livesess.Runtime(t, tacklr.AgentOptions{})}
+	return &acptest.Runtime{Client: livesess.Runtime(t, tacklr.AgentOptions{}, workspace.Config{})}
 }
 
 func inbound(ctx context.Context, s *server.Server, body []byte, w server.MessageWriter) {
@@ -197,7 +198,7 @@ func TestHandleRPC_noAgentConfigured_onPrompt(t *testing.T) {
 	bindRes := acptest.Result(t, bindRec)
 	errs, _ := bindRes["errors"].([]any)
 	if len(errs) == 0 {
-		t.Fatal("want unknown vfs profile when agent has no OpenVFS")
+		t.Fatal("want unknown vfs profile when the runtime has no workspace")
 	}
 
 	promptBody := `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`

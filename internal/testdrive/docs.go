@@ -105,34 +105,17 @@ func (d *FX) serveDocsBatch(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	s := d.ensureDoc(id)
-	req := vfs.DocsBatch{}
-	if body.WriteControl != nil {
-		req.RequiredRevisionID = body.WriteControl.RequiredRevisionId
-	}
-	for _, dr := range body.Requests {
-		if dr == nil {
-			continue
-		}
-		req.Requests = append(req.Requests, vfs.DocsRequest{
-			DeleteContentRange:     dr.DeleteContentRange,
-			InsertText:             dr.InsertText,
-			UpdateParagraphStyle:   dr.UpdateParagraphStyle,
-			CreateParagraphBullets: dr.CreateParagraphBullets,
-			InsertTable:            dr.InsertTable,
-			UpdateTextStyle:        dr.UpdateTextStyle,
-		})
-	}
-	if req.RequiredRevisionID != "" && s.snap.RevisionID != "" && req.RequiredRevisionID != s.snap.RevisionID {
+	if body.WriteControl != nil && body.WriteControl.RequiredRevisionId != "" && s.snap.RevisionID != "" && body.WriteControl.RequiredRevisionId != s.snap.RevisionID {
 		writeDriveErr(w, http.StatusBadRequest, "requiredRevisionId must be the latest revision")
 		return
 	}
-	applyDocsBatch(&s.snap, req)
+	applyDocsBatch(&s.snap, body.Requests)
 	next := s.snap.RevisionID + "+1"
 	if s.snap.RevisionID == "" {
 		next = "R1"
 	}
 	s.snap.RevisionID = next
-	d.DocsBatches = append(d.DocsBatches, req)
+	d.DocsBatches = append(d.DocsBatches, &body)
 	writeDriveJSON(w, http.StatusOK, map[string]any{
 		"writeControl": map[string]any{"requiredRevisionId": next},
 	})
@@ -283,11 +266,7 @@ func listsJSON(snap vfs.DocsSnapshot) map[string]any {
 			levels = append(levels, map[string]any{"glyphType": g})
 		}
 		if len(levels) == 0 {
-			g := "BULLET"
-			if p.Ordered {
-				g = "DECIMAL"
-			}
-			levels = append(levels, map[string]any{"glyphType": g})
+			levels = append(levels, map[string]any{"glyphType": "BULLET"})
 		}
 		out[id] = map[string]any{"listProperties": map[string]any{"nestingLevels": levels}}
 	}
@@ -327,20 +306,20 @@ func objectsJSON(spans []vfs.DocsSpan) map[string]any {
 	return out
 }
 
-func applyDocsBatch(s *vfs.DocsSnapshot, req vfs.DocsBatch) {
-	tabOf := func(tab string) string {
-		if tab != "" {
-			return tab
-		}
-		return req.TabID
-	}
+// applyDocsBatch applies a batchUpdate's requests to s, as the Docs service
+// would. Every request names its tab or none (the whole document).
+func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
+	tabOf := func(tab string) string { return tab }
 	sameTab := func(spTab, reqTab string) bool {
 		if reqTab == "" {
 			return true
 		}
 		return spTab == reqTab || spTab == ""
 	}
-	for _, r := range req.Requests {
+	for _, r := range reqs {
+		if r == nil {
+			continue
+		}
 		if del := r.DeleteContentRange; del != nil && del.Range != nil {
 			start, end := int(del.Range.StartIndex), int(del.Range.EndIndex)
 			tab := tabOf(del.Range.TabId)

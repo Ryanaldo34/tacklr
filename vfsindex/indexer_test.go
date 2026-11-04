@@ -22,7 +22,6 @@ func treeLocal(t *testing.T, members ...vfs.Member) *vfs.MountSession {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 	return ms
 }
 

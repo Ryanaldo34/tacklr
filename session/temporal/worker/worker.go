@@ -17,7 +17,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
-	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 // JobHandler runs a named background job. A worker registers handlers by
@@ -72,9 +72,15 @@ type Config struct {
 	Fallback session.EventLog
 	// DisableStreams sends events only to Fallback, not Workflow Streams.
 	DisableStreams bool
-	// Projection mounts the turn tree on the host kernel.
-	// Nil leaves the MountSession in-process.
-	Projection vfs.Projection
+	// Workspace is the agent's /workspace: the tree each turn mounts, and
+	// the tools, skills and overflow the agent gets from it. A zero
+	// Workspace is no workspace.
+	Workspace workspace.Config
+	// FuseRoot is the host directory under which the worker shows each
+	// turn's workspace with FUSE, one directory per session, so run_command
+	// can run there. Empty keeps the workspace in-process, and the harness
+	// then has no run_command tool.
+	FuseRoot string
 	// Jobs are named background workers Schedule can start. A specialist
 	// of the same name takes precedence.
 	Jobs map[string]JobHandler
@@ -113,7 +119,8 @@ func New(c client.Client, cfg Config) sdkworker.Worker {
 	acts := &activities{
 		Agent:          cfg.Agent,
 		Store:          cfg.Store,
-		Projection:     cfg.Projection,
+		Workspace:      cfg.Workspace,
+		FuseRoot:       cfg.FuseRoot,
 		Fallback:       fallback,
 		DisableStreams: cfg.DisableStreams,
 		Secrets:        cfg.Secrets,

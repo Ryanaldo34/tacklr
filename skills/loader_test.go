@@ -2,12 +2,11 @@ package skills
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func writeSkill(t *testing.T, root, dir, name, desc, body string) {
@@ -22,66 +21,39 @@ func writeSkill(t *testing.T, root, dir, name, desc, body string) {
 	}
 }
 
-func mountSkills(t *testing.T, hosts ...string) *vfs.MountSession {
-	t.Helper()
-	opens := make([]vfs.Open, 0, len(hosts))
-	for _, host := range hosts {
-		if err := os.MkdirAll(host, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		opens = append(opens, vfs.Local(host))
-	}
-	skills := opens[0]
-	if len(opens) > 1 {
-		skills = vfs.Union(opens...)
-	}
-	ms, err := vfs.Tree(vfs.At("skills", skills))(t.Context(), t.Name(), vfs.Request{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ms.Close() })
-	return ms
-}
-
-func TestLoader_emptySessionAndMissingMount(t *testing.T) {
+func TestLoader_emptyMissingAndCanceled(t *testing.T) {
 	loaded, err := (Loader{}).Load(context.Background())
 	if err != nil || loaded != nil {
-		t.Fatalf("nil session: loaded=%#v err=%v", loaded, err)
+		t.Fatalf("empty root: loaded=%#v err=%v", loaded, err)
 	}
-
-	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(t.Context(), t.Name(), vfs.Request{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ms.Close() })
-	loaded, err = (Loader{Session: ms}).Load(t.Context())
+	loaded, err = (Loader{Root: filepath.Join(t.TempDir(), "missing")}).Load(t.Context())
 	if err != nil || loaded != nil {
-		t.Fatalf("no /workspace/skills: loaded=%#v err=%v", loaded, err)
+		t.Fatalf("missing root: loaded=%#v err=%v", loaded, err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := (Loader{Session: ms}).Load(ctx); err == nil {
+	if _, err := (Loader{Root: t.TempDir()}).Load(ctx); err == nil {
 		t.Fatal("expected canceled context error")
 	}
 }
 
 func TestLoader_catalogAndFailurePaths(t *testing.T) {
 	root := t.TempDir()
-	writeSkill(t, root, "alpha", "alpha", "Alpha skill", "Do alpha things.")
 	writeSkill(t, root, "beta", "beta", "Beta skill", "Do beta things.")
+	writeSkill(t, root, "alpha", "alpha", "Alpha skill", "Do alpha things.")
 	if err := os.WriteFile(filepath.Join(root, "readme.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	loaded, err := (Loader{Session: mountSkills(t, root)}).Load(context.Background())
+	loaded, err := (Loader{Root: root}).Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(loaded) != 2 || loaded[0].Name != "alpha" || loaded[1].Name != "beta" {
 		t.Fatalf("loaded = %#v (want alpha, beta sorted)", loaded)
 	}
-	if loaded[0].Path != "/workspace/skills/alpha/SKILL.md" {
+	if loaded[0].Path != filepath.Join(root, "alpha", "SKILL.md") {
 		t.Fatalf("path = %q", loaded[0].Path)
 	}
 	cat := Catalog(loaded)
@@ -92,12 +64,11 @@ func TestLoader_catalogAndFailurePaths(t *testing.T) {
 	t.Run("unreadable pack", func(t *testing.T) {
 		r := t.TempDir()
 		writeSkill(t, r, "alpha", "alpha", "A", "Body.")
-		ms := mountSkills(t, r)
 		if err := os.Chmod(r, 0); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(r, 0o755) })
-		if _, err := (Loader{Session: ms}).Load(context.Background()); err == nil {
+		if _, err := (Loader{Root: r}).Load(context.Background()); err == nil {
 			t.Fatal("an unreadable skills dir loaded (tests must not run as root)")
 		}
 	})
@@ -107,16 +78,16 @@ func TestLoader_catalogAndFailurePaths(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(r, "empty"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := (Loader{Session: mountSkills(t, r)}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "SKILL.md") {
+		if _, err := (Loader{Root: r}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "SKILL.md") {
 			t.Fatalf("err = %v", err)
 		}
 	})
 
-	t.Run("duplicate skill names across packs", func(t *testing.T) {
-		r1, r2 := t.TempDir(), t.TempDir()
-		writeSkill(t, r1, "a", "dup", "D1", "Body one.")
-		writeSkill(t, r2, "b", "dup", "D2", "Body two.")
-		if _, err := (Loader{Session: mountSkills(t, r1, r2)}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "duplicate") {
+	t.Run("duplicate skill names", func(t *testing.T) {
+		r := t.TempDir()
+		writeSkill(t, r, "a", "dup", "D1", "Body one.")
+		writeSkill(t, r, "b", "dup", "D2", "Body two.")
+		if _, err := (Loader{Root: r}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "duplicate") {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -130,7 +101,7 @@ func TestLoader_catalogAndFailurePaths(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte("no front matter"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := (Loader{Session: mountSkills(t, r)}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "front matter") {
+		if _, err := (Loader{Root: r}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "front matter") {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -141,7 +112,7 @@ func TestLoader_catalogAndFailurePaths(t *testing.T) {
 		if err := os.Symlink(filepath.Join(r, "real"), filepath.Join(r, "link")); err != nil {
 			t.Fatal(err)
 		}
-		loaded, err := (Loader{Session: mountSkills(t, r)}).Load(context.Background())
+		loaded, err := (Loader{Root: r}).Load(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -149,25 +120,18 @@ func TestLoader_catalogAndFailurePaths(t *testing.T) {
 			t.Fatalf("expected only real skill, got %#v", loaded)
 		}
 	})
+}
 
-	t.Run("unreadable skill file after stat", func(t *testing.T) {
-		r := t.TempDir()
-		d := filepath.Join(r, "locked")
-		if err := os.Mkdir(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		path := filepath.Join(d, "SKILL.md")
-		if err := os.WriteFile(path, []byte("---\nname: locked\ndescription: d\n---\n\nbody"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(path, 0); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
-		if _, err := (Loader{Session: mountSkills(t, r)}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "SKILL.md") {
-			t.Fatalf("err = %v, want the unreadable SKILL.md named (tests must not run as root)", err)
-		}
+// Collect stops at a canceled context between skills.
+func TestCollect_stopsWhenCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err := Collect(ctx, []string{"a", "b"}, func(context.Context, string) ([]byte, string, error) {
+		cancel()
+		return []byte("---\nname: a\ndescription: d\n---\n\nbody"), "a", nil
 	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
 }
 
 func TestParse_returnPaths(t *testing.T) {

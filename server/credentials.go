@@ -4,12 +4,11 @@ import (
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/session"
-	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // CredentialBag is the VFS credential state for one wire session.
-// A protocol parses its own payload into vfs.Binding values, then calls
+// A protocol parses its own payload into mount.Binding values, then calls
 // Bind, Refresh, and Unbind. Take copies that state onto AuthContext for
 // the next Prompt or Resume and clears the drop list.
 type CredentialBag struct {
@@ -21,7 +20,7 @@ type CredentialBag struct {
 // Bind validates b and stores it. A later bind with the same provider and
 // alias replaces the previous one.
 func (b *CredentialBag) Bind(binding mount.Binding) error {
-	if err := vfs.ValidateBinding(binding); err != nil {
+	if err := binding.Validate(); err != nil {
 		return err
 	}
 	b.mu.Lock()

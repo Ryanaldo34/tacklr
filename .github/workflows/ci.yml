@@ -92,6 +92,9 @@ jobs:
       - name: Build
         run: go build ./...
 
+      - name: Build the core for WebAssembly
+        run: make wasm
+
       # Ubuntu 24.04 AppArmor lets unprivileged CLONE_NEWUSER succeed but
       # blocks bind-mounts inside the namespace. The session jail needs both.
       - name: Allow unprivileged user namespaces

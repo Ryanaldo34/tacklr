@@ -147,7 +147,7 @@ A commit fits the round into `MaxWindowSize`:
 1. A round with a plan install or handoff goes in as it is; the effect then replaces the window.
 2. Under 85% of `MaxWindowSize`, the round is appended.
 3. Over it, the window **collapses**: everything after the first user message and the plan document (an earlier summary too) is saved as session messages, then replaced by one summary of the window as it was. The new round is not in the summary request; it is appended after the summary. With a Brain the summary says that `search` finds the earlier messages and `open` reads one. The window is then small, so the next rounds append without another model call: a session pays for a summary only when the window fills again.
-4. A round still over `MaxWindowSize` alone has its largest tool results cut. With `AgentOptions.OverflowPath` (a directory on a writable mount, for example an object-storage mount), each one's full text is first written to `<OverflowPath>/<session>/<call id>.txt`. The cut result ends with a note: how much was kept, and the path to `read` with `start` and `end`, or that the full text was not kept.
+4. A round still over `MaxWindowSize` alone has its largest tool results cut. With an `AgentOptions.Overflow` (the workspace's `workspace.Config.OverflowPath`: a directory on a writable mount, for example an object-storage mount), each one's full text is first written to `<OverflowPath>/<session>/<call id>.txt`. The cut result ends with a note: how much was kept, and the path to `read` with `start` and `end`, or that the full text was not kept.
 
 A commit that fails (a token count, the session-message save, the summary request, a round that cannot fit, or the overflow write) fails the step and saves nothing.
 
@@ -237,7 +237,7 @@ Encrypt remaining work-item payloads (prompt text, tool args, HITL bytes) at res
 srv := server.NewServer(sessions, agent, acp.New(wire), myProtocol{})
 ```
 
-A protocol is the handshake: create a session, start a turn, stream `session.Event`, end a turn, return HITL answers. Map wire auth into `AuthContext`. Hosts that persist ACP wire envelopes in Postgres call `PostgresWireStore.Setup`.
+A protocol is the handshake: create a session, start a turn, stream `session.Event`, end a turn, return HITL answers. Map wire auth into `AuthContext`. Hosts that persist ACP wire envelopes in Postgres use `server/postgres`: `postgres.NewWireStore(pool, "acp")`, then `Setup` once per database.
 
 | Client | ACP example | Host protocol / autonomous |
 |---------|-------------|----------------------------|
@@ -285,10 +285,10 @@ Do not put Temporal `workflow.Context` on `session.Client`.
 
 The session loop starts `tacklr.turn`. Inference and tool steps inherit that span. Do not add extra wrapper spans around a step.
 
-Host setup: `telemetry.Init` installs the process-wide OpenTelemetry providers and, when an endpoint is set, the OTLP exporters. `Dial` replaces the tracer with a replay-safe one that keeps that export configuration, then prepends Temporal’s OpenTelemetry plugin. Postgres statement spans join the same trace: `brain/postgres.Configure` sets pgx's otelpgx tracer (`ConnConfig.Tracer`) on the host's pool config, so the brain store, `session/postgres` and `server.PostgresWireStore` all emit them when they share that pool.
+Host setup: `export.Init` (package `telemetry/export`) installs the process-wide OpenTelemetry providers and, when an endpoint is set, the OTLP exporters. Temporal tracing needs a replay-safe tracer: after `Init`, call `export.ReinstallTracer` with `temporalotel.NewReplaySafeTracerProvider`, and add Temporal’s OpenTelemetry plugin to `client.Options.Plugins` before `Dial`. Postgres statement spans join the same trace: `brain/postgres.Configure` sets pgx's otelpgx tracer (`ConnConfig.Tracer`) on the host's pool config, so the brain store, `session/postgres` and `server/postgres` all emit them when they share that pool.
 
 ```go
-shutdown, err := telemetry.Init(ctx, telemetry.Config{
+shutdown, err := export.Init(ctx, export.Config{
     ServiceName:  "tacklr-worker",
     OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), // Alloy / collector
     Insecure:     true, // local

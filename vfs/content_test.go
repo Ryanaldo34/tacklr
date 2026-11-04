@@ -6,13 +6,19 @@ import (
 	"testing"
 )
 
-func TestKernelWritable(t *testing.T) {
+// The built-in codecs own the text types as identity (raw bytes are the
+// text); a type nobody registered is neither identity nor projected.
+func TestContentRegistry_builtinsOwnTextTypes(t *testing.T) {
+	r, err := NewContentRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, mt := range []string{
 		"text/plain", "text/markdown", "text/x-go", "application/json",
 		"application/yaml", "text/plain; charset=utf-8",
 	} {
-		if !kernelWritable(mt) {
-			t.Fatalf("kernelWritable(%q) = false, want plaintext writable", mt)
+		if !r.Identity(mt) {
+			t.Fatalf("Identity(%q) = false, want plaintext writable", mt)
 		}
 	}
 	for _, mt := range []string{
@@ -21,50 +27,26 @@ func TestKernelWritable(t *testing.T) {
 		"application/vnd.google-apps.document", "application/vnd.google-apps.spreadsheet",
 		"application/vnd.notion.page",
 	} {
-		if kernelWritable(mt) {
-			t.Fatalf("kernelWritable(%q) = true, want EROFS", mt)
+		if r.Identity(mt) {
+			t.Fatalf("Identity(%q) = true, want EROFS", mt)
 		}
 	}
-	if !kernelWritableFile(FileInfo{Name: "a.go", MediaType: "text/x-go"}) {
-		t.Fatal("kernelWritableFile go")
-	}
-	if kernelWritableFile(FileInfo{Name: "pic.png", MediaType: "image/png"}) {
-		t.Fatal("kernelWritableFile png")
-	}
-	if kernelWritableFile(FileInfo{Name: "a.go"}) {
-		t.Fatal("kernelWritableFile empty media type")
-	}
-	doc, err := DefaultContentRegistry().Decode(context.Background(), "/x.go", "text/x-go; charset=utf-8", []byte("package x\n"))
+	doc, err := r.Decode(context.Background(), "/x.go", "text/x-go; charset=utf-8", []byte("package x\n"))
 	if err != nil {
-		t.Fatalf("default registry must own extension-map types: %v", err)
+		t.Fatalf("built-in codecs must own extension-map types: %v", err)
 	}
 	if doc.MediaType() != "text/x-go" {
 		t.Fatalf("decoded media type %q", doc.MediaType())
 	}
-	if !kernelCreateOK("README") || !kernelCreateOK("note.txt") {
-		t.Fatal("kernelCreateOK plaintext")
+	if _, ok := r.Lookup("text/plain"); !ok {
+		t.Fatal("lookup text/plain")
 	}
 }
 
-func TestContentRegistry_registerDoesNotReplace(t *testing.T) {
-	r := NewContentRegistry()
-	if err := r.Register(TextCodec{}); err != nil {
-		t.Fatal(err)
-	}
-	err := r.Register(stealPlainCodec{})
-	if !errors.Is(err, ErrAlreadyRegistered) {
+// A second codec for a media type is refused.
+func TestNewContentRegistry_refusesASecondCodecForAType(t *testing.T) {
+	if _, err := NewContentRegistry(stealPlainCodec{}); !errors.Is(err, ErrAlreadyRegistered) {
 		t.Fatalf("overwrite: %v", err)
-	}
-	doc, err := r.Decode(context.Background(), "/a.txt", "text/plain", []byte("hello"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	txt, ok := doc.(Textual)
-	if !ok || txt.Text() != "hello" {
-		t.Fatalf("text codec still owns text/plain: %T %v", doc, err)
-	}
-	if _, ok := r.Lookup("text/plain"); !ok {
-		t.Fatal("lookup text/plain")
 	}
 }
 

@@ -14,7 +14,8 @@ type instrumentsContextKey struct{}
 
 // SetMeterProvider installs mp as the process-wide MeterProvider and rebuilds
 // the cached global Instruments so later Init/SetMeterProvider calls take effect.
-// Prefer telemetry.Init / SetMeterProvider. Pass nil for noop.
+// Hosts usually get this from export.Init (package telemetry/export). Pass
+// nil for noop.
 func SetMeterProvider(mp metric.MeterProvider) {
 	if mp == nil {
 		mp = noop.NewMeterProvider()

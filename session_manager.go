@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // sessionManager is one session's committed state: plan, user state,
@@ -19,7 +18,6 @@ type sessionManager struct {
 	userState   map[string]any
 	Permissions permissions
 	Search      *brain.SearchContext
-	VFS         *vfs.MountSession
 }
 
 // newSessionManager returns an empty manager ready for use.

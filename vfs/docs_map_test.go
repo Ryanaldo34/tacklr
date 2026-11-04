@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"google.golang.org/api/docs/v1"
+	"github.com/ryanaldo34/tacklr/vfs/internal/google/docs"
 )
 
 func TestMapReplace_imageAndEmptyAndTableMarks(t *testing.T) {
@@ -108,7 +108,7 @@ func TestDocsWalkHelpers(t *testing.T) {
 	spans := paragraphSpans(&docs.StructuralElement{
 		StartIndex: 1, EndIndex: 4,
 		Paragraph: &docs.Paragraph{
-			Bullet:   &docs.Bullet{ListId: "l", NestingLevel: 1},
+			Bullet:   &docs.Bullet{ListID: "l", NestingLevel: 1},
 			Elements: []*docs.ParagraphElement{nil, {TextRun: &docs.TextRun{Content: "x\n"}}},
 		},
 	}, tabBody{ID: "t"})
@@ -116,10 +116,10 @@ func TestDocsWalkHelpers(t *testing.T) {
 		t.Fatal("bullet para")
 	}
 	_ = paragraphText(&docs.Paragraph{Elements: []*docs.ParagraphElement{nil}})
-	if kernelWritable("") || IsProjected("") || !kernelCreateOK("readme") {
+	if builtinCodecs.Identity("") || builtinCodecs.Projected("") {
 		t.Fatal("registry helpers")
 	}
-	if _, err := EncodeDocument(t.Context(), NewTextDocument("/a.txt", "text/plain", "utf-8", "z")); err != nil {
+	if _, err := builtinCodecs.Encode(t.Context(), NewTextDocument("/a.txt", "text/plain", "utf-8", "z")); err != nil {
 		t.Fatal(err)
 	}
 	if DetectMediaType("n.docx", nil) == "" {
@@ -139,7 +139,7 @@ func TestDocsWalkHelpers(t *testing.T) {
 	if len(rd.Blocks()) < 4 {
 		t.Fatalf("blocks=%d", len(rd.Blocks()))
 	}
-	if allDocumentTabs(nil) != nil || allDocumentTabs(&docs.Document{}) != nil {
+	if allDocumentTabs(&docs.Document{}) != nil {
 		t.Fatal("empty tabs")
 	}
 	if len(allDocumentTabs(&docs.Document{Body: &docs.Body{}})) != 1 {
@@ -149,7 +149,6 @@ func TestDocsWalkHelpers(t *testing.T) {
 		nil,
 		{ChildTabs: []*docs.Tab{{DocumentTab: &docs.DocumentTab{Body: &docs.Body{}}}}},
 	}})
-	_ = snapshotFromDocument(nil)
 	_ = paragraphSpans(&docs.StructuralElement{
 		StartIndex: 1, EndIndex: 3,
 		Paragraph: &docs.Paragraph{
@@ -167,11 +166,11 @@ func TestDocsWalkHelpers(t *testing.T) {
 	_ = paragraphSpans(&docs.StructuralElement{
 		StartIndex: 1, EndIndex: 2,
 		Paragraph: &docs.Paragraph{Elements: []*docs.ParagraphElement{{
-			InlineObjectElement: &docs.InlineObjectElement{InlineObjectId: "kix.z"},
+			InlineObjectElement: &docs.InlineObjectElement{InlineObjectID: "kix.z"},
 		}}},
 	}, tabBody{Objs: map[string]docs.InlineObject{
 		"kix.z": {InlineObjectProperties: &docs.InlineObjectProperties{
-			EmbeddedObject: &docs.EmbeddedObject{Title: "t", ImageProperties: &docs.ImageProperties{ContentUri: "https://e"}},
+			EmbeddedObject: &docs.EmbeddedObject{Title: "t", ImageProperties: &docs.ImageProperties{ContentURI: "https://e"}},
 		}},
 	}})
 }

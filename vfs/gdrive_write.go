@@ -422,7 +422,7 @@ func (p *driveProvider) PutFile(ctx context.Context, name string, r io.Reader, s
 }
 
 // WriteDocument implements documentBackend.
-func (p *driveProvider) WriteDocument(ctx context.Context, name string, doc Document) error {
+func (p *driveProvider) WriteDocument(ctx context.Context, name string, doc Document, reg *ContentRegistry) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -439,7 +439,7 @@ func (p *driveProvider) WriteDocument(ctx context.Context, name string, doc Docu
 	if err != nil && !isNotExist(err) {
 		return err
 	}
-	data, err := EncodeDocument(ctx, doc)
+	data, err := reg.Encode(ctx, doc)
 	if err != nil {
 		return err
 	}

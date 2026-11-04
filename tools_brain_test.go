@@ -184,7 +184,7 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 		t.Fatal(err)
 	}
 	ms := mustMountTree(t, "link-graph", vfs.Request{}, vfs.At("work", vfs.Local(t.TempDir())))
-	h := mustNewHarness(t, AgentOptions{sessionID: "link-graph", mountSession: ms, Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns})
+	h := mustNewHarness(t, AgentOptions{sessionID: "link-graph", Model: &scriptedModel{}, Brain: eng, SearchNamespace: ns})
 	activatePlan(t, h)
 	call := func(name, args string) (string, error) {
 		out, err := h.findTool(name, "").invoke(ctx, args, turnRuntime(h))
@@ -198,7 +198,8 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	found, foundErr := call("search", `{"query":"signs the renewal contract"}`)
 	related, relatedErr := call("related", `{"ref":"`+deal.ID.String()+`","relation":"about"}`)
 	_, unindexed := call("link", `{"from":"/workspace/work/doc.md","to":"`+deal.ID.String()+`","relation":"about"}`)
-	if _, err := runWriteTool(t, h, h.findTool("index_file", ""), `{"path":"/workspace/work/doc.md"}`); err != nil {
+	indexer := &vfsindex.MountIndexer{VFS: ms, Brain: eng, Scope: scope}
+	if _, err := indexer.IndexPath(ctx, "/workspace/work/doc.md"); err != nil {
 		t.Fatal(err)
 	}
 	_, byPath := call("link", `{"from":"/workspace/work/doc.md","to":"`+deal.ID.String()+`","relation":"about"}`)

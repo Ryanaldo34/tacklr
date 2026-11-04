@@ -32,7 +32,6 @@ func TestMountSession_localSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 	specs := ms.Specs()
 	if len(specs) != 3 {
 		t.Fatalf("Specs = %+v", specs)
@@ -174,7 +173,6 @@ func TestMountSession_localSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms2.Close() })
 
 	if b, err := ms2.Route(ctx, "/workspace/work/hello.go").
 		ReadFile(ctx); err != nil || string(b) != "package main\n" {
@@ -189,7 +187,6 @@ func TestMountSession_writeLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 
 	if err := ms.Route(ctx, "/workspace/mem/a.txt").
 		WriteFile(ctx, []byte("hello-mem\n")); err != nil {
@@ -278,7 +275,6 @@ func TestDocument_session(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 
 	var b strings.Builder
 	for i := 1; i <= 100; i++ {
@@ -476,7 +472,7 @@ func TestDocument_session(t *testing.T) {
 	}
 
 	if _, err := ms.Route(ctx, "/workspace/work/pic.bin").
-		OpenDocument(ctx, nil); !errors.Is(err, vfs.ErrNoCodec) {
+		OpenDocument(ctx); !errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("binary: %v", err)
 	}
 
@@ -544,7 +540,7 @@ func TestDocument_session(t *testing.T) {
 	}
 
 	if _, err := ms.Route(ctx, "/workspace/work/bad.txt").
-		OpenDocument(ctx, nil); !errors.Is(err, vfs.ErrInvalidUTF8) {
+		OpenDocument(ctx); !errors.Is(err, vfs.ErrInvalidUTF8) {
 		t.Fatalf("utf8: %v", err)
 	}
 
@@ -680,19 +676,22 @@ func TestMountSession_configErrors(t *testing.T) {
 	if _, err := vfs.NewMountSession(""); err == nil {
 		t.Fatal("empty session id construct")
 	}
-	creg := vfs.NewContentRegistry()
-	if err := creg.Register(nil); err == nil {
+	if _, err := vfs.NewContentRegistry(nil); err == nil {
 		t.Fatal("nil codec")
 	}
-	if err := creg.Register(emptyTypesCodec{}); err == nil {
+	if _, err := vfs.NewContentRegistry(emptyTypesCodec{}); err == nil {
 		t.Fatal("empty media types")
 	}
-	if err := creg.Register(blankTypeCodec{}); err == nil {
+	if _, err := vfs.NewContentRegistry(blankTypeCodec{}); err == nil {
 		t.Fatal("blank media type")
 	}
-	// empty registry has no codec — Decode fails closed
-	if _, err := creg.Decode(ctx, "/x.json", "application/json", []byte(`{}`)); !errors.Is(err, vfs.ErrNoCodec) {
-		t.Fatalf("empty registry decode: %v", err)
+	// a type with no codec fails closed
+	creg, err := vfs.NewContentRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := creg.Decode(ctx, "/x.bin", "application/x-unknown", []byte(`{}`)); !errors.Is(err, vfs.ErrNoCodec) {
+		t.Fatalf("unregistered decode: %v", err)
 	}
 	// canceled decode
 	cctx, cancel := context.WithCancel(ctx)

@@ -126,30 +126,26 @@ func TestDOCXAndHTML_canceledContext(t *testing.T) {
 	}
 }
 
-func TestRegisterCommon(t *testing.T) {
-	reg := vfs.NewContentRegistry()
-	if err := RegisterCommon(reg); err != nil {
+func TestCodecs_registerWordAndExcel(t *testing.T) {
+	reg, err := vfs.NewContentRegistry(Codecs()...)
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, err := reg.Decode(context.Background(), "/x.xlsx", XLSXMediaType, []byte("not-zip"))
+	_, err = reg.Decode(context.Background(), "/x.xlsx", XLSXMediaType, []byte("not-zip"))
 	if err == nil || errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("xlsx must be registered: %v", err)
 	}
-	if err := RegisterCommon(reg); err != nil {
-		t.Fatal(err)
+	if !reg.Projected(DOCXMediaType) {
+		t.Fatal("docx must be a projected type")
 	}
 }
 
 func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
-	if err := RegisterCommon(vfs.DefaultContentRegistry()); err != nil {
-		t.Fatal(err)
-	}
 	ctx := t.Context()
-	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(ctx, "xlsx-create", vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir()))).WithCodecs(Codecs()...)(ctx, "xlsx-create", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 	body := "Amount,Note\n42,ok"
 	_, err = ms.Apply(ctx, "/workspace/work/Budget.xlsx", vfs.Mutation{Content: &body})
 	if err != nil {

@@ -17,10 +17,6 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.12.1
 	github.com/helixdb/helix-db/sdks/go v0.3.1
 	github.com/jackc/pgx/v5 v5.9.2
-	github.com/microsoft/kiota-abstractions-go v1.9.4
-	github.com/microsoft/kiota-http-go v1.5.6
-	github.com/microsoftgraph/msgraph-sdk-go v1.101.0
-	github.com/microsoftgraph/msgraph-sdk-go-core v1.4.1
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/prometheus/client_golang v1.24.1
@@ -48,7 +44,6 @@ require (
 	go.temporal.io/sdk/contrib/workflowstreams v0.1.1
 	golang.org/x/crypto v0.58.0
 	golang.org/x/net v0.62.0
-	golang.org/x/oauth2 v0.37.0
 	google.golang.org/api v0.293.0
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
@@ -109,11 +104,6 @@ require (
 	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/magiconair/properties v1.8.10 // indirect
-	github.com/microsoft/kiota-authentication-azure-go v1.3.1 // indirect
-	github.com/microsoft/kiota-serialization-form-go v1.1.3 // indirect
-	github.com/microsoft/kiota-serialization-json-go v1.1.2 // indirect
-	github.com/microsoft/kiota-serialization-multipart-go v1.1.2 // indirect
-	github.com/microsoft/kiota-serialization-text-go v1.1.3 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/go-archive v0.3.0 // indirect
 	github.com/moby/moby/api v1.54.2 // indirect
@@ -138,7 +128,6 @@ require (
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/shirou/gopsutil/v4 v4.26.5 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
-	github.com/std-uritemplate/std-uritemplate/go/v2 v2.0.3 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
@@ -148,6 +137,7 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
+	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect

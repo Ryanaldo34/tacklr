@@ -200,7 +200,7 @@ linters:
           - usestdlibvars
 
       # Local MCP stdio launches trusted config commands.
-      - path: internal/mcp/
+      - path: ^mcp/
         text: "G204"
         linters:
           - gosec

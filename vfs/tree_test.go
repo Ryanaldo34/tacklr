@@ -21,7 +21,6 @@ func TestTree_aMemberNeedsANameAndAnOpenAndAnEmptyOneIsSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 	ents, readErr := ms.Route(t.Context(), mount.WorkspacePoint).ReadDir(t.Context())
 
 	if noName == nil || noOpen == nil {

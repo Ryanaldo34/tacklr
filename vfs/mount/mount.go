@@ -3,6 +3,9 @@
 package mount
 
 import (
+	"errors"
+	"fmt"
+	"path"
 	"strings"
 	"time"
 )
@@ -46,15 +49,47 @@ const (
 	ParamAccount = "account"
 )
 
+// ErrInvalidBinding is a binding or alias that Validate or ValidAlias
+// rejects.
+var ErrInvalidBinding = errors.New("mount: invalid binding")
+
 // Alias is the binding's folder name under /workspace: its name parameter,
-// else its single-segment point.
+// else its absolute point without the leading "/" ("/contracts" is
+// contracts). It is "" when the binding has neither.
 func (b Binding) Alias() string {
 	if name := strings.TrimSpace(b.Params[ParamName]); name != "" {
 		return name
 	}
 	point := strings.TrimSpace(b.Point)
-	if point == "" || point == WorkspacePoint {
+	if !path.IsAbs(point) {
 		return ""
 	}
-	return strings.TrimPrefix(point, "/")
+	return strings.TrimPrefix(path.Clean(point), "/")
+}
+
+// Validate checks that the binding has a provider, an access token and a
+// valid alias. The provider checks its own parameters (folderId, siteId)
+// when it opens.
+func (b Binding) Validate() error {
+	if strings.TrimSpace(b.Provider) == "" {
+		return fmt.Errorf("%w: provider required", ErrInvalidBinding)
+	}
+	if strings.TrimSpace(b.Auth.Token) == "" {
+		return fmt.Errorf("%w: access token required", ErrInvalidBinding)
+	}
+	return ValidAlias(b.Alias())
+}
+
+// ValidAlias checks that alias is one path segment and not a name the
+// workspace keeps for itself (work, skills, workspace).
+func ValidAlias(alias string) error {
+	switch {
+	case alias == "":
+		return fmt.Errorf("%w: a name or an absolute one-segment point is required", ErrInvalidBinding)
+	case alias == "." || alias == ".." || strings.ContainsAny(alias, "/\\\x00"):
+		return fmt.Errorf("%w: alias %q must be one path segment", ErrInvalidBinding, alias)
+	case alias == "work" || alias == "skills" || alias == "workspace":
+		return fmt.Errorf("%w: alias %q is reserved", ErrInvalidBinding, alias)
+	}
+	return nil
 }

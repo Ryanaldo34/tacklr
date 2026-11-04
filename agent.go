@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"path"
 	"slices"
 	"strings"
 
@@ -18,10 +17,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/telemetry"
-	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
 // Harness is one session's harness for one step: a model request, one
@@ -31,6 +28,7 @@ type Harness struct {
 	model                 Model
 	sessionId             string
 	tools                 []*Tool
+	mcp                   session.MCPClient
 	mcpConfigs            []session.MCPServer
 	mcpCredentialResolver session.MCPCredentialResolver
 	instructions          string
@@ -43,15 +41,12 @@ type Harness struct {
 	skillsLoader    skills.SkillLoader
 	brain           *brain.Engine
 	brainWriteKinds []string
-	// indexer backs index_file and unindex; nil without a Brain and a
-	// workspace.
-	indexer *vfsindex.MountIndexer
-	// overflowPath is AgentOptions.OverflowPath: where a trimmed result's
-	// full text goes. Empty: it is not kept.
-	overflowPath string
-	mcpCleanup   func()
-	context      *modelContextManager
-	toolRunner   *toolRunner
+	// overflow keeps a trimmed result's full text (AgentOptions.Overflow).
+	// Nil: it is not kept.
+	overflow   Overflow
+	mcpCleanup func()
+	context    *modelContextManager
+	toolRunner *toolRunner
 	// modelSeq counts model requests, for model span sequence numbers.
 	modelSeq int
 	// usage is the provider's input token count for the last model request
@@ -71,20 +66,6 @@ func (a *Harness) commitRound(ctx context.Context, round []*message.Message, eff
 	}
 	a.context.Add(round...)
 	return a.applyEffect(ctx, effect)
-}
-
-// stageOverflow writes a result's full text under OverflowPath and returns
-// its virtual path, so the agent can read what a trim cut.
-func (a *Harness) stageOverflow(ctx context.Context, callID, content string) (string, error) {
-	dir := path.Join(a.overflowPath, a.sessionId)
-	if err := a.session.VFS.Route(ctx, dir).MkdirAll(ctx); err != nil {
-		return "", err
-	}
-	p := path.Join(dir, callID+".txt")
-	if err := a.session.VFS.Route(ctx, p).WriteFile(ctx, []byte(content)); err != nil {
-		return "", err
-	}
-	return p, nil
 }
 
 func (a *Harness) constructSystemPrompt() string {
@@ -426,18 +407,19 @@ func (a *Harness) initMCP(ctx context.Context) {
 		}
 		configs = append(configs, resolved)
 	}
-	a.mcpCleanup = mcpruntime.DiscoverAllTools(ctx, configs, func(name, description, namespace string, schema map[string]any, handler mcpruntime.ToolHandler) {
-		tool := newMCPTool(mcpToolConfig{
-			Name:        name,
-			Description: description,
-			Namespace:   namespace,
-			Schema:      schema,
+	tools, closeAll := a.mcp.Connect(ctx, configs)
+	a.mcpCleanup = closeAll
+	for _, t := range tools {
+		a.tools = append(a.tools, newMCPTool(mcpToolConfig{
+			Name:        t.Name,
+			Description: t.Description,
+			Namespace:   t.Server,
+			Schema:      t.Schema,
 			Handler: func(ctx context.Context, args map[string]any, _ *CallContext) (string, error) {
-				return handler(ctx, args)
+				return t.Call(ctx, args)
 			},
-		})
-		a.tools = append(a.tools, tool)
-	})
+		}))
+	}
 }
 
 // Close releases the turn's MCP connections. The session runtime closes the

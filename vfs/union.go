@@ -132,7 +132,7 @@ func (p unionProvider) OpenDocument(ctx context.Context, name string, reg *Conte
 	return db.OpenDocument(ctx, rel, reg)
 }
 
-func (p unionProvider) WriteDocument(context.Context, string, Document) error {
+func (p unionProvider) WriteDocument(context.Context, string, Document, *ContentRegistry) error {
 	return ErrReadOnly
 }
 

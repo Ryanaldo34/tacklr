@@ -230,18 +230,20 @@ The built-in tools that change files or run commands ask for permission the same
 
 ### Give the agent a workspace
 
-`OpenVFS` builds the agent's `/workspace`. Each `vfs.At` mounts a source under a name.
+The worker builds the agent's `/workspace` for each turn from `worker.Config.Workspace` (package `workspace`). Each `vfs.At` mounts a source under a name.
 
 ```go
-func workspace() vfs.OpenVFS {
-	return vfs.Tree(
+func agentWorkspace() workspace.Config {
+	return workspace.Config{Open: vfs.Tree(
 		vfs.At("work", vfs.Local("/srv/tacklr/work")),            // /workspace/work
 		vfs.At("docs", vfs.Local("/srv/tacklr/docs")).ReadOnly(), // the agent can read, not write
-	)
+	)}
 }
 ```
 
-With a workspace, the agent gets `read`, `write`, `write_document`, `write_spreadsheet`, and `run_command`. Commands run in a sandbox that sees this session's workspace, not other sessions' files. Other sources: `vfs.S3`, `vfs.Blob`, `vfs.Drive`, `vfs.Graph`, `vfs.Git`. See [docs/vfs.md](docs/vfs.md).
+Pass it as `worker.Config{Workspace: agentWorkspace()}`. With a workspace, the agent gets `read`, `write`, `write_document`, and `write_spreadsheet`. To also give it `run_command`, set `worker.Config{FuseRoot: "/run/tacklr"}`: the worker mounts each session's workspace there with FUSE, and commands run in a sandbox that sees that session's workspace, not other sessions' files. Other sources: `vfs.S3`, `vfs.Blob`, `vfs.Drive`, `vfs.Graph`, `vfs.Git`. See [docs/vfs.md](docs/vfs.md).
+
+The workspace reads text files on its own. To read and write Word and Excel files, pass their codecs: `vfs.Tree(...).WithCodecs(adapters.Codecs()...)` (package `vfs/adapters`). Only the sources and codecs you name are linked into your binary.
 
 ### Add a knowledge store
 
@@ -337,7 +339,7 @@ You can replace each of these parts:
 
 A custom store can check itself against the shared tests in `session/storetest` and `brain/storetest`.
 
-Tacklr also includes web search and fetch tools (`web`), email tools (`email/gmail`, `email/outlook`), MCP servers (`AgentOptions.MCPConfigs`), skill files the agent can read (`AgentOptions.SkillsPath`), and OpenTelemetry setup (`telemetry`).
+Tacklr also includes web search and fetch tools (`web`), MCP servers (`AgentOptions.MCPConfigs`, connected by `AgentOptions.MCP: mcp.Client{}`), skill files the agent can read (`AgentOptions.SkillsLoader`, or `/workspace/skills` on the workspace), and OpenTelemetry setup (`telemetry`).
 
 ## Documentation
 
@@ -347,7 +349,6 @@ Tacklr also includes web search and fetch tools (`web`), email tools (`email/gma
 | [docs/tools.md](docs/tools.md) | Writing tools, `CallContext`, permissions |
 | [docs/vfs.md](docs/vfs.md) | The workspace, its sources, documents and spreadsheets |
 | [docs/knowledge.md](docs/knowledge.md) | The knowledge store: search, kinds, graph, file indexing |
-| [docs/fuse-vfs-run-command.md](docs/fuse-vfs-run-command.md) | How `run_command` sees the workspace |
 
 ## Contributing
 

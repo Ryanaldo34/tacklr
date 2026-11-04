@@ -30,6 +30,7 @@ import (
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
+	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 func TestSessionWorkflow_activityRetryThenCompletes(t *testing.T) {
@@ -83,7 +84,7 @@ func TestSessionWorkflow_authExpiredYieldThenResume(t *testing.T) {
 		Name: "cloud_read",
 		Handler: func(context.Context) (string, error) {
 			if calls.Add(1) == 1 {
-				return "", fmt.Errorf("gdrive: %w", vfs.ErrAuthExpired)
+				return "", fmt.Errorf("gdrive: %w", tacklr.ErrAuthExpired)
 			}
 			return "from-cloud", nil
 		},
@@ -269,11 +270,9 @@ func TestSessionWorkflow_badWorkspaceBindingFailsTurn(t *testing.T) {
 			IsComplete: true,
 		}
 	})
-	agent := tacklr.AgentOptions{
-		Model: model, MaxWindowSize: 8192,
-		OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(missing))),
-	}
-	_, fallback := registerSession(env, agent)
+	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}
+	acts, fallback := registerSession(env, agent)
+	acts.Workspace = workspace.Config{Open: vfs.Tree(vfs.At("docs", vfs.Local(missing)))}
 	id := session.ID("sess-bad-binding")
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{

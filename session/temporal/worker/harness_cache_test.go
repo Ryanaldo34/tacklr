@@ -12,7 +12,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/session"
-	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/fuse"
 )
 
 // failingStore is a session.Store whose named operations fail. unreadable
@@ -67,7 +67,7 @@ func (s *failingStore) Save(ctx context.Context, id session.ID, cp []byte, expec
 func testHarness(t *testing.T, id session.ID, builds *atomic.Int32) harnessSpec {
 	t.Helper()
 	model := testkit.HTTPModel(t, nil)
-	return harnessSpec{ID: id, Key: "k", Build: func(ctx context.Context) (*tacklr.Harness, *vfs.MountSession, error) {
+	return harnessSpec{ID: id, Key: "k", Build: func(ctx context.Context) (*tacklr.Harness, *fuse.Server, error) {
 		builds.Add(1)
 		h, err := tacklr.NewHarness(ctx, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
 		return h, nil, err
@@ -138,7 +138,7 @@ func TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes(t *testing.T) {
 			}
 			w := testHarness(t, "s", &builds)
 			if tc.build != nil {
-				w.Build = func(context.Context) (*tacklr.Harness, *vfs.MountSession, error) { return nil, nil, tc.build }
+				w.Build = func(context.Context) (*tacklr.Harness, *fuse.Server, error) { return nil, nil, tc.build }
 			}
 
 			err := tc.step(newHarnessCache(time.Minute, 0), tc.store, w)

@@ -177,7 +177,7 @@ func (x *MountIndexer) IndexPath(ctx context.Context, virtualPath string) (PathI
 
 func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileInfo) (PathIndexResult, error) {
 	mt := cmp.Or(st.MediaType, "application/octet-stream")
-	if !vfs.IsTextLike(mt) && !vfs.IsProjected(mt) {
+	if !vfs.IsTextLike(mt) && !x.VFS.Codecs().Projected(mt) {
 		return PathSkipped, nil
 	}
 	sizes, err := x.Chunking.withDefaults()
@@ -277,7 +277,7 @@ func (x *MountIndexer) writeFile(ctx context.Context, vpath string, doc brain.Ob
 		}
 		doc.ContentType = cmp.Or(structured.MediaType(), doc.ContentType)
 		doc.Properties[PropMediaType] = doc.ContentType
-		parts = blockParts(ctx, doc.Title, kind, structured, sizes)
+		parts = blockParts(ctx, doc.Title, kind, structured, sizes, x.VFS.Codecs().Projected(structured.MediaType()))
 	} else {
 		f, err := x.VFS.Route(ctx, vpath).Open(ctx)
 		if err != nil {
@@ -305,7 +305,7 @@ func (x *MountIndexer) writeFile(ctx context.Context, vpath string, doc brain.Ob
 // files the document path cannot read: over vfs.MaxReadFileBytes, not
 // UTF-8, or on a backend without documents.
 func (x *MountIndexer) readStructured(ctx context.Context, vpath, mt string) (vfs.Textual, error) {
-	if !vfs.HasStructure(mt) {
+	if !x.VFS.Codecs().HasStructure(mt) {
 		return nil, nil
 	}
 	doc, err := x.VFS.Route(ctx, vpath).ReadText(ctx)
@@ -335,8 +335,9 @@ func streamParts(src iter.Seq2[chunk, error], kind string) iter.Seq2[brain.Objec
 
 // blockParts yields one Chunk per block of doc; a block over sizes.Max is
 // split into content-defined chunks. A document without blocks is chunked
-// like a plain-text file.
-func blockParts(ctx context.Context, base, kind string, doc vfs.Textual, sizes ChunkSizes) iter.Seq2[brain.Object, error] {
+// like a plain-text file. projected says doc's codec is rich or grid: its
+// block spans are not line numbers.
+func blockParts(ctx context.Context, base, kind string, doc vfs.Textual, sizes ChunkSizes, projected bool) iter.Seq2[brain.Object, error] {
 	body := doc.Text()
 	var blocks []vfs.Block
 	if s, ok := doc.(vfs.Structured); ok {
@@ -345,7 +346,6 @@ func blockParts(ctx context.Context, base, kind string, doc vfs.Textual, sizes C
 	if len(blocks) == 0 {
 		return streamParts(chunks(ctx, strings.NewReader(body), sizes, 0), kind)
 	}
-	projected := vfs.IsProjected(doc.MediaType())
 	var starts []int
 	if !projected {
 		starts = lineStarts(body)

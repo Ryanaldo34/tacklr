@@ -2,22 +2,20 @@ package tacklr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/ryanaldo34/tacklr/session"
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/skills"
-	"github.com/ryanaldo34/tacklr/vfs"
-	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-// AgentOptions is the one agent, and the argument to NewHarness.
-// A session runtime uses OpenVFS to build the workspace for each turn, then
-// BindTurn attaches the session id and that tree. SkillsPath is a directory
-// on that tree when it is mounted, and a local directory when it is not.
+// AgentOptions is the one agent, and the argument to NewHarness. A session
+// runtime calls BindTurn to attach the session id for each turn. The agent's
+// workspace (package workspace) adds its tools, skills and Overflow to these
+// options for the turns that have one.
 type AgentOptions struct {
 	// MaxWindowSize is the context window in tokens. Zero uses the model's
 	// reported window.
@@ -28,23 +26,24 @@ type AgentOptions struct {
 	sessionID string
 	// Name is the label used in logs. It does not select behavior.
 	Name string
-	// Tools are host tools, including optional tools from email and web.
-	// Give each tool its clients by closing
-	// over them in the constructor (see NewTool). Session-world tools
-	// (VFS, brain, index) still inject from the fields below.
-	Tools      []*Tool
+	// Tools are host tools, including optional tools from web, shell and
+	// workspace. Give each tool its clients by closing over them in the
+	// constructor (see NewTool). The plan, brain and specialist tools inject
+	// from the fields below.
+	Tools []*Tool
+	// MCP connects the harness to MCPConfigs (package mcp). It is
+	// required when there are MCP servers.
+	MCP        session.MCPClient
 	MCPConfigs []session.MCPServer
 	// MCPCredentialResolver resolves durable references immediately before
 	// connection. Inline client credentials remain session-scoped.
 	MCPCredentialResolver session.MCPCredentialResolver
 	Specialists           []*Specialist
-	// OverflowPath is a directory on a writable workspace mount (for example
-	// an object-storage mount). When a round is too large for the window even
-	// with the history fully summarized, its largest results are trimmed;
-	// each one's full text is first written to
-	// <OverflowPath>/<session>/<call id>.txt and the trimmed result names
-	// that path. Empty: the full text is not kept.
-	OverflowPath string
+	// Overflow keeps the full text of results the window trims. When a round
+	// is too large for the window even with the history fully summarized,
+	// its largest results are trimmed; each one's full text is first kept
+	// here and the trimmed result says where. Nil: the full text is not kept.
+	Overflow Overflow
 	// ToolInterceptors wrap each tool call (outermost first). Built-in
 	// planning lock and OnCall middleware are installed after these.
 	// Hosts cannot omit the planning lock; specialists skip it via WithSpecialist.
@@ -53,12 +52,10 @@ type AgentOptions struct {
 	// for a namespaced tool) that run without a permission prompt. A user's
 	// reject-always still wins. An unknown name fails construction.
 	AllowTools []string
-	// SkillsLoader loads skills. When nil, SkillsPath is walked with skills.Loader.
+	// SkillsLoader loads the skills the agent can read: skills.Loader for a
+	// local directory, or the workspace's skills directory (package
+	// workspace). Nil: no skills.
 	SkillsLoader skills.SkillLoader
-	// SkillsPath is the skills directory. When the turn has a workspace mount,
-	// it is a virtual path and empty means /workspace/skills. When it does not,
-	// it is a local directory and empty means no skills.
-	SkillsPath string
 	// Brain enables the knowledge tools (search, open, related, save, and
 	// link when the engine has a graph) when non-nil. Workers inherit the
 	// same engine. The host builds the store, and the graph with
@@ -78,15 +75,6 @@ type AgentOptions struct {
 	// against object Readers, so search only returns source files the caller can
 	// open at the source. Set them from the host's identity provider each turn.
 	SearchPrincipals []string
-	// IndexReaders resolves a workspace file's source ACL when index_file
-	// indexes it (see vfsindex.MountIndexer.Readers). Nil indexes files visible
-	// to the whole SearchNamespace.
-	IndexReaders vfsindex.ReadersFunc
-	// OpenVFS builds the /workspace tree for each turn. Nil means no VFS.
-	OpenVFS vfs.OpenVFS
-	// mountSession is that tree for this turn. BindTurn sets it from the
-	// tree OpenVFS returned. The runtime closes it after the turn.
-	mountSession *vfs.MountSession
 	// skipPlanningLock is set only by WithSpecialist. The parent session always
 	// gates write tools on an active plan.
 	skipPlanningLock bool
@@ -95,12 +83,18 @@ type AgentOptions struct {
 	jobs []string
 }
 
-// BindTurn attaches the per-turn session id, the workspace tree, and the
-// names of the Runtime job workers the runtime registered. Hosts set
-// OpenVFS and SkillsPath. The session runtime calls BindTurn.
-func BindTurn(opts AgentOptions, id string, mount *vfs.MountSession, jobs []string) AgentOptions {
+// Overflow keeps the full text of results trimmed from the window, where the
+// agent can read it again. Package workspace keeps it on the workspace.
+type Overflow interface {
+	// Keep stores text, the full result of the session's call callID, and
+	// returns where the agent reads it.
+	Keep(ctx context.Context, sessionID, callID, text string) (string, error)
+}
+
+// BindTurn attaches the per-turn session id and the names of the Runtime
+// job workers the runtime registered. The session runtime calls BindTurn.
+func BindTurn(opts AgentOptions, id string, jobs []string) AgentOptions {
 	opts.sessionID = id
-	opts.mountSession = mount
 	opts.jobs = jobs
 	return opts
 }
@@ -112,7 +106,6 @@ func NewHarness(ctx context.Context, opts AgentOptions) (*Harness, error) {
 		return nil, err
 	}
 	sm := newSessionManager()
-	sm.VFS = opts.mountSession
 	if !opts.SearchNamespace.Empty() {
 		sm.Search.SetNamespace(opts.SearchNamespace)
 	}
@@ -123,16 +116,17 @@ func NewHarness(ctx context.Context, opts AgentOptions) (*Harness, error) {
 		instructions:          opts.SystemPrompt,
 		session:               sm,
 		tools:                 opts.Tools,
+		mcp:                   opts.MCP,
 		mcpConfigs:            opts.MCPConfigs,
 		mcpCredentialResolver: opts.MCPCredentialResolver,
-		skillsLoader:          skillsSource(opts),
+		skillsLoader:          opts.SkillsLoader,
 		brain:                 opts.Brain,
 		brainWriteKinds:       opts.BrainWriteKinds,
 		sessionId:             opts.sessionID,
 		jobs:                  opts.jobs,
 		specialists:           make(map[string]*Specialist),
 		context:               newModelContextManager(),
-		overflowPath:          opts.OverflowPath,
+		overflow:              opts.Overflow,
 	}
 	chain := slices.Clone(opts.ToolInterceptors)
 	if !opts.skipPlanningLock {
@@ -162,9 +156,6 @@ func (opts *AgentOptions) Validate() error {
 		}
 		opts.MaxWindowSize = uint(size)
 	}
-	if err := opts.validateOverflowPath(); err != nil {
-		return err
-	}
 	if opts.Brain != nil {
 		if err := opts.SearchNamespace.Validate(); err != nil {
 			return fmt.Errorf("tacklr: AgentOptions.SearchNamespace is required with Brain: %w", err)
@@ -174,6 +165,9 @@ func (opts *AgentOptions) Validate() error {
 		if tool == nil {
 			return fmt.Errorf("tacklr: AgentOptions.Tools[%d] is nil", i)
 		}
+	}
+	if len(opts.MCPConfigs) > 0 && opts.MCP == nil {
+		return errors.New("tacklr: AgentOptions.MCP is required with MCP servers")
 	}
 	seenMCP := make(map[string]struct{}, len(opts.MCPConfigs))
 	for i := range opts.MCPConfigs {
@@ -192,25 +186,6 @@ func (opts *AgentOptions) Validate() error {
 	return nil
 }
 
-// validateOverflowPath checks that OverflowPath, when set, is a directory
-// path on a writable mount of the turn's workspace.
-func (opts *AgentOptions) validateOverflowPath() error {
-	if opts.OverflowPath == "" {
-		return nil
-	}
-	if opts.mountSession == nil {
-		return fmt.Errorf("tacklr: AgentOptions.OverflowPath %q needs a workspace (OpenVFS)", opts.OverflowPath)
-	}
-	spec, err := opts.mountSession.SpecAt(opts.OverflowPath)
-	if err != nil {
-		return fmt.Errorf("tacklr: AgentOptions.OverflowPath %q: %w", opts.OverflowPath, err)
-	}
-	if spec.ReadOnly {
-		return fmt.Errorf("tacklr: AgentOptions.OverflowPath %q is on a read-only mount", opts.OverflowPath)
-	}
-	return nil
-}
-
 func (h *Harness) finishInit(ctx context.Context, opts AgentOptions) error {
 	if err := h.initSkills(ctx); err != nil {
 		return fmt.Errorf("initialize skills: %w", err)
@@ -219,16 +194,11 @@ func (h *Harness) finishInit(ctx context.Context, opts AgentOptions) error {
 	if err := h.initSpecialists(opts.Specialists); err != nil {
 		return err
 	}
-	if h.brain != nil && h.session.VFS != nil {
-		// Validate made SearchNamespace a valid scope for a Brain.
-		h.indexer = &vfsindex.MountIndexer{VFS: h.session.VFS, Brain: h.brain, Scope: h.session.Search.Scope(), Readers: opts.IndexReaders}
-	}
 	h.injectBuiltinTools()
 	return h.grantTools(opts.AllowTools)
 }
 
-// injectBuiltinTools registers the plan tools, the session-world VFS, brain
-// and index tools, and the job tools.
+// injectBuiltinTools registers the plan, brain and specialist tools.
 func (a *Harness) injectBuiltinTools() {
 	a.tools = append(a.tools,
 		newCreatePlanTool(),
@@ -237,15 +207,8 @@ func (a *Harness) injectBuiltinTools() {
 		newListPlanTool(),
 		askUserChoiceTool,
 	)
-	if ms := a.session.VFS; ms != nil {
-		a.tools = append(a.tools, newVFSTools(ms)...)
-		a.tools = append(a.tools, newRunCommand(ms))
-	}
 	if a.brain != nil {
 		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search, a.sessionId, a.brainWriteKinds)...)
-	}
-	if a.indexer != nil {
-		a.tools = append(a.tools, newVFSIndexTools(a.indexer)...)
 	}
 	if len(a.specialists) > 0 {
 		a.tools = append(a.tools, a.spawnTool(), a.listChildrenTool(), a.cancelChildTool())
@@ -275,19 +238,6 @@ func (a *Harness) planningWriteLock(ctx context.Context, inv ToolInvocation, nex
 		return ToolOutcome{}, fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
 	}
 	return next(ctx, inv)
-}
-
-func skillsSource(opts AgentOptions) skills.SkillLoader {
-	if opts.SkillsLoader != nil {
-		return opts.SkillsLoader
-	}
-	if opts.mountSession != nil {
-		return skills.Loader{Session: opts.mountSession, Root: opts.SkillsPath}
-	}
-	if strings.TrimSpace(opts.SkillsPath) == "" {
-		return nil
-	}
-	return skills.Loader{Root: opts.SkillsPath}
 }
 
 func (a *Harness) initSkills(ctx context.Context) error {

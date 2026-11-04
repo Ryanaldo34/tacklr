@@ -28,7 +28,6 @@ func mountGit(t *testing.T, sessionID string, repo vfs.GitRepo) *vfs.MountSessio
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 	return ms
 }
 

@@ -20,7 +20,7 @@ threshold:
 
 # First matching override wins (specific packages first).
 override:
-  - path: github.com/ryanaldo34/tacklr/internal/mcp$
+  - path: github.com/ryanaldo34/tacklr/mcp$
     threshold: 100
   - path: github.com/ryanaldo34/tacklr/skills$
     threshold: 100
@@ -69,7 +69,7 @@ exclude:
     - internal/helixtest
     - internal/s3test
     # Exporter constructors, not product outcomes.
-    - telemetry/otel.go
+    - telemetry/export/export.go
 
 breakdown-file-name: coverage.breakdown
 

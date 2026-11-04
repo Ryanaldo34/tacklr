@@ -1,15 +1,17 @@
 package vfs
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
-	"google.golang.org/api/docs/v1"
-	"google.golang.org/api/googleapi"
+	"github.com/ryanaldo34/tacklr/vfs/internal/google/docs"
+	"github.com/ryanaldo34/tacklr/vfs/internal/rest"
 )
 
 // DocsAPI is the Docs subset used by the provider.
@@ -28,9 +30,9 @@ type DocsSnapshot struct {
 	Lists      map[string]DocsListProps
 }
 
-// DocsListProps is list metadata from documents.get.
+// DocsListProps is list metadata from documents.get: the glyph type of each
+// nesting level ("" where the level has none).
 type DocsListProps struct {
-	Ordered    bool
 	GlyphTypes []string
 }
 
@@ -63,14 +65,62 @@ type DocsBatch struct {
 	Requests           []DocsRequest
 }
 
-// DocsRequest fields are the real batchUpdate request names.
+// DocsRequest is one batchUpdate request. Exactly one field is set; the
+// field names are the Docs API request names.
 type DocsRequest struct {
-	DeleteContentRange     *docs.DeleteContentRangeRequest
-	InsertText             *docs.InsertTextRequest
-	UpdateParagraphStyle   *docs.UpdateParagraphStyleRequest
-	CreateParagraphBullets *docs.CreateParagraphBulletsRequest
-	InsertTable            *docs.InsertTableRequest
-	UpdateTextStyle        *docs.UpdateTextStyleRequest
+	DeleteContentRange     *DocsRange
+	InsertText             *DocsInsertText
+	UpdateParagraphStyle   *DocsParagraphStyle
+	CreateParagraphBullets *DocsBullets
+	InsertTable            *DocsInsertTable
+	UpdateTextStyle        *DocsTextStyle
+}
+
+// DocsRange is the Docs body indexes [StartIndex, EndIndex) of one tab. An
+// empty TabID is the batch's tab.
+type DocsRange struct {
+	StartIndex, EndIndex int
+	TabID                string
+}
+
+// DocsLocation is one Docs body index of one tab. An empty TabID is the
+// batch's tab.
+type DocsLocation struct {
+	Index int
+	TabID string
+}
+
+// DocsInsertText inserts Text at Location.
+type DocsInsertText struct {
+	Location DocsLocation
+	Text     string
+}
+
+// DocsParagraphStyle sets the named style (NORMAL_TEXT, HEADING_1, …) of the
+// paragraphs in Range.
+type DocsParagraphStyle struct {
+	Range          DocsRange
+	NamedStyleType string
+}
+
+// DocsBullets makes the paragraphs in Range a list with BulletPreset.
+type DocsBullets struct {
+	Range        DocsRange
+	BulletPreset string
+}
+
+// DocsInsertTable inserts an empty Rows × Columns table at Location.
+type DocsInsertTable struct {
+	Location      DocsLocation
+	Rows, Columns int
+}
+
+// DocsTextStyle sets bold, italic, strikethrough and the link of the text in
+// Range. An empty Link removes the link.
+type DocsTextStyle struct {
+	Range                       DocsRange
+	Bold, Italic, Strikethrough bool
+	Link                        string
 }
 
 // DocsBatchResult is writeControl.requiredRevisionId after apply.
@@ -78,113 +128,185 @@ type DocsBatchResult struct {
 	RevisionID string
 }
 
-// GoogleDocs implements DocsAPI with google.golang.org/api/docs/v1.
+func snapshotToRich(path string, snap DocsSnapshot) *IR {
+	blocks := make([]Block, 0, len(snap.Body))
+	locs := make([]blockLocation, 0, len(snap.Body))
+	var structural []structuralSpan
+	for _, sp := range snap.Body {
+		switch sp.Kind {
+		case "sectionBreak", "tableOfContents":
+			structural = append(structural, structuralSpan{
+				tabID: sp.TabID, startIndex: sp.StartIndex, endIndex: sp.EndIndex, kind: sp.Kind,
+			})
+			continue
+		}
+		b := spanToBlock(sp, snap.Lists)
+		blocks = append(blocks, b)
+		locs = append(locs, spanToLocation(sp))
+	}
+	d := newRichDocument(path, mimeGoogleDocument, blocks, snap.Tabs)
+	if rb, ok := asRichBody(d); ok {
+		for i := range locs {
+			if i < len(rb.tree) {
+				locs[i].id = rb.tree[i].ID
+			}
+		}
+	}
+	attachPersistHint(d, persistHint{
+		fileID: snap.DocumentID, revisionID: snap.RevisionID,
+		locations: locs, structural: structural,
+	})
+	return d
+}
+
+func spanToBlock(sp DocsSpan, lists map[string]DocsListProps) Block {
+	attrs := map[string]string{}
+	if sp.TabID != "" {
+		attrs["tab_id"] = sp.TabID
+	}
+	b := Block{Kind: sp.Kind, Text: sp.Text, Style: StyleMeta{Level: sp.Level, Attributes: attrs}}
+	switch sp.Kind {
+	case "heading":
+		b.Kind = BlockKindHeading
+	case "list_item":
+		b.Kind = BlockKindListItem
+		attrs["list_id"] = sp.ListID
+		lt := "ul"
+		// A level is numbered by its own glyph, or by the list's first level.
+		if g := lists[sp.ListID].GlyphTypes; (sp.Nesting < len(g) && glyphOrdered(g[sp.Nesting])) || (len(g) > 0 && glyphOrdered(g[0])) {
+			lt = "ol"
+		}
+		attrs["list_type"] = lt
+	case "table":
+		b.Kind = BlockKindTable
+		grid, _ := parseTSV(sp.Text)
+		rows, cols := len(grid), 0
+		if rows > 0 {
+			cols = len(grid[0])
+		}
+		attrs["rows"] = strconv.Itoa(rows)
+		attrs["cols"] = strconv.Itoa(cols)
+	case "image":
+		b.Kind = BlockKindImage
+		attrs["object_id"] = sp.ObjectID
+		if sp.NamedStyle != "" && (strings.HasPrefix(sp.NamedStyle, "http://") || strings.HasPrefix(sp.NamedStyle, "https://")) {
+			attrs["content_uri"] = sp.NamedStyle
+		}
+		b.Text = sp.Text
+	default:
+		b.Kind = BlockKindParagraph
+	}
+	return b
+}
+
+func spanToLocation(sp DocsSpan) blockLocation {
+	loc := blockLocation{
+		tabID: sp.TabID, startIndex: sp.StartIndex, endIndex: sp.EndIndex,
+		kind: sp.Kind, objectID: sp.ObjectID,
+	}
+	for _, c := range sp.Cells {
+		loc.cells = append(loc.cells, cellLocation{
+			row: c.Row, col: c.Col, startIndex: c.StartIndex, endIndex: c.EndIndex,
+		})
+	}
+	return loc
+}
+
+func glyphOrdered(glyphType string) bool {
+	switch glyphType {
+	case "DECIMAL", "ZERO_DECIMAL", "UPPER_ALPHA", "ALPHA", "UPPER_ROMAN", "ROMAN",
+		"UPPERALPHA", "UPPERROMAN":
+		return true
+	default:
+		u := strings.ToUpper(glyphType)
+		return strings.Contains(u, "DECIMAL") ||
+			strings.Contains(u, "ALPHA") ||
+			strings.Contains(u, "ROMAN")
+	}
+}
+
+// googleDocs implements DocsAPI with the Docs v1 REST API.
 type googleDocs struct {
-	service *docs.Service
+	c rest.Client
 }
 
-// NewGoogleDocs builds a DocsAPI from a user token holder.
-func NewGoogleDocs(ctx context.Context, holder *TokenHolder) (DocsAPI, error) {
-	return newGoogleDocs(ctx, holder, "", nil)
-}
-
-// NewGoogleDocsHTTP points the Docs SDK at base with httpClient (custom endpoint).
-func NewGoogleDocsHTTP(ctx context.Context, holder *TokenHolder, base string, httpClient *http.Client) (DocsAPI, error) {
-	return newGoogleDocs(ctx, holder, base, httpClient)
-}
-
-func newGoogleDocs(ctx context.Context, holder *TokenHolder, base string, httpClient *http.Client) (*googleDocs, error) {
-	opts, err := googleAPIOptions(holder, base, httpClient)
-	if err != nil {
-		return nil, fmt.Errorf("vfs: docs token required")
-	}
-	svc, err := docs.NewService(ctx, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("vfs: docs service: %w", err)
-	}
-	return &googleDocs{service: svc}, nil
+// NewGoogleDocs returns a DocsAPI that authenticates with holder
+// (required). base is the API root ("" for Google's); httpClient nil is
+// http.DefaultClient.
+func NewGoogleDocs(holder *TokenHolder, base string, httpClient *http.Client) DocsAPI {
+	return googleDocs{c: apiClient(holder, base, "https://docs.googleapis.com/", httpClient)}
 }
 
 // Get implements DocsAPI. Always sets includeTabsContent=true.
 func (g googleDocs) Get(ctx context.Context, documentID string) (DocsSnapshot, error) {
-	f, err := g.service.Documents.Get(documentID).
-		IncludeTabsContent(true).
-		Context(ctx).
-		Do()
-	if err != nil {
+	var d docs.Document
+	if err := g.c.Call(ctx, http.MethodGet, "v1/documents/"+url.PathEscape(documentID), url.Values{"includeTabsContent": {"true"}}, nil, &d); err != nil {
 		return DocsSnapshot{}, mapDocsError(err)
 	}
-	return snapshotFromDocument(f), nil
+	return snapshotFromDocument(&d), nil
 }
 
 // BatchUpdate implements DocsAPI. Returns only writeControl.requiredRevisionId.
 func (g googleDocs) BatchUpdate(ctx context.Context, documentID string, req DocsBatch) (DocsBatchResult, error) {
-	out := make([]*docs.Request, 0, len(req.Requests))
+	call := docs.BatchUpdateDocumentRequest{Requests: make([]*docs.Request, 0, len(req.Requests))}
 	for i := range req.Requests {
-		out = append(out, docsRequestToAPI(req.Requests[i], req.TabID))
-	}
-	call := &docs.BatchUpdateDocumentRequest{
-		Requests: out,
+		call.Requests = append(call.Requests, docsRequestToAPI(req.Requests[i], req.TabID))
 	}
 	if req.RequiredRevisionID != "" {
-		call.WriteControl = &docs.WriteControl{RequiredRevisionId: req.RequiredRevisionID}
+		call.WriteControl = &docs.WriteControl{RequiredRevisionID: req.RequiredRevisionID}
 	}
-	resp, err := g.service.Documents.BatchUpdate(documentID, call).Context(ctx).Do()
-	if err != nil {
+	var resp docs.BatchUpdateDocumentResponse
+	if err := g.c.Call(ctx, http.MethodPost, "v1/documents/"+url.PathEscape(documentID)+":batchUpdate", nil, call, &resp); err != nil {
 		return DocsBatchResult{}, mapDocsError(err)
 	}
 	rev := ""
-	if resp != nil && resp.WriteControl != nil {
-		rev = resp.WriteControl.RequiredRevisionId
+	if resp.WriteControl != nil {
+		rev = resp.WriteControl.RequiredRevisionID
 	}
 	return DocsBatchResult{RevisionID: rev}, nil
 }
 
+// docsRequestToAPI is r as a Docs API request, on tabID where r names no
+// tab.
 func docsRequestToAPI(r DocsRequest, tabID string) *docs.Request {
-	applyTab := func(loc *docs.Location, rng *docs.Range) {
-		if tabID == "" {
-			return
+	rng := func(x DocsRange) *docs.Range {
+		return &docs.Range{StartIndex: int64(x.StartIndex), EndIndex: int64(x.EndIndex), TabID: cmp.Or(x.TabID, tabID)}
+	}
+	loc := func(x DocsLocation) *docs.Location {
+		return &docs.Location{Index: int64(x.Index), TabID: cmp.Or(x.TabID, tabID)}
+	}
+	out := &docs.Request{}
+	switch {
+	case r.DeleteContentRange != nil:
+		out.DeleteContentRange = &docs.DeleteContentRangeRequest{Range: rng(*r.DeleteContentRange)}
+	case r.InsertText != nil:
+		out.InsertText = &docs.InsertTextRequest{Location: loc(r.InsertText.Location), Text: r.InsertText.Text}
+	case r.UpdateParagraphStyle != nil:
+		out.UpdateParagraphStyle = &docs.UpdateParagraphStyleRequest{
+			Range:          rng(r.UpdateParagraphStyle.Range),
+			ParagraphStyle: &docs.ParagraphStyle{NamedStyleType: r.UpdateParagraphStyle.NamedStyleType},
+			Fields:         "namedStyleType",
 		}
-		if loc != nil && loc.TabId == "" {
-			loc.TabId = tabID
+	case r.CreateParagraphBullets != nil:
+		out.CreateParagraphBullets = &docs.CreateParagraphBulletsRequest{Range: rng(r.CreateParagraphBullets.Range), BulletPreset: r.CreateParagraphBullets.BulletPreset}
+	case r.InsertTable != nil:
+		out.InsertTable = &docs.InsertTableRequest{Location: loc(r.InsertTable.Location), Rows: int64(r.InsertTable.Rows), Columns: int64(r.InsertTable.Columns)}
+	case r.UpdateTextStyle != nil:
+		st := &docs.TextStyle{
+			Bold:          r.UpdateTextStyle.Bold,
+			Italic:        r.UpdateTextStyle.Italic,
+			Strikethrough: r.UpdateTextStyle.Strikethrough,
 		}
-		if rng != nil && rng.TabId == "" {
-			rng.TabId = tabID
+		if r.UpdateTextStyle.Link != "" {
+			st.Link = &docs.Link{URL: r.UpdateTextStyle.Link}
 		}
+		out.UpdateTextStyle = &docs.UpdateTextStyleRequest{Range: rng(r.UpdateTextStyle.Range), TextStyle: st, Fields: "bold,italic,strikethrough,link"}
 	}
-	if r.DeleteContentRange != nil {
-		applyTab(nil, r.DeleteContentRange.Range)
-	}
-	if r.InsertText != nil {
-		applyTab(r.InsertText.Location, nil)
-	}
-	if r.UpdateParagraphStyle != nil {
-		applyTab(nil, r.UpdateParagraphStyle.Range)
-	}
-	if r.CreateParagraphBullets != nil {
-		applyTab(nil, r.CreateParagraphBullets.Range)
-	}
-	if r.InsertTable != nil {
-		applyTab(r.InsertTable.Location, nil)
-	}
-	if r.UpdateTextStyle != nil {
-		applyTab(nil, r.UpdateTextStyle.Range)
-	}
-	return &docs.Request{
-		DeleteContentRange:     r.DeleteContentRange,
-		InsertText:             r.InsertText,
-		UpdateParagraphStyle:   r.UpdateParagraphStyle,
-		CreateParagraphBullets: r.CreateParagraphBullets,
-		InsertTable:            r.InsertTable,
-		UpdateTextStyle:        r.UpdateTextStyle,
-	}
+	return out
 }
 
 func mapDocsError(err error) error {
-	if err == nil {
-		return nil
-	}
-	var gerr *googleapi.Error
+	var gerr *rest.Error
 	if !errors.As(err, &gerr) {
 		return err
 	}
@@ -208,7 +330,7 @@ func mapDocsError(err error) error {
 		}
 		return ErrInvalidWrite
 	default:
-		return googleHTTPErr("docs", gerr.Code, gerr.Message)
+		return fmt.Errorf("vfs: docs %w", gerr)
 	}
 }
 
@@ -222,9 +344,6 @@ type tabBody struct {
 }
 
 func allDocumentTabs(d *docs.Document) []tabBody {
-	if d == nil {
-		return nil
-	}
 	if len(d.Tabs) == 0 {
 		if d.Body != nil {
 			return []tabBody{{Body: d.Body, Lists: d.Lists, Objs: d.InlineObjects}}
@@ -241,7 +360,7 @@ func allDocumentTabs(d *docs.Document) []tabBody {
 			if t.DocumentTab != nil && t.DocumentTab.Body != nil {
 				id, title, idx := "", "", 0
 				if t.TabProperties != nil {
-					id, title = t.TabProperties.TabId, t.TabProperties.Title
+					id, title = t.TabProperties.TabID, t.TabProperties.Title
 					idx = int(t.TabProperties.Index)
 				}
 				out = append(out, tabBody{
@@ -257,12 +376,9 @@ func allDocumentTabs(d *docs.Document) []tabBody {
 }
 
 func snapshotFromDocument(d *docs.Document) DocsSnapshot {
-	if d == nil {
-		return DocsSnapshot{}
-	}
 	snap := DocsSnapshot{
-		DocumentID: d.DocumentId,
-		RevisionID: d.RevisionId,
+		DocumentID: d.DocumentID,
+		RevisionID: d.RevisionID,
 		Title:      d.Title,
 		Lists:      map[string]DocsListProps{},
 	}
@@ -291,9 +407,6 @@ func mergeListProps(dst map[string]DocsListProps, src map[string]docs.List) {
 				if nl == nil {
 					continue
 				}
-				if i == 0 {
-					p.Ordered = glyphOrdered(nl.GlyphType)
-				}
 				for len(p.GlyphTypes) <= i {
 					p.GlyphTypes = append(p.GlyphTypes, "")
 				}
@@ -301,19 +414,6 @@ func mergeListProps(dst map[string]DocsListProps, src map[string]docs.List) {
 			}
 		}
 		dst[id] = p
-	}
-}
-
-func glyphOrdered(glyphType string) bool {
-	switch glyphType {
-	case "DECIMAL", "ZERO_DECIMAL", "UPPER_ALPHA", "ALPHA", "UPPER_ROMAN", "ROMAN",
-		"UPPERALPHA", "UPPERROMAN":
-		return true
-	default:
-		u := strings.ToUpper(glyphType)
-		return strings.Contains(u, "DECIMAL") ||
-			strings.Contains(u, "ALPHA") ||
-			strings.Contains(u, "ROMAN")
 	}
 }
 
@@ -409,7 +509,7 @@ func paragraphSpans(el *docs.StructuralElement, tb tabBody) []DocsSpan {
 			continue
 		}
 		if e.InlineObjectElement != nil {
-			oid := e.InlineObjectElement.InlineObjectId
+			oid := e.InlineObjectElement.InlineObjectID
 			img := DocsSpan{
 				TabID:      tb.ID,
 				StartIndex: int(e.StartIndex),
@@ -421,7 +521,7 @@ func paragraphSpans(el *docs.StructuralElement, tb tabBody) []DocsSpan {
 				obj.InlineObjectProperties.EmbeddedObject != nil &&
 				obj.InlineObjectProperties.EmbeddedObject.ImageProperties != nil {
 				img.Text = obj.InlineObjectProperties.EmbeddedObject.Title
-				img.NamedStyle = obj.InlineObjectProperties.EmbeddedObject.ImageProperties.ContentUri
+				img.NamedStyle = obj.InlineObjectProperties.EmbeddedObject.ImageProperties.ContentURI
 			}
 			images = append(images, img)
 			continue
@@ -449,7 +549,7 @@ func paragraphSpans(el *docs.StructuralElement, tb tabBody) []DocsSpan {
 	switch {
 	case p.Bullet != nil:
 		span.Kind = "list_item"
-		span.ListID = p.Bullet.ListId
+		span.ListID = p.Bullet.ListID
 		span.Nesting = int(p.Bullet.NestingLevel)
 		span.Level = span.Nesting + 1
 	case strings.HasPrefix(named, "HEADING_"):
@@ -491,8 +591,8 @@ func paragraphText(p *docs.Paragraph) string {
 			if st.Strikethrough {
 				marks[MarkStrike] = "true"
 			}
-			if st.Link != nil && st.Link.Url != "" {
-				marks[MarkHref] = st.Link.Url
+			if st.Link != nil && st.Link.URL != "" {
+				marks[MarkHref] = st.Link.URL
 			}
 		}
 		runs = append(runs, Run{Text: text, Marks: marks})
@@ -501,91 +601,4 @@ func paragraphText(p *docs.Paragraph) string {
 		return ""
 	}
 	return FormatInline(mergeRuns(runs))
-}
-
-func snapshotToRich(path string, snap DocsSnapshot) *IR {
-	blocks := make([]Block, 0, len(snap.Body))
-	locs := make([]blockLocation, 0, len(snap.Body))
-	var structural []structuralSpan
-	for _, sp := range snap.Body {
-		switch sp.Kind {
-		case "sectionBreak", "tableOfContents":
-			structural = append(structural, structuralSpan{
-				tabID: sp.TabID, startIndex: sp.StartIndex, endIndex: sp.EndIndex, kind: sp.Kind,
-			})
-			continue
-		}
-		b := spanToBlock(sp, snap.Lists)
-		blocks = append(blocks, b)
-		locs = append(locs, spanToLocation(sp))
-	}
-	d := newRichDocument(path, mimeGoogleDocument, blocks, snap.Tabs)
-	if rb, ok := asRichBody(d); ok {
-		for i := range locs {
-			if i < len(rb.tree) {
-				locs[i].id = rb.tree[i].ID
-			}
-		}
-	}
-	attachPersistHint(d, persistHint{
-		fileID: snap.DocumentID, revisionID: snap.RevisionID,
-		locations: locs, structural: structural,
-	})
-	return d
-}
-
-func spanToBlock(sp DocsSpan, lists map[string]DocsListProps) Block {
-	attrs := map[string]string{}
-	if sp.TabID != "" {
-		attrs["tab_id"] = sp.TabID
-	}
-	b := Block{Kind: sp.Kind, Text: sp.Text, Style: StyleMeta{Level: sp.Level, Attributes: attrs}}
-	switch sp.Kind {
-	case "heading":
-		b.Kind = BlockKindHeading
-	case "list_item":
-		b.Kind = BlockKindListItem
-		attrs["list_id"] = sp.ListID
-		lt := "ul"
-		if p, ok := lists[sp.ListID]; ok {
-			if sp.Nesting < len(p.GlyphTypes) && glyphOrdered(p.GlyphTypes[sp.Nesting]) {
-				lt = "ol"
-			} else if p.Ordered {
-				lt = "ol"
-			}
-		}
-		attrs["list_type"] = lt
-	case "table":
-		b.Kind = BlockKindTable
-		grid, _ := parseTSV(sp.Text)
-		rows, cols := len(grid), 0
-		if rows > 0 {
-			cols = len(grid[0])
-		}
-		attrs["rows"] = strconv.Itoa(rows)
-		attrs["cols"] = strconv.Itoa(cols)
-	case "image":
-		b.Kind = BlockKindImage
-		attrs["object_id"] = sp.ObjectID
-		if sp.NamedStyle != "" && (strings.HasPrefix(sp.NamedStyle, "http://") || strings.HasPrefix(sp.NamedStyle, "https://")) {
-			attrs["content_uri"] = sp.NamedStyle
-		}
-		b.Text = sp.Text
-	default:
-		b.Kind = BlockKindParagraph
-	}
-	return b
-}
-
-func spanToLocation(sp DocsSpan) blockLocation {
-	loc := blockLocation{
-		tabID: sp.TabID, startIndex: sp.StartIndex, endIndex: sp.EndIndex,
-		kind: sp.Kind, objectID: sp.ObjectID,
-	}
-	for _, c := range sp.Cells {
-		loc.cells = append(loc.cells, cellLocation{
-			row: c.Row, col: c.Col, startIndex: c.StartIndex, endIndex: c.EndIndex,
-		})
-	}
-	return loc
 }

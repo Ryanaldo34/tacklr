@@ -20,9 +20,11 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/pgtest"
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
+	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/session"
 	sessionpg "github.com/ryanaldo34/tacklr/session/postgres"
-	"github.com/ryanaldo34/tacklr/telemetry"
+	"github.com/ryanaldo34/tacklr/telemetry/export"
+	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 var traceOnce sync.Once
@@ -30,11 +32,11 @@ var traceOnce sync.Once
 func trace(t testing.TB) {
 	t.Helper()
 	traceOnce.Do(func() {
-		if _, err := telemetry.Init(context.Background(), telemetry.Config{}); err != nil {
+		if _, err := export.Init(context.Background(), export.Config{}); err != nil {
 			t.Fatal(err)
 		}
 		// As a host does: Temporal tracing needs its replay-safe tracer.
-		if err := telemetry.ReinstallTracer(context.Background(), func(opts ...sdktrace.TracerProviderOption) (oteltrace.TracerProvider, func(context.Context) error) {
+		if err := export.ReinstallTracer(context.Background(), func(opts ...sdktrace.TracerProviderOption) (oteltrace.TracerProvider, func(context.Context) error) {
 			tp := temporalotel.NewReplaySafeTracerProvider(opts...)
 			return tp, tp.Shutdown
 		}); err != nil {
@@ -70,9 +72,14 @@ func stores(t testing.TB) (session.Store, session.EventLog, session.SecretStorag
 }
 
 // Runtime starts a worker against the shared Temporal Docker server, on the
-// Postgres session stores.
-func Runtime(t testing.TB, agent tacklr.AgentOptions) session.Client {
+// Postgres session stores, with ws as the agent's workspace. As a host
+// serving ACP clients does, it connects MCP servers with mcp.Client unless
+// agent names another client.
+func Runtime(t testing.TB, agent tacklr.AgentOptions, ws workspace.Config) session.Client {
 	t.Helper()
+	if agent.MCP == nil {
+		agent.MCP = mcp.Client{}
+	}
 	trace(t)
 	plugin, err := temporalotel.NewPlugin(temporalotel.PluginOptions{})
 	if err != nil {
@@ -86,7 +93,7 @@ func Runtime(t testing.TB, agent tacklr.AgentOptions) session.Client {
 	tq := "tacklr-" + uuid.NewString()
 	store, log, secrets := stores(t)
 	rt := temporal.Open(c, temporal.Config{TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true})
-	w := worker.New(c, worker.Config{Agent: agent, TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true})
+	w := worker.New(c, worker.Config{Agent: agent, Workspace: ws, TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true})
 	stop := make(chan any)
 	done := make(chan struct{})
 	go func() {

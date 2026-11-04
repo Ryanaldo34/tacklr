@@ -3,11 +3,9 @@
 // # Public surface (hosts)
 //
 //   - Tree / At / Union / OpenVFS — host builds one /workspace tree per turn
-//     (agent-visible). Union merges Opens at one alias. Skill catalogs use a
-//     SkillsPath on that tree (empty means /workspace/skills). With no workspace,
-//     SkillsPath is a local directory.
-//   - MountSession — path I/O, ReadText / WriteDocument, ReadLines, FuseMount / Close, HostDir
-//   - FuseMount — kernel tree (needs Linux FUSE)
+//     (agent-visible). Union merges Opens at one alias. Package workspace
+//     gives the agent its tools, skills and overflow on that tree.
+//   - MountSession — path I/O, ReadText / WriteDocument, ReadLines
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
 //   - SessionAuth + TokenHolder + Binding — session-scoped user-owned credentials (never on MountSpec)
 //   - GitRepo + GitToken / GitSSHKey — git clone onto worker disk; the agent runs git itself
@@ -15,15 +13,21 @@
 //   - WorkspacePoint — /workspace (the only top-level mount)
 //   - Provider / Open / S3API / DriveAPI / GraphAPI — custom backends (Blob uses S3API).
 //     Hosts construct default backends from this package (Local, S3, Blob,
-//     Drive, Graph, Git, NewGoogleDrive, NewGraph).
+//     Drive, Graph, Git). NewGoogleDrive, NewGoogleDocs, NewGoogleSheets and
+//     NewMicrosoftGraph call the Google and Graph REST APIs over net/http.
+//     The S3 and Azure Blob SDK adapters are in packages vfs/awss3 and
+//     vfs/azureblob, so this package does not link those SDKs.
 //   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok).
 //     FileInfo.Version changes when the content changes (ETag, md5Checksum, cTag, or local size+mtime+inode).
 //     Read handles stream on every backend; remote ReadAt uses range requests with read-ahead.
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view
-//   - ContentRegistry + Codec + TextCodec + IdentityCodec — optional custom decode
-//     (Register is first-wins; Lookup is exported; overwrite returns ErrAlreadyRegistered)
-//   - DetectMediaType, size-cap constants, sentinel errors (including ErrFuseNotMounted, ErrAuthExpired, ErrAmbiguous, ErrPermission, ErrAlreadyRegistered)
+//   - ContentRegistry + Codec + TextCodec + IdentityCodec — each MountSession's
+//     codecs (MountSession.Codecs): TextCodec, the mounted backends' own types
+//     (Drive's Google Docs and Sheets), and what the host adds with
+//     OpenVFS.WithCodecs (vfs/adapters has Word and Excel). Nothing registers
+//     a codec on import; a second codec for a type returns ErrAlreadyRegistered
+//   - DetectMediaType, size-cap constants, sentinel errors (including ErrAuthExpired, ErrAmbiguous, ErrPermission, ErrAlreadyRegistered)
 //
 // Providers own IR translation and persist immediately on WriteDocument.
 // MountSession routes; it does not encode or hold a dirty document cache.
@@ -33,8 +37,9 @@
 // those tools pass — not a large MountSession surface.
 //
 // This package never imports brain; knowledge is not a mount. Optional
-// artifact indexing lives in package vfsindex (imports both). FUSE / host rg
-// read ReadText (provider IR plaintext). This package does not ship a grep tool.
+// artifact indexing lives in package vfsindex (imports both). Package
+// vfs/fuse shows a MountSession on the host kernel; host tools there read
+// ReadText (provider IR plaintext). This package does not ship a grep tool.
 //
 // Hosts should not need anything else. Host paths and bucket details stay
 // inside providers. MountSession only keeps the mount map and routes paths.
@@ -43,12 +48,9 @@
 //
 // Absolute virtual paths only, via MountSession:
 //
-//	Stat, Open, ReadFile, WriteFile, ReadDir, Remove, MkdirAll, FuseMount, Close
+//	Stat, Open, ReadFile, WriteFile, ReadDir, Remove, MkdirAll
 //	File is Close + Stat. Read / ReadAt / Write are optional (comma-ok).
-//	FuseMount is explicit (host kernel tree). The only mount point is /workspace.
-//	If ReadText succeeds, the kernel sees that plaintext
-//	(read-only unless IdentityCodec). Otherwise Stat + io.ReaderAt. Close
-//	unmounts. HostDir is the last FuseMount directory.
+//	The only mount point is /workspace.
 //
 // Read-only mounts reject mutating ops with ErrReadOnly. Local paths are jailed
 // under the provider root (including symlink evaluation). S3 and Azure Blob use

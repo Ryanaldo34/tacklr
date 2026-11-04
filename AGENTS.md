@@ -4,6 +4,8 @@ Tacklr is an opinionated Go agent harness SDK. It is a framework, not a bag of h
 
 **Tacklr supports Linux only.** Do not add code, build tags, skips, fallbacks, docs, or workarounds for any other operating system. Build, vet, lint, and run tests on Linux (a Linux VM on a Mac); a local non-Linux problem is not a Tacklr problem.
 
+**The harness core also builds for WebAssembly** (`GOOS=js GOARCH=wasm`, `make wasm`), so a host can run it outside a Linux worker, for example in a Cloudflare Durable Object. The core is the packages in `WASM_CORE` in the Makefile. Keep Linux-only code (the `shell` jail, `vfs/fuse`), the agent's workspace (`workspace` and the `vfs` packages it builds on), and heavy SDK adapters (`mcp`, `vfs/awss3`, `vfs/azureblob`, `telemetry/export`) in their own packages that the core does not import. A component's agent tools live with the component (`web`, `shell`, `workspace`) and reach the harness through `AgentOptions.Tools`. This is not support for another operating system: do not add build tags or wasm-only code paths to the core.
+
 ## Goals of the Project
 
 Design decisions should follow these four ideas.
