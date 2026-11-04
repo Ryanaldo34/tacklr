@@ -367,6 +367,17 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 		t.Fatalf("read = %q err=%v", got, err)
 	}
 
+	// n < 0 reads from the offset to the end of the content.
+	tail, err := vfs.NewMicrosoftGraph(holder, srv.URL+"/", srv.Client()).GetContent(ctx, "site-drv", "fs", 5, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rest, _ := io.ReadAll(tail)
+	_ = tail.Close()
+	if string(rest) != "site" {
+		t.Fatalf("content from offset 5 = %q", rest)
+	}
+
 	ents, err := ms.Route(ctx, "/workspace/legal").
 		ReadDir(ctx)
 	if err != nil {
@@ -913,6 +924,17 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 	if _, err := vfs.Graph(sdk, holder, vfs.AccountPersonal)(ctx, "s", graphBinding("txt1", true)); err == nil || !strings.Contains(err.Error(), "not a folder") {
 		t.Fatalf("open on a file: %v", err)
 	}
+
+	// The server ignores Range and sends the whole body; the read fails
+	// instead of returning the wrong bytes.
+	whole, err := p.OpenFile(ctx, "a.txt", os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := whole.(io.ReaderAt).ReadAt(make([]byte, 1), 1); err == nil || !strings.Contains(err.Error(), "answered with HTTP 200") {
+		t.Fatalf("range ignored: %v", err)
+	}
+	_ = whole.Close()
 
 	holder.Set(mount.Credential{Token: "stale"})
 	stale, err := p.OpenFile(ctx, "a.txt", os.O_RDONLY, 0)
