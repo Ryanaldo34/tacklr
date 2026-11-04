@@ -238,15 +238,17 @@ func TestHandleRPC_sessionPrompt_streamsEvents(t *testing.T) {
 		t.Fatal("expected at least one frame")
 	}
 
-	// Should have session/update notifications followed by a result
-	var hasUpdate, hasThought, hasResult bool
+	// Should have session/update notifications followed by a result, and
+	// each text once: streamed, or in the completed message.
+	var hasUpdate, hasResult bool
+	texts := map[any]string{}
 	for _, f := range frames {
 		if f["method"] == "session/update" {
 			hasUpdate = true
 			params, _ := f["params"].(map[string]any)
 			update, _ := params["update"].(map[string]any)
-			if update["sessionUpdate"] == "agent_thought_chunk" {
-				hasThought = true
+			if content, ok := update["content"].(map[string]any); ok {
+				texts[update["sessionUpdate"]] += content["text"].(string)
 			}
 		}
 		if f["result"] != nil {
@@ -256,8 +258,8 @@ func TestHandleRPC_sessionPrompt_streamsEvents(t *testing.T) {
 	if !hasUpdate {
 		t.Error("expected at least one session/update notification")
 	}
-	if !hasThought {
-		t.Error("expected agent_thought_chunk for reasoning")
+	if texts["agent_thought_chunk"] != "thinking" || texts["agent_message_chunk"] != "hello" {
+		t.Errorf("texts %v; want the reasoning and the message once each", texts)
 	}
 	if !hasResult {
 		t.Error("expected a result frame")

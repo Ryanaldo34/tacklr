@@ -27,22 +27,35 @@ func newStreamAssembler() *streamAssembler {
 	return &streamAssembler{buf: make(map[string]string)}
 }
 
-func (s *streamAssembler) AddDelta(chunk LLMResponseChunk) {
-	if chunk.IsComplete || chunk.Content == "" {
-		return
-	}
-	if chunk.Type != session.EventMessage && chunk.Type != session.EventReasoning {
-		return
-	}
-	s.buf[string(chunk.Type)+":"+chunk.MessageId] += chunk.Content
+// isDelta reports whether chunk is a piece of a message or reasoning
+// text: not complete, with content.
+func isDelta(chunk LLMResponseChunk) bool {
+	return !chunk.IsComplete && chunk.Content != "" && isText(chunk.Type)
 }
 
-// CompleteContent returns chunk.Content, or accumulated deltas if Content is empty.
-func (s *streamAssembler) CompleteContent(chunk LLMResponseChunk) string {
-	if chunk.Content != "" {
-		return chunk.Content
+func isText(t session.EventType) bool {
+	return t == session.EventMessage || t == session.EventReasoning
+}
+
+func streamKey(chunk LLMResponseChunk) string {
+	return string(chunk.Type) + ":" + chunk.MessageId
+}
+
+// Streamed is the text chunk's message streamed so far.
+func (s *streamAssembler) Streamed(chunk LLMResponseChunk) string {
+	return s.buf[streamKey(chunk)]
+}
+
+func (s *streamAssembler) AddDelta(chunk LLMResponseChunk) {
+	if isDelta(chunk) {
+		s.buf[streamKey(chunk)] += chunk.Content
 	}
-	return s.buf[string(chunk.Type)+":"+chunk.MessageId]
+}
+
+// CompleteContent is a completed message's text: what streamed, which
+// readers already have a part of, else the completion's own Content.
+func (s *streamAssembler) CompleteContent(chunk LLMResponseChunk) string {
+	return cmp.Or(s.buf[streamKey(chunk)], chunk.Content)
 }
 
 // MessageFromComplete builds a context-window Message for a completed

@@ -351,9 +351,6 @@ func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, events cha
 			IsComplete: true,
 		}
 	}
-	// item IDs that already streamed reasoning_*_text.delta — avoid replaying
-	// the full summary on output_item.done (would duplicate ACP thought chunks).
-	reasoningStreamed := make(map[string]struct{})
 	for scanner.Scan() {
 		if err := ctx.Err(); err != nil {
 			return
@@ -410,9 +407,6 @@ func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, events cha
 			// Explicit reasoning channels (OpenAI/Azure o-series style) → thought.
 			// Keep summary as additive; do not invent reclassification of output_text.
 			if evt.Delta != "" {
-				if msgID != "" {
-					reasoningStreamed[msgID] = struct{}{}
-				}
 				events <- tacklr.LLMResponseChunk{
 					Type:       session.EventReasoning,
 					MessageId:  msgID,
@@ -422,7 +416,7 @@ func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, events cha
 			}
 		case "response.output_item.done":
 			if evt.Item != nil {
-				s.emitOutputItemComplete(evt.Item, events, reasoningStreamed)
+				s.emitOutputItemComplete(evt.Item, events)
 			}
 		case "error":
 			// Azure mid-stream errors often use type=error with HTTP 200.
@@ -653,7 +647,7 @@ func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputIte
 	telemetry.EmitEventSeverity(ctx, telemetry.EventProviderFailed, log.SeverityError, attrs...)
 }
 
-func (s *Model) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk, reasoningStreamed map[string]struct{}) {
+func (s *Model) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
 	var typeHolder struct {
 		Type string `json:"type"`
 	}
@@ -686,15 +680,22 @@ func (s *Model) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr
 			}
 			return
 		}
+		var text strings.Builder
+		for _, c := range msg.Content {
+			if c.Type == "output_text" {
+				text.WriteString(c.Text)
+			}
+		}
 		events <- tacklr.LLMResponseChunk{
 			Type:       session.EventMessage,
 			MessageId:  msg.ID,
+			Content:    text.String(),
 			IsComplete: true,
 		}
 	case "function_call":
 		s.emitFunctionCallChunk(raw, events)
 	case "reasoning":
-		s.emitReasoningChunk(raw, events, reasoningStreamed)
+		s.emitReasoningChunk(raw, events)
 	}
 }
 
@@ -774,7 +775,7 @@ func (s *Model) emitFunctionCallChunk(raw json.RawMessage, events chan<- tacklr.
 	}
 }
 
-func (s *Model) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk, reasoningStreamed map[string]struct{}) {
+func (s *Model) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
 	var reasoning struct {
 		ID               string `json:"id"`
 		EncryptedContent string `json:"encrypted_content"`
@@ -810,18 +811,10 @@ func (s *Model) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLM
 			}
 		}
 	}
-	// If deltas already went to ACP as thought chunks, only signal completion
-	// (empty Content) so Zed does not render the full summary a second time.
-	content := ""
-	if text.Len() > 0 {
-		if _, streamed := reasoningStreamed[reasoning.ID]; !streamed {
-			content = text.String()
-		}
-	}
 	events <- tacklr.LLMResponseChunk{
 		Type:             session.EventReasoning,
 		MessageId:        reasoning.ID,
-		Content:          content,
+		Content:          text.String(),
 		EncryptedContent: reasoning.EncryptedContent,
 		IsComplete:       true,
 	}

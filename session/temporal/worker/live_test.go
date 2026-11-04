@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
@@ -51,6 +53,11 @@ type liveStack struct {
 	Secrets   session.SecretStorage
 	// cfg is the worker's Config, so a restart builds the same worker.
 	cfg Config
+	// live serves the worker's live endpoint when cfg.Live has a key: a
+	// restart serves the new worker at a new URL, as a new machine is.
+	live *httptest.Server
+	// current is the running worker, for a model that looks at it.
+	current atomic.Pointer[Worker]
 }
 
 func newLiveStack(t *testing.T, agent tacklr.AgentOptions, change ...func(*Config)) *liveStack {
@@ -72,29 +79,49 @@ func newLiveStack(t *testing.T, agent tacklr.AgentOptions, change ...func(*Confi
 	store := session.NewMemoryStore()
 	log := session.NewMemoryEventLog()
 	secrets := session.NewMemorySecretStorage()
-	// A lost worker's steps go elsewhere after two seconds, not ten.
-	rt := temporal.Open(c, temporal.Config{TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, WorkerQueueTimeout: 2 * time.Second})
 	cfg := Config{Agent: agent, TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets}
 	for _, f := range change {
 		f(&cfg)
 	}
-	w := New(c, cfg)
-	if err := w.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(w.Stop)
-	return &liveStack{Client: rt, Store: store, Temporal: c, TaskQueue: tq, Worker: w, Secrets: secrets, cfg: cfg}
+	// A lost worker's steps go elsewhere after two seconds, not ten.
+	rt := temporal.Open(c, temporal.Config{TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, WorkerQueueTimeout: 2 * time.Second, Live: temporal.Live{Key: cfg.Live.Key}})
+	s := &liveStack{Client: rt, Store: store, Temporal: c, TaskQueue: tq, Secrets: secrets, cfg: cfg}
+	s.startWorker(t)
+	return s
 }
 
-func (s *liveStack) RestartWorker(t *testing.T) {
+// startWorker starts a worker on the stack's config and, with a live key,
+// serves its live endpoint at a URL of its own.
+func (s *liveStack) startWorker(t *testing.T) {
 	t.Helper()
-	s.Worker.Stop()
-	w := New(s.Temporal, s.cfg)
+	cfg := s.cfg
+	var handler atomic.Pointer[http.Handler]
+	if len(cfg.Live.Key) > 0 {
+		s.live = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { (*handler.Load()).ServeHTTP(w, r) }))
+		t.Cleanup(s.live.Close)
+		cfg.Live.URL = s.live.URL
+	}
+	w := New(s.Temporal, cfg)
+	h := w.LiveHandler()
+	handler.Store(&h)
 	if err := w.Start(); err != nil {
 		t.Fatal(err)
 	}
 	s.Worker = w
+	s.current.Store(w)
 	t.Cleanup(w.Stop)
+}
+
+// RestartWorker stops the worker, as a machine that goes away does, and
+// starts another.
+func (s *liveStack) RestartWorker(t *testing.T) {
+	t.Helper()
+	s.Worker.Stop()
+	if s.live != nil {
+		s.live.CloseClientConnections()
+		s.live.Close()
+	}
+	s.startWorker(t)
 }
 
 // spans records every span the package's sessions end.
@@ -157,6 +184,104 @@ func waitContains(t *testing.T, sub session.Subscription, timeout time.Duration,
 		case <-ctx.Done():
 			t.Fatalf("timeout, got %+v", got)
 		}
+	}
+}
+
+// TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages: a
+// client dials the live endpoint of the worker that runs the model call and
+// gets the reply's deltas there; the session's stream keeps only the whole
+// message. After the worker goes away, the next turn's deltas come from the
+// worker that took the session. A request without the session's token is
+// refused, and one without a session is not found.
+func TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages(t *testing.T) {
+	ctx := t.Context()
+	var stacks atomic.Pointer[liveStack]
+	var sid atomic.Value
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		// The reply streams once the client listens on this worker.
+		id, _ := sid.Load().(session.ID)
+		for stacks.Load().current.Load().live.Readers(id) == 0 && ctx.Err() == nil {
+			time.Sleep(10 * time.Millisecond)
+		}
+		for _, piece := range []string{"Hel", "lo ", "world"} {
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: piece}
+		}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, IsComplete: true}
+	})
+	stack := newLiveStack(t, liveAgent(t, model, tacklr.AgentOptions{}), func(c *Config) { c.Live.Key = []byte("live-key") })
+	stacks.Store(stack)
+	id, err := stack.Client.CreateSession(ctx, session.CreateSession{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid.Store(id)
+	turn := func() []session.Event {
+		head, err := stack.Client.Head(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sub, err := stack.Client.Subscribe(ctx, id, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = sub.Close() }()
+		if err := stack.Client.Prompt(ctx, id, session.Prompt{Text: "hi"}); err != nil {
+			t.Fatal(err)
+		}
+		return waitTurn(t, stack.Client, id, sub, 60*time.Second)
+	}
+	deltas := func(evs []session.Event) string {
+		var b strings.Builder
+		for _, ev := range evs {
+			if ev.Delta {
+				b.WriteString(ev.Content)
+			}
+		}
+		return b.String()
+	}
+	whole := func(evs []session.Event) []string {
+		var out []string
+		for _, ev := range evs {
+			if ev.Type == session.EventMessage && !ev.Delta {
+				out = append(out, ev.Content)
+			}
+		}
+		return out
+	}
+
+	first := turn()
+	stored, err := stack.Client.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged := waitTurn(t, stack.Client, id, stored, 10*time.Second)
+	_ = stored.Close()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, stack.live.URL+protocol.LivePath+string(id), nil)
+	req.Header.Set("Authorization", "Bearer "+protocol.LiveToken([]byte("other-key"), id))
+	refused, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = refused.Body.Close()
+	unknown, err := http.Get(stack.live.URL + protocol.LivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unknown.Body.Close()
+	stack.RestartWorker(t)
+	second := turn()
+
+	if deltas(first) != "Hello world" || !slices.Equal(whole(first), []string{"Hello world"}) {
+		t.Fatalf("first turn %+v; want the deltas live, then the whole message", first)
+	}
+	if deltas(logged) != "" || !slices.Equal(whole(logged), []string{"Hello world"}) {
+		t.Fatalf("the stream from its start %+v; want the whole message and no delta", logged)
+	}
+	if refused.StatusCode != http.StatusUnauthorized || unknown.StatusCode != http.StatusNotFound {
+		t.Fatalf("a request with another key's token got %d, one with no session %d; want 401 and 404", refused.StatusCode, unknown.StatusCode)
+	}
+	if deltas(second) != "Hello world" {
+		t.Fatalf("turn after the worker went away %+v; want its deltas from the worker that took the session", second)
 	}
 }
 

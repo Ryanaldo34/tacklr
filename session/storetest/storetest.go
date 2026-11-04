@@ -61,7 +61,7 @@ func Store(t *testing.T, newStore func(t *testing.T) session.Store) {
 		}
 	})
 
-	t.Run("a call's outcome is replaced by a later put, and delete removes the session", func(t *testing.T) {
+	t.Run("a call's outcome is replaced by a later put, a clear drops outcomes only, and delete removes the session", func(t *testing.T) {
 		ctx, store, id := t.Context(), newStore(t), session.ID("s")
 		if _, err := store.Save(ctx, id, []byte("cp"), ""); err != nil {
 			t.Fatal(err)
@@ -73,18 +73,29 @@ func Store(t *testing.T, newStore func(t *testing.T) session.Store) {
 		}
 		got, err := store.Outcomes(ctx, id, []string{"call", "unknown"})
 		none, noneErr := store.Outcomes(ctx, id, nil)
+		if err := store.ClearOutcomes(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		cleared, _ := store.Outcomes(ctx, id, []string{"call"})
+		_, _, keptErr := store.Load(ctx, id)
+		if err := store.PutOutcome(ctx, id, "next", session.Outcome{Result: "next"}); err != nil {
+			t.Fatal(err)
+		}
 		if err := store.Delete(ctx, id); err != nil {
 			t.Fatal(err)
 		}
 		_, _, deleted := store.Load(ctx, id)
 		rev, _ := store.Revision(ctx, id)
-		gone, _ := store.Outcomes(ctx, id, []string{"call"})
+		gone, _ := store.Outcomes(ctx, id, []string{"next"})
 
 		if err != nil || len(got) != 1 || got["call"].Result != "result second" || string(got["call"].Record) != "second" {
 			t.Fatalf("outcomes %+v %v; want the later outcome only", got, err)
 		}
 		if len(none) != 0 || noneErr != nil {
 			t.Fatalf("outcomes of no keys %v %v; want none", none, noneErr)
+		}
+		if len(cleared) != 0 || keptErr != nil {
+			t.Fatalf("after a clear: outcomes %v, load %v; want no outcomes and the snapshot kept", cleared, keptErr)
 		}
 		if !errors.Is(deleted, session.ErrNotFound) || rev != "" || len(gone) != 0 {
 			t.Fatalf("after delete: load %v, revision %q, outcomes %v; want nothing left", deleted, rev, gone)
@@ -230,6 +241,33 @@ func EventLog(t *testing.T, newLog func(t *testing.T) session.EventLog) {
 			if c != fmt.Sprint("late ", n) {
 				t.Fatalf("late subscriber got %v; want the later events once, in order", later)
 			}
+		}
+	})
+
+	t.Run("a trim drops the events through its offset and keeps the numbering", func(t *testing.T) {
+		ctx, log, id := t.Context(), newLog(t), session.ID("t")
+		for n := range 5 {
+			appendEvent(t, log, id, session.TopicEvents, session.Event{Content: fmt.Sprint(n + 1)})
+		}
+		if err := log.Trim(ctx, id, 3); err != nil {
+			t.Fatal(err)
+		}
+		unknownTrim := log.Trim(ctx, "unknown", 3)
+		appendEvent(t, log, id, session.TopicEvents, session.Event{Content: "6"})
+		head, _ := log.Head(ctx, id)
+		fromStart, err := log.Subscribe(ctx, id, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kept := contents(receive(t, fromStart, 3))
+		fromFive, err := log.Subscribe(ctx, id, 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		after := contents(receive(t, fromFive, 1))
+
+		if head != 6 || unknownTrim != nil || !slices.Equal(kept, []string{"4", "5", "6"}) || !slices.Equal(after, []string{"6"}) {
+			t.Fatalf("head %d, trim of an unknown session %v, from the start %v, after 5 %v; want 6, nil, [4 5 6], [6]", head, unknownTrim, kept, after)
 		}
 	})
 }

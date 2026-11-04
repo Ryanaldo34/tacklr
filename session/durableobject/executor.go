@@ -53,6 +53,8 @@ type executor struct {
 	seen  uint64
 	// armed says the watchdog alarm is set, and when.
 	armed time.Time
+	// newTurn says the next Commit is a new turn's first.
+	newTurn bool
 }
 
 type queued struct {
@@ -205,8 +207,28 @@ func (e *executor) record(kind string, value any, err error) error {
 }
 
 // Begin implements loop.Executor. The object holds no turn-scoped resources
-// besides its harness, which it keeps across turns.
-func (e *executor) Begin(string, int, int) {}
+// besides its harness, which it keeps across turns. A new turn drops the
+// events of the turns before it, and its first Commit their outcome
+// records, once it committed what they left open. A replay already did,
+// and a run again after a stop only deletes again.
+func (e *executor) Begin(kind string, _, _ int) {
+	if kind != session.WakePrompt || e.pos < len(e.journal) {
+		return
+	}
+	e.newTurn = true
+	id := e.init.SessionID
+	head, err := e.o.events.Head(e.ctx, id)
+	if err != nil {
+		panic(stopped{err})
+	}
+	ops, err := e.o.events.trimOps(id, head)
+	if err != nil {
+		panic(stopped{err})
+	}
+	if err := e.o.host.Write(ops...); err != nil {
+		panic(stopped{err})
+	}
+}
 
 // End implements loop.Executor.
 func (e *executor) End() {}
@@ -363,6 +385,11 @@ func (e *executor) emitter(ctx context.Context) func(session.Event) {
 		case session.EventComplete, session.EventInterrupt, session.EventError:
 			return
 		}
+		if ev.Delta {
+			// Live only: the message's complete event carries the text.
+			e.o.deltas.Publish(e.init.SessionID, ev)
+			return
+		}
 		_ = e.o.events.Append(ctx, e.init.SessionID, session.TopicEvents, ev)
 	}
 }
@@ -482,6 +509,12 @@ func (e *executor) Commit(base session.Revision, in tacklr.CommitIn) (session.Re
 		rev, err = e.o.harness.commit(ctx, e, base, in)
 		return err
 	})
+	if err == nil && e.newTurn {
+		e.newTurn = false
+		if cerr := e.o.snapshots.ClearOutcomes(e.ctx, e.init.SessionID); cerr != nil {
+			panic(stopped{cerr})
+		}
+	}
 	return rev, e.record("commit", rev, err)
 }
 

@@ -314,13 +314,23 @@ func (a *Harness) findTool(name, namespace string) *Tool {
 // message cancelled before it had one.
 const CancelledToolResultContent = "cancelled: user interrupted the agent"
 
-// streamChunk maps a model chunk to a harness session.Event.
-// Function-call Category and Title are set on a copy; Name stays programmatic
-// so execution and model history keep using the real tool name.
-// Ignores session.EventComplete (usage only; the wait loop ends the turn).
-func (a *Harness) streamChunk(chunk LLMResponseChunk, out chan<- session.Event) {
+// streamChunk maps a model chunk to a harness session.Event: a piece of a
+// message's text is a delta at its offset in what asm streamed, and a
+// completed message carries its full text. Call it before asm takes the
+// chunk. Function-call Category and Title are set on a copy; Name stays
+// programmatic so execution and model history keep using the real tool
+// name. Ignores session.EventComplete (usage only; the wait loop ends the
+// turn).
+func (a *Harness) streamChunk(chunk LLMResponseChunk, asm *streamAssembler, out chan<- session.Event) {
 	if chunk.Type == "" || chunk.Type == session.EventComplete {
 		return
+	}
+	ev := session.Event{Type: chunk.Type, TurnID: chunk.TurnId, MessageID: chunk.MessageId, Error: chunk.Err(), Content: chunk.Content}
+	switch {
+	case isDelta(chunk):
+		ev.Delta, ev.Offset = true, len(asm.Streamed(chunk))
+	case chunk.IsComplete && isText(chunk.Type):
+		ev.Content = asm.CompleteContent(chunk)
 	}
 	toolCalls := chunk.ToolCalls
 	if chunk.Type == session.EventFunctionCall && len(chunk.ToolCalls) > 0 {
@@ -329,14 +339,8 @@ func (a *Harness) streamChunk(chunk LLMResponseChunk, out chan<- session.Event) 
 			toolCalls[i] = a.withToolPresentation(toolCalls[i])
 		}
 	}
-	out <- session.Event{
-		Type:      chunk.Type,
-		TurnID:    chunk.TurnId,
-		MessageID: chunk.MessageId,
-		Error:     chunk.Err(),
-		ToolCalls: toolCalls,
-		Content:   chunk.Content,
-	}
+	ev.ToolCalls = toolCalls
+	out <- ev
 }
 
 // withToolPresentation fills Category and Title for client-facing tool events.

@@ -34,8 +34,11 @@ func TestStreamAssembler_accumulatesDeltasAndBuildsMessages(t *testing.T) {
 	if got := asm.CompleteContent(LLMResponseChunk{Type: session.EventMessage, MessageId: "m1"}); got != "hello" {
 		t.Fatalf("message content = %q", got)
 	}
-	if got := asm.CompleteContent(LLMResponseChunk{Type: session.EventMessage, MessageId: "m1", Content: "explicit"}); got != "explicit" {
-		t.Fatalf("explicit content = %q", got)
+	if got := asm.CompleteContent(LLMResponseChunk{Type: session.EventMessage, MessageId: "m1", Content: "explicit"}); got != "hello" {
+		t.Fatalf("streamed message's content = %q; want what streamed, which readers have", got)
+	}
+	if got := asm.CompleteContent(LLMResponseChunk{Type: session.EventMessage, MessageId: "m2", Content: "explicit"}); got != "explicit" {
+		t.Fatalf("unstreamed message's content = %q; want the completion's own", got)
 	}
 	if completed.Role != message.RoleReasoning || completed.Content != "think" {
 		t.Fatalf("reasoning message = %+v", completed)

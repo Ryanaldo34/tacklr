@@ -138,11 +138,18 @@ var (
 )
 
 // EventLog is the session progress stream. Topics are TopicEvents and
-// TopicRetry (a repeated attempt).
+// TopicRetry (a repeated attempt). It holds durable events only, never a
+// Delta, and only the session's current turn: the runtime trims the turns
+// before it when a new turn starts.
 type EventLog interface {
 	Append(ctx context.Context, sessionID ID, topic string, ev Event) error
+	// Subscribe sends the events after after, then each new one. When
+	// after is before the oldest event kept, it starts at that event.
 	Subscribe(ctx context.Context, sessionID ID, after Seq) (<-chan Event, error)
 	Head(ctx context.Context, sessionID ID) (Seq, error)
+	// Trim deletes the events up to and including through. The numbers of
+	// the events that stay, and of later ones, do not change.
+	Trim(ctx context.Context, sessionID ID, through Seq) error
 	CloseSession(ctx context.Context, sessionID ID) error
 }
 
@@ -166,11 +173,16 @@ type Store interface {
 	// PutOutcome keeps one tool call's outcome under its session and
 	// call key, so the durable runtime's history holds only that it exists.
 	// A Put of a key replaces it: a step that runs again leaves one record.
-	// Records stay until Delete, so a late Subscribe can read every result.
+	// Records stay until ClearOutcomes or Delete, so a Subscribe in the
+	// turn can read every result.
 	PutOutcome(ctx context.Context, sessionID ID, callKey string, o Outcome) error
 	// Outcomes returns the records kept under callKeys; a key with none is
 	// absent from the map.
 	Outcomes(ctx context.Context, sessionID ID, callKeys []string) (map[string]Outcome, error)
+	// ClearOutcomes removes the session's outcome records. The runtime
+	// calls it when a new turn starts: the turns before it committed their
+	// rounds, so no step reads their records again.
+	ClearOutcomes(ctx context.Context, sessionID ID) error
 	// Delete removes the session's snapshot and its outcome records.
 	Delete(ctx context.Context, sessionID ID) error
 }

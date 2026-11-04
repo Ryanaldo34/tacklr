@@ -141,6 +141,7 @@ func RunTurn(
 		return nil
 	}
 
+	streamed := map[string]int{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -156,7 +157,7 @@ func RunTurn(
 				}
 				return errors.New("server: turn stream ended without a result")
 			}
-			ctrl := proto.OnEvent(ctx, env, threadID, ev, reqID)
+			ctrl := proto.OnEvent(ctx, env, threadID, noteStreamed(streamed, ev), reqID)
 			if err := writeFrames(ctrl.Frames); err != nil {
 				_ = env.Client.Cancel(context.Background(), id)
 				return err
@@ -179,6 +180,23 @@ func RunTurn(
 			}
 		}
 	}
+}
+
+// noteStreamed counts the text of each message the turn streamed as
+// deltas, and sets a complete event's Streamed to what its reader already
+// has. Subscribe sends a message's deltas in order without gaps.
+func noteStreamed(streamed map[string]int, ev session.Event) session.Event {
+	if ev.Type != session.EventMessage && ev.Type != session.EventReasoning {
+		return ev
+	}
+	k := string(ev.Type) + ":" + ev.MessageID
+	if ev.Delta {
+		streamed[k] += len(ev.Content)
+		return ev
+	}
+	ev.Streamed = min(streamed[k], len(ev.Content))
+	delete(streamed, k)
+	return ev
 }
 
 // PromptOrResume is one protocol turn against Runtime.

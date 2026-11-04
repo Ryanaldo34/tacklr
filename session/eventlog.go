@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"slices"
 	"sync"
 )
 
@@ -11,8 +12,10 @@ type logEntry struct {
 }
 
 type sessionLog struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// entries are the events after base: entries[0] is event base+1.
 	entries []logEntry
+	base    int
 	closed  bool
 	// changed is closed and replaced on every Append and on close: it wakes
 	// the tails, which read the log from where they are.
@@ -68,8 +71,9 @@ func (l *MemoryEventLog) Subscribe(ctx context.Context, sessionID ID, after Seq)
 				s.mu.Unlock()
 				return
 			}
-			entries, changed := s.entries[min(next, len(s.entries)):], s.changed
-			next += len(entries)
+			from := min(max(next-s.base, 0), len(s.entries))
+			entries, changed := s.entries[from:], s.changed
+			next = s.base + len(s.entries)
 			s.mu.Unlock()
 			for _, e := range entries {
 				if e.topic == TopicRetry {
@@ -101,7 +105,24 @@ func (l *MemoryEventLog) Head(_ context.Context, sessionID ID) (Seq, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Seq(len(s.entries)), nil
+	return Seq(s.base + len(s.entries)), nil //nolint:gosec // G115: counts are not negative
+}
+
+// Trim implements EventLog.
+func (l *MemoryEventLog) Trim(_ context.Context, sessionID ID, through Seq) error {
+	l.mu.RLock()
+	s := l.sessions[sessionID]
+	l.mu.RUnlock()
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := min(max(int(through)-s.base, 0), len(s.entries)) //nolint:gosec // G115: EventLog seq is well below MaxInt
+	// A new array: tails read the old one outside the lock.
+	s.entries = slices.Clone(s.entries[n:])
+	s.base += n
+	return nil
 }
 
 // CloseSession implements EventLog. It drops the log, ending its tails, so

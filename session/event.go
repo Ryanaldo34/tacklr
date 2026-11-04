@@ -31,6 +31,17 @@ type Event struct {
 	Content   string
 	Data      []byte
 	ToolCalls []message.ToolCall
+	// Delta marks a piece of a message or reasoning text as the model
+	// streams it. A delta goes live to the subscribers that listen now and
+	// is never stored: the message's complete event, which is stored,
+	// carries its full text. Offset is where the delta's Content starts in
+	// that text, in bytes, so a reader sees a gap or a repeat.
+	Delta  bool `json:"delta,omitempty"`
+	Offset int  `json:"offset,omitempty"`
+	// Streamed is how many bytes of a complete event's Content the reader
+	// already got as deltas. The pump (server.RunTurn) sets it, so a
+	// protocol sends only the rest. It is not on the wire.
+	Streamed int `json:"-"`
 	// Error is in-process only. Workflow Streams cannot encode error values;
 	// Fail is the durable stand-in (the error's text) and FailKind names the
 	// sentinel a client acts on, so Kind.Err rebuilds it after the wire.

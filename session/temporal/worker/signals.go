@@ -52,5 +52,6 @@ type carried struct {
 	Suspended bool
 	Jobs      []loop.Job
 	TaskQueue string
+	LiveURL   string
 	Stream    *workflowstreams.WorkflowStreamState
 }

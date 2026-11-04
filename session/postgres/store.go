@@ -108,6 +108,14 @@ func (s *Store) Outcomes(ctx context.Context, sessionID session.ID, callKeys []s
 	return out, nil
 }
 
+// ClearOutcomes implements session.Store.
+func (s *Store) ClearOutcomes(ctx context.Context, sessionID session.ID) error {
+	if _, err := s.db.pool.Exec(ctx, s.db.sql(`DELETE FROM {s}.session_outcomes WHERE session_id = $1`), sessionID); err != nil {
+		return fmt.Errorf("clear outcomes %q: %w", sessionID, err)
+	}
+	return nil
+}
+
 // Delete implements session.Store: the checkpoint and every outcome go in
 // one statement.
 func (s *Store) Delete(ctx context.Context, sessionID session.ID) error {

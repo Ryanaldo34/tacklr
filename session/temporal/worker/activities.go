@@ -71,6 +71,10 @@ type activities struct {
 	Jobs           map[string]JobHandler
 	harnesses      *harnessCache
 	queue          string
+	// live sends the deltas of this worker's model calls to the clients
+	// on its live endpoint, at liveURL.
+	live    *session.Live
+	liveURL string
 }
 
 // stepSession is the session an activity builds its harness for. The
@@ -93,6 +97,9 @@ type commitInput struct {
 	stepSession
 	Base session.Revision
 	In   tacklr.CommitIn
+	// NewTurn says this is a new turn's first Commit: once it saved, the
+	// turns before it are committed, and what they left goes.
+	NewTurn bool `json:",omitempty"`
 }
 
 type runJobInput struct {
@@ -207,14 +214,35 @@ func (a *activities) Commit(ctx context.Context, in commitInput) (session.Revisi
 	if err != nil {
 		return "", activityError(ctx, err)
 	}
+	var head session.Seq
+	if in.NewTurn && a.Fallback != nil {
+		if head, err = a.Fallback.Head(ctx, in.SessionID); err != nil {
+			return "", activityError(ctx, err)
+		}
+	}
 	out, stop := tacklr.PipeEvents(a.emitter(ctx, stream, in.SessionID))
-	defer stop()
 	rev, err := a.harnesses.Commit(ctx, a.Store, w, in.Base, in.In, out)
+	stop()
 	telemetry.RecordCheckpointAttempt(ctx, err)
 	if err != nil {
 		slog.ErrorContext(ctx, "commit failed", "area", telemetry.AreaRuntime, "error", err)
+		return rev, activityError(ctx, err)
+	}
+	if in.NewTurn {
+		err = a.endTurns(ctx, in.SessionID, head)
 	}
 	return rev, activityError(ctx, err)
+}
+
+// endTurns drops what the turns before a new one left: their outcome
+// records and, when the steps write to it, the fallback log's events
+// through head. A retry of the Commit drops them again.
+func (a *activities) endTurns(ctx context.Context, id session.ID, head session.Seq) error {
+	err := a.Store.ClearOutcomes(ctx, id)
+	if a.Fallback != nil {
+		err = errors.Join(err, a.Fallback.Trim(ctx, id, head))
+	}
+	return err
 }
 
 func (a *activities) RunJob(ctx context.Context, in runJobInput) (string, error) {
@@ -263,10 +291,11 @@ func (a *activities) harness(ctx context.Context, in stepSession) (harnessSpec, 
 	}}, nil
 }
 
-// WorkerQueue is this worker's own task queue. The workflow asks a worker
-// on the shared queue, then sends the session's steps to the answer.
-func (a *activities) WorkerQueue(context.Context) (string, error) {
-	return a.queue, nil
+// WorkerQueue is this worker's route: its own task queue and live URL. The
+// workflow asks a worker on the shared queue, then sends the session's
+// steps to the answer, and clients dial its live URL.
+func (a *activities) WorkerQueue(context.Context) (protocol.Route, error) {
+	return protocol.Route{Queue: a.queue, Live: a.liveURL}, nil
 }
 
 // Forget deletes what the harnesses of a closed session and of its jobs
@@ -318,6 +347,14 @@ func (a *activities) emitter(ctx context.Context, stream *workflowstreams.Client
 			return
 		}
 		if ctx.Err() != nil {
+			return
+		}
+		if ev.Delta {
+			// Live only: the message's complete event carries the text. A
+			// worker with no live endpoint sends none.
+			if a.live != nil {
+				a.live.Publish(sessionID, ev)
+			}
 			return
 		}
 		force := first
@@ -380,15 +417,14 @@ func publishContext(ctx context.Context) context.Context {
 	return context.WithoutCancel(ctx)
 }
 
-// publish sends ev on the stream and to the fallback log. With outcome
-// set, the stream carries ev without its content; the fallback log, which
-// is not history, gets it whole.
+// publish sends a durable event on the stream, or to the fallback log when
+// the step has no stream. With outcome set, the stream carries ev without
+// its content; the fallback log, which is not history, gets it whole.
 func (a *activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID session.ID, topic string, ev session.Event, outcome string, force bool) error {
 	if ev.Error != nil && ev.Fail == "" {
 		ev.Fail = ev.Error.Error()
 	}
 	pubCtx := publishContext(ctx)
-	var streamErr error
 	if stream != nil {
 		item := protocol.StreamItem{Event: ev, Outcome: outcome}
 		if outcome != "" {
@@ -396,13 +432,12 @@ func (a *activities) publish(ctx context.Context, stream *workflowstreams.Client
 		}
 		stream.Topic(topic).Publish(item, force)
 		if force {
-			streamErr = stream.Flush(pubCtx)
+			return stream.Flush(pubCtx)
 		}
+		return nil
 	}
 	if a.Fallback != nil {
-		if err := a.Fallback.Append(pubCtx, sessionID, topic, ev); err != nil {
-			return err
-		}
+		return a.Fallback.Append(pubCtx, sessionID, topic, ev)
 	}
-	return streamErr
+	return nil
 }

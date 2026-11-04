@@ -450,6 +450,10 @@ func presentEvent(event session.Event) presentationEvent {
 		ToolCalls: slices.Clone(event.ToolCalls),
 		Error:     event.Error,
 	}
+	if event.Type == session.EventMessage || event.Type == session.EventReasoning {
+		// A complete message shows only the text its deltas did not.
+		presented.Content = event.Content[event.Streamed:]
+	}
 	if event.Error != nil {
 		presented.ErrorText = event.Error.Error()
 	} else if event.Fail != "" {

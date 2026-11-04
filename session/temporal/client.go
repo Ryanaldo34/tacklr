@@ -33,6 +33,7 @@ type Client struct {
 	secrets        session.SecretStorage
 	fallback       session.EventLog
 	disableStreams bool
+	live           Live
 	// policy is the execution policy every session this client starts
 	// carries in its workflow input.
 	policy protocol.Input
@@ -60,6 +61,10 @@ type Config struct {
 	Fallback session.EventLog
 	// DisableStreams uses the fallback EventLog instead of Workflow Streams.
 	DisableStreams bool
+	// Live is how Subscribe reaches the live endpoint of the worker that
+	// holds a session's harness, for its deltas. A zero Live gets whole
+	// messages only.
+	Live Live
 	// WorkerQueueTimeout is how long a step waits to start on the worker
 	// that holds its session's harness. A step that did not start in time
 	// (that worker is gone) goes to another worker, which builds the harness
@@ -111,6 +116,7 @@ func Open(c client.Client, cfg Config) *Client {
 		secrets:        cfg.Secrets,
 		fallback:       fallback,
 		disableStreams: cfg.DisableStreams,
+		live:           cfg.Live,
 		policy: protocol.Input{
 			WorkerQueueTimeout:  cfg.WorkerQueueTimeout,
 			ActivityTimeout:     cfg.ActivityTimeout,
@@ -277,16 +283,19 @@ func (r *Client) Head(ctx context.Context, sessionID session.ID) (session.Seq, e
 	return r.fallback.Head(ctx, sessionID)
 }
 
-// Subscribe implements session.Client.
+// Subscribe implements session.Client: the session's durable events, from
+// its stream or the fallback log, with its deltas from the live endpoint
+// of the worker that holds its harness between them.
 func (r *Client) Subscribe(ctx context.Context, sessionID session.ID, after session.Seq) (session.Subscription, error) {
 	subCtx, cancel := context.WithCancel(ctx)
+	s := &sub{cancel: cancel}
+	ch := make(chan session.Event, 64)
 	if r.disableStreams {
 		src, err := r.fallback.Subscribe(subCtx, sessionID, after)
 		if err != nil {
 			cancel()
 			return nil, err
 		}
-		ch := make(chan session.Event)
 		go func() {
 			defer close(ch)
 			for ev := range src {
@@ -295,17 +304,20 @@ func (r *Client) Subscribe(ctx context.Context, sessionID session.ID, after sess
 				}
 			}
 		}()
-		return &sub{ch: ch, cancel: cancel}, nil
+	} else {
+		c := workflowstreams.NewClient(r.client, string(sessionID), workflowstreams.Options{})
+		dc := converter.GetDefaultDataConverter()
+		go func() {
+			defer close(ch)
+			defer func() { _ = c.Close(subCtx) }()
+			s.err = r.stream(subCtx, c, dc, sessionID, after, ch)
+		}()
 	}
-	c := workflowstreams.NewClient(r.client, string(sessionID), workflowstreams.Options{})
-	ch := make(chan session.Event, 64)
-	s := &sub{ch: ch, cancel: cancel}
-	dc := converter.GetDefaultDataConverter()
-	go func() {
-		defer close(ch)
-		defer func() { _ = c.Close(subCtx) }()
-		s.err = r.stream(subCtx, c, dc, sessionID, after, ch)
-	}()
+	var deltas <-chan session.Event
+	if len(r.live.Key) > 0 {
+		deltas = r.deltas(subCtx, sessionID)
+	}
+	s.ch = session.Merge(subCtx, ch, deltas)
 	return s, nil
 }
 

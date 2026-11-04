@@ -65,6 +65,8 @@ type Object struct {
 	snapshots *snapshots
 	secrets   *secretStore
 	events    *eventLog
+	// deltas sends the session's deltas to the subscribers listening now.
+	deltas *session.Live
 
 	mu sync.Mutex
 	// running says a goroutine runs the session; ready closes once it has
@@ -98,6 +100,7 @@ func NewObject(host Host, cfg Config) *Object {
 		snapshots: &snapshots{s: host},
 		secrets:   &secretStore{s: host, sealer: cfg.Sealer},
 		events:    newEventLog(host),
+		deltas:    session.NewLive(),
 		notify:    make(chan struct{}, 1),
 	}
 }
@@ -316,12 +319,13 @@ func (o *Object) Subscribe(ctx context.Context, after session.Seq) (session.Subs
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
+	deltas := o.deltas.Subscribe(ctx, id)
 	ch, err := o.events.Subscribe(ctx, id, after)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	return &subscription{ch: ch, cancel: cancel}, nil
+	return &subscription{ch: session.Merge(ctx, ch, deltas), cancel: cancel}, nil
 }
 
 // openID is the id of the object's session unless it is unknown or closed.

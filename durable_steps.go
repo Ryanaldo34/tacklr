@@ -97,7 +97,7 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 		if afterTools && chunk.Err() != nil {
 			chunk = tagModelAfterToolsError(chunk)
 		}
-		a.streamChunk(chunk, out)
+		a.streamChunk(chunk, asm, out)
 		if err := chunk.Err(); err != nil {
 			return Reply{}, err
 		}

@@ -4,6 +4,9 @@
 package protocol
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"time"
 
@@ -27,7 +30,29 @@ const (
 	QueryStatus = "tacklr_status"
 	// QueryJobs answers the IDs of the session's jobs.
 	QueryJobs = "tacklr_jobs"
+	// QueryLive answers the live URL of the worker that holds the
+	// session's harness, where its deltas stream; "" until it is routed.
+	QueryLive = "tacklr_live"
 )
+
+// Route is the worker that holds a session's harness: its own task queue,
+// and the URL of its live endpoint ("" when it serves none).
+type Route struct {
+	Queue string
+	Live  string
+}
+
+// LivePath is where a worker's live endpoint serves a session's deltas:
+// LivePath followed by the session id.
+const LivePath = "/tacklr/live/"
+
+// LiveToken is the bearer token for id's deltas: hex HMAC-SHA256 of the id
+// under the key clients and workers share.
+func LiveToken(key []byte, id session.ID) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(id))
+	return hex.EncodeToString(mac.Sum(nil))
+}
 
 // Input is the session workflow's start state, not a checkpoint.
 // Credentials live in SecretStorage. State merges into the checkpoint on

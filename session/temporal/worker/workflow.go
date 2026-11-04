@@ -62,11 +62,19 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 		in:          in,
 		turn:        turn,
 		opts:        activityOptions(in),
+		stream:      stream,
 		taskQueue:   carry.TaskQueue,
+		liveURL:     carry.LiveURL,
 		routed:      carry.TaskQueue != "",
 		wakeCh:      wakeCh,
 		childDoneCh: workflow.GetSignalChannel(ctx, signalChildDone),
 	}
+	// Route now, so a client that subscribes before the first step finds
+	// the worker whose live endpoint streams the session's deltas.
+	ex.route()
+	_ = workflow.SetQueryHandler(ctx, protocol.QueryLive, func() (string, error) {
+		return ex.liveURL, nil
+	})
 	_ = workflow.SetQueryHandler(ctx, protocol.QueryStatus, func() (session.Status, error) {
 		return turn.Status(), nil
 	})
@@ -86,7 +94,7 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 			Mounts: turn.Mounts, Inbox: turn.Inbox, NextMCP: turn.NextMCP, State: turn.State,
 			Round: turn.Round, Rev: turn.Rev, Result: turn.Result, Terminal: turn.Terminal, Yielded: turn.Yielded,
 			Finished: turn.Finished, Suspended: turn.Suspended, Jobs: turn.Jobs,
-			TaskQueue: ex.taskQueue,
+			TaskQueue: ex.taskQueue, LiveURL: ex.liveURL,
 		}
 		return "", stream.NewContinueAsNewError(ctx, protocol.Workflow, func(state *workflowstreams.WorkflowStreamState) []any {
 			c.Stream = state
@@ -152,14 +160,18 @@ const shortTimeout = 30 * time.Second
 type executor struct {
 	ctx workflow.Context
 	// taskQueue is the task queue of the worker that holds the session's
-	// harness; routed says the workflow asked for it since that worker was
-	// last lost.
+	// harness, and liveURL its live endpoint; routed says the workflow
+	// asked for them since that worker was last lost.
 	taskQueue string
+	liveURL   string
 	routed    bool
-	end       func(string, error)
-	in        protocol.Input
-	turn      *loop.Turn
-	opts      workflow.ActivityOptions
+	stream    *workflowstreams.WorkflowStream
+	// newTurn says the next Commit is a new turn's first.
+	newTurn bool
+	end     func(string, error)
+	in      protocol.Input
+	turn    *loop.Turn
+	opts    workflow.ActivityOptions
 	// wakeCh carries host wakes, childDoneCh each job's end; both move into
 	// queue in arrival order.
 	wakeCh      workflow.ReceiveChannel
@@ -173,6 +185,16 @@ func (w *executor) Begin(kind string, promptLen, resumes int) {
 		"prompt_len", promptLen, "resume_count", resumes,
 	)
 	_, w.end = startTurn(w.ctx, "", w.in.SessionID, kind)
+	if kind == session.WakePrompt {
+		// A new turn: the stream drops the turns before it now, and the
+		// turn's first Commit drops their outcomes and fallback events once
+		// it committed what they left open.
+		w.newTurn = true
+		if st, err := w.stream.GetState(time.Hour); err == nil {
+			// The stream has no offset getter; its state has the offset.
+			_ = w.stream.Truncate(st.BaseOffset + int64(len(st.Log)))
+		}
+	}
 }
 
 func (w *executor) End() {
@@ -196,8 +218,11 @@ func (w *executor) Commit(base session.Revision, in tacklr.CommitIn) (session.Re
 	var act *activities
 	var rev session.Revision
 	err := w.harnessStep(func(opts func(workflow.Context) workflow.Context) error {
-		return workflow.ExecuteActivity(opts(w.ctx), act.Commit, commitInput{stepSession: w.stepSession(), Base: base, In: in}).Get(w.ctx, &rev)
+		return workflow.ExecuteActivity(opts(w.ctx), act.Commit, commitInput{stepSession: w.stepSession(), Base: base, In: in, NewTurn: w.newTurn}).Get(w.ctx, &rev)
 	})
+	if err == nil {
+		w.newTurn = false
+	}
 	return rev, w.stepErr(err)
 }
 
@@ -223,15 +248,7 @@ func (w *executor) sharedCtx(ctx workflow.Context) workflow.Context {
 // queue for its own queue; until a worker answers, steps use the shared
 // queue.
 func (w *executor) harnessCtx(ctx workflow.Context) workflow.Context {
-	if !w.routed {
-		// A local activity: it runs on the worker running this workflow
-		// task, which polls the shared queue, and records only a marker.
-		var queue string
-		lctx := workflow.WithLocalActivityOptions(ctx, workflow.LocalActivityOptions{StartToCloseTimeout: shortTimeout, RetryPolicy: w.opts.RetryPolicy})
-		if err := workflow.ExecuteLocalActivity(lctx, "WorkerQueue").Get(w.ctx, &queue); err == nil {
-			w.taskQueue, w.routed = queue, true
-		}
-	}
+	w.route()
 	opts := w.opts
 	if w.taskQueue != "" {
 		opts.TaskQueue = w.taskQueue
@@ -240,13 +257,27 @@ func (w *executor) harnessCtx(ctx workflow.Context) workflow.Context {
 	return workflow.WithActivityOptions(ctx, opts)
 }
 
+// route asks a worker on the shared queue for its route, unless the
+// session has one. A local activity: it runs on the worker running this
+// workflow task, which polls the shared queue, and records only a marker.
+func (w *executor) route() {
+	if w.routed {
+		return
+	}
+	var r protocol.Route
+	lctx := workflow.WithLocalActivityOptions(w.ctx, workflow.LocalActivityOptions{StartToCloseTimeout: shortTimeout, RetryPolicy: w.opts.RetryPolicy})
+	if err := workflow.ExecuteLocalActivity(lctx, "WorkerQueue").Get(w.ctx, &r); err == nil {
+		w.taskQueue, w.liveURL, w.routed = r.Queue, r.Live, true
+	}
+}
+
 // lostWorker reports whether err is a step that never started because the
 // worker holding the session's harness is gone. The step runs again on the
 // worker the shared queue picks, which builds the harness.
 func (w *executor) lostWorker(err error) bool {
 	var timeout *temporal.TimeoutError
 	if errors.As(err, &timeout) && timeout.TimeoutType() == enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START {
-		w.routed = false
+		w.routed, w.liveURL = false, ""
 		return true
 	}
 	return false

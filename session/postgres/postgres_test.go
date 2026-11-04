@@ -144,6 +144,7 @@ func TestStores_failEveryCallOnAClosedPool(t *testing.T) {
 		"delete": store.Delete(ctx, "s"), "put secrets": secrets.Put(ctx, "s", bag), "get secrets": getErr,
 		"delete secrets": secrets.Delete(ctx, "s"), "append": log.Append(ctx, "s", session.TopicEvents, session.Event{}),
 		"head": headErr, "close session": log.CloseSession(ctx, "s"),
+		"clear outcomes": store.ClearOutcomes(ctx, "s"), "trim": log.Trim(ctx, "s", 1),
 	}
 	sub, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()

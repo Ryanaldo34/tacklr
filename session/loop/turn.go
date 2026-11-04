@@ -47,7 +47,10 @@ type ToolResult struct {
 // Steps take only what changes per step. The session's identity and MCP
 // servers are the runtime's: it holds them for the session
 // and builds each step's harness from them. Begin and End bracket a turn so
-// the implementation can pin turn-scoped resources.
+// the implementation can pin turn-scoped resources. A Begin of kind
+// session.WakePrompt starts a new turn: the runtime then trims the event
+// log and the outcome records of the turns before it, which committed. A
+// resume or a continue goes on with the turn it parked or suspended.
 //
 // Mailbox. Next is the one read of the mailbox: prompts, resumes,
 // cancels, closes, and job ends, in the order they arrived. With block it

@@ -98,6 +98,14 @@ func (s *MemoryStore) Outcomes(_ context.Context, sessionID ID, callKeys []strin
 	return out, nil
 }
 
+// ClearOutcomes implements Store.
+func (s *MemoryStore) ClearOutcomes(_ context.Context, sessionID ID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.outcomes, sessionID)
+	return nil
+}
+
 // Delete implements Store.
 func (s *MemoryStore) Delete(_ context.Context, sessionID ID) error {
 	s.mu.Lock()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,7 +35,15 @@ func newFixture(t *testing.T, answer reply, tools []*tacklr.Tool, configure ...f
 	var infers atomic.Int32
 	model := testkit.HTTPModel(t, func(_ context.Context, msgs []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		infers.Add(1)
-		ch <- answer(msgs)
+		c := answer(msgs)
+		if c.Type == session.EventMessage && len(c.Content) > 1 {
+			// The text streams as two deltas, then the message completes.
+			n := len(c.Content) / 2
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: c.Content[:n]}
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: c.Content[n:]}
+			c.Content = ""
+		}
+		ch <- c
 	})
 	sealer, err := session.NewAESGCM(make([]byte, 32))
 	if err != nil {
@@ -113,9 +122,11 @@ func toolResult(evs []session.Event) string {
 }
 
 // TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents: the model
-// calls a tool, the tool runs, and the model answers from its result; a
-// subscriber sees the call, its result, the answer and the end of the turn,
-// and the session reports the turn complete with its result.
+// calls a tool, the tool runs, and the model streams its answer from the
+// result; a subscriber sees the call, its result, the answer's deltas live,
+// the whole answer and the end of the turn, and the session reports the
+// turn complete with its result. The log keeps the whole answer and no
+// delta, and a second turn leaves only its own events and outcome.
 func TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents(t *testing.T) {
 	lookup := tacklr.NewTool(tacklr.ToolConfig{Name: "lookup", Timeout: time.Minute, Handler: func(context.Context) (string, error) { return "42", nil }})
 	f := newFixture(t, callThenAnswer("lookup", `{}`), []*tacklr.Tool{lookup})
@@ -124,20 +135,65 @@ func TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub := f.subscribe(t, id)
-
-	if err := f.c.Prompt(ctx, id, session.Prompt{Text: "what is it?"}); err != nil {
-		t.Fatal(err)
+	turn := func() []session.Event {
+		sub := f.subscribe(t, id)
+		if err := f.c.Prompt(ctx, id, session.Prompt{Text: "what is it?"}); err != nil {
+			t.Fatal(err)
+		}
+		return untilEnd(t, sub)
 	}
-	evs := untilEnd(t, sub)
+	stored := func() []session.Event {
+		sub, err := f.c.Subscribe(ctx, id, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = sub.Close() }()
+		return untilEnd(t, sub)
+	}
+
+	evs := turn()
 	st, stErr := f.c.Status(ctx, id)
+	logged := stored()
+	turn()
+	events, outcomes := f.p.Stored(id, id, "event"), f.p.Stored(id, id, "outcome")
 
 	if last(evs).Type != session.EventComplete || toolResult(evs) != "42" {
 		t.Fatalf("events %+v; want the tool's result, then the end of the turn", evs)
 	}
+	if deltas(evs) != "done: 42" || !slices.Equal(answers(evs), []string{"done: 42"}) {
+		t.Fatalf("events %+v; want the answer's deltas live, then the whole answer", evs)
+	}
 	if stErr != nil || st.State != session.Complete || st.Result != "done: 42" || st.Waiting || st.ID != id {
 		t.Fatalf("status %+v %v; want the turn complete with its answer", st, stErr)
 	}
+	if deltas(logged) != "" || !slices.Equal(answers(logged), []string{"done: 42"}) || toolResult(logged) != "42" {
+		t.Fatalf("the log %+v; want the whole answer and no delta", logged)
+	}
+	if events != len(logged) || outcomes != 1 {
+		t.Fatalf("after a second turn the log holds %d events and %d outcomes; want that turn's %d and its one outcome", events, outcomes, len(logged))
+	}
+}
+
+// deltas is the text evs streamed as deltas.
+func deltas(evs []session.Event) string {
+	var b strings.Builder
+	for _, ev := range evs {
+		if ev.Delta {
+			b.WriteString(ev.Content)
+		}
+	}
+	return b.String()
+}
+
+// answers are the whole messages in evs.
+func answers(evs []session.Event) []string {
+	var out []string
+	for _, ev := range evs {
+		if ev.Type == session.EventMessage && !ev.Delta {
+			out = append(out, ev.Content)
+		}
+	}
+	return out
 }
 
 // TestSession_anObjectStoppedMidToolReplaysAndFinishesTheTurn: the object

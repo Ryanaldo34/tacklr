@@ -119,6 +119,15 @@ func (st *snapshots) Outcomes(_ context.Context, id session.ID, callKeys []strin
 	return out, nil
 }
 
+// ClearOutcomes implements session.Store.
+func (st *snapshots) ClearOutcomes(_ context.Context, id session.ID) error {
+	ops, err := deleteAll(st.s, prefix(kindOutcome, id))
+	if err != nil {
+		return err
+	}
+	return st.s.Write(ops...)
+}
+
 // Delete implements session.Store.
 func (st *snapshots) Delete(_ context.Context, id session.ID) error {
 	st.mu.Lock()
@@ -310,6 +319,37 @@ func (l *eventLog) Head(_ context.Context, id session.ID) (session.Seq, error) {
 		return 0, err
 	}
 	return session.Seq(sl.head), nil
+}
+
+// Trim implements session.EventLog.
+func (l *eventLog) Trim(_ context.Context, id session.ID, through session.Seq) error {
+	ops, err := l.trimOps(id, through)
+	if err != nil {
+		return err
+	}
+	return l.s.Write(ops...)
+}
+
+// trimOps are the deletes of id's events up to through.
+func (l *eventLog) trimOps(id session.ID, through session.Seq) ([]Op, error) {
+	var ops []Op
+	after := ""
+	for {
+		entries, err := l.s.Scan(prefix(kindEvent, id), after, tailBatch)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			if seqOf(e.Key) > uint64(through) {
+				return ops, nil
+			}
+			ops = append(ops, del(e.Key))
+		}
+		if len(entries) < tailBatch {
+			return ops, nil
+		}
+		after = entries[len(entries)-1].Key
+	}
 }
 
 // CloseSession implements session.EventLog: it deletes the session's log

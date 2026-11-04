@@ -195,6 +195,8 @@ func (s *runner) drive(d Executor, user *message.Message, resume map[string][]by
 }
 
 func (s *runner) runWorker(d Executor, task string) {
+	d.Begin(session.WakePrompt, len(task), 0)
+	defer d.End()
 	out, err := d.Job(s.turn.Worker, task)
 	if err != nil {
 		s.turn.Err = err
