@@ -4,14 +4,16 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
-	"google.golang.org/api/sheets/v4"
+	"github.com/ryanaldo34/tacklr/internal/google/sheets"
+	"github.com/ryanaldo34/tacklr/internal/rest"
 )
 
 // SheetsAPI is the Sheets subset used by the provider. MemorySheets is the
-// in-memory implementation; GoogleSheets talks to the service.
+// in-memory implementation; NewGoogleSheets talks to the service.
 type SheetsAPI interface {
 	Get(ctx context.Context, spreadsheetID string) (SheetsSnapshot, error)
 	BatchUpdateValues(ctx context.Context, spreadsheetID string, req SheetsValuesBatch) error
@@ -50,48 +52,94 @@ type SheetsValueRange struct {
 	Values [][]string
 }
 
+func snapshotToTabular(path string, snap SheetsSnapshot) (*IR, error) {
+	td, err := NewTabularDocument(path, mimeGoogleSpreadsheet, snap.Sheets, snap.Named)
+	if err != nil {
+		return nil, err
+	}
+	attachPersistHint(td, persistHint{fileID: snap.SpreadsheetID})
+	return td, nil
+}
+
+func tabularOverlayBatch(td *gridBody) (SheetsValuesBatch, error) {
+	var data []SheetsValueRange
+	for _, sh := range td.sheets {
+		rows := sh.Rows
+		cols := sh.Cols
+		if rows == 0 || cols == 0 {
+			continue
+		}
+		grid := make([][]string, rows)
+		for r := 0; r < rows; r++ {
+			grid[r] = make([]string, cols)
+			if r < len(sh.Cells) {
+				for c := 0; c < cols && c < len(sh.Cells[r]); c++ {
+					if sh.mergeSlave(r, c) {
+						continue
+					}
+					grid[r][c] = sh.Cells[r][c].Input
+				}
+			}
+		}
+		title := sh.Title
+		if title == "" {
+			title = "Sheet1"
+		}
+		data = append(data, SheetsValueRange{
+			Range:  sheetA1(title, 1, 1, rows, cols),
+			Values: grid,
+		})
+	}
+	return SheetsValuesBatch{Data: data}, nil
+}
+
+func tabularFormatBatch(td *gridBody) SheetsBatch {
+	var reqs []SheetsRepeatCell
+	for _, sh := range td.sheets {
+		id, err := strconv.ParseInt(sh.ID, 10, 64)
+		if err != nil {
+			id = 0
+		}
+		rows, cols := sh.Rows, sh.Cols
+		for _, rec := range formatRects(sh, rows, cols) {
+			reqs = append(reqs, SheetsRepeatCell{
+				SheetID:  id,
+				StartRow: rec.r1, StartCol: rec.c1, EndRow: rec.r2, EndCol: rec.c2,
+				Format: rec.format,
+			})
+		}
+	}
+	return SheetsBatch{Requests: reqs}
+}
+
+// googleSheets implements SheetsAPI with the Sheets v4 REST API.
 type googleSheets struct {
-	service *sheets.Service
+	c rest.Client
 }
 
-// NewGoogleSheets builds a SheetsAPI from a user token holder.
-func NewGoogleSheets(ctx context.Context, holder *TokenHolder) (SheetsAPI, error) {
-	return newGoogleSheets(ctx, holder, "", nil)
-}
-
-// NewGoogleSheetsHTTP points the Sheets SDK at base with httpClient (custom endpoint).
-func NewGoogleSheetsHTTP(ctx context.Context, holder *TokenHolder, base string, httpClient *http.Client) (SheetsAPI, error) {
-	return newGoogleSheets(ctx, holder, base, httpClient)
-}
-
-func newGoogleSheets(ctx context.Context, holder *TokenHolder, base string, httpClient *http.Client) (*googleSheets, error) {
-	opts, err := googleAPIOptions(holder, base, httpClient)
-	if err != nil {
-		return nil, fmt.Errorf("vfs: sheets token required")
-	}
-	svc, err := sheets.NewService(ctx, opts...)
-	if err != nil {
-		return nil, fmt.Errorf("vfs: sheets service: %w", err)
-	}
-	return &googleSheets{service: svc}, nil
+// NewGoogleSheets returns a SheetsAPI that authenticates with holder
+// (required). base is the API root ("" for Google's); httpClient nil is
+// http.DefaultClient.
+func NewGoogleSheets(holder *TokenHolder, base string, httpClient *http.Client) SheetsAPI {
+	return googleSheets{c: apiClient(holder, base, "https://sheets.googleapis.com/", httpClient)}
 }
 
 func (g googleSheets) Get(ctx context.Context, spreadsheetID string) (SheetsSnapshot, error) {
-	meta, err := g.service.Spreadsheets.Get(spreadsheetID).
-		IncludeGridData(true).
-		Fields("spreadsheetId,sheets.properties,sheets.merges,sheets.data,namedRanges").
-		Context(ctx).
-		Do()
-	if err != nil {
+	var meta sheets.Spreadsheet
+	q := url.Values{
+		"includeGridData": {"true"},
+		"fields":          {"spreadsheetId,sheets.properties,sheets.merges,sheets.data,namedRanges"},
+	}
+	if err := g.c.Call(ctx, http.MethodGet, "v4/spreadsheets/"+url.PathEscape(spreadsheetID), q, nil, &meta); err != nil {
 		return SheetsSnapshot{}, mapDocsError(err)
 	}
-	snap := SheetsSnapshot{SpreadsheetID: meta.SpreadsheetId}
+	snap := SheetsSnapshot{SpreadsheetID: meta.SpreadsheetID}
 	for i, sh := range meta.Sheets {
 		if sh == nil || sh.Properties == nil {
 			continue
 		}
 		title := sh.Properties.Title
-		id := strconv.FormatInt(sh.Properties.SheetId, 10)
+		id := strconv.FormatInt(sh.Properties.SheetID, 10)
 		item := Sheet{
 			ID:    id,
 			Title: title,
@@ -127,7 +175,7 @@ func (g googleSheets) Get(ctx context.Context, spreadsheetID string) (SheetsSnap
 		}
 		n := NamedRange{Name: nr.Name}
 		if nr.Range != nil {
-			n.SheetID = strconv.FormatInt(nr.Range.SheetId, 10)
+			n.SheetID = strconv.FormatInt(nr.Range.SheetID, 10)
 			n.A1 = gridRangeA1(nr.Range)
 		}
 		snap.Named = append(snap.Named, n)
@@ -138,19 +186,12 @@ func (g googleSheets) Get(ctx context.Context, spreadsheetID string) (SheetsSnap
 func (g googleSheets) BatchUpdateValues(ctx context.Context, spreadsheetID string, req SheetsValuesBatch) error {
 	data := make([]*sheets.ValueRange, 0, len(req.Data))
 	for _, r := range req.Data {
-		vals := make([][]any, len(r.Values))
-		for i, row := range r.Values {
-			vals[i] = make([]any, len(row))
-			for j, c := range row {
-				vals[i][j] = c
-			}
-		}
-		data = append(data, &sheets.ValueRange{Range: r.Range, Values: vals})
+		data = append(data, &sheets.ValueRange{Range: r.Range, Values: r.Values})
 	}
-	_, err := g.service.Spreadsheets.Values.BatchUpdate(spreadsheetID, &sheets.BatchUpdateValuesRequest{
+	err := g.c.Call(ctx, http.MethodPost, "v4/spreadsheets/"+url.PathEscape(spreadsheetID)+"/values:batchUpdate", nil, sheets.BatchUpdateValuesRequest{
 		ValueInputOption: "USER_ENTERED",
 		Data:             data,
-	}).Context(ctx).Do()
+	}, nil)
 	return mapDocsError(err)
 }
 
@@ -166,7 +207,7 @@ func (g googleSheets) BatchUpdate(ctx context.Context, spreadsheetID string, req
 		}
 		calls = append(calls, &sheets.Request{RepeatCell: &sheets.RepeatCellRequest{
 			Range: &sheets.GridRange{
-				SheetId:          r.SheetID,
+				SheetID:          r.SheetID,
 				StartRowIndex:    int64(r.StartRow),
 				StartColumnIndex: int64(r.StartCol),
 				EndRowIndex:      int64(r.EndRow),
@@ -179,9 +220,9 @@ func (g googleSheets) BatchUpdate(ctx context.Context, spreadsheetID string, req
 	if len(calls) == 0 {
 		return nil
 	}
-	_, err := g.service.Spreadsheets.BatchUpdate(spreadsheetID, &sheets.BatchUpdateSpreadsheetRequest{
+	err := g.c.Call(ctx, http.MethodPost, "v4/spreadsheets/"+url.PathEscape(spreadsheetID)+":batchUpdate", nil, sheets.BatchUpdateSpreadsheetRequest{
 		Requests: calls,
-	}).Context(ctx).Do()
+	}, nil)
 	return mapDocsError(err)
 }
 
@@ -422,8 +463,8 @@ func irBorderStyle(s string) string {
 }
 
 func colorHex(c *sheets.Color, style *sheets.ColorStyle) string {
-	if style != nil && style.RgbColor != nil {
-		c = style.RgbColor
+	if style != nil && style.RGBColor != nil {
+		c = style.RGBColor
 	}
 	if c == nil {
 		return ""
@@ -458,7 +499,7 @@ func rgbStyle(c *sheets.Color) *sheets.ColorStyle {
 	if c == nil {
 		return nil
 	}
-	return &sheets.ColorStyle{RgbColor: c}
+	return &sheets.ColorStyle{RGBColor: c}
 }
 
 func repeatCellPayload(f CellFormat) (*sheets.CellData, string) {
@@ -668,64 +709,4 @@ func gridRangeA1(r *sheets.GridRange) string {
 		c2 = c1
 	}
 	return FormatA1(r1, c1) + ":" + FormatA1(r2, c2)
-}
-
-func snapshotToTabular(path string, snap SheetsSnapshot) (*IR, error) {
-	td, err := NewTabularDocument(path, mimeGoogleSpreadsheet, snap.Sheets, snap.Named)
-	if err != nil {
-		return nil, err
-	}
-	attachPersistHint(td, persistHint{fileID: snap.SpreadsheetID})
-	return td, nil
-}
-
-func tabularOverlayBatch(td *gridBody) (SheetsValuesBatch, error) {
-	var data []SheetsValueRange
-	for _, sh := range td.sheets {
-		rows := sh.Rows
-		cols := sh.Cols
-		if rows == 0 || cols == 0 {
-			continue
-		}
-		grid := make([][]string, rows)
-		for r := 0; r < rows; r++ {
-			grid[r] = make([]string, cols)
-			if r < len(sh.Cells) {
-				for c := 0; c < cols && c < len(sh.Cells[r]); c++ {
-					if sh.mergeSlave(r, c) {
-						continue
-					}
-					grid[r][c] = sh.Cells[r][c].Input
-				}
-			}
-		}
-		title := sh.Title
-		if title == "" {
-			title = "Sheet1"
-		}
-		data = append(data, SheetsValueRange{
-			Range:  sheetA1(title, 1, 1, rows, cols),
-			Values: grid,
-		})
-	}
-	return SheetsValuesBatch{Data: data}, nil
-}
-
-func tabularFormatBatch(td *gridBody) SheetsBatch {
-	var reqs []SheetsRepeatCell
-	for _, sh := range td.sheets {
-		id, err := strconv.ParseInt(sh.ID, 10, 64)
-		if err != nil {
-			id = 0
-		}
-		rows, cols := sh.Rows, sh.Cols
-		for _, rec := range formatRects(sh, rows, cols) {
-			reqs = append(reqs, SheetsRepeatCell{
-				SheetID:  id,
-				StartRow: rec.r1, StartCol: rec.c1, EndRow: rec.r2, EndCol: rec.c2,
-				Format: rec.format,
-			})
-		}
-	}
-	return SheetsBatch{Requests: reqs}
 }

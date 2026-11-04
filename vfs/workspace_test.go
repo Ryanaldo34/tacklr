@@ -26,7 +26,6 @@ func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 
 	if ents, err := ms.Route(ctx, mount.WorkspacePoint).
 		ReadDir(ctx); err != nil || len(ents) != 2 || ents[0].Name != "contracts" || ents[1].Name != "notes" || !ents[0].IsDir {
@@ -75,7 +74,6 @@ func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 
 	if err := ms.Route(ctx, "/workspace/legal/b.txt").
 		WriteFile(ctx, []byte("two")); err != nil {
@@ -123,17 +121,17 @@ func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
 	}
 
 	if _, err := ms.Route(ctx, "/workspace").
-		OpenDocument(ctx, nil); err == nil {
+		OpenDocument(ctx); err == nil {
 		t.Fatal("opendoc workspace root")
 	}
 
 	if _, err := ms.Route(ctx, "/workspace/missing/x").
-		OpenDocument(ctx, nil); !errors.Is(err, vfs.ErrNotExist) {
+		OpenDocument(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("opendoc missing = %v", err)
 	}
 
 	if _, err := ms.Route(ctx, "/workspace/legal/a.txt").
-		OpenDocument(ctx, nil); err != nil && !errors.Is(err, vfs.ErrNotSupported) {
+		OpenDocument(ctx); err != nil && !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("opendoc local = %v", err)
 	}
 }

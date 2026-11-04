@@ -1,7 +1,6 @@
 package vfs
 
 import (
-	"context"
 	"strings"
 )
 
@@ -222,22 +221,6 @@ func asRichBody(doc Document) (*richBody, bool) {
 	}
 	r, ok := d.body.(*richBody)
 	return r, ok
-}
-
-func EncodeDocument(ctx context.Context, doc Document) ([]byte, error) {
-	if doc == nil {
-		return nil, ErrNotTextual
-	}
-	if c, ok := defaultContentRegistry.codec(normalizeMediaType(doc.MediaType())); ok {
-		if enc, ok := c.(Encoder); ok {
-			return enc.Encode(ctx, doc)
-		}
-	}
-	text, ok := doc.(Textual)
-	if !ok {
-		return nil, ErrNotTextual
-	}
-	return EncodeTextual(text)
 }
 
 func (d *IR) Path() string      { return d.path }

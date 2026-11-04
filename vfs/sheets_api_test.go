@@ -129,10 +129,7 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	holder := NewTokenHolder(mount.Credential{Token: "tok"})
-	api, err := NewGoogleSheetsHTTP(ctx, holder, ts.URL+"/", ts.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
+	api := NewGoogleSheets(holder, ts.URL+"/", ts.Client())
 
 	if _, err := api.Get(ctx, "missing"); err == nil {
 		t.Fatal("Get missing")
@@ -260,8 +257,5 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	if !strings.Contains(valuesBody, "USER_ENTERED") || !strings.Contains(valuesBody, "99") ||
 		!strings.Contains(valuesBody, "Budget!B2") {
 		t.Fatalf("BatchUpdateValues body = %s", valuesBody)
-	}
-	if _, err := NewGoogleSheetsHTTP(ctx, nil, "", nil); err == nil {
-		t.Fatal("nil HTTP holder")
 	}
 }

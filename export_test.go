@@ -11,6 +11,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/adapters"
 )
 
 // scriptedModel is the package-tacklr test Model. Root tests cannot
@@ -133,13 +134,14 @@ func mustNewHarness(t testing.TB, opts AgentOptions) *Harness {
 	return h
 }
 
+// mustMountTree mounts members as a host that reads Word and Excel files
+// does: with the vfs/adapters codecs.
 func mustMountTree(t testing.TB, sessionID string, req vfs.Request, members ...vfs.Member) *vfs.MountSession {
 	t.Helper()
-	ms, err := vfs.Tree(members...)(t.Context(), sessionID, req)
+	ms, err := vfs.Tree(members...).WithCodecs(adapters.Codecs()...)(t.Context(), sessionID, req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 	return ms
 }
 
@@ -160,4 +162,13 @@ func drainEventCh() chan session.Event {
 		}
 	}()
 	return c
+}
+
+// activatePlan gives the session an active plan, so write tools run.
+func activatePlan(t *testing.T, h *Harness) {
+	t.Helper()
+	h.session.Plan.set([]Todo{{Title: "t", Description: "d", Status: TodoStatusPending}})
+	if !h.session.Plan.HasActive() {
+		t.Fatal("plan not active")
+	}
 }

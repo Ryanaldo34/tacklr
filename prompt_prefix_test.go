@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/session"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -26,6 +27,7 @@ func TestNewHarness_twoBuildsSendTheSameRequestPrefix(t *testing.T) {
 	hs := httptest.NewServer(mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil))
 	t.Cleanup(hs.Close)
 	opts := AgentOptions{Model: &scriptedModel{}, MaxWindowSize: 8192,
+		MCP:          mcp.Client{},
 		MCPConfigs:   []session.MCPServer{{Name: "svc", Type: session.MCPHTTP, URL: hs.URL}},
 		SkillsLoader: skillPack(t, "research", "Research carefully", "Verify claims."),
 		Specialists:  []*Specialist{{Name: "writer", Model: &scriptedModel{}}, {Name: "analyst", Model: &scriptedModel{}}}}

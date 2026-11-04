@@ -19,6 +19,7 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 func TestACP_vfsBindRefreshUnbind(t *testing.T) {
@@ -43,7 +44,7 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 			IsComplete: true,
 		}
 	})
-	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{OpenVFS: func(ctx context.Context, sid string, req vfs.Request) (*vfs.MountSession, error) {
+	r := acptest.NewWorkspaceRuntime(t, strategy, tacklr.AgentOptions{}, workspace.Config{Open: func(ctx context.Context, sid string, req vfs.Request) (*vfs.MountSession, error) {
 		if _, ok := vfs.BindingByName(req.Bindings, "docs"); !ok {
 			if _, ok := vfs.BindingByName(req.Bindings, "local"); !ok {
 				return vfs.Tree()(ctx, sid, req)
@@ -59,7 +60,7 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	bridge := acp.NewClientBridge(w)
 	bridge.SetCaps(acp.ClientCapabilities{VFSTokenRefresh: true})
 	proto := acpProtocolFor(r)
-	env := server.ProtocolEnv{Client: r.Client, Agent: r.Agent, Conn: &server.Conn{Writer: w, Ask: bridge}}
+	env := server.ProtocolEnv{Client: r.Client, Agent: r.Agent, Workspace: r.Workspace, Conn: &server.Conn{Writer: w, Ask: bridge}}
 	bind := `{"jsonrpc":"2.0","id":2,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[{"provider":"local","params":{"name":"docs"},"auth":{"token":"tok1"}}]}}`
 	if err := proto.HandleInbound(t.Context(), env, []byte(bind)); err != nil {
 		t.Fatal(err)

@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -11,10 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/internal/rest"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
-
-	"golang.org/x/oauth2"
-	"google.golang.org/api/option"
 )
 
 // Microsoft account kinds for Graph / ParamAccount.
@@ -23,66 +22,6 @@ const (
 	AccountOrganization = "organization"
 	AccountPersonal     = "personal"
 )
-
-// ValidateBinding checks provider, alias, and access token. Optional backend
-// params (gdrive folderId, Graph site/drive) are applied when the factory
-// opens; omitted gdrive folderId is My Drive. Point may be empty when
-// params["name"] is set; leftover "/contracts" becomes alias contracts.
-func ValidateBinding(b mount.Binding) error {
-	if strings.TrimSpace(b.Provider) == "" {
-		return fmt.Errorf("vfs: provider required")
-	}
-	if _, err := resolveBindingAlias(b); err != nil {
-		return err
-	}
-	if strings.TrimSpace(b.Auth.Token) == "" {
-		return fmt.Errorf("vfs: access token required")
-	}
-	return nil
-}
-
-func resolveBindingAlias(b mount.Binding) (string, error) {
-	name := strings.TrimSpace(b.Params[mount.ParamName])
-	if name != "" {
-		if err := validAlias(name); err != nil {
-			return "", err
-		}
-		return name, nil
-	}
-	point := strings.TrimSpace(b.Point)
-	if point == "" || point == mount.WorkspacePoint {
-		return "", fmt.Errorf("%w: name required", ErrInvalidPath)
-	}
-	if err := ValidMountPoint(point); err != nil {
-		return "", err
-	}
-	alias := strings.TrimPrefix(path.Clean(point), "/")
-	if err := validAlias(alias); err != nil {
-		return "", err
-	}
-	return alias, nil
-}
-
-func unbindAlias(point string) (string, error) {
-	point = strings.TrimSpace(point)
-	if point == "" {
-		return "", ErrInvalidPath
-	}
-	if !strings.HasPrefix(point, "/") {
-		if err := validAlias(point); err != nil {
-			return "", err
-		}
-		return point, nil
-	}
-	if err := ValidMountPoint(point); err != nil {
-		return "", err
-	}
-	alias := strings.TrimPrefix(path.Clean(point), "/")
-	if err := validAlias(alias); err != nil {
-		return "", err
-	}
-	return alias, nil
-}
 
 // TokenRefreshFunc fetches a new access token (IdP or host callback).
 type TokenRefreshFunc func(ctx context.Context) (mount.Credential, error)
@@ -225,24 +164,6 @@ func (h *TokenHolder) refreshCurrent(ctx context.Context, staleToken string) err
 	return err
 }
 
-// Token implements oauth2.TokenSource. Expiry is left zero so the SDK always
-// sends the current holder token; 401 handling lives in the Drive adapter.
-func (h *TokenHolder) Token() (*oauth2.Token, error) {
-	if h == nil {
-		return nil, ErrAuthExpired
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.cred.Token == "" {
-		return nil, ErrAuthExpired
-	}
-	return &oauth2.Token{
-		AccessToken: h.cred.Token,
-		TokenType:   "Bearer",
-		Expiry:      h.cred.ExpiresAt,
-	}, nil
-}
-
 type sessionBindings struct {
 	holders map[string]*TokenHolder // provider → holder
 	list    []mount.Binding
@@ -279,13 +200,10 @@ func (s *SessionAuth) Bind(sessionID string, b mount.Binding) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return fmt.Errorf("%w: session id is required", ErrInvalidPath)
 	}
-	if err := ValidateBinding(b); err != nil {
+	if err := b.Validate(); err != nil {
 		return err
 	}
-	alias, err := resolveBindingAlias(b)
-	if err != nil {
-		return err
-	}
+	alias := b.Alias()
 	params := maps.Clone(b.Params)
 	if params == nil {
 		params = make(map[string]string, 1)
@@ -354,6 +272,18 @@ func (s *SessionAuth) Unbind(sessionID, point string) error {
 		return err
 	}
 	return s.drop(sessionID, alias, "")
+}
+
+// unbindAlias is the alias point names: "/contracts" or "contracts".
+func unbindAlias(point string) (string, error) {
+	alias := strings.TrimSpace(point)
+	if strings.HasPrefix(alias, "/") {
+		alias = strings.TrimPrefix(path.Clean(alias), "/")
+	}
+	if err := mount.ValidAlias(alias); err != nil {
+		return "", err
+	}
+	return alias, nil
 }
 
 // UnbindProvider removes every binding for provider on the session.
@@ -467,22 +397,15 @@ func (s *SessionAuth) HasBindings(sessionID string) bool {
 	return ok && len(sess.list) > 0
 }
 
-func googleAPIOptions(holder *TokenHolder, base string, httpClient *http.Client) ([]option.ClientOption, error) {
+// apiClient is a REST API client (Google, Graph) at base (def when base is
+// empty) that sends holder's current token.
+func apiClient(holder *TokenHolder, base, def string, httpClient *http.Client) rest.Client {
 	if holder == nil {
-		return nil, fmt.Errorf("vfs: token required")
+		panic("vfs: an API client requires a TokenHolder")
 	}
-	var opts []option.ClientOption
-	if httpClient != nil {
-		hc := &http.Client{
-			Transport: &oauth2.Transport{Source: holder, Base: httpClient.Transport},
-			Timeout:   httpClient.Timeout,
-		}
-		opts = append(opts, option.WithHTTPClient(hc))
-	} else {
-		opts = append(opts, option.WithTokenSource(holder))
+	return rest.Client{
+		Base:  cmp.Or(base, def),
+		HTTP:  cmp.Or(httpClient, http.DefaultClient),
+		Token: func() string { return holder.Current().Token },
 	}
-	if base != "" {
-		opts = append(opts, option.WithEndpoint(base))
-	}
-	return opts, nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"slices"
 	"sync"
 )
@@ -98,26 +97,4 @@ func (f *remoteFile) Close() error {
 		return nil
 	}
 	return f.body.Close()
-}
-
-// rangeHeader is the HTTP Range value for n bytes from off; "" asks for the
-// whole object.
-func rangeHeader(off, n int64) string {
-	switch {
-	case n < 0 && off == 0:
-		return ""
-	case n < 0:
-		return fmt.Sprintf("bytes=%d-", off)
-	default:
-		return fmt.Sprintf("bytes=%d-%d", off, off+n-1)
-	}
-}
-
-// rangedBody returns resp's body, which must be the range asked for.
-func rangedBody(resp *http.Response, off, n int64) (io.ReadCloser, error) {
-	if rangeHeader(off, n) != "" && resp.StatusCode != http.StatusPartialContent {
-		_ = resp.Body.Close()
-		return nil, fmt.Errorf("vfs: range %s answered with HTTP %d", rangeHeader(off, n), resp.StatusCode)
-	}
-	return resp.Body, nil
 }

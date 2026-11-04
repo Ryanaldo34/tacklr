@@ -15,8 +15,12 @@ const defaultHTTPShutdown = 5 * time.Second
 // Server serves a session.Client over HTTP, with WebSocket when the request upgrades.
 // Protocols is the ordered list of wire implementations (ACP and/or host protocols).
 type Server struct {
-	Client    session.Client
-	Agent     tacklr.AgentOptions
+	Client session.Client
+	Agent  tacklr.AgentOptions
+	// Workspace says the runtime mounts a workspace for the sessions
+	// (worker.Config.Workspace), so clients may bind backends to it (ACP
+	// vfs/bind). False refuses binds.
+	Workspace bool
 	Protocols []Protocol
 	// Connections tracks ACP WebSocket connections.
 	// Custom protocols may ignore it.
@@ -45,7 +49,7 @@ func NewServer(rt session.Client, agent tacklr.AgentOptions, protocols ...Protoc
 }
 
 func (s *Server) env(conn *Conn) ProtocolEnv {
-	return ProtocolEnv{Client: s.Client, Agent: s.Agent, Conn: conn, Security: s.Security, Connections: s.Connections}
+	return ProtocolEnv{Client: s.Client, Agent: s.Agent, Workspace: s.Workspace, Conn: conn, Security: s.Security, Connections: s.Connections}
 }
 
 // HTTPMux mounts every Protocol's HTTP routes. Used by ServeHTTP and tests.

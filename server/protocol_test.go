@@ -18,7 +18,7 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
-	"github.com/ryanaldo34/tacklr/telemetry"
+	"github.com/ryanaldo34/tacklr/telemetry/export"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
@@ -247,7 +247,7 @@ func TestServeHTTP_respectsContextCancel(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	shutdown, err := telemetry.Init(context.Background(), telemetry.Config{})
+	shutdown, err := export.Init(context.Background(), export.Config{})
 	if err != nil {
 		panic(err)
 	}

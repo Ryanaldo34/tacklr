@@ -15,7 +15,6 @@ import (
 	"github.com/ryanaldo34/tacklr/message"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // roundsHarness is a turn whose model answers each request with the calls
@@ -99,43 +98,49 @@ func TestCommit_aPromptPastAnOpenRoundCancelsItsOpenCalls(t *testing.T) {
 	}
 }
 
+// keptResults is an Overflow in memory: it keeps each result under
+// <session>/<call id>, or fails every Keep.
+type keptResults struct {
+	full map[string]string
+	fail bool
+}
+
+func (k *keptResults) Keep(_ context.Context, sessionID, callID, text string) (string, error) {
+	if k.fail {
+		return "", errors.New("store is down")
+	}
+	p := sessionID + "/" + callID
+	k.full[p] = text
+	return p, nil
+}
+
 // TestCommitRound_trimsAResultTooLargeForTheWindow: a result too large for
-// the window even with nothing left to summarize is cut to fit. With
-// OverflowPath its full text is first saved where read finds it; without, the
-// note says it was not kept. A save that fails fails the step.
+// the window even with nothing left to summarize is cut to fit. With an
+// Overflow its full text is first kept and the cut result says where;
+// without, the note says it was not kept. A Keep that fails fails the step.
 func TestCommitRound_trimsAResultTooLargeForTheWindow(t *testing.T) {
 	full := strings.Repeat("x", 2000) + "END"
 	cases := []struct {
 		name     string
-		overflow string
-		block    string // a path made a file or directory first, so the save fails
+		overflow *keptResults
 		want     string
 	}{
-		{name: "kept on a mount", overflow: "/workspace/work/overflow", want: "The full output is at /workspace/work/overflow/trim/b1.txt; read it with start and end."},
+		{name: "kept", overflow: &keptResults{full: map[string]string{}}, want: "The full output is at trim/b1; read it with start and end."},
 		{name: "not kept", want: "The full output was not kept."},
-		{name: "a directory that cannot be made", overflow: "/workspace/work/blocked", block: "file", want: "stage full tool result"},
-		{name: "a file that cannot be written", overflow: "/workspace/work/overflow", block: "dir", want: "stage full tool result"},
+		{name: "a keep that fails", overflow: &keptResults{fail: true}, want: "stage full tool result"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ms := mustMountTree(t, "trim", vfs.Request{}, vfs.At("work", vfs.Local(t.TempDir())))
-			switch tc.block {
-			case "file":
-				if err := ms.Route(t.Context(), tc.overflow).WriteFile(t.Context(), []byte("x")); err != nil {
-					t.Fatal(err)
-				}
-			case "dir":
-				if err := ms.Route(t.Context(), tc.overflow+"/trim/b1.txt").MkdirAll(t.Context()); err != nil {
-					t.Fatal(err)
-				}
-			}
 			big := NewTool(ToolConfig{Name: "big", Handler: func(context.Context) (string, error) { return full, nil }})
-			h, _, _ := roundsHarness(t, AgentOptions{sessionID: "trim", MaxWindowSize: 500, mountSession: ms, OverflowPath: tc.overflow, Tools: []*Tool{big}},
-				toolCall("b1", "big", "{}"))
+			opts := AgentOptions{sessionID: "trim", MaxWindowSize: 500, Tools: []*Tool{big}}
+			if tc.overflow != nil {
+				opts.Overflow = tc.overflow
+			}
+			h, _, _ := roundsHarness(t, opts, toolCall("b1", "big", "{}"))
 
 			_, err := replyRound(t, h)
 
-			if tc.block != "" {
+			if tc.overflow != nil && tc.overflow.fail {
 				if err == nil || !strings.Contains(err.Error(), tc.want) {
 					t.Fatalf("commit = %v, want %q", err, tc.want)
 				}
@@ -146,11 +151,8 @@ func TestCommitRound_trimsAResultTooLargeForTheWindow(t *testing.T) {
 			if err != nil || !strings.HasPrefix(result.Content, "xxx") || !strings.HasSuffix(result.Content, tc.want+"]") || len(result.Content) >= len(full) {
 				t.Fatalf("result = %q %v, want it cut with %q", result.Content, err, tc.want)
 			}
-			if tc.overflow != "" {
-				read, err := h.findTool("read", "").invoke(t.Context(), `{"path":"/workspace/work/overflow/trim/b1.txt"}`, turnRuntime(h))
-				if err != nil || !strings.Contains(read.Output, "END") {
-					t.Fatalf("read the full output = %q %v", read.Output, err)
-				}
+			if tc.overflow != nil && tc.overflow.full["trim/b1"] != full {
+				t.Fatalf("kept = %q, want the full result", tc.overflow.full["trim/b1"])
 			}
 		})
 	}

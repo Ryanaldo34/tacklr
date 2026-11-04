@@ -8,12 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/session"
 
 	"github.com/ryanaldo34/tacklr/message"
 
 	"github.com/ryanaldo34/tacklr/skills"
-	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 type failMCP struct{}
@@ -37,11 +38,10 @@ func TestNewHarness_constructFailClosed(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	ms := mustMountTree(t, t.Name(), vfs.Request{}, vfs.At("skills", vfs.Local(root)))
 	_, err := NewHarness(context.Background(), AgentOptions{
 		MaxWindowSize: 8192,
 		Model:         &scriptedModel{},
-		mountSession:  ms,
+		SkillsLoader:  skills.Loader{Root: root},
 	})
 	if err == nil || !strings.Contains(err.Error(), "initialize skills") {
 		t.Fatalf("want skills construct error, got %v", err)
@@ -51,7 +51,10 @@ func TestNewHarness_constructFailClosed(t *testing.T) {
 func TestNewHarness_configurationInvariants(t *testing.T) {
 	// Arrange
 	validModel := &scriptedModel{}
-	ms := mustMountTree(t, "overflow-config", vfs.Request{}, vfs.At("work", vfs.Local(t.TempDir())), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
+	noNamespaceBrain, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
 		name string
 		opts AgentOptions
@@ -81,16 +84,29 @@ func TestNewHarness_configurationInvariants(t *testing.T) {
 			opts: AgentOptions{Model: validModel, Tools: []*Tool{nil}},
 		},
 		{
+			name: "a brain without a search namespace",
+			opts: AgentOptions{Model: validModel, Brain: noNamespaceBrain},
+		},
+		{
 			name: "invalid MCP transport",
 			opts: AgentOptions{
 				Model:      validModel,
+				MCP:        mcp.Client{},
 				MCPConfigs: []session.MCPServer{{Name: "stdio"}},
+			},
+		},
+		{
+			name: "MCP servers without a client",
+			opts: AgentOptions{
+				Model:      validModel,
+				MCPConfigs: []session.MCPServer{{Name: "remote", Type: session.MCPHTTP, URL: "https://example.test"}},
 			},
 		},
 		{
 			name: "duplicate MCP server",
 			opts: AgentOptions{
 				Model: validModel,
+				MCP:   mcp.Client{},
 				MCPConfigs: []session.MCPServer{
 					{Name: "remote", Type: session.MCPHTTP, URL: "https://example.test/a"},
 					{Name: "remote", Type: session.MCPHTTP, URL: "https://example.test/b"},
@@ -98,21 +114,10 @@ func TestNewHarness_configurationInvariants(t *testing.T) {
 			},
 		},
 		{
-			name: "overflow path without a workspace",
-			opts: AgentOptions{Model: validModel, OverflowPath: "/workspace/work/overflow"},
-		},
-		{
-			name: "overflow path outside the mounts",
-			opts: AgentOptions{Model: validModel, mountSession: ms, OverflowPath: "/elsewhere"},
-		},
-		{
-			name: "overflow path on a read-only mount",
-			opts: AgentOptions{Model: validModel, mountSession: ms, OverflowPath: "/workspace/ro/overflow"},
-		},
-		{
 			name: "credential ref without resolver",
 			opts: AgentOptions{
 				Model: validModel,
+				MCP:   mcp.Client{},
 				MCPConfigs: []session.MCPServer{
 					{Name: "remote", Type: session.MCPHTTP, URL: "https://example.test", CredentialRef: "vault://remote"},
 				},
@@ -165,6 +170,7 @@ func TestHarness_checkpointAfterRun(t *testing.T) {
 			Description: "Looks things up.",
 			Model:       mock,
 		}},
+		MCP: mcp.Client{},
 		MCPConfigs: []session.MCPServer{{
 			Name: "remote", Type: session.MCPHTTP, URL: "https://example.test", CredentialRef: "vault://remote",
 		}},
@@ -258,9 +264,8 @@ func TestHarness_checkpointAfterRun(t *testing.T) {
 	}
 }
 
-func TestHarness_readSkillReturnsTheBodyOfASkillUnderSkillsPath(t *testing.T) {
-	root := skillPack(t, "research", "Research carefully", "Always verify claims.").Root
-	h := mustNewHarness(t, AgentOptions{MaxWindowSize: 8192, Model: &scriptedModel{}, SkillsPath: root})
+func TestHarness_readSkillReturnsTheBodyOfASkill(t *testing.T) {
+	h := mustNewHarness(t, AgentOptions{MaxWindowSize: 8192, Model: &scriptedModel{}, SkillsLoader: skillPack(t, "research", "Research carefully", "Always verify claims.")})
 
 	res, err := h.findTool("read_skill", "").invoke(t.Context(), `{"name":"research"}`, turnRuntime(h))
 

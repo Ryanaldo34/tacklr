@@ -114,14 +114,14 @@ func (ms *MountSession) applyFull(ctx context.Context, p string, exists bool, fi
 		return ApplyResult{}, ErrTooLarge
 	}
 	if exists {
-		if IsProjected(fi.MediaType) {
+		if ms.codecs.Projected(fi.MediaType) {
 			return ms.applyProjectedFull(ctx, p, mut, body)
 		}
 		return ms.stage(ctx, NewTextDocument(p, fi.MediaType, "utf-8", body))
 	}
 	n := min(len(body), 512)
 	mt := ms.createMediaType(p, mut.MediaType, []byte(body[:n]))
-	doc, err := createDocument(p, mt, mut)
+	doc, err := ms.codecs.create(p, mt, mut)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -216,7 +216,7 @@ func (ms *MountSession) applySubstring(ctx context.Context, p string, mut Mutati
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if IsProjected(doc.MediaType()) {
+	if ms.codecs.Projected(doc.MediaType()) {
 		return ApplyResult{}, ErrProjected
 	}
 	repl := ""
@@ -340,7 +340,7 @@ func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, 
 		mt := ms.createMediaType(p, mut.MediaType, nil)
 		created := mut
 		created.Blocks = next
-		doc, err := createDocument(p, mt, created)
+		doc, err := ms.codecs.create(p, mt, created)
 		if err != nil {
 			return ApplyResult{}, err
 		}
@@ -350,7 +350,7 @@ func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, 
 		}
 		return ms.stage(ctx, text)
 	}
-	if !IsProjected(fi.MediaType) {
+	if !ms.codecs.Projected(fi.MediaType) {
 		return ApplyResult{}, ErrProjected
 	}
 	if len(next) == 0 {
@@ -444,7 +444,7 @@ func (ms *MountSession) checkout(ctx context.Context, p, rev string) (Textual, e
 }
 
 func (ms *MountSession) loadMatching(ctx context.Context, p, expected string) (Textual, error) {
-	doc, err := ms.Route(ctx, p).OpenDocument(ctx, nil)
+	doc, err := ms.Route(ctx, p).OpenDocument(ctx)
 	if err != nil {
 		return nil, err
 	}

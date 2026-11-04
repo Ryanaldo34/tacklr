@@ -11,8 +11,6 @@ import (
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/vfs/mount"
-
-	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 )
 
 // MaxReadFileBytes caps full-file reads and writes.
@@ -32,15 +30,21 @@ type filePutter interface {
 
 // MountSession groups providers for one session. Route returns the provider
 // for a path. The provider reads, writes, and returns the error.
-// Tree creates the session, mounts /workspace, optionally FuseMounts, and
-// Closes it. The agent harness only borrows the pointer.
+// Tree creates the session and mounts /workspace. The agent harness only
+// borrows the pointer.
 type MountSession struct {
 	mu      sync.Mutex
 	id      string
 	mounts  map[string]mountEntry
-	fuse    *gofuse.Server
-	hostDir string
 	lastRev map[string]string
+	// codecs read and write the session's documents; set before the
+	// session is shared (Tree, OpenVFS.WithCodecs) and not changed after.
+	codecs *ContentRegistry
+}
+
+// Codecs is the registry the session reads and writes documents with.
+func (m *MountSession) Codecs() *ContentRegistry {
+	return m.codecs
 }
 
 type mountEntry struct {
@@ -66,12 +70,12 @@ func (m *MountSession) storedRev(virtualPath string) string {
 	return m.lastRev[virtualPath]
 }
 
-// NewMountSession binds a session id. Hosts use Tree; FuseMount is optional.
+// NewMountSession binds a session id. Hosts use Tree.
 func NewMountSession(sessionID string) (*MountSession, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil, fmt.Errorf("%w: session id is required", ErrInvalidPath)
 	}
-	return &MountSession{id: sessionID, mounts: map[string]mountEntry{}}, nil
+	return &MountSession{id: sessionID, mounts: map[string]mountEntry{}, codecs: builtinCodecs}, nil
 }
 
 // mount puts p at spec.Point.
@@ -98,16 +102,6 @@ func (m *MountSession) mount(ctx context.Context, spec MountSpec, p Provider) er
 	}
 	m.mounts[cleaned] = mountEntry{provider: p, spec: stored}
 	return nil
-}
-
-// HostDir is the directory last passed to FuseMount, or "".
-// Hosts and run_command use this as cwd. Harness tool results, errors,
-// Specs, and checkpoints must never print it. The child
-// process can still observe it via pwd until a later jail.
-func (m *MountSession) HostDir() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.hostDir
 }
 
 // Specs returns the durable mount records (checkpoint-safe; no host paths or secrets).

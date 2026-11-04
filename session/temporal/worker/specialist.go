@@ -13,5 +13,5 @@ func overlaySpecialist(parent tacklr.AgentOptions, specialist string) (tacklr.Ag
 		return tacklr.AgentOptions{}, fmt.Errorf("%w: specialist %q", tacklr.ErrNotFound, specialist)
 	}
 	out := parent.WithSpecialist(spec)
-	return tacklr.BindTurn(out, "", nil, nil), nil
+	return tacklr.BindTurn(out, "", nil), nil
 }

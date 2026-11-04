@@ -10,7 +10,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
-	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/fuse"
 )
 
 // harnessSpec names one session's harness: its tacklr.Harness (tools, MCP
@@ -20,7 +20,7 @@ import (
 type harnessSpec struct {
 	ID    session.ID
 	Key   string
-	Build func(context.Context) (*tacklr.Harness, *vfs.MountSession, error)
+	Build func(context.Context) (*tacklr.Harness, *fuse.Server, error)
 }
 
 // harnessCache keeps each session's harness on this worker, so the steps of a
@@ -44,7 +44,7 @@ type entry struct {
 	ready chan struct{}
 	err   error
 	h     *tacklr.Harness
-	ms    *vfs.MountSession
+	mount *fuse.Server
 	users int
 	last  uint64
 	gone  bool
@@ -171,12 +171,20 @@ func (ws *harnessCache) Close(id session.ID) {
 	}
 }
 
-// CloseAll closes every harness, when the worker stops.
+// CloseAll closes every harness, when the worker stops, and returns once
+// the ones no step uses are closed and their workspaces unmounted. A step
+// still running closes its harness when it ends.
 func (ws *harnessCache) CloseAll() {
 	ws.mu.Lock()
-	defer ws.mu.Unlock()
+	var closed []<-chan struct{}
 	for id, cur := range ws.byID {
-		ws.drop(id, cur)
+		if done := ws.drop(id, cur); done != nil {
+			closed = append(closed, done)
+		}
+	}
+	ws.mu.Unlock()
+	for _, done := range closed {
+		<-done
 	}
 }
 
@@ -233,8 +241,8 @@ func (ws *harnessCache) makeRoom() {
 // build builds the harness outside the cache lock, so other sessions do not
 // wait on it. It outlives the step that asked for it, so it does not stop
 // when that step is cancelled.
-func (c *entry) build(ctx context.Context, build func(context.Context) (*tacklr.Harness, *vfs.MountSession, error)) {
-	c.h, c.ms, c.err = build(ctx)
+func (c *entry) build(ctx context.Context, build func(context.Context) (*tacklr.Harness, *fuse.Server, error)) {
+	c.h, c.mount, c.err = build(ctx)
 	close(c.ready)
 }
 
@@ -330,9 +338,10 @@ func (ws *harnessCache) release(id session.ID, cur *entry) {
 	})
 }
 
-// drop takes cur out of the cache and closes it once no step uses it.
+// drop takes cur out of the cache and closes it once no step uses it. The
+// channel closes when that close is done; it is nil while a step uses cur.
 // Call it with ws.mu held.
-func (ws *harnessCache) drop(id session.ID, cur *entry) {
+func (ws *harnessCache) drop(id session.ID, cur *entry) <-chan struct{} {
 	if ws.byID[id] == cur {
 		delete(ws.byID, id)
 	}
@@ -341,14 +350,20 @@ func (ws *harnessCache) drop(id session.ID, cur *entry) {
 		cur.timer.Stop()
 		cur.timer = nil
 	}
-	if cur.users == 0 {
-		cur.close()
+	if cur.users > 0 {
+		return nil
 	}
+	return cur.close()
 }
 
-func (c *entry) close() {
+// close closes c's harness once it is built, without holding up the caller.
+// The channel closes when it is done.
+func (c *entry) close() <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		<-c.ready
-		abandonTurn(c.h, c.ms)
+		abandonTurn(c.h, c.mount)
 	}()
+	return done
 }

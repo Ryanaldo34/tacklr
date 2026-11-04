@@ -1,5 +1,9 @@
 # Requires Go 1.27 (go.mod).
-.PHONY: test vet lint fmt cover coverage check
+.PHONY: test vet lint fmt cover coverage check wasm
+
+# The harness core builds for WebAssembly (GOOS=js GOARCH=wasm) so a host can
+# run it outside a Linux worker, for example in a Cloudflare Durable Object.
+WASM_CORE = . ./message ./session ./session/loop ./brain ./skills ./vfs/mount ./telemetry ./openai ./web ./server ./server/acp
 
 # The whole suite. It needs Linux, FUSE and Docker: Testcontainers starts
 # Postgres (pgvector), Helix and Temporal. -covermode=atomic is required with -race.
@@ -8,6 +12,9 @@ test:
 
 vet:
 	go vet ./...
+
+wasm:
+	GOOS=js GOARCH=wasm go build $(WASM_CORE)
 
 # Format all packages (gofmt + goimports if available).
 fmt:
@@ -29,7 +36,7 @@ cover:
 coverage: cover
 
 # Full local gate: format check + lint + vet + race tests + coverage thresholds.
-check: vet lint cover
+check: vet wasm lint cover
 	@unformatted=$$(gofmt -l .); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \

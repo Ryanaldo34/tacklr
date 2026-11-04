@@ -16,6 +16,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/internal/s3test"
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/awss3"
 )
 
 func TestS3_rejectsBadConfig(t *testing.T) {
@@ -23,15 +24,15 @@ func TestS3_rejectsBadConfig(t *testing.T) {
 	if _, err := vfs.S3(nil, "")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("nil client")
 	}
-	if _, err := vfs.S3(vfs.AWSS3{}, "")(ctx, "s", mount.Binding{}); err == nil {
+	if _, err := vfs.S3(awss3.API{}, "")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("missing bucket")
 	}
-	if _, err := vfs.S3(vfs.AWSS3{}, "b")(ctx, "s", mount.Binding{
+	if _, err := vfs.S3(awss3.API{}, "b")(ctx, "s", mount.Binding{
 		Params: map[string]string{"prefix": "a/../b"},
 	}); err == nil {
 		t.Fatal("bad prefix")
 	}
-	var aws vfs.AWSS3
+	var aws awss3.API
 	if _, err := aws.Head(ctx, "b", "k"); err == nil {
 		t.Fatal("nil AWS Head")
 	}
@@ -55,8 +56,8 @@ func TestMountSession_s3(t *testing.T) {
 	client, bucket := startS3(ctx, t)
 
 	ms, err := vfs.Tree(
-		vfs.At("data", vfs.S3(vfs.AWSS3{Client: client}, bucket)),
-		vfs.At("ro", vfs.S3(vfs.AWSS3{Client: client}, bucket)).ReadOnly(),
+		vfs.At("data", vfs.S3(awss3.API{Client: client}, bucket)),
+		vfs.At("ro", vfs.S3(awss3.API{Client: client}, bucket)).ReadOnly(),
 	)(ctx, "sess-s3", vfs.Request{Bindings: []mount.Binding{
 		{Params: map[string]string{mount.ParamName: "data", "prefix": "runs/1"}},
 		{Params: map[string]string{mount.ParamName: "ro", "prefix": "readonly"}},
@@ -64,7 +65,6 @@ func TestMountSession_s3(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 
 	if err := ms.Route(ctx, "/workspace/data/hello.go").
 		WriteFile(ctx, []byte("package main\n")); err != nil {
@@ -245,7 +245,7 @@ func TestMountSession_s3(t *testing.T) {
 	}
 
 	if _, err := ms.Route(ctx, "/workspace/data/blob").
-		OpenDocument(ctx, nil); !errors.Is(err, vfs.ErrNoCodec) {
+		OpenDocument(ctx); !errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("image/png hint should skip sniff: %v", err)
 	}
 
@@ -254,7 +254,7 @@ func TestMountSession_s3(t *testing.T) {
 		t.Fatalf("octet-stream + .go key: Stat MediaType=%q err=%v", st.MediaType, err)
 	}
 
-	open := vfs.S3(vfs.AWSS3{Client: client}, bucket)
+	open := vfs.S3(awss3.API{Client: client}, bucket)
 	p, err := open(ctx, "sess", mount.Binding{Params: map[string]string{"prefix": "direct"}})
 	if err != nil {
 		t.Fatal(err)
@@ -301,13 +301,12 @@ func TestMountSession_s3(t *testing.T) {
 		t.Fatal("open root as file")
 	}
 
-	blobMS, err := vfs.Tree(vfs.At("data", vfs.Blob(vfs.AWSS3{Client: client}, "")))(ctx, "blob-s3", vfs.Request{Bindings: []mount.Binding{{
+	blobMS, err := vfs.Tree(vfs.At("data", vfs.Blob(awss3.API{Client: client}, "")))(ctx, "blob-s3", vfs.Request{Bindings: []mount.Binding{{
 		Params: map[string]string{mount.ParamName: "data", "container": bucket, "prefix": "blobrun"},
 	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = blobMS.Close() })
 
 	if err := blobMS.Route(ctx, "/workspace/data/hello.go").
 		WriteFile(ctx, []byte("package main\n")); err != nil {

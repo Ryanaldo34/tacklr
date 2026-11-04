@@ -39,23 +39,20 @@ Progress (`EmitUpdate`), park (`Park` with a typed interrupt such as `&UserSelec
 
 ### Large results
 
-Each result goes into the context window with its call. When a reply's results do not fit even after the window collapses into a summary, the largest are cut to fit, and the cut result tells the model so. Set `AgentOptions.OverflowPath` to a directory on a writable mount to keep each cut result's full text there; the note names the file for `read`. A `ToolInterceptor` can also replace a result's `Output` to shorten it: it returns the call's `ToolOutcome` and may change its `Output` and `Effect` after `next` returns.
+Each result goes into the context window with its call. When a reply's results do not fit even after the window collapses into a summary, the largest are cut to fit, and the cut result tells the model so. Set `workspace.Config.OverflowPath` to a directory on a writable mount to keep each cut result's full text there (any `AgentOptions.Overflow` works); the note names the file for `read`. A `ToolInterceptor` can also replace a result's `Output` to shorten it: it returns the call's `ToolOutcome` and may change its `Output` and `Effect` after `next` returns.
 
 ## Optional tools
 
-Packages `web` and `email` export optional tools. Construct them with a closed-over client and put the result on `AgentOptions.Tools`. The harness does not inject these from options fields.
+Package `web` exports optional tools. Construct them with a closed-over client and put the result on `AgentOptions.Tools`. The harness does not inject these from options fields.
 
 ```go
 client := web.NewExa(os.Getenv("EXA_API_KEY"))
-mail := gmail.New(gmailService)
 
 opts := tacklr.AgentOptions{
     Model: model,
     Tools: []*tacklr.Tool{
         web.WebSearch(client),
         web.WebFetch(client),
-        email.ReadInbox(mail),
-        email.SendEmail(mail),
     },
 }
 ```
@@ -64,14 +61,15 @@ Tests pass a fake into the same constructor. Omit a constructor and that tool is
 
 ## Session-world tools
 
-These still inject when the turn’s world is present. They close over per-turn mount and search state.
+The harness injects the tools that close over its own state. The workspace's tools live in package `workspace` and reach the harness through `AgentOptions.Tools`: a worker with `worker.Config.Workspace` adds them for each turn (`workspace.Config.Bind`), so the harness core does not import the vfs.
 
-| You set | Tools that close over it |
-|---------|--------------------------|
-| `MountSession` | `read`, `write`, `write_document`, `write_spreadsheet`, `run_command` |
-| `SkillsPath` (on the workspace when mounted, otherwise a local directory) | `read_skill` |
+| You set | Tools |
+|---------|-------|
+| `worker.Config.Workspace` | `read`, `write`, `write_document`, `write_spreadsheet` (package `workspace`) |
+| `worker.Config.Workspace` + `FuseRoot` | `run_command` (package `shell`) |
+| `worker.Config.Workspace` + `Brain` | `index_file`, `unindex` (package `workspace`) |
+| `SkillsLoader` (`skills.Loader` for a local directory; the workspace's `skills` directory by default when the turn has one) | `read_skill` |
 | `Brain` | `search`, `open`, `related`; `save` with `BrainWriteKinds`; `link` when the engine has a graph |
-| Brain + workspace + search namespace | `index_file`, `unindex` |
 
 Write tools need an active plan (`create_plan`). That lock is a product rule: hosts cannot turn it off. Specialists skip it. `write`, the document and spreadsheet writes, and `run_command` park for permission unless the host names them in `AgentOptions.AllowTools` (by the name the model calls them; a user's reject-always still wins).
 

@@ -159,7 +159,8 @@ func (r Route) MkdirAll(ctx context.Context) error {
 	return r.Provider.MkdirAll(ctx, r.Rel, 0o755)
 }
 
-func (r Route) OpenDocument(ctx context.Context, reg *ContentRegistry) (Document, error) {
+// OpenDocument decodes the file with the session's codecs.
+func (r Route) OpenDocument(ctx context.Context) (Document, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -170,10 +171,7 @@ func (r Route) OpenDocument(ctx context.Context, reg *ContentRegistry) (Document
 	if !ok {
 		return nil, ErrNotSupported
 	}
-	if reg == nil {
-		reg = DefaultContentRegistry()
-	}
-	doc, err := db.OpenDocument(ctx, r.Rel, reg)
+	doc, err := db.OpenDocument(ctx, r.Rel, r.sess.codecs)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +179,7 @@ func (r Route) OpenDocument(ctx context.Context, reg *ContentRegistry) (Document
 }
 
 func (r Route) ReadText(ctx context.Context) (Textual, error) {
-	doc, err := r.OpenDocument(ctx, nil)
+	doc, err := r.OpenDocument(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -209,5 +207,5 @@ func (r Route) WriteDocument(ctx context.Context, doc Document) error {
 	if !ok {
 		return ErrNotSupported
 	}
-	return db.WriteDocument(ctx, r.Rel, doc)
+	return db.WriteDocument(ctx, r.Rel, doc, r.sess.codecs)
 }

@@ -10,39 +10,39 @@ import (
 
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 
-	"google.golang.org/api/docs/v1"
-	"google.golang.org/api/googleapi"
+	"github.com/ryanaldo34/tacklr/internal/google/docs"
+	"github.com/ryanaldo34/tacklr/internal/rest"
 )
 
 func TestMapDocsError(t *testing.T) {
-	if !errors.Is(mapDocsError(&googleapi.Error{Code: 401}), ErrAuthExpired) {
+	if !errors.Is(mapDocsError(&rest.Error{Code: 401}), ErrAuthExpired) {
 		t.Fatal("401")
 	}
-	if !errors.Is(mapDocsError(&googleapi.Error{Code: 404}), ErrNotExist) {
+	if !errors.Is(mapDocsError(&rest.Error{Code: 404}), ErrNotExist) {
 		t.Fatal("404")
 	}
-	err := mapDocsError(&googleapi.Error{Code: 403, Message: "DLP blocked"})
+	err := mapDocsError(&rest.Error{Code: 403, Message: "DLP blocked"})
 	if !errors.Is(err, ErrPermission) || !strings.Contains(err.Error(), "DLP blocked") {
 		t.Fatalf("403: %v", err)
 	}
-	if !errors.Is(mapDocsError(&googleapi.Error{
+	if !errors.Is(mapDocsError(&rest.Error{
 		Code: 400, Message: "requiredRevisionId must be the latest revision",
 	}), ErrConflict) {
 		t.Fatal("revision 400")
 	}
-	if !errors.Is(mapDocsError(&googleapi.Error{
+	if !errors.Is(mapDocsError(&rest.Error{
 		Code: 400, Message: "not the latest revision",
 	}), ErrConflict) {
 		t.Fatal("revision substring 400")
 	}
-	raw := mapDocsError(&googleapi.Error{Code: 400, Message: "invalid document structure"})
+	raw := mapDocsError(&rest.Error{Code: 400, Message: "invalid document structure"})
 	if errors.Is(raw, ErrConflict) {
 		t.Fatal("structure 400 must not be conflict")
 	}
 	if !errors.Is(raw, ErrInvalidWrite) || strings.Contains(raw.Error(), "googleapi") {
 		t.Fatalf("structure 400: %v", raw)
 	}
-	ins := mapDocsError(&googleapi.Error{
+	ins := mapDocsError(&rest.Error{
 		Code: 400, Message: "Invalid requests[0].insertText: The insertion index must be inside the bounds of an existing paragraph.",
 	})
 	if !errors.Is(ins, ErrInvalidWrite) || strings.Contains(ins.Error(), "googleapi") || strings.Contains(ins.Error(), "insertText") {
@@ -54,31 +54,37 @@ func TestMapDocsError(t *testing.T) {
 	if got := mapDocsError(errors.New("plain")); got == nil {
 		t.Fatal("plain")
 	}
-	if !errors.Is(mapDocsError(&googleapi.Error{Code: 403}), ErrPermission) {
+	if !errors.Is(mapDocsError(&rest.Error{Code: 403}), ErrPermission) {
 		t.Fatal("403 empty")
 	}
-	five := mapDocsError(&googleapi.Error{Code: 500, Message: "boom"})
+	if bare := mapDocsError(&rest.Error{Code: 502}); bare.Error() != "vfs: docs HTTP 502" {
+		t.Fatalf("502 = %v", bare)
+	}
+	five := mapDocsError(&rest.Error{Code: 500, Message: "boom"})
 	if five == nil || errors.Is(five, ErrInvalidWrite) || !strings.Contains(five.Error(), "HTTP 500") || !strings.Contains(five.Error(), "boom") {
 		t.Fatalf("500: %v", five)
 	}
 }
 
 func TestMapDriveError(t *testing.T) {
-	if !errors.Is(mapDriveError(&googleapi.Error{Code: 404}), ErrNotExist) {
+	if !errors.Is(mapDriveError(&rest.Error{Code: 404}), ErrNotExist) {
 		t.Fatal("404")
 	}
-	if !errors.Is(mapDriveError(&googleapi.Error{Code: 400, Message: "exportSizeLimitExceeded"}), ErrTooLarge) {
+	if !errors.Is(mapDriveError(&rest.Error{Code: 400, Message: "exportSizeLimitExceeded"}), ErrTooLarge) {
 		t.Fatal("export size")
 	}
-	bad := mapDriveError(&googleapi.Error{Code: 400, Message: "bad request"})
+	bad := mapDriveError(&rest.Error{Code: 400, Message: "bad request"})
 	if errors.Is(bad, ErrInvalidWrite) || !strings.Contains(bad.Error(), "HTTP 400") {
 		t.Fatalf("400: %v", bad)
 	}
-	five := mapDriveError(&googleapi.Error{Code: 500, Message: "boom"})
+	five := mapDriveError(&rest.Error{Code: 500, Message: "boom"})
 	if errors.Is(five, ErrInvalidWrite) || !strings.Contains(five.Error(), "HTTP 500") {
 		t.Fatalf("500: %v", five)
 	}
-	limited := mapDriveError(&googleapi.Error{Code: 429, Message: "slow down"})
+	if !errors.Is(mapDriveError(&rest.Error{Code: 403}), ErrPermission) {
+		t.Fatal("403 empty")
+	}
+	limited := mapDriveError(&rest.Error{Code: 429, Message: "slow down"})
 	if errors.Is(limited, ErrInvalidWrite) || !strings.Contains(limited.Error(), "HTTP 429") {
 		t.Fatalf("429: %v", limited)
 	}
@@ -89,7 +95,7 @@ func TestParagraphText_rebuildsInlineMarks(t *testing.T) {
 		{TextRun: &docs.TextRun{Content: "See "}},
 		{TextRun: &docs.TextRun{Content: "x", TextStyle: &docs.TextStyle{Bold: true}}},
 		{TextRun: &docs.TextRun{Content: " and "}},
-		{TextRun: &docs.TextRun{Content: "Maya\n", TextStyle: &docs.TextStyle{Link: &docs.Link{Url: "mailto:maya"}}}},
+		{TextRun: &docs.TextRun{Content: "Maya\n", TextStyle: &docs.TextStyle{Link: &docs.Link{URL: "mailto:maya"}}}},
 	}})
 	if got != "See **x** and [Maya](mailto:maya)" {
 		t.Fatalf("got %q", got)
@@ -105,12 +111,12 @@ func TestParagraphText_rebuildsInlineMarks(t *testing.T) {
 
 func TestSnapshotFromDocument_tabsAndImages(t *testing.T) {
 	d := &docs.Document{
-		DocumentId: "doc1",
-		RevisionId: "R0",
+		DocumentID: "doc1",
+		RevisionID: "R0",
 		Title:      "Spec",
 		Tabs: []*docs.Tab{
 			{
-				TabProperties: &docs.TabProperties{TabId: "t.a", Title: "Intro", Index: 0},
+				TabProperties: &docs.TabProperties{TabID: "t.a", Title: "Intro", Index: 0},
 				DocumentTab: &docs.DocumentTab{
 					Body: &docs.Body{Content: []*docs.StructuralElement{
 						{StartIndex: 1, EndIndex: 2, SectionBreak: &docs.SectionBreak{}},
@@ -121,7 +127,7 @@ func TestSnapshotFromDocument_tabsAndImages(t *testing.T) {
 						{StartIndex: 8, EndIndex: 9, Paragraph: &docs.Paragraph{
 							Elements: []*docs.ParagraphElement{{
 								StartIndex: 8, EndIndex: 9,
-								InlineObjectElement: &docs.InlineObjectElement{InlineObjectId: "kix.pic"},
+								InlineObjectElement: &docs.InlineObjectElement{InlineObjectID: "kix.pic"},
 							}},
 						}},
 						{StartIndex: 9, EndIndex: 10, TableOfContents: &docs.TableOfContents{}},
@@ -152,13 +158,13 @@ func TestSnapshotFromDocument_tabsAndImages(t *testing.T) {
 					},
 					InlineObjects: map[string]docs.InlineObject{
 						"kix.pic": {InlineObjectProperties: &docs.InlineObjectProperties{
-							EmbeddedObject: &docs.EmbeddedObject{ImageProperties: &docs.ImageProperties{ContentUri: "https://img"}},
+							EmbeddedObject: &docs.EmbeddedObject{ImageProperties: &docs.ImageProperties{ContentURI: "https://img"}},
 						}},
 					},
 				},
 			},
 			{
-				TabProperties: &docs.TabProperties{TabId: "t.b", Title: "Appendix", Index: 1},
+				TabProperties: &docs.TabProperties{TabID: "t.b", Title: "Appendix", Index: 1},
 				DocumentTab: &docs.DocumentTab{
 					Body: &docs.Body{Content: []*docs.StructuralElement{
 						{StartIndex: 1, EndIndex: 6, Paragraph: &docs.Paragraph{
@@ -185,7 +191,7 @@ func TestSnapshotFromDocument_tabsAndImages(t *testing.T) {
 		t.Fatalf("kinds = %s", kinds)
 	}
 
-	tab := &docs.Table{Rows: 1, Columns: 1, TableRows: []*docs.TableRow{{
+	tab := &docs.Table{TableRows: []*docs.TableRow{{
 		TableCells: []*docs.TableCell{{
 			StartIndex: 10, EndIndex: 14,
 			Content: []*docs.StructuralElement{{
@@ -242,9 +248,9 @@ func TestGoogleDocs_httpGetBatchUpdate(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	holder := NewTokenHolder(mount.Credential{Token: "tok"})
-	api, err := NewGoogleDocsHTTP(ctx, holder, ts.URL+"/", ts.Client())
-	if err != nil {
-		t.Fatal(err)
+	api := NewGoogleDocs(holder, ts.URL+"/", ts.Client())
+	if _, err := api.Get(ctx, "missing"); !errors.Is(err, ErrNotExist) {
+		t.Fatalf("Get missing = %v", err)
 	}
 	snap, err := api.Get(ctx, "doc1")
 	if err != nil || snap.DocumentID != "doc1" {
@@ -265,10 +271,10 @@ func TestGoogleDocs_httpGetBatchUpdate(t *testing.T) {
 	if err != nil || res.RevisionID != "R1" || !sawWriteControl {
 		t.Fatalf("BatchUpdate = %+v saw=%v err=%v", res, sawWriteControl, err)
 	}
-	if _, err := NewGoogleDocs(ctx, nil); err == nil {
-		t.Fatal("nil holder")
-	}
-	if _, err := NewGoogleDocsHTTP(ctx, nil, "", nil); err == nil {
-		t.Fatal("nil HTTP holder")
-	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("a client without a TokenHolder must panic")
+		}
+	}()
+	NewGoogleDocs(nil, "", nil)
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/ryanaldo34/tacklr/session/loop"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
+	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 func TestActivities_childTurnUsesParentSecrets(t *testing.T) {
@@ -31,14 +32,7 @@ func TestActivities_childTurnUsesParentSecrets(t *testing.T) {
 	open := vfs.Tree(vfs.At("docs", vfs.Local(dir)))
 	agent := tacklr.AgentOptions{Model: testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok", IsComplete: true}
-	}), MaxWindowSize: 8192,
-
-		OpenVFS: func(ctx context.Context, sessionID string, req vfs.Request) (*vfs.MountSession, error) {
-			if len(req.Bindings) > 0 {
-				gotToken = req.Bindings[0].Auth.Token
-			}
-			return open(ctx, sessionID, req)
-		}}
+	}), MaxWindowSize: 8192}
 	store := session.NewMemorySecretStorage()
 	parentAuth := session.AuthContext{Bindings: []mount.Binding{{
 		Provider: "local",
@@ -49,6 +43,12 @@ func TestActivities_childTurnUsesParentSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	acts := newActs(agent, session.NewMemoryEventLog(), true)
+	acts.Workspace = workspace.Config{Open: func(ctx context.Context, sessionID string, req vfs.Request) (*vfs.MountSession, error) {
+		if len(req.Bindings) > 0 {
+			gotToken = req.Bindings[0].Auth.Token
+		}
+		return open(ctx, sessionID, req)
+	}}
 	acts.Secrets = store
 	if _, err := acts.Commit(t.Context(), commitInput{
 		stepSession: stepSession{SessionID: "child", Identity: loop.Identity{
@@ -60,7 +60,7 @@ func TestActivities_childTurnUsesParentSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	if gotToken != "parent-tok" {
-		t.Fatalf("OpenVFS token=%q", gotToken)
+		t.Fatalf("workspace token=%q", gotToken)
 	}
 }
 

@@ -9,7 +9,7 @@ import (
 // does not implement it returns ErrNotSupported — the session never encodes.
 type documentBackend interface {
 	OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error)
-	WriteDocument(ctx context.Context, name string, doc Document) error
+	WriteDocument(ctx context.Context, name string, doc Document, reg *ContentRegistry) error
 }
 
 // EncodeTextual returns UTF-8 bytes for a Textual document.
@@ -34,9 +34,6 @@ func textualPayload(t Textual) (string, error) {
 func decodeProviderDocument(ctx context.Context, name string, fi FileInfo, data []byte, reg *ContentRegistry) (Document, error) {
 	if len(data) > MaxReadFileBytes {
 		return nil, errFileExceeds(MaxReadFileBytes)
-	}
-	if reg == nil {
-		reg = DefaultContentRegistry()
 	}
 	mt := normalizeMediaType(fi.MediaType)
 	if mt == "" {

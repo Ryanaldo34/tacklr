@@ -43,7 +43,10 @@ func (c *Conn) EstablishSecurity(securityContext Context) {
 type ProtocolEnv struct {
 	Client session.Client
 	Agent  tacklr.AgentOptions
-	Conn   *Conn
+	// Workspace says the runtime mounts a workspace (Server.Workspace), so
+	// clients may bind backends to it.
+	Workspace bool
+	Conn      *Conn
 	// Security is protocol-neutral. Implementations map wire credentials into
 	// this service and store the resulting Context on Conn.
 	Security *Service

@@ -6,37 +6,26 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-
-	"google.golang.org/api/docs/v1"
 )
 
-func docsRange(start, end int, tabID string) *docs.Range {
-	return &docs.Range{StartIndex: int64(start), EndIndex: int64(end), TabId: tabID}
+func docsRange(start, end int, tabID string) DocsRange {
+	return DocsRange{StartIndex: start, EndIndex: end, TabID: tabID}
 }
 
-func docsLocation(index int, tabID string) *docs.Location {
-	return &docs.Location{Index: int64(index), TabId: tabID}
+func docsLocation(index int, tabID string) DocsLocation {
+	return DocsLocation{Index: index, TabID: tabID}
 }
 
 func reqDelete(start, end int, tabID string) DocsRequest {
-	return DocsRequest{DeleteContentRange: &docs.DeleteContentRangeRequest{
-		Range: docsRange(start, end, tabID),
-	}}
+	return DocsRequest{DeleteContentRange: new(docsRange(start, end, tabID))}
 }
 
 func reqInsert(index int, tabID, text string) DocsRequest {
-	return DocsRequest{InsertText: &docs.InsertTextRequest{
-		Location: docsLocation(index, tabID),
-		Text:     text,
-	}}
+	return DocsRequest{InsertText: &DocsInsertText{Location: docsLocation(index, tabID), Text: text}}
 }
 
 func reqStyle(start, end int, tabID, named string) DocsRequest {
-	return DocsRequest{UpdateParagraphStyle: &docs.UpdateParagraphStyleRequest{
-		Range:          docsRange(start, end, tabID),
-		ParagraphStyle: &docs.ParagraphStyle{NamedStyleType: named},
-		Fields:         "namedStyleType",
-	}}
+	return DocsRequest{UpdateParagraphStyle: &DocsParagraphStyle{Range: docsRange(start, end, tabID), NamedStyleType: named}}
 }
 
 func reqBullets(start, end int, tabID, listType string) DocsRequest {
@@ -44,10 +33,7 @@ func reqBullets(start, end int, tabID, listType string) DocsRequest {
 	if listType == "ol" {
 		preset = "NUMBERED_DECIMAL_ALPHA_ROMAN"
 	}
-	return DocsRequest{CreateParagraphBullets: &docs.CreateParagraphBulletsRequest{
-		Range:        docsRange(start, end, tabID),
-		BulletPreset: preset,
-	}}
+	return DocsRequest{CreateParagraphBullets: &DocsBullets{Range: docsRange(start, end, tabID), BulletPreset: preset}}
 }
 
 func runHasMarks(r Run) bool {
@@ -56,21 +42,12 @@ func runHasMarks(r Run) bool {
 }
 
 func reqTextStyle(start, end int, tabID string, r Run) DocsRequest {
-	st := &docs.TextStyle{
+	return DocsRequest{UpdateTextStyle: &DocsTextStyle{
+		Range:         docsRange(start, end, tabID),
 		Bold:          r.Marks[MarkBold] == "true",
 		Italic:        r.Marks[MarkItalic] == "true",
 		Strikethrough: r.Marks[MarkStrike] == "true",
-	}
-	st.ForceSendFields = []string{"Bold", "Italic", "Strikethrough"}
-	if href := r.Marks[MarkHref]; href != "" {
-		st.Link = &docs.Link{Url: href}
-	} else {
-		st.NullFields = []string{"Link"}
-	}
-	return DocsRequest{UpdateTextStyle: &docs.UpdateTextStyleRequest{
-		Range:     docsRange(start, end, tabID),
-		TextStyle: st,
-		Fields:    "bold,italic,strikethrough,link",
+		Link:          r.Marks[MarkHref],
 	}}
 }
 
@@ -108,11 +85,7 @@ func appendInsertStyled(reqs []DocsRequest, idx int, tabID, named, prefix string
 }
 
 func reqInsertTable(index int, tabID string, rows, cols int) DocsRequest {
-	return DocsRequest{InsertTable: &docs.InsertTableRequest{
-		Location: docsLocation(index, tabID),
-		Rows:     int64(rows),
-		Columns:  int64(cols),
-	}}
+	return DocsRequest{InsertTable: &DocsInsertTable{Location: docsLocation(index, tabID), Rows: rows, Columns: cols}}
 }
 
 // mapReplaceBlock builds keep-newline text replace requests for one location.

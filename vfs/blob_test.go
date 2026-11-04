@@ -14,6 +14,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/azureblob"
 )
 
 const (
@@ -27,15 +28,15 @@ func TestBlob_rejectsBadConfig(t *testing.T) {
 	if _, err := vfs.Blob(nil, "")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("nil client")
 	}
-	if _, err := vfs.Blob(vfs.AzureBlob{}, "")(ctx, "s", mount.Binding{}); err == nil {
+	if _, err := vfs.Blob(azureblob.API{}, "")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("missing container")
 	}
-	if _, err := vfs.Blob(vfs.AzureBlob{}, "c")(ctx, "s", mount.Binding{
+	if _, err := vfs.Blob(azureblob.API{}, "c")(ctx, "s", mount.Binding{
 		Params: map[string]string{"prefix": "a/../b"},
 	}); err == nil {
 		t.Fatal("bad prefix")
 	}
-	var azure vfs.AzureBlob
+	var azure azureblob.API
 	if _, err := azure.Head(ctx, "c", "k"); err == nil {
 		t.Fatal("nil Azure Head")
 	}
@@ -53,7 +54,7 @@ func TestBlob_rejectsBadConfig(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := vfs.Blob(vfs.AzureBlob{}, "c")(canceled, "s", mount.Binding{}); !errors.Is(err, context.Canceled) {
+	if _, err := vfs.Blob(azureblob.API{}, "c")(canceled, "s", mount.Binding{}); !errors.Is(err, context.Canceled) {
 		t.Fatal("Open canceled")
 	}
 }
@@ -64,8 +65,8 @@ func TestMountSession_azureBlobAzurite(t *testing.T) {
 	client, container := startAzurite(ctx, t)
 
 	ms, err := vfs.Tree(
-		vfs.At("data", vfs.Blob(vfs.AzureBlob{Client: client}, container)),
-		vfs.At("ro", vfs.Blob(vfs.AzureBlob{Client: client}, container)).ReadOnly(),
+		vfs.At("data", vfs.Blob(azureblob.API{Client: client}, container)),
+		vfs.At("ro", vfs.Blob(azureblob.API{Client: client}, container)).ReadOnly(),
 	)(ctx, "sess-blob", vfs.Request{Bindings: []mount.Binding{
 		{Params: map[string]string{mount.ParamName: "data", "prefix": "runs/1"}},
 		{Params: map[string]string{mount.ParamName: "ro", "prefix": "readonly"}},
@@ -73,7 +74,6 @@ func TestMountSession_azureBlobAzurite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 
 	if err := ms.Route(ctx, "/workspace/data/hello.go").
 		WriteFile(ctx, []byte("package main\n")); err != nil {

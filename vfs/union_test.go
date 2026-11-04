@@ -38,7 +38,6 @@ func unionSession(t *testing.T, dirs ...string) *vfs.MountSession {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 	return ms
 }
 
@@ -52,7 +51,6 @@ func TestMountSession_unionMergesBackends(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 
 	specs := ms.Specs()
 	if len(specs) != 1 || specs[0].Point != "/workspace/skills" {
@@ -106,7 +104,7 @@ func TestMountSession_unionMergesBackends(t *testing.T) {
 	}
 
 	if _, err := ms.Route(ctx, "/workspace/skills/alpha/SKILL.md").
-		OpenDocument(ctx, nil); err != nil {
+		OpenDocument(ctx); err != nil {
 		t.Fatalf("OpenDocument local = %v", err)
 	}
 
@@ -201,7 +199,7 @@ func TestMountSession_unionMissingAndCanceled(t *testing.T) {
 	}
 
 	if _, err := ms.Route(ctx, "/workspace/skills/nope.md").
-		OpenDocument(ctx, nil); err == nil {
+		OpenDocument(ctx); err == nil {
 		t.Fatal("OpenDocument missing")
 	}
 

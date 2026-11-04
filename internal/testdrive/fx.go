@@ -11,11 +11,14 @@ import (
 	"mime/multipart"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ryanaldo34/tacklr/internal/google/docs"
 
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 
@@ -48,7 +51,7 @@ type FX struct {
 	seq       int
 
 	docs            map[string]*docState
-	DocsBatches     []vfs.DocsBatch
+	DocsBatches     []*docs.BatchUpdateDocumentRequest
 	docConflictLeft int
 	docBatchFail    bool
 	books           *vfs.MemorySheets
@@ -125,7 +128,7 @@ func (d *FX) FailMeta(status int) {
 	d.failMeta = status
 }
 
-// Open builds Drive, Docs, and Sheets SDK clients against this fixture over httptest.
+// Open builds Drive, Docs, and Sheets clients against this fixture over httptest.
 func Open(t testing.TB, fx *FX, holder *vfs.TokenHolder) vfs.Open {
 	t.Helper()
 	if holder == nil {
@@ -133,19 +136,7 @@ func Open(t testing.TB, fx *FX, holder *vfs.TokenHolder) vfs.Open {
 	}
 	srv := testhttp.New(t, fx)
 	base, hc := srv.URL+"/", srv.Client()
-	api, err := vfs.NewGoogleDriveHTTP(t.Context(), holder, base, hc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	docs, err := vfs.NewGoogleDocsHTTP(t.Context(), holder, base, hc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sheets, err := vfs.NewGoogleSheetsHTTP(t.Context(), holder, base, hc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return vfs.DriveWith(api, docs, sheets, holder)
+	return vfs.DriveWith(vfs.NewGoogleDrive(holder, base, hc), vfs.NewGoogleDocs(holder, base, hc), vfs.NewGoogleSheets(holder, base, hc), holder)
 }
 
 func (d *FX) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -211,17 +202,26 @@ func (d *FX) serveList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var files []map[string]any
+	var nodes []*Node
 	for _, n := range d.Nodes {
-		if n.Parent != parent {
-			continue
+		if n.Parent == parent && (name == "" || n.Meta.Name == name) {
+			nodes = append(nodes, n)
 		}
-		if name != "" && n.Meta.Name != name {
-			continue
-		}
+	}
+	slices.SortFunc(nodes, func(a, b *Node) int { return strings.Compare(a.Meta.ID, b.Meta.ID) })
+	// Drive may return fewer files than pageSize; the fake pages by two, so
+	// every listing follows nextPageToken.
+	from, _ := strconv.Atoi(r.URL.Query().Get("pageToken"))
+	to := min(from+2, len(nodes))
+	files := []map[string]any{}
+	for _, n := range nodes[from:to] {
 		files = append(files, fileJSON(n))
 	}
-	writeDriveJSON(w, http.StatusOK, map[string]any{"files": files})
+	page := map[string]any{"files": files}
+	if to < len(nodes) {
+		page["nextPageToken"] = strconv.Itoa(to)
+	}
+	writeDriveJSON(w, http.StatusOK, page)
 }
 
 func (d *FX) serveMeta(w http.ResponseWriter, id string) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"slices"
 	"strings"
 	"time"
@@ -13,7 +14,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // brainTools closes over the engine and the session's SearchContext (the
@@ -53,11 +53,10 @@ func (b brainTools) ref(ctx context.Context, scope brain.Scope, idOrPath, field 
 	if id, err := uuid.Parse(s); err == nil {
 		return id, nil
 	}
-	p, err := vfs.CleanPath(s)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("%s is neither a UUID nor a path: %w", field, err)
+	if !path.IsAbs(s) {
+		return uuid.Nil, fmt.Errorf("%s is neither a UUID nor a path: %q", field, s)
 	}
-	return b.engine.Resolve(ctx, scope, brain.Ref{Path: p})
+	return b.engine.Resolve(ctx, scope, brain.Ref{Path: path.Clean(s)})
 }
 
 // page returns the next page of the tool's previous call when more is set,

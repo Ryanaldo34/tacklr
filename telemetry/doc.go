@@ -1,12 +1,8 @@
-// Package telemetry configures OpenTelemetry for Tacklr hosts and process tools.
-//
-// Default export is the LGTM stack via one OTLP endpoint (Grafana Alloy or the
-// OpenTelemetry Collector → Tempo, Loki, Mimir/Prometheus, Grafana).
-//
-// Host API:
-//   - Config, Init — process-wide OTLP traces, metrics, and logs.
-//   - MeterProviderFromPrometheusRegisterer — Prometheus scrape
-//   - DefaultResource — service resource
+// Package telemetry is Tacklr's OpenTelemetry instrumentation: spans,
+// metrics and log events on the process-wide OpenTelemetry providers. It
+// depends only on the OpenTelemetry API, so it builds anywhere the harness
+// does. Package telemetry/export installs the SDK providers and exporters
+// (OTLP, Prometheus) a host process sends them to.
 //
 // Span starters, Instruments.Record*, attribute constants, and EmitEvent are
 // for the harness and the session package. Hosts must not start tacklr spans or

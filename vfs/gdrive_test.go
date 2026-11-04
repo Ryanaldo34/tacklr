@@ -10,9 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -37,7 +35,6 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 
 	specs := ms.Specs()
 	if len(specs) != 2 {
@@ -191,7 +188,6 @@ func TestMountSession_gdriveDirectoryAndWriteDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 
 	if _, err := ms.Route(ctx, "/workspace/contracts/acme").
 		ReadFile(ctx); err == nil {
@@ -209,7 +205,7 @@ func TestMountSession_gdriveDirectoryAndWriteDocument(t *testing.T) {
 	}
 
 	doc, err := ms.Route(ctx, "/workspace/contracts/acme/note.md").
-		OpenDocument(ctx, nil)
+		OpenDocument(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +238,7 @@ func TestDrive_validateRejectsFileID(t *testing.T) {
 	}
 }
 
-func TestGoogleDrive_sdkAdapter(t *testing.T) {
+func TestGoogleDrive_callsTheDriveAPI(t *testing.T) {
 	ctx := t.Context()
 	var sawAuth []string
 	mux := http.NewServeMux()
@@ -303,10 +299,7 @@ func TestGoogleDrive_sdkAdapter(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok-1"})
-	api, err := vfs.NewGoogleDriveHTTP(ctx, holder, ts.URL+"/", ts.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
+	api := vfs.NewGoogleDrive(holder, ts.URL+"/", ts.Client())
 
 	meta, err := api.GetMeta(ctx, "root1")
 	if err != nil || meta.ID != "root1" || !meta.IsDir {
@@ -375,6 +368,19 @@ func TestGoogleDrive_sdkAdapter(t *testing.T) {
 	if err != nil || created.ID != "newdoc" || !createdMetaOnly {
 		t.Fatalf("metadata-only create = %+v saw=%v err=%v", created, createdMetaOnly, err)
 	}
+
+	gone := httptest.NewServer(mux)
+	gone.Close()
+	unreachable := vfs.NewGoogleDrive(holder, gone.URL+"/", nil)
+	if _, err := unreachable.PutMedia(ctx, "bin1", "text/plain", strings.NewReader("x"), 1); err == nil {
+		t.Fatal("upload to a closed endpoint succeeded")
+	}
+	if _, err := unreachable.List(ctx, "root1"); err == nil {
+		t.Fatal("list on a closed endpoint succeeded")
+	}
+	if _, err := vfs.NewGoogleDrive(holder, "http://bad host/", nil).GetMeta(ctx, "root1"); err == nil {
+		t.Fatal("call to a malformed endpoint succeeded")
+	}
 }
 
 func mustZipHTML(html string) []byte {
@@ -437,34 +443,6 @@ func TestDrive_exportReadHonestStat(t *testing.T) {
 	}
 	if doc.MediaType() != "application/vnd.google-apps.document" {
 		t.Fatalf("mt = %s", doc.MediaType())
-	}
-
-	before := api.Exports
-	dir := t.TempDir()
-	if err := ms.FuseMount(dir); err != nil {
-		return
-	}
-	t.Cleanup(func() { _ = ms.Close() })
-	host := filepath.Join(dir, "workspace", "contracts", "Spec")
-	hst, err := os.Stat(host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hst.Size() != 0 {
-		t.Fatalf("FUSE getattr size=%d want 0", hst.Size())
-	}
-	if api.Exports != before {
-		t.Fatalf("getattr exported (exports %d → %d)", before, api.Exports)
-	}
-	got, err := os.ReadFile(host)
-	if err != nil || !strings.Contains(string(got), "<h1>Spec</h1>") {
-		t.Fatalf("FUSE cat = %q err=%v", got, err)
-	}
-	if err := os.WriteFile(host, []byte("nope"), 0o644); err == nil {
-		t.Fatal("projected Docs kernel write: want EROFS")
-	} else if !errors.Is(err, syscall.EROFS) && !errors.Is(err, os.ErrPermission) &&
-		!strings.Contains(err.Error(), "read-only") && !strings.Contains(err.Error(), "EROFS") {
-		t.Fatalf("projected Docs write err = %v", err)
 	}
 }
 
@@ -913,7 +891,6 @@ func mountDrive(t *testing.T, api *testdrive.FX, writable bool) *vfs.MountSessio
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ms.Close() })
 	return ms
 }
 
@@ -993,34 +970,6 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	if !strings.Contains(text, "# Sheet: Budget") || !strings.Contains(text, "42") ||
 		strings.Contains(text, "<table>") || strings.Contains(text, "bold") {
 		t.Fatalf("projection = %s", text)
-	}
-
-	dir := t.TempDir()
-	if err := ms.FuseMount(dir); err != nil {
-		return
-	}
-	t.Cleanup(func() { _ = ms.Close() })
-	wst, err := os.Stat(filepath.Join(dir, "workspace"))
-	if err != nil || !wst.IsDir() {
-		t.Fatalf("getattr /workspace = %+v err=%v", wst, err)
-	}
-	host := filepath.Join(dir, "workspace", "contracts", "Budget")
-	hst, err := os.Stat(host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hst.Size() != 0 {
-		t.Fatalf("FUSE getattr size=%d want 0", hst.Size())
-	}
-	got, err := os.ReadFile(host)
-	if err != nil || !strings.Contains(string(got), "# Sheet: Budget") || !strings.Contains(string(got), "42") {
-		t.Fatalf("FUSE cat = %q err=%v", got, err)
-	}
-	if err := os.WriteFile(host, []byte("nope"), 0o644); err == nil {
-		t.Fatal("kernel write: want EROFS")
-	} else if !errors.Is(err, syscall.EROFS) && !errors.Is(err, os.ErrPermission) &&
-		!strings.Contains(err.Error(), "read-only") && !strings.Contains(err.Error(), "EROFS") {
-		t.Fatalf("kernel write err = %v", err)
 	}
 }
 

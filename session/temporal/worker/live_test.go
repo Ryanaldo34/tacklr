@@ -31,11 +31,13 @@ import (
 
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
-	"github.com/ryanaldo34/tacklr/telemetry"
+	"github.com/ryanaldo34/tacklr/telemetry/export"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
+	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 var liveSeq atomic.Int64
@@ -99,12 +101,12 @@ func (s *liveStack) RestartWorker(t *testing.T) {
 var spans = tracetest.NewSpanRecorder()
 
 func TestMain(m *testing.M) {
-	shutdown, err := telemetry.Init(context.Background(), telemetry.Config{})
+	shutdown, err := export.Init(context.Background(), export.Config{})
 	if err != nil {
 		panic(err)
 	}
 	// As a host does: Temporal tracing needs its replay-safe tracer provider.
-	if err := telemetry.ReinstallTracer(context.Background(), func(opts ...sdktrace.TracerProviderOption) (trace.TracerProvider, func(context.Context) error) {
+	if err := export.ReinstallTracer(context.Background(), func(opts ...sdktrace.TracerProviderOption) (trace.TracerProvider, func(context.Context) error) {
 		tp := temporalotel.NewReplaySafeTracerProvider(append(opts, sdktrace.WithSpanProcessor(spans))...)
 		return tp, tp.Shutdown
 	}); err != nil {
@@ -189,7 +191,9 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 			IsComplete: true,
 		}
 	})
-	stack := newLiveStack(t, liveAgent(t, model, tacklr.AgentOptions{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}))
+	stack := newLiveStack(t, liveAgent(t, model, tacklr.AgentOptions{}), func(cfg *Config) {
+		cfg.Workspace = workspace.Config{Open: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}
+	})
 	id, err := stack.Client.CreateSession(ctx, session.CreateSession{})
 	if err != nil {
 		t.Fatal(err)
@@ -250,6 +254,64 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 	})
 }
 
+// TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace: with a FuseRoot the
+// worker mounts the session's workspace on the host and the agent gets
+// run_command there. An empty command gets a correction; a command reads
+// the workspace.
+func TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace(t *testing.T) {
+	// Arrange
+	ctx := t.Context()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-shell"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runCommand := func(id, command string) tacklr.LLMResponseChunk {
+		return tacklr.LLMResponseChunk{
+			Type:       session.EventFunctionCall,
+			ToolCalls:  []message.ToolCall{{ID: id, CallID: id, Name: "run_command", Arguments: fmt.Sprintf(`{"command":%q}`, command)}},
+			IsComplete: true,
+		}
+	}
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		last := lastMsg(msgs)
+		switch {
+		case last.Role != message.RoleTool:
+			ch <- runCommand("empty", "  ")
+		case strings.Contains(last.Content, "command is required"):
+			ch <- runCommand("cat", "cat workspace/docs/hello.txt")
+		default:
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: last.Content, IsComplete: true}
+		}
+	})
+	agent := liveAgent(t, model, tacklr.AgentOptions{AllowTools: []string{"run_command"}})
+	stack := newLiveStack(t, agent, func(cfg *Config) {
+		cfg.Workspace = workspace.Config{Open: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}
+		cfg.FuseRoot = t.TempDir()
+	})
+	id, err := stack.Client.CreateSession(ctx, session.CreateSession{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := stack.Client.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Close() })
+
+	// Act
+	if err := stack.Client.Prompt(ctx, id, session.Prompt{Text: "look"}); err != nil {
+		t.Fatal(err)
+	}
+	got := waitTurn(t, stack.Client, id, sub, 60*time.Second)
+
+	// Assert
+	if !slices.ContainsFunc(got, func(ev session.Event) bool {
+		return ev.Type == session.EventMessage && strings.Contains(ev.Content, "exit=0") && strings.Contains(ev.Content, "from-shell")
+	}) {
+		t.Fatalf("want the shell's read of the workspace, got %+v", got)
+	}
+}
+
 // TestLive_historyHoldsNoSecretsOrToolResults: a session whose prompt binds a
 // VFS token and an MCP header, and whose reply makes four calls with 100 KB
 // results, keeps neither the secrets nor the results in history, which
@@ -281,7 +343,7 @@ func TestLive_historyHoldsNoSecretsOrToolResults(t *testing.T) {
 	}) (string, error) {
 		return result(args.N), nil
 	}})
-	stack := newLiveStack(t, liveAgent(t, model, tacklr.AgentOptions{Tools: []*tacklr.Tool{big}, MaxWindowSize: 1 << 20}))
+	stack := newLiveStack(t, liveAgent(t, model, tacklr.AgentOptions{Tools: []*tacklr.Tool{big}, MaxWindowSize: 1 << 20, MCP: mcp.Client{}}))
 	id, err := stack.Client.CreateSession(ctx, session.CreateSession{
 		MCPServers: []session.MCPServer{{
 			Name: "remote", Type: session.MCPHTTP, URL: "https://example.test/mcp",

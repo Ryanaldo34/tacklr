@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
+	"github.com/ryanaldo34/tacklr/workspace"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/contrib/workflowstreams"
@@ -24,7 +25,7 @@ import (
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/session/loop"
 	"github.com/ryanaldo34/tacklr/telemetry"
-	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/fuse"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
@@ -62,7 +63,8 @@ func activityError(ctx context.Context, err error) error {
 type activities struct {
 	Agent          tacklr.AgentOptions
 	Store          session.Store
-	Projection     vfs.Projection
+	Workspace      workspace.Config
+	FuseRoot       string
 	Fallback       session.EventLog
 	DisableStreams bool
 	Secrets        session.SecretStorage
@@ -248,7 +250,7 @@ func (a *activities) harness(ctx context.Context, in stepSession) (harnessSpec, 
 		Jobs       []string
 	}{in.Identity.Specialist, bindings, in.MCPServers, jobs})
 	sum := sha256.Sum256(key)
-	return harnessSpec{ID: in.SessionID, Key: hex.EncodeToString(sum[:]), Build: func(ctx context.Context) (*tacklr.Harness, *vfs.MountSession, error) {
+	return harnessSpec{ID: in.SessionID, Key: hex.EncodeToString(sum[:]), Build: func(ctx context.Context) (*tacklr.Harness, *fuse.Server, error) {
 		spec := a.Agent
 		if in.Identity.Specialist != "" {
 			over, err := overlaySpecialist(spec, in.Identity.Specialist)
@@ -257,7 +259,7 @@ func (a *activities) harness(ctx context.Context, in stepSession) (harnessSpec, 
 			}
 			spec = over
 		}
-		return constructTurn(ctx, spec, string(in.SessionID), bindings, a.Projection, in.MCPServers, jobs)
+		return constructTurn(ctx, spec, a.Workspace, a.FuseRoot, string(in.SessionID), bindings, in.MCPServers, jobs)
 	}}, nil
 }
 

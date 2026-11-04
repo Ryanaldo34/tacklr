@@ -657,7 +657,7 @@ same as any other tool client. Isolated VFS with no Brain: file tools only.
 | `link` | You are asserting or removing a relationship (graph only) | `Engine.Link` |
 | `read` / `write` | You are editing a workspace file | VFS |
 | `index_file` / `unindex` | You must (un)mirror an artifact | `IndexPath` |
-| `run_command` | You need live `ls` / `fd` / `find` / `rg` on the FUSE tree | Host shell, cwd = `HostDir` |
+| `run_command` | You need live `ls` / `fd` / `find` / `rg` on the FUSE tree | Host shell (package `shell`), cwd = the FUSE mount |
 
 `search`, `open` and `related` take an optional `namespace` that narrows the
 host namespace for one call. `save` is registered only when
@@ -758,8 +758,9 @@ if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 //   BrainWriteKinds: the kinds the save tool may write (none: no save tool)
 //   SearchNamespace:  from brain.ParseNamespace("org", orgID) (required with Brain)
 //   SearchPrincipals: the caller's user and group ids (checked against Readers)
-//   IndexReaders:     a file's source ACL for index_file (optional)
-//   OpenVFS:         workspace files only. Knowledge is not a mount.
+// worker.Config.Workspace (package workspace):
+//   Open:         workspace files only. Knowledge is not a mount.
+//   IndexReaders: a file's source ACL for index_file (optional)
 //
 // A turn with Brain, a workspace, and SearchNamespace registers index_file
 // and unindex. It does not re-index writes or subscribe to Drive or bucket
@@ -812,7 +813,7 @@ search. `MemoryStore`, `postgres.Store` and `helixgraph.Graph` pass them.
 | Empty namespace | Every Engine and store call fails with `ErrInvalid`. `AgentOptions.Validate` rejects `Brain` without `SearchNamespace`. |
 | Wrong namespace | `Get` / search look like not found. Graph ids that fail hydrate are dropped. A coarser scope (fewer attrs) in the same tenant sees objects with extra attrs; another tenant sees nothing. |
 | Id held by another tenant | `Save` / `PutTree` / `SoftDelete` return `ErrNotFound` and change nothing. |
-| Object with `Readers` | Visible only to a scope whose `Principals` include one of them. `vfsindex.MountIndexer.Readers` (or `AgentOptions.IndexReaders`) sets them from source sharing; a sharing change re-indexes the file. The graph node carries the readers too. For a caller who cannot read the object, the graph does not rank it or an edge that touches it, and `related` does not walk through it. A tenant-wide search still ranks from the index while at most `helixgraph.Options.MaxOverfetch` (256) such objects or edges are in the tenant; past that, Helix ranks within the readable candidates. |
+| Object with `Readers` | Visible only to a scope whose `Principals` include one of them. `vfsindex.MountIndexer.Readers` (or `workspace.Config.IndexReaders`) sets them from source sharing; a sharing change re-indexes the file. The graph node carries the readers too. For a caller who cannot read the object, the graph does not rank it or an edge that touches it, and `related` does not walk through it. A tenant-wide search still ranks from the index while at most `helixgraph.Options.MaxOverfetch` (256) such objects or edges are in the tenant; past that, Helix ranks within the readable candidates. |
 | Re-index fails midway | `PutTree` stages new parts, which no read or search sees, and swaps them in with one short commit, so the previous version stays. `PurgeDeleted` drops staged parts that never committed. |
 | Two writes of one tree | The commit that reads an older tree revision returns `ErrConflict` and changes nothing. |
 | Embedding model change | A backend's vector search only compares rows from its `Embedder.Model()`. Rows from the old model drop out of the dense channel, and the next re-index embeds those parts again. |
@@ -855,7 +856,7 @@ search. `MemoryStore`, `postgres.Store` and `helixgraph.Graph` pass them.
 | Artifact indexer | `vfsindex/indexer.go` |
 | Index policy + bridge | `vfsindex/policy.go`, `vfsindex/bridge.go` |
 | Knowledge tools | `tools_brain.go` |
-| Index tools | `tools_vfsindex.go` |
+| Index tools | `workspace/index.go` |
 
 Tests are outcome-oriented integration tests (in-memory Engine + local VFS
 jail). We assert what *should* happen (write visible as an object, related

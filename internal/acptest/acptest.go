@@ -15,18 +15,27 @@ import (
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 // Runtime is the session client and agent an ACP request runs against.
+// Workspace says the sessions have a workspace, so clients may bind to it.
 type Runtime struct {
-	Client session.Client
-	Agent  tacklr.AgentOptions
+	Client    session.Client
+	Agent     tacklr.AgentOptions
+	Workspace bool
 }
 
-// NewRuntime runs spec on the live Temporal stack. A nil spec.Model takes
-// model, else a model that sends nothing; the window and system prompt get
-// test defaults.
+// NewRuntime runs spec on the live Temporal stack, with no workspace. A nil
+// spec.Model takes model, else a model that sends nothing; the window and
+// system prompt get test defaults.
 func NewRuntime(t *testing.T, model tacklr.Model, spec tacklr.AgentOptions) *Runtime {
+	t.Helper()
+	return NewWorkspaceRuntime(t, model, spec, workspace.Config{})
+}
+
+// NewWorkspaceRuntime is NewRuntime with ws as the agent's workspace.
+func NewWorkspaceRuntime(t *testing.T, model tacklr.Model, spec tacklr.AgentOptions, ws workspace.Config) *Runtime {
 	t.Helper()
 	if spec.Model == nil {
 		spec.Model = model
@@ -40,7 +49,7 @@ func NewRuntime(t *testing.T, model tacklr.Model, spec tacklr.AgentOptions) *Run
 	if spec.SystemPrompt == "" {
 		spec.SystemPrompt = "test prompt"
 	}
-	return &Runtime{Client: livesess.Runtime(t, spec), Agent: spec}
+	return &Runtime{Client: livesess.Runtime(t, spec, ws), Agent: spec, Workspace: ws.Open != nil}
 }
 
 // Serve runs one ACP request body against r through proto and returns what
@@ -48,7 +57,7 @@ func NewRuntime(t *testing.T, model tacklr.Model, spec tacklr.AgentOptions) *Run
 func Serve(t *testing.T, r *Runtime, proto server.Protocol, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	env := server.ProtocolEnv{Client: r.Client, Agent: r.Agent, Conn: &server.Conn{Writer: acp.HTTPWriter(rec)}}
+	env := server.ProtocolEnv{Client: r.Client, Agent: r.Agent, Workspace: r.Workspace, Conn: &server.Conn{Writer: acp.HTTPWriter(rec)}}
 	_ = proto.HandleInbound(t.Context(), env, []byte(body))
 	return rec
 }

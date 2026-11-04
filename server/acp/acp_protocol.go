@@ -137,13 +137,8 @@ func (p *acpProtocol) handleACPWebSocket(env server.ProtocolEnv, w http.Response
 				Security:    &securityContext,
 				SetSecurity: acpConn.SetSecurityContext,
 			}
-			reqEnv := server.ProtocolEnv{
-				Client:      env.Client,
-				Agent:       env.Agent,
-				Conn:        reqConn,
-				Security:    env.Security,
-				Connections: env.Connections,
-			}
+			reqEnv := env
+			reqEnv.Conn = reqConn
 			if err := p.HandleInbound(ctx, reqEnv, body); err != nil {
 				slog.Debug("acp websocket inbound", "error", err, "connection_id", acpConn.ID)
 			}

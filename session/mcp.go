@@ -45,11 +45,31 @@ type MCPCredentialResolver interface {
 	ResolveMCP(context.Context, string) (MCPCredentials, error)
 }
 
+// MCPClient connects a harness to its MCP servers. Package mcp is the
+// implementation; a harness with MCP servers requires one.
+type MCPClient interface {
+	// Connect connects to each server and returns the tools of those that
+	// answered, and a func that closes the connections. A server that
+	// fails is logged and skipped.
+	Connect(ctx context.Context, servers []MCPServer) ([]MCPTool, func())
+}
+
+// MCPTool is one tool an MCP server offers.
+type MCPTool struct {
+	// Server is the name of the server, the tool's namespace.
+	Server      string
+	Name        string
+	Description string
+	// Schema is the tool's JSON Schema for its arguments.
+	Schema map[string]any
+	// Call runs the tool on the server and returns its text result.
+	Call func(ctx context.Context, args map[string]any) (string, error)
+}
+
 // MCPServer is one MCP server a session connects to, for the harness or
 // the ACP session lifecycle. It matches the ACP mcpServers wire shape: a stdio server
 // sets Command/Args/Env with no Type, while HTTP and SSE servers set Type plus
-// URL/Headers. Connection and tool discovery are handled internally by the
-// harness — library consumers only supply configs.
+// URL/Headers. The harness connects through AgentOptions.MCP.
 type MCPServer struct {
 	// Name is a human-readable identifier for the server. It is used as the
 	// tool namespace so that tools from this server are grouped together and

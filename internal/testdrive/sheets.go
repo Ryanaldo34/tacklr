@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"google.golang.org/api/sheets/v4"
+	"github.com/ryanaldo34/tacklr/internal/google/sheets"
 
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -132,7 +132,7 @@ func (d *FX) serveSheetsBatch(w http.ResponseWriter, r *http.Request, id string)
 			fmt = formatFromSheets(call.RepeatCell.Cell.UserEnteredFormat)
 		}
 		req.Requests = append(req.Requests, vfs.SheetsRepeatCell{
-			SheetID:  rng.SheetId,
+			SheetID:  rng.SheetID,
 			StartRow: int(rng.StartRowIndex), StartCol: int(rng.StartColumnIndex),
 			EndRow: int(rng.EndRowIndex), EndCol: int(rng.EndColumnIndex),
 			Format: fmt,
@@ -308,13 +308,13 @@ func formatFromSheets(f *sheets.CellFormat) vfs.CellFormat {
 	}
 	if tf := f.TextFormat; tf != nil {
 		out.Bold, out.Italic, out.Strike, out.Underline = tf.Bold, tf.Italic, tf.Strikethrough, tf.Underline
-		if tf.ForegroundColorStyle != nil && tf.ForegroundColorStyle.RgbColor != nil {
-			c := tf.ForegroundColorStyle.RgbColor
+		if tf.ForegroundColorStyle != nil && tf.ForegroundColorStyle.RGBColor != nil {
+			c := tf.ForegroundColorStyle.RGBColor
 			out.Color = vfs.FormatRGB(uint8(c.Red*255+0.5), uint8(c.Green*255+0.5), uint8(c.Blue*255+0.5))
 		}
 	}
-	if f.BackgroundColorStyle != nil && f.BackgroundColorStyle.RgbColor != nil {
-		c := f.BackgroundColorStyle.RgbColor
+	if f.BackgroundColorStyle != nil && f.BackgroundColorStyle.RGBColor != nil {
+		c := f.BackgroundColorStyle.RGBColor
 		out.Fill = vfs.FormatRGB(uint8(c.Red*255+0.5), uint8(c.Green*255+0.5), uint8(c.Blue*255+0.5))
 	}
 	out.Align = strings.ToLower(f.HorizontalAlignment)
@@ -361,8 +361,8 @@ func borderFromReq(b *sheets.Borders) *vfs.CellBorder {
 			st = "double"
 		}
 		col := ""
-		if e.b.ColorStyle != nil && e.b.ColorStyle.RgbColor != nil {
-			c := e.b.ColorStyle.RgbColor
+		if e.b.ColorStyle != nil && e.b.ColorStyle.RGBColor != nil {
+			c := e.b.ColorStyle.RGBColor
 			col = vfs.FormatRGB(uint8(c.Red*255+0.5), uint8(c.Green*255+0.5), uint8(c.Blue*255+0.5))
 		}
 		if style == "" {
