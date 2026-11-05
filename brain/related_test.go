@@ -14,6 +14,10 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
+// TestRelated_listsARecordsChildrenOrAPartsParentAndNearbyParts: Related lists
+// a record's parts in order and in pages, or a part's record and the parts
+// next to it; a graph relation with no graph lists nothing; an unknown id is
+// not found, no id is invalid, and a cancelled call stops.
 func TestRelated_listsARecordsChildrenOrAPartsParentAndNearbyParts(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()

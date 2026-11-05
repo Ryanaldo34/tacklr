@@ -47,15 +47,21 @@ func idsOf(objs []brain.RichObject) []uuid.UUID {
 	return out
 }
 
-type errString string
+// embedFunc is the host's embedding provider, the lowest-level client of a
+// store. Tacklr ships no embedder, so a test gives fn the provider's answer.
+type embedFunc func(ctx context.Context, texts []string) ([][]float32, error)
 
-func (e errString) Error() string { return string(e) }
-
-// failEmbedder fails every embed.
-type failEmbedder struct{}
-
-func (failEmbedder) Embed(context.Context, []string) ([][]float32, error) {
-	return nil, errString("embed down")
+func (f embedFunc) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	return f(ctx, texts)
 }
 
-func (failEmbedder) Model() string { return "fail-model" }
+func (embedFunc) Model() string { return "test-model" }
+
+// repeatVector returns n copies of v, one per embedded text.
+func repeatVector(v []float32, n int) [][]float32 {
+	out := make([][]float32, n)
+	for i := range out {
+		out[i] = v
+	}
+	return out
+}

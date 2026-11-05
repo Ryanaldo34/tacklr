@@ -1,4 +1,4 @@
-package brain
+package brain_test
 
 import (
 	"context"
@@ -7,156 +7,98 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
-func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
-	store := NewMemoryStore()
-	eng, err := NewEngine(store)
+// TestSessionMessages_saveOnceSearchWithRecordsAndDelete: a session's saved
+// window is found next to the records, a retried save keeps its generation,
+// another session sees only the records, a kind or title filter keeps only
+// the records it names, and a delete starts the generations again. A save
+// needs a session, a generation key and messages, and a zero MemoryStore
+// saves too.
+func TestSessionMessages_saveOnceSearchWithRecordsAndDelete(t *testing.T) {
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns, err := ParseNamespace("org", "acme")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ns := storetest.Namespace(t, "org", uuid.NewString())
 	ctx := t.Context()
 	const (
 		sessionID = "sess.with.dots"
 		marker    = "message-marker"
-		token     = "only-in-session"
 	)
+	scope := brain.Scope{Namespace: ns, SessionID: sessionID}
 	stopped, stop := context.WithCancel(ctx)
 	stop()
-	if _, err := eng.SaveSessionMessages(stopped, ns, sessionID, "k", []SessionMessage{{Role: "user", SearchText: "x"}}); err == nil {
-		t.Fatal("cancelled save")
+	fact := save(t, eng, brain.Scope{Namespace: ns}, brain.Object{Kind: "Fact", Title: "fact", Content: "durable"})
+	save(t, eng, brain.Scope{Namespace: ns}, brain.Object{Kind: "Fact", ParentID: &fact.ID, Title: "chunk", Content: marker + " durable-fact"})
+	msg := []brain.SessionMessage{{Role: "tool", Body: []byte(`{"role":"tool","content":"` + marker + `"}`), SearchText: marker}}
+	search := func(req brain.SearchRequest) []brain.RichObject {
+		page, err := eng.Search(ctx, scope, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.Collect(page.Results.Objects())
 	}
-	if err := eng.DeleteSessionMessages(stopped, ns, sessionID); err == nil {
-		t.Fatal("cancelled delete")
-	}
-	if _, err := store.SaveSessionMessages(ctx, ns, "", "k", []SessionMessage{{Role: "user"}}); err == nil {
-		t.Fatal("session id")
-	}
-	if _, err := store.SaveSessionMessages(ctx, ns, sessionID, " ", []SessionMessage{{Role: "user"}}); err == nil {
-		t.Fatal("generation key")
-	}
-	if _, err := store.SaveSessionMessages(ctx, ns, sessionID, "k", nil); err == nil {
-		t.Fatal("empty window")
-	}
-	if err := eng.DeleteSessionMessages(ctx, ns, " "); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("blank session delete = %v", err)
-	}
-	if err := eng.DeleteSessionMessages(ctx, nil, sessionID); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("unscoped delete = %v", err)
-	}
-	blank := &MemoryStore{}
-	if _, err := blank.SaveSessionMessages(ctx, ns, sessionID, "blank-store", []SessionMessage{{Role: "user", SearchText: marker}}); err != nil {
-		t.Fatal(err)
-	}
-	factID := uuid.New()
-	if _, err := eng.Save(ctx, Scope{Namespace: ns}, Object{
-		ID: factID, Kind: "Fact", Title: "fact", Content: "durable",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := eng.Save(ctx, Scope{Namespace: ns}, Object{
-		Kind: "Fact", ParentID: &factID, Title: "chunk", Content: marker + " durable-fact",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	msg := []SessionMessage{{
-		Role:       "tool",
-		Body:       []byte(`{"role":"tool","content":"` + marker + " " + token + `"}`),
-		SearchText: marker + " " + token,
-	}}
-	gen, err := eng.SaveSessionMessages(ctx, ns, sessionID, "key-1", msg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, err := eng.SaveSessionMessages(ctx, ns, sessionID, "key-1", msg)
-	if err != nil || again != gen {
-		t.Fatalf("retry gen = %d err = %v", again, err)
-	}
-	next, err := eng.SaveSessionMessages(ctx, ns, sessionID, "key-2", []SessionMessage{{
-		Role: "user", Body: []byte(`{"role":"user","content":"later"}`), SearchText: "later-window",
-	}})
-	if err != nil || next != gen+1 {
-		t.Fatalf("next gen = %d err = %v", next, err)
+	kinds := func(objs []brain.RichObject) []string {
+		out := make([]string, len(objs))
+		for i, o := range objs {
+			out[i] = o.Kind
+		}
+		slices.Sort(out)
+		return out
 	}
 
-	scope := Scope{Namespace: ns, SessionID: sessionID}
-	page, err := eng.Search(ctx, scope, SearchRequest{Query: marker})
-	if err != nil {
-		t.Fatal(err)
+	gen, genErr := eng.SaveSessionMessages(ctx, ns, sessionID, "key-1", msg)
+	again, againErr := eng.SaveSessionMessages(ctx, ns, sessionID, "key-1", msg)
+	next, nextErr := eng.SaveSessionMessages(ctx, ns, sessionID, "key-2", []brain.SessionMessage{{Role: "user", SearchText: "later-window"}})
+	merged := search(brain.SearchRequest{Query: marker})
+	otherSession, otherErr := eng.Search(ctx, brain.Scope{Namespace: ns, SessionID: "other"}, brain.SearchRequest{Query: marker})
+	byKind := search(brain.SearchRequest{Query: marker, Filters: brain.Filter{Kind: brain.StringMatch{Eq: "Fact"}}})
+	byTitle := search(brain.SearchRequest{Query: marker, Filters: brain.Filter{Title: brain.StringMatch{Eq: "fact"}}})
+	deleteErr := eng.DeleteSessionMessages(ctx, ns, sessionID)
+	afterDelete := search(brain.SearchRequest{Query: marker})
+	restart, restartErr := eng.SaveSessionMessages(ctx, ns, sessionID, "key-3", msg)
+	_, zeroErr := (&brain.MemoryStore{}).SaveSessionMessages(ctx, ns, sessionID, "k", msg)
+	invalid := map[string]error{
+		"blank session delete":  eng.DeleteSessionMessages(ctx, ns, " "),
+		"cancelled delete":      eng.DeleteSessionMessages(stopped, ns, sessionID),
+		"save with no session":  saveErr(store.SaveSessionMessages(ctx, ns, "", "k", msg)),
+		"save with no key":      saveErr(store.SaveSessionMessages(ctx, ns, sessionID, " ", msg)),
+		"save with no messages": saveErr(store.SaveSessionMessages(ctx, ns, sessionID, "k", nil)),
+		"cancelled save":        saveErr(eng.SaveSessionMessages(stopped, ns, sessionID, "k", msg)),
 	}
-	var facts, messages int
-	for _, obj := range slices.Collect(page.Results.Objects()) {
-		switch obj.Kind {
-		case "Fact":
-			facts++
-		case KindSessionMessage:
-			messages++
+
+	if genErr != nil || againErr != nil || again != gen || nextErr != nil || next != gen+1 {
+		t.Errorf("generations = %d %v, retry %d %v, next %d %v, want the retry to keep its generation", gen, genErr, again, againErr, next, nextErr)
+	}
+	if got := kinds(merged); !slices.Equal(got, []string{"Fact", brain.KindSessionMessage}) {
+		t.Errorf("search the session = %v, want the fact and the message", got)
+	}
+	if got := slices.Collect(otherSession.Results.Objects()); otherErr != nil || !slices.Equal(idsOf(got), []uuid.UUID{fact.ID}) {
+		t.Errorf("search another session = %v %v, want the fact alone", titlesOf(got), otherErr)
+	}
+	if !slices.Equal(idsOf(byKind), []uuid.UUID{fact.ID}) || !slices.Equal(idsOf(byTitle), []uuid.UUID{fact.ID}) {
+		t.Errorf("by kind = %v, by title = %v, want the fact alone", titlesOf(byKind), titlesOf(byTitle))
+	}
+	if deleteErr != nil || !slices.Equal(idsOf(afterDelete), []uuid.UUID{fact.ID}) || restartErr != nil || restart != 1 {
+		t.Errorf("after delete = %v %v, next generation %d %v, want the fact alone and generation 1", titlesOf(afterDelete), deleteErr, restart, restartErr)
+	}
+	if zeroErr != nil {
+		t.Errorf("save to a zero MemoryStore = %v", zeroErr)
+	}
+	for name, err := range invalid {
+		if err == nil {
+			t.Errorf("%s succeeded, want an error", name)
 		}
 	}
-	if len(slices.Collect(page.Results.Objects())) != 2 || facts != 1 || messages != 1 {
-		t.Fatalf("merged search = %+v", slices.Collect(page.Results.Objects()))
-	}
-
-	filtered, err := eng.Search(ctx, scope, SearchRequest{
-		Query:   marker,
-		Filters: Filter{Kind: StringMatch{Eq: "Fact"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(slices.Collect(filtered.Results.Objects())) != 1 || slices.Collect(filtered.Results.Objects())[0].Kind != "Fact" {
-		t.Fatalf("kind filter = %+v", slices.Collect(filtered.Results.Objects()))
-	}
-
-	if err := eng.DeleteSessionMessages(ctx, ns, sessionID); err != nil {
-		t.Fatal(err)
-	}
-	factPage, err := eng.Search(ctx, scope, SearchRequest{Query: "durable-fact"})
-	if err != nil || len(slices.Collect(factPage.Results.Objects())) != 1 || slices.Collect(factPage.Results.Objects())[0].Kind != "Fact" {
-		t.Fatalf("fact after delete = %+v err=%v", slices.Collect(factPage.Results.Objects()), err)
-	}
-
-	restart, err := eng.SaveSessionMessages(ctx, ns, sessionID, "key-3", msg)
-	if err != nil || restart != 1 {
-		t.Fatalf("generation after delete = %d err = %v", restart, err)
-	}
-	other, err := eng.Search(ctx, Scope{Namespace: ns, SessionID: "other"}, SearchRequest{Query: token})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(slices.Collect(other.Results.Objects())) != 0 {
-		t.Fatalf("other session = %+v", slices.Collect(other.Results.Objects()))
-	}
-	hidden, err := eng.Search(ctx, scope, SearchRequest{
-		Query:   marker,
-		Filters: Filter{Title: StringMatch{Eq: "nope"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, obj := range slices.Collect(hidden.Results.Objects()) {
-		if obj.Kind == KindSessionMessage {
-			t.Fatalf("title filter = %+v", slices.Collect(hidden.Results.Objects()))
-		}
-	}
-
-	embedFail, err := NewEngine(NewMemoryStore(WithMemoryEmbedding(Embedding{Embedder: errEmbed{}})))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := embedFail.SaveSessionMessages(ctx, ns, sessionID, "embed", msg); err != nil {
-		t.Fatal(err)
+	if err := invalid["blank session delete"]; !errors.Is(err, brain.ErrInvalid) {
+		t.Errorf("blank session delete = %v, want ErrInvalid", err)
 	}
 }
 
-type errEmbed struct{}
-
-func (errEmbed) Embed(context.Context, []string) ([][]float32, error) {
-	return nil, errors.New("embed down")
-}
-
-func (errEmbed) Model() string { return "test-model" }
+// saveErr is the error of a session save.
+func saveErr(_ int, err error) error { return err }

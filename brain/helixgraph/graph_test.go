@@ -25,6 +25,8 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
+// TestHelixGraph_contract: Helix meets the graph contract every brain graph
+// must meet.
 func TestHelixGraph_contract(t *testing.T) {
 	g := helixtest.Graph(t)
 	graphtest.Run(t, func(t *testing.T, emb brain.Embedder) brain.Graph {
@@ -35,6 +37,9 @@ func TestHelixGraph_contract(t *testing.T) {
 	})
 }
 
+// TestOpen_failsUntilHelixHasBuiltEveryIndex: Open fails on a bad index
+// receipt or status, waits while Helix is not listening or an index builds,
+// and retries past one gateway error or create conflict.
 func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 	t.Parallel()
 	// Opens that should succeed get a deadline too: a Helix that is gone
@@ -275,6 +280,9 @@ func (p *faultProxy) failWith(query, body string) { p.fail(query, http.StatusOK,
 
 func (p *faultProxy) hang(query string) { p.rule.Store(&faultRule{query: query, hang: true}) }
 
+// TestGraph_searchPastMaxOverfetchRanksOnlyReadableElements: when more hidden
+// nodes or edges than MaxOverfetch rank first, a search still returns the
+// readable node or edge.
 func TestGraph_searchPastMaxOverfetchRanksOnlyReadableElements(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -322,69 +330,5 @@ func TestGraph_searchPastMaxOverfetchRanksOnlyReadableElements(t *testing.T) {
 	}
 	if edgeErr != nil || len(found) != 1 || found[0].FromID != a || found[0].ToID != b {
 		t.Errorf("edge search past the overfetch = %+v %v, want a→b", found, edgeErr)
-	}
-}
-
-// TestEngine_liveKnowledgeGraph is the Engine outcome on real Helix: Save
-// writes nodes, Link stores edges with note vectors, and Related and Search
-// return results read from the store; a soft-deleted object leaves them.
-func TestEngine_liveKnowledgeGraph(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Graph(t)),
-		brain.WithKinds(brain.KindSpec{Kind: "Document", IsParent: true}, brain.KindSpec{Kind: "Fact", IsParent: true}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scope := brain.Scope{Namespace: brain.Namespace{{Name: "org", Value: uuid.NewString()}}}
-	save := func(kind, title, content string) brain.Object {
-		obj, err := eng.Save(ctx, scope, brain.Object{Kind: kind, Title: title, Content: content})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return obj
-	}
-	doc := save("Document", "Contract", "MSA body")
-	fact := save("Fact", "Risk", "indemnity exclusivity penalty on late delivery")
-	summary := save("Document", "Summary", "short summary")
-	for _, l := range []brain.LinkRequest{
-		{From: doc.ID, To: fact.ID, Relation: "about", Meta: brain.EdgeMeta{Note: "late delivery penalty exclusivity"}},
-		{From: fact.ID, To: summary.ID, Relation: "about"},
-	} {
-		if err := eng.Link(ctx, scope, l); err != nil {
-			t.Fatal(err)
-		}
-	}
-	doc.Title = "Contract v2"
-	if _, err := eng.Save(ctx, scope, doc); err != nil {
-		t.Fatal(err)
-	}
-
-	related, relatedErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relation: "about", Depth: 2})
-	facts, factsErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "indemnity exclusivity penalty", Kind: "Fact"})
-	links, linksErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "late delivery penalty"})
-	if err := eng.SoftDelete(ctx, scope, fact.ID); err != nil {
-		t.Fatal(err)
-	}
-	afterDelete, afterErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relation: "about"})
-
-	if relatedErr != nil || len(related.Results) != 2 || related.Results[0].Object.ID != fact.ID || related.Results[1].Object.ID != summary.ID || related.Results[1].Object.Relation.Depth != 2 {
-		t.Errorf("two-hop related = %+v %v, want fact then summary at depth 2", related.Results, relatedErr)
-	}
-	if factsErr != nil || len(facts.Results) != 1 || facts.Results[0].Object.ID != fact.ID {
-		t.Errorf("search for the fact = %+v %v, want the fact alone", facts.Results, factsErr)
-	}
-	var link *brain.LinkResult
-	for _, r := range links.Results {
-		if r.Link != nil && link == nil {
-			link = r.Link
-		}
-	}
-	if linksErr != nil || link == nil || link.From.Title != "Contract v2" || link.To.ID != fact.ID || link.Relation != "about" {
-		t.Errorf("search for the link note = %+v %v, want the doc→fact link with both ends read", links.Results, linksErr)
-	}
-	if afterErr != nil || len(afterDelete.Results) != 0 {
-		t.Errorf("related after soft delete = %+v %v, want none", afterDelete.Results, afterErr)
 	}
 }

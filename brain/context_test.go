@@ -9,30 +9,9 @@ import (
 	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
-// cancelEmbedder cancels the caller's ctx on its first call and counts calls.
-// The first call succeeds, as an embed that returns just before cancel does.
-type cancelEmbedder struct {
-	cancel context.CancelFunc
-	calls  *int
-}
-
-func (e cancelEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	*e.calls++
-	e.cancel()
-	return repeatVector([]float32{1, 0}, len(texts)), nil
-}
-
-func (cancelEmbedder) Model() string { return "cancel-model" }
-
-// repeatVector returns n copies of v, one per embedded text.
-func repeatVector(v []float32, n int) [][]float32 {
-	out := make([][]float32, n)
-	for i := range out {
-		out[i] = v
-	}
-	return out
-}
-
+// TestEngine_cancelledWritesStopEmbeddingTheRest: when the caller's context
+// ends during the first embed, a session save and a tree write return
+// Canceled and embed nothing more.
 func TestEngine_cancelledWritesStopEmbeddingTheRest(t *testing.T) {
 	scope := brain.Scope{Namespace: storetest.Namespace(t, "org", "a")}
 	msgs := []brain.SessionMessage{{Role: "user", SearchText: "one"}, {Role: "user", SearchText: "two"}, {Role: "user", SearchText: "three"}}
@@ -41,11 +20,18 @@ func TestEngine_cancelledWritesStopEmbeddingTheRest(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		calls := 0
-		eng, err := brain.NewEngine(brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: cancelEmbedder{cancel: cancel, calls: &calls}, BatchSize: 1})))
+		// The first embed succeeds and the caller gives up just after it.
+		emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
+			calls++
+			cancel()
+			return repeatVector([]float32{1, 0}, len(texts)), nil
+		})
+		eng, err := brain.NewEngine(brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb, BatchSize: 1})))
 		if err != nil {
 			t.Fatal(err)
 		}
-		return calls, write(ctx, eng)
+		err = write(ctx, eng)
+		return calls, err
 	}
 
 	saveCalls, saveErr := run(func(ctx context.Context, eng *brain.Engine) error {
@@ -57,7 +43,6 @@ func TestEngine_cancelledWritesStopEmbeddingTheRest(t *testing.T) {
 		return err
 	})
 
-	// The first embed cancels; nothing after it is embedded or saved.
 	if !errors.Is(saveErr, context.Canceled) || saveCalls != 1 {
 		t.Errorf("session save = %v after %d embeds, want Canceled after 1", saveErr, saveCalls)
 	}

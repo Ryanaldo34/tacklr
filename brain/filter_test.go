@@ -7,6 +7,8 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
+// TestFilters_malformedInputIsInvalid: every malformed filter, decoded from
+// the tool boundary or built by hand, is ErrInvalid.
 func TestFilters_malformedInputIsInvalid(t *testing.T) {
 	decode := func(m map[string]any) error {
 		_, err := brain.DecodeFilter(m)

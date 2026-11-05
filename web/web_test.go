@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -23,6 +25,9 @@ func newExaTestClient(t *testing.T, handler http.HandlerFunc) *Exa {
 	return client
 }
 
+// TestWebSearch_searchesAndCoercesFilters: web_search formats Exa's results,
+// rejects arguments it cannot send, and drops or moves filters Exa does not
+// take, with a note that says so.
 func TestWebSearch_searchesAndCoercesFilters(t *testing.T) {
 	client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -35,6 +40,8 @@ func TestWebSearch_searchesAndCoercesFilters(t *testing.T) {
 			_, _ = w.Write([]byte(`{"results":[{"title":"Paris","url":"https://example.com/paris","highlights":["Paris is the capital",""],"text":"Paris is the capital of France.","summary":"Capital city","author":"Ed","publishedDate":"2024-01-01"}],"output":{"content":"Paris is the capital."}}`))
 		case "empty-results":
 			_, _ = w.Write([]byte(`{"results":[]}`))
+		case "census.gov":
+			_, _ = w.Write([]byte(`{"results":[{"title":"Census","url":"https://census.gov","highlights":["` + strings.Repeat("h", 900) + `"]}]}`))
 		case "untitled":
 			_, _ = w.Write([]byte(`{"results":[{"url":"https://example.com/x","highlights":["hit"]}],"output":{"content":{"answer":"ok"}}}`))
 		default:
@@ -92,277 +99,200 @@ func TestWebSearch_searchesAndCoercesFilters(t *testing.T) {
 	if err != nil || !strings.Contains(got, "Hit") || !strings.Contains(got, "Moved site:") {
 		t.Fatalf("site: lift: %q err=%v", got, err)
 	}
-	if WebSearch(NewExa("k")).Name() != "web_search" || WebFetch(NewExa("k")).Name() != "web_fetch" {
-		t.Fatal("web constructors must name the tools")
+	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "site:census.gov"})
+	if err != nil || !strings.Contains(got, "Query: census.gov") || !strings.Contains(got, strings.Repeat("h", 800)+"…") {
+		t.Fatalf("site-only query searches the host, with a long highlight cut: %q err=%v", got, err)
 	}
 }
 
-func TestWebSearch_httpStatusCorrectionAndFailed(t *testing.T) {
-	ctx := context.Background()
+// TestWebSearch_retriesOnTheOpenWebWhenTheFiltersFail: a filtered search that
+// finds nothing, or that Exa rejects for its filters, runs again without the
+// filters; a retry that fails is the tool's failure.
+func TestWebSearch_retriesOnTheOpenWebWhenTheFiltersFail(t *testing.T) {
+	hit := `{"results":[{"title":"Open web hit","url":"https://example.com"}]}`
+	for name, tc := range map[string]struct {
+		args        webSearchArgs
+		first       func(http.ResponseWriter)
+		retryStatus int // 0 answers the retry with a hit
+		want        string
+	}{
+		"no hits with a category": {
+			webSearchArgs{Query: "ACS 5-year demographics", Category: "publication"},
+			func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"results":[]}`)) }, 0, "No hits with those filters",
+		},
+		"a domain filter exa rejects": {
+			webSearchArgs{Query: "paper", IncludeDomains: []string{"arxiv.org"}},
+			func(w http.ResponseWriter) { http.Error(w, "UNSUPPORTED_PUBLICATION", http.StatusBadRequest) }, 0, "retried on the open web",
+		},
+		"a retry that fails": {
+			webSearchArgs{Query: "q", Category: "news"},
+			func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"results":[]}`)) }, http.StatusBadGateway, "search provider failed",
+		},
+	} {
+		var requests []map[string]any
+		client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			requests = append(requests, body)
+			switch {
+			case len(requests) == 1:
+				tc.first(w)
+			case tc.retryStatus != 0:
+				w.WriteHeader(tc.retryStatus)
+			default:
+				_, _ = w.Write([]byte(hit))
+			}
+		})
 
-	fixable := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"bad query filters"}`))
-	})
-	_, err := runWebSearch(ctx, fixable, webSearchArgs{Query: "census ACS"})
-	if err == nil || !errors.Is(err, tacklr.ErrCorrection) || !strings.Contains(err.Error(), "Simplify filters") {
-		t.Fatalf("400: %v", err)
-	}
+		got, err := runWebSearch(t.Context(), client, tc.args)
 
-	limited := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
-	})
-	_, err = runWebSearch(ctx, limited, webSearchArgs{Query: "census ACS"})
-	if err == nil || !errors.Is(err, tacklr.ErrFailed) || errors.Is(err, tacklr.ErrCorrection) || !strings.Contains(err.Error(), "search provider failed") {
-		t.Fatalf("429: %v", err)
-	}
-	var st *StatusError
-	if !errors.As(err, &st) || st.Status != http.StatusTooManyRequests {
-		t.Fatalf("429 cause: %v", err)
-	}
-
-	pub := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`UNSUPPORTED_PUBLICATION`))
-	})
-	_, err = runWebSearch(ctx, pub, webSearchArgs{Query: "paper"})
-	if err == nil || !errors.Is(err, tacklr.ErrCorrection) || !strings.Contains(err.Error(), "category=publication") {
-		t.Fatalf("publication: %v", err)
-	}
-}
-
-func TestWebSearch_schemaHidesExaKnobs(t *testing.T) {
-	search := WebSearch(NewExa("k")).AsJson()
-	params, _ := search["parameters"].(map[string]any)
-	props, _ := params["properties"].(map[string]any)
-	for _, hidden := range []string{"type", "category", "exclude_domains", "start_published_date", "end_published_date", "content_mode", "max_text_characters", "system_prompt", "user_location", "max_age_hours"} {
-		if _, ok := props[hidden]; ok {
-			t.Fatalf("web_search schema still exposes %s", hidden)
+		if len(requests) != 2 || requests[1]["category"] != nil || requests[1]["includeDomains"] != nil {
+			t.Errorf("%s: requests = %v, want the search, then one without filters", name, requests)
+		}
+		if tc.retryStatus != 0 {
+			if !errors.Is(err, tacklr.ErrFailed) || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("%s = %v, want ErrFailed naming %q", name, err, tc.want)
+			}
+			continue
+		}
+		if err != nil || !strings.Contains(got, "Open web hit") || !strings.Contains(got, tc.want) {
+			t.Errorf("%s = %q %v, want the open-web hit and %q", name, got, err, tc.want)
 		}
 	}
-	for _, want := range []string{"query", "include_domains", "num_results"} {
-		if _, ok := props[want]; !ok {
-			t.Fatalf("web_search schema missing %s", want)
+}
+
+// TestWebSearch_mapsProviderFailuresToToolErrors: a query Exa rejects asks
+// the model for a correction, an expired key is ErrAuthExpired, a provider
+// that is down or limits the rate is ErrFailed, and any other failure keeps
+// its own error.
+func TestWebSearch_mapsProviderFailuresToToolErrors(t *testing.T) {
+	answering := func(status int, body string) *Exa {
+		return newExaTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		})
+	}
+	down := answering(http.StatusOK, "")
+	down.BaseURL = "http://127.0.0.1:1"
+
+	for name, tc := range map[string]struct {
+		client *Exa
+		is     error
+		want   string
+	}{
+		"a query exa rejects":             {answering(http.StatusBadRequest, `{"error":"bad query filters"}`), tacklr.ErrCorrection, "Simplify filters"},
+		"a domain filter on publications": {answering(http.StatusBadRequest, "not supported for category=publication"), tacklr.ErrCorrection, "category=publication cannot filter by domain"},
+		"an expired key":                  {answering(http.StatusUnauthorized, "no"), tacklr.ErrAuthExpired, "credentials expired"},
+		"a rate limit":                    {answering(http.StatusTooManyRequests, `{"error":"rate limited"}`), ErrService, "search provider failed"},
+		"a provider that does not answer": {down, tacklr.ErrFailed, "connection refused"},
+		"a response that is not json":     {answering(http.StatusOK, "not-json"), nil, "decode response"},
+		"a client with no key":            {NewExa(""), nil, "API key is required"},
+	} {
+		_, err := runWebSearch(t.Context(), tc.client, webSearchArgs{Query: "census ACS"})
+
+		if err == nil || (tc.is != nil && !errors.Is(err, tc.is)) || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s = %v, want %v naming %q", name, err, tc.is, tc.want)
 		}
-	}
-	fetch := WebFetch(NewExa("k")).AsJson()
-	fparams, _ := fetch["parameters"].(map[string]any)
-	fprops, _ := fparams["properties"].(map[string]any)
-	if _, ok := fprops["content_mode"]; ok {
-		t.Fatal("web_fetch schema still exposes content_mode")
-	}
-	if _, ok := fprops["urls"]; !ok {
-		t.Fatal("web_fetch schema missing urls")
 	}
 }
 
-func TestWebSearch_retriesEmptyFilteredSearch(t *testing.T) {
-	var n int
-	client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		n++
-		b, _ := io.ReadAll(r.Body)
-		var body map[string]any
-		_ = json.Unmarshal(b, &body)
-		w.Header().Set("Content-Type", "application/json")
-		cat, _ := body["category"].(string)
-		if cat == "publication" {
-			_, _ = w.Write([]byte(`{"results":[]}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"results":[{"title":"Census ACS","url":"https://www.census.gov/acs"}]}`))
-	})
-	got, err := runWebSearch(context.Background(), client, webSearchArgs{Query: "ACS 5-year demographics", Category: "publication"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 2 {
-		t.Fatalf("searches = %d, want 2 (empty then retry)", n)
-	}
-	if !strings.Contains(got, "Census ACS") || !strings.Contains(got, "No hits with those filters") {
-		t.Fatalf("retry output: %s", got)
-	}
-}
-
+// TestWebFetch_readsKnownURLs: web_fetch reads the URLs it can normalize,
+// asks Exa for text, highlights or both, reports a URL Exa could not read,
+// and rejects arguments it cannot send.
 func TestWebFetch_readsKnownURLs(t *testing.T) {
+	var highlights any
 	client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/contents" {
 			http.NotFound(w, r)
 			return
 		}
-		b, _ := io.ReadAll(r.Body)
 		var body map[string]any
-		_ = json.Unmarshal(b, &body)
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		highlights = body["highlights"]
 		w.Header().Set("Content-Type", "application/json")
 		urls, _ := body["urls"].([]any)
 		if len(urls) == 1 && urls[0] == "https://example.gov/missing" {
 			_, _ = w.Write([]byte(`{"results":[],"statuses":[{"id":"https://example.gov/missing","status":"error","error":{"tag":"not_found"}}]}`))
 			return
 		}
-		if len(urls) == 0 {
-			_, _ = w.Write([]byte(`{"results":[]}`))
-			return
-		}
 		_, _ = w.Write([]byte(`{"results":[{"title":"City Code","url":"https://example.gov/code","text":"Section 1.2 setbacks"}]}`))
 	})
-	ctx := context.Background()
-
-	got, err := runWebFetch(ctx, client, webFetchArgs{URLs: []string{"https://example.gov/code"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(got, "City Code") || !strings.Contains(got, "setbacks") {
-		t.Fatal(got)
-	}
-
-	got, err = runWebFetch(ctx, client, webFetchArgs{
-		URLs: []string{"  ", "ftp://x", "example.gov/code", "https://example.gov/code", "not a host"},
-	})
-	if err != nil || !strings.Contains(got, "City Code") {
-		t.Fatalf("normalize: %q err=%v", got, err)
+	ctx := t.Context()
+	fetch := func(args webFetchArgs) string {
+		t.Helper()
+		got, err := runWebFetch(ctx, client, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
 	}
 
-	got, err = runWebFetch(ctx, client, webFetchArgs{
-		URLs: []string{"https://example.gov/missing"}, ContentMode: "highlights", HighlightQuery: "setbacks",
-	})
-	if err != nil || !strings.Contains(got, "error") || !strings.Contains(got, "not_found") {
-		t.Fatalf("status: %q err=%v", got, err)
-	}
+	text := fetch(webFetchArgs{URLs: []string{"https://example.gov/code"}})
+	normalized := fetch(webFetchArgs{URLs: []string{"  ", "ftp://x", "example.gov/code", "https://example.gov/code", "not a host"}})
+	missing := fetch(webFetchArgs{URLs: []string{"https://example.gov/missing"}, ContentMode: "highlights", HighlightQuery: "setbacks"})
+	fetch(webFetchArgs{URLs: []string{"https://example.gov/code"}, ContentMode: "highlights"})
+	anyHighlights := highlights
+	fetch(webFetchArgs{URLs: []string{"https://example.gov/code"}, ContentMode: "both"})
+	textAndAnyHighlights := highlights
+	fetch(webFetchArgs{URLs: []string{"https://example.gov/code"}, ContentMode: "both", MaxTextCharacters: 20000, HighlightQuery: "setbacks"})
+	focused, _ := highlights.(map[string]any)
+	_, noURLs := runWebFetch(ctx, client, webFetchArgs{})
+	_, tooMany := runWebFetch(ctx, client, webFetchArgs{URLs: []string{"https://a", "https://b", "https://c", "https://d", "https://e", "https://f"}})
+	_, badMode := runWebFetch(ctx, client, webFetchArgs{URLs: []string{"https://example.gov/code"}, ContentMode: "raw"})
+	_, noKey := runWebFetch(ctx, NewExa(""), webFetchArgs{URLs: []string{"https://example.gov/code"}})
+	down := newExaTestClient(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadGateway) })
+	_, downErr := runWebFetch(ctx, down, webFetchArgs{URLs: []string{"https://example.com"}})
 
-	if _, err := runWebFetch(ctx, client, webFetchArgs{}); err == nil {
-		t.Fatal("no urls")
+	if !strings.Contains(text, "City Code") || !strings.Contains(text, "setbacks") || !strings.Contains(normalized, "URLs requested: 1") {
+		t.Errorf("fetch = %q, normalized = %q, want the page, and one URL left after normalizing", text, normalized)
 	}
-	if _, err := runWebFetch(ctx, client, webFetchArgs{
-		URLs: []string{"https://a", "https://b", "https://c", "https://d", "https://e", "https://f"},
-	}); err == nil {
-		t.Fatal("too many urls")
+	if !strings.Contains(missing, "error (not_found)") {
+		t.Errorf("fetch a missing page = %q, want its status", missing)
 	}
-	if _, err := runWebFetch(ctx, client, webFetchArgs{
-		URLs: []string{"https://example.gov/code"}, ContentMode: "raw",
-	}); err == nil {
-		t.Fatal("invalid mode")
+	if anyHighlights != true || textAndAnyHighlights != true || !maps.Equal(focused, map[string]any{"query": "setbacks"}) {
+		t.Errorf("highlights asked for = %v, %v, then %v, want any highlights twice, then highlights on the query", anyHighlights, textAndAnyHighlights, focused)
 	}
-	got, err = runWebFetch(ctx, client, webFetchArgs{
-		URLs: []string{"https://example.gov/code"}, ContentMode: "both", MaxTextCharacters: 20000,
-	})
-	if err != nil || !strings.Contains(got, "City Code") {
-		t.Fatalf("both: %q err=%v", got, err)
-	}
-}
-
-func TestWebConstructors_panicWithoutClient(t *testing.T) {
-	for _, fn := range []func(){
-		func() { WebSearch(nil) },
-		func() { WebFetch(nil) },
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"no urls":          {noURLs, "at least one"},
+		"too many urls":    {tooMany, "at most 5"},
+		"an unknown mode":  {badMode, "invalid content_mode"},
+		"no key":           {noKey, "API key is required"},
+		"a provider error": {downErr, "search provider failed"},
 	} {
-		var panicked bool
-		func() {
-			defer func() { panicked = recover() != nil }()
-			fn()
+		if tc.err == nil || !strings.Contains(tc.err.Error(), tc.want) {
+			t.Errorf("%s = %v, want %q", name, tc.err, tc.want)
+		}
+	}
+	if !errors.Is(downErr, tacklr.ErrFailed) {
+		t.Errorf("fetch from a provider that fails = %v, want ErrFailed", downErr)
+	}
+}
+
+// TestWebConstructors_offerOnlyTheAgentsArgumentsAndPanicWithoutAClient:
+// each tool's schema holds only the arguments the agent sets (the harness
+// sets the Exa options), and each constructor panics without an Exa client.
+func TestWebConstructors_offerOnlyTheAgentsArgumentsAndPanicWithoutAClient(t *testing.T) {
+	for name, tc := range map[string]struct {
+		build func(*Exa) *tacklr.Tool
+		args  []string
+	}{
+		"web_search": {WebSearch, []string{"include_domains", "num_results", "query"}},
+		"web_fetch":  {WebFetch, []string{"highlight_query", "urls"}},
+	} {
+		panicked := func() (p bool) {
+			defer func() { p = recover() != nil }()
+			tc.build(nil)
+			return false
 		}()
-		if !panicked {
-			t.Fatal("nil Exa constructor did not panic")
+		tool := tc.build(NewExa("k"))
+		params, _ := tool.AsJson()["parameters"].(map[string]any)
+		props, _ := params["properties"].(map[string]any)
+
+		if got := slices.Sorted(maps.Keys(props)); tool.Name() != name || !slices.Equal(got, tc.args) || !panicked {
+			t.Errorf("%s: tool %q with arguments %v, panicked without a client %v, want %v and a panic", name, tool.Name(), got, panicked, tc.args)
 		}
-	}
-}
-
-func TestMapExaErr_andStatusErrorEdges(t *testing.T) {
-	if err := mapExaErr("web_search", nil); err != nil {
-		t.Fatal(err)
-	}
-	var st *StatusError
-	if st.Error() != "exa: status error" || st.Unwrap() != nil || st.QueryFixable() || st.PublicationDomain() {
-		t.Fatalf("nil status: %+v", st)
-	}
-	if !(&StatusError{Status: 400, Body: "not supported for category=publication"}).PublicationDomain() {
-		t.Fatal("publication body")
-	}
-	if err := mapExaErr("web_search", ErrService); err == nil || !errors.Is(err, tacklr.ErrFailed) {
-		t.Fatalf("service: %v", err)
-	}
-	if err := mapExaErr("web_search", &StatusError{Status: 401, Body: "no"}); err == nil || !errors.Is(err, tacklr.ErrAuthExpired) {
-		t.Fatalf("401: %v", err)
-	}
-	if err := mapExaErr("web_search", errors.New("plain")); err == nil || err.Error() != "plain" {
-		t.Fatalf("plain: %v", err)
-	}
-}
-
-func TestWebSearch_siteOnlyQueryAndTruncation(t *testing.T) {
-	query, hosts := liftSiteOperators(`site:census.gov`)
-	if query != "census.gov" || len(hosts) != 1 {
-		t.Fatalf("site-only = %q %v", query, hosts)
-	}
-	got := formatWebSearchResult("q", "", nil, nil)
-	if !strings.Contains(got, "No results found") {
-		t.Fatal(got)
-	}
-	if !strings.HasSuffix(truncateRunes(strings.Repeat("a", 10), 3), "…") {
-		t.Fatal("truncate")
-	}
-	if formatSynthesisContent(json.RawMessage(`not-json`)) == "" {
-		t.Fatal("raw synthesis")
-	}
-	if !strings.Contains(formatSynthesisContent(json.RawMessage(`"quoted"`)), "quoted") {
-		t.Fatal("string synthesis")
-	}
-	if !strings.Contains(formatWebSearchResult("q", "auto", &SearchResponse{}, []string{"note"}), "Adjusted: note") {
-		t.Fatal("notes")
-	}
-	if !strings.Contains(formatWebSearchResult("q", "", &SearchResponse{Results: []SearchResult{{Title: "T"}}}, nil), "Mode: auto") {
-		t.Fatal("default mode")
-	}
-}
-
-func TestWebSearch_retriesProviderConflictThenSucceeds(t *testing.T) {
-	var n int
-	client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		n++
-		w.Header().Set("Content-Type", "application/json")
-		if n == 1 {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`UNSUPPORTED_PUBLICATION`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"results":[{"title":"Open","url":"https://example.com"}]}`))
-	})
-	got, err := runWebSearch(t.Context(), client, webSearchArgs{Query: "paper", IncludeDomains: []string{"arxiv.org"}})
-	if err != nil || n != 2 || !strings.Contains(got, "Open") || !strings.Contains(got, "retried on the open web") {
-		t.Fatalf("retry: n=%d out=%q err=%v", n, got, err)
-	}
-
-	var fails int
-	failRetry := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		fails++
-		if fails == 1 {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"results":[]}`))
-			return
-		}
-		w.WriteHeader(http.StatusBadGateway)
-	})
-	if _, err := runWebSearch(t.Context(), failRetry, webSearchArgs{Query: "q", Category: "news"}); err == nil || !errors.Is(err, tacklr.ErrFailed) {
-		t.Fatalf("retry fail: %v", err)
-	}
-}
-
-func TestWebFetch_highlightsAndProviderFailure(t *testing.T) {
-	req, err := buildExaContentsRequest(webFetchArgs{URLs: []string{"https://example.com"}, ContentMode: "highlights"})
-	if err != nil || req.Highlights != true {
-		t.Fatalf("highlights default: %+v err=%v", req, err)
-	}
-	both, err := buildExaContentsRequest(webFetchArgs{URLs: []string{"https://example.com"}, ContentMode: "both", HighlightQuery: "setbacks"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	h, _ := both.Highlights.(HighlightsOptions)
-	if h.Query != "setbacks" {
-		t.Fatalf("both highlights query: %#v", both.Highlights)
-	}
-	fail := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-	})
-	if _, err := runWebFetch(t.Context(), fail, webFetchArgs{URLs: []string{"https://example.com"}}); err == nil || !errors.Is(err, tacklr.ErrFailed) {
-		t.Fatalf("fetch fail: %v", err)
 	}
 }

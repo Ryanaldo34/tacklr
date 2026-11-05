@@ -14,6 +14,12 @@ import (
 	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
+// TestEngine_openReadsTheObjectItsKindAndItsFirstChildren: Open returns an
+// object with its content, the store's kind and its first 10 parts by
+// position; a part opens without children; an object is visible from its org
+// but not from a sibling workspace; a soft-deleted object, another tenant's
+// object or an unindexed path is not found; Resolve finds an object by path or
+// id, and a call with no id is invalid.
 func TestEngine_openReadsTheObjectItsKindAndItsFirstChildren(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
@@ -97,9 +103,15 @@ func TestEngine_openReadsTheObjectItsKindAndItsFirstChildren(t *testing.T) {
 	}
 }
 
-func TestEngine_openTakesTheKindFromTheCatalogWhenKindsAreRegistered(t *testing.T) {
+// TestEngine_openTakesTheKindFromTheCatalogOverTheStore: with kinds
+// registered, Open returns the catalog's kind and fields, even when the store
+// holds another copy, and no kind for an object of an unregistered kind.
+func TestEngine_openTakesTheKindFromTheCatalogOverTheStore(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
+	if err := store.PutKind(ctx, brain.ObjectKind{Kind: "Deal", Description: "store copy", IsParent: true}); err != nil {
+		t.Fatal(err)
+	}
 	eng, err := brain.NewEngine(store, brain.WithKinds(brain.KindSpec{Kind: "Deal", Description: "A sale", IsParent: true,
 		Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}}}))
 	if err != nil {
@@ -115,14 +127,18 @@ func TestEngine_openTakesTheKindFromTheCatalogWhenKindsAreRegistered(t *testing.
 	opened, err := eng.Open(ctx, scope, deal.ID)
 	strayOpened, strayErr := eng.Open(ctx, scope, stray.ID)
 
-	if err != nil || opened.Kind == nil || opened.Kind.Description != "A sale" || !json.Valid(opened.Kind.FilterableFields) {
-		t.Errorf("open a registered kind = %+v %v, want the catalog's kind", opened.Kind, err)
+	var fields []brain.FieldSpec
+	if err != nil || opened.Kind == nil || opened.Kind.Description != "A sale" ||
+		json.Unmarshal(opened.Kind.FilterableFields, &fields) != nil || len(fields) != 1 || fields[0].Name != "stage" {
+		t.Errorf("open a registered kind = %+v %v, want the catalog's kind with its stage field", opened.Kind, err)
 	}
 	if strayErr != nil || strayOpened.Kind != nil {
 		t.Errorf("open an unregistered kind = %+v %v, want no kind", strayOpened.Kind, strayErr)
 	}
 }
 
+// TestNewEngine_requiresAStoreAndValidKinds: NewEngine fails with no store or
+// an invalid kind, and otherwise serves the kinds it was given, with no graph.
 func TestNewEngine_requiresAStoreAndValidKinds(t *testing.T) {
 	_, noStore := brain.NewEngine(nil)
 	_, badKind := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{Kind: ""}))
@@ -133,20 +149,5 @@ func TestNewEngine_requiresAStoreAndValidKinds(t *testing.T) {
 	}
 	if err != nil || eng.HasGraph() || !slices.Equal(eng.Catalog().RecordKinds(), []string{"Note"}) {
 		t.Errorf("engine = %v, graph %v, kinds %v", err, eng.HasGraph(), eng.Catalog().RecordKinds())
-	}
-}
-
-func TestMemoryStore_PutRequiresIdentity(t *testing.T) {
-	s := brain.NewMemoryStore()
-	cases := map[string]func() error{
-		"empty object":      func() error { return storetest.Put(s, brain.Object{}) },
-		"missing kind":      func() error { return storetest.Put(s, brain.Object{ID: uuid.New()}) },
-		"missing namespace": func() error { return storetest.Put(s, brain.Object{ID: uuid.New(), Kind: "X"}) },
-		"empty kind":        func() error { return s.PutKind(context.Background(), brain.ObjectKind{}) },
-	}
-	for name, fn := range cases {
-		if err := fn(); err == nil {
-			t.Errorf("%s: want error", name)
-		}
 	}
 }

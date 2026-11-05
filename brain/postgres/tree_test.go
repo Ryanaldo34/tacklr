@@ -11,6 +11,9 @@ import (
 	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
+// TestStore_aTreeCommitThatCannotFinishLeavesThePreviousTree: a tree write
+// blocked past its deadline, or with properties JSON cannot hold, fails and
+// leaves the previous tree.
 func TestStore_aTreeCommitThatCannotFinishLeavesThePreviousTree(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()

@@ -30,6 +30,10 @@ func docWithParts(t *testing.T, eng *brain.Engine, scope brain.Scope, title stri
 	return doc
 }
 
+// TestSearch_ranksRecordsAndTheirPartsInTheCallersTenant: a search returns the
+// caller's records found by their own words, their parts' words, a filter on
+// the record, a kind, an id or an exact phrase; an empty query, a bad filter
+// or no scope is invalid.
 func TestSearch_ranksRecordsAndTheirPartsInTheCallersTenant(t *testing.T) {
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
@@ -80,6 +84,51 @@ func TestSearch_ranksRecordsAndTheirPartsInTheCallersTenant(t *testing.T) {
 	}
 }
 
+// TestSearch_quotesARecordsBestPartsAroundTheQuery: a record keeps only its
+// EvidenceN best parts as evidence, and each part is quoted in at most
+// SnippetCap runes around the first query word, with an ellipsis on each cut
+// side; a part that holds no query word is quoted from its start, and a part
+// with no text has an empty quote.
+func TestSearch_quotesARecordsBestPartsAroundTheQuery(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithConfig(brain.EngineConfig{EvidenceN: 2, SnippetCap: 60}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := brain.Scope{Namespace: tenant(t)}
+	middle := strings.Repeat("x", 50) + " oauth " + strings.Repeat("y", 50)
+	manual, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "Manual"}, brain.Parts(
+		brain.Object{Kind: "Chunk", Title: "setup", Content: middle},
+		brain.Object{Kind: "Chunk", Title: "oauth notes", Content: strings.Repeat("z", 100)},
+		brain.Object{Kind: "Chunk", Title: "oauth blank"},
+		brain.Object{Kind: "Chunk", Title: "short", Content: "oauth"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page, searchErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "oauth"})
+	within, withinErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "oauth", Within: manual.ID})
+
+	got := slices.Collect(page.Results.Objects())
+	if searchErr != nil || len(got) != 1 || got[0].ID != manual.ID || len(got[0].Evidence) != 2 {
+		t.Errorf("search = %+v %v, want the manual with its 2 best parts", got, searchErr)
+	}
+	var quotes []string
+	for o := range within.Results.Objects() {
+		quotes = append(quotes, o.Evidence[0].Snippet)
+	}
+	slices.Sort(quotes)
+	want := []string{"", "oauth", strings.Repeat("z", 60) + "…", "…" + middle[11:71] + "…"}
+	slices.Sort(want)
+	if withinErr != nil || !slices.Equal(quotes, want) {
+		t.Errorf("quotes within the manual = %q %v, want %q", quotes, withinErr, want)
+	}
+}
+
+// TestSearch_facetsCountTheKindsAndFieldValuesOfAPage: a page counts its kinds
+// and the few-valued fields of its records; under a catalog it counts only the
+// kind's fields.
 func TestSearch_facetsCountTheKindsAndFieldValuesOfAPage(t *testing.T) {
 	ctx := context.Background()
 	open, err := brain.NewEngine(brain.NewMemoryStore())
@@ -119,6 +168,9 @@ func TestSearch_facetsCountTheKindsAndFieldValuesOfAPage(t *testing.T) {
 	}
 }
 
+// TestSearch_morePagesThroughTheRestEvenAfterACheckpoint: Next pages through
+// every result once, also from a rest restored from a checkpoint, and a
+// restored rest whose filter is no longer valid is invalid.
 func TestSearch_morePagesThroughTheRestEvenAfterACheckpoint(t *testing.T) {
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
@@ -169,6 +221,9 @@ func TestSearch_morePagesThroughTheRestEvenAfterACheckpoint(t *testing.T) {
 	}
 }
 
+// TestSearch_aRerankerReordersAndDropsTheTopResults: a reranker gets the query
+// and sets the order and the number of results; a failing reranker fails the
+// search.
 func TestSearch_aRerankerReordersAndDropsTheTopResults(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
@@ -187,8 +242,9 @@ func TestSearch_aRerankerReordersAndDropsTheTopResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	errRerank := errors.New("rerank down")
 	failing, err := brain.NewEngine(store, brain.WithReranker(func(context.Context, string, []brain.RichObject) ([]brain.RichObject, error) {
-		return nil, errString("rerank down")
+		return nil, errRerank
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -208,11 +264,15 @@ func TestSearch_aRerankerReordersAndDropsTheTopResults(t *testing.T) {
 	if gotErr != nil || !slices.Equal(titlesOf(slices.Collect(got.Results.Objects())), want[:2]) || asked != "alpha" {
 		t.Errorf("reranked for %q = %v %v, want %v reversed without the last, for alpha", asked, titlesOf(slices.Collect(got.Results.Objects())), gotErr, titlesOf(slices.Collect(base.Results.Objects())))
 	}
-	if !errors.Is(failErr, errString("rerank down")) {
+	if !errors.Is(failErr, errRerank) {
 		t.Errorf("failing reranker = %v, want its error", failErr)
 	}
 }
 
+// TestSearch_listsAKindNewestFirstAndSearchesWithinOneRecord: a search with
+// only a kind lists it newest first, a search within a record or one of its
+// parts returns that record's matching parts, and a search with nothing to
+// match is invalid.
 func TestSearch_listsAKindNewestFirstAndSearchesWithinOneRecord(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
