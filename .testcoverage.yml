@@ -1,50 +1,69 @@
 # Test coverage gates for Tacklr.
 # Enforced in CI via go-test-coverage (https://github.com/vladopajic/go-test-coverage).
 #
-# Thresholds are outcome-oriented: high for pure logic packages, lower where the
-# remaining lines are defensive SDK/exporter failure branches or cancel races
-# that need live systems or brittle orchestration to force.
+# Every package must be fully covered, except the ones listed under override,
+# each held at its coverage today: a change may raise a floor, never lower it.
+# What is uncovered there is a race, a host-only path, or an error the
+# platform cannot produce on demand (see the package's tests).
 
 profile: coverage.out
 
 threshold:
   file: 0
-  # Root-package files (agent.go, tools_brain.go, …) are each a "package" to the
-  # coverage tool. Floor 70% covers tools_brain/web without live backends.
-  package: 70
-  # Library total after excludes (cmd/, testkit, live helpers).
-  # Helixgraph is included: CI runs Testcontainers Helix (enterprise-dev).
-  # 89: the in-process session driver and its scripted tests are gone.
-  # What remains uncovered is error handling, not a missing caller outcome.
-  total: 89
+  # Package paths are relative to the module. Each root-package file is its
+  # own "package" to the tool (agent_construct.go, tools.go, ...).
+  package: 100
+  # Library total after the excludes below.
+  total: 99
 
-# First matching override wins (specific packages first).
+# Floors below 100, first match wins. Paths are module-relative regexes.
 override:
-  - path: github.com/ryanaldo34/tacklr/mcp$
-    threshold: 100
-  - path: github.com/ryanaldo34/tacklr/skills$
-    threshold: 100
-  - path: github.com/ryanaldo34/tacklr/server$
+  - path: ^agent_construct\.go$
+    threshold: 98
+  - path: ^model_tasks\.go$
+    threshold: 99
+  - path: ^toolcall\.go$
+    threshold: 97
+  - path: ^tools\.go$
+    threshold: 99
+  - path: ^brain$
+    threshold: 99
+  - path: ^brain/helixgraph$
+    threshold: 99
+  - path: ^openai$
+    threshold: 99
+  - path: ^server/acp$
+    threshold: 99
+  - path: ^session/durableobject$
+    threshold: 96
+  - path: ^session/durableobject/dotest$
+    threshold: 94
+  - path: ^session/internal$
+    threshold: 98
+  - path: ^session/loop$
+    threshold: 98
+  - path: ^session/postgres$
+    threshold: 99
+  - path: ^session/temporal$
+    threshold: 93
+  - path: ^session/temporal/worker$
+    threshold: 97
+  - path: ^shell$
     threshold: 95
-  - path: github.com/ryanaldo34/tacklr/session/internal$
-    threshold: 95
-  - path: github.com/ryanaldo34/tacklr/builtins$
-    threshold: 90
-  - path: github.com/ryanaldo34/tacklr/interrupt$
-    threshold: 90
-  - path: github.com/ryanaldo34/tacklr/brain$
-    threshold: 85
-  # Live Testcontainers Helix.
-  - path: github.com/ryanaldo34/tacklr/brain/helixgraph$
-    threshold: 90
-  # Live Testcontainers Postgres (pgvector).
-  - path: github.com/ryanaldo34/tacklr/brain/postgres$
-    threshold: 95
-  # VFS including S3 (RustFS) and Azurite Testcontainers.
-  - path: github.com/ryanaldo34/tacklr/vfs$
-    threshold: 85
-  - path: github.com/ryanaldo34/tacklr/vfsindex$
-    threshold: 85
+  - path: ^vfs$
+    threshold: 99
+  - path: ^vfs/fuse$
+    threshold: 97
+  - path: ^vfsindex$
+    threshold: 99
+  - path: ^telemetry/export$
+    threshold: 99
+
+# A pull request may not lower total coverage below main's last good run
+# (its breakdown is downloaded in CI). The small allowance absorbs the few
+# race-only statements that a run may or may not reach.
+diff:
+  threshold: -0.1
 
 exclude:
   # Repo-relative paths (matched as regexes against file paths).
@@ -67,12 +86,8 @@ exclude:
     # container runtime, not a product outcome.
     - internal/temporaldocker
     - internal/helixtest
+    - internal/pgtest
+    - internal/faultproxy
     - internal/s3test
-    # Exporter constructors, not product outcomes.
-    - telemetry/export/export.go
 
 breakdown-file-name: coverage.breakdown
-
-diff:
-  base-breakdown-file-name: ""
-  threshold: null

@@ -38,8 +38,11 @@ fmt:
 # Functions nothing reaches: not the tests, not a main. Any finding fails.
 # The Linux packages use the tests as roots; the js/wasm bridge uses the
 # example Worker's main.
-DEADCODE = go run golang.org/x/tools/cmd/deadcode@v0.52.0
+# The tool is built for this machine first: GOOS=js on `go run` would build
+# the tool itself for js.
+DEADCODE = $(CURDIR)/.bin/deadcode
 deadcode:
+	@GOBIN=$(CURDIR)/.bin go install golang.org/x/tools/cmd/deadcode@v0.52.0
 	@out=$$($(DEADCODE) -test ./...; GOOS=js GOARCH=wasm $(DEADCODE) -filter 'session/durableobject/cloudflare|examples/cloudflare' ./examples/cloudflare); \
 	if [ -n "$$out" ]; then echo "$$out"; echo "unreachable code: delete it or cover it"; exit 1; fi
 
@@ -50,7 +53,7 @@ lint:
 # Profile + threshold gate (writes coverage.out for tools; no HTML).
 cover:
 	go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
-	@go run github.com/vladopajic/go-test-coverage/v2@latest --config=./.testcoverage.yml
+	@go run github.com/vladopajic/go-test-coverage/v2@v2.21.0 --config=./.testcoverage.yml
 	@./scripts/coverage-summary.sh coverage.out
 	@./scripts/update-coverage-badge.sh coverage.out docs/badges/coverage.json
 

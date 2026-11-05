@@ -22,8 +22,8 @@ concurrency:
 env:
   GO_VERSION: "1.27.x"
   GOLANGCI_LINT_VERSION: v2.14.0
-  # Keep in sync with go install path used below.
-  GO_TEST_COVERAGE_VERSION: v2.17.0
+  # Keep in sync with the Makefile's cover target.
+  GO_TEST_COVERAGE_VERSION: v2.21.0
 
 jobs:
   lint:
@@ -77,6 +77,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # Read main's coverage breakdown artifact from another run.
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -143,13 +145,35 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # The coverage breakdown of main's last good run: a pull request may
+      # not lower coverage below it (diff.threshold in .testcoverage.yml).
+      - name: Download main's coverage breakdown
+        id: main_breakdown
+        if: github.ref_name != 'main'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          branch: main
+          workflow_conclusion: success
+          name: main.breakdown
+          if_no_artifact_found: warn
+
       - name: Enforce coverage thresholds
-        uses: vladopajic/go-test-coverage@v2
+        id: coverage
+        # Continue so we still upload artifacts / comment when thresholds fail.
+        continue-on-error: true
+        uses: vladopajic/go-test-coverage@v2.21.0
         with:
           config: ./.testcoverage.yml
-          # Continue so we still upload artifacts / comment when thresholds fail.
-          continue-on-error: true
-        id: coverage
+          breakdown-file-name: ${{ github.ref_name == 'main' && 'main.breakdown' || '' }}
+          diff-base-breakdown-file-name: ${{ steps.main_breakdown.outputs.found_artifact == 'true' && 'main.breakdown' || '' }}
+
+      - name: Upload main's coverage breakdown
+        if: github.ref_name == 'main' && steps.coverage.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: main.breakdown
+          path: main.breakdown
+          if-no-files-found: error
 
       - name: Fail if coverage below threshold
         if: steps.coverage.outcome == 'failure'
