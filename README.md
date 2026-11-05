@@ -98,7 +98,7 @@ flowchart LR
 
 A session's steps go to the worker that already has it loaded. If that worker stops, any other worker rebuilds the session from Postgres and continues.
 
-Package `session/durableobject` runs sessions as durable objects: one object per session, with journal replay over the object's own storage, so a session needs no Temporal. It is plain Go and builds for WebAssembly; the Cloudflare Workers platform that hosts it is next. See [docs/session.md](docs/session.md#durable-objects).
+Package `session/durableobject` runs sessions as durable objects: one object per session, with journal replay over the object's own storage, so a session needs no Temporal. It is plain Go and builds for WebAssembly, and `session/durableobject/cloudflare` runs it on Cloudflare Workers. See [docs/session.md](docs/session.md#durable-objects) and [examples/cloudflare](examples/cloudflare).
 
 ## Getting started
 
@@ -325,7 +325,7 @@ For long work that is not an agent, such as a data export, register a `session.J
 
 ### Run in production
 
-Split the program from step 2 along the lines of the [Temporal diagram](#on-temporal): hosts call only `temporal.Open`, workers call only `worker.New`, and both use the Postgres stores from `session/postgres`.
+Split the program from step 2 along the lines of the [Temporal diagram](#on-temporal): hosts call only `temporal.Open`, workers call only `worker.New`, and both use the Postgres stores from `session/postgres`. [examples/temporal](examples/temporal) is that split, with an ACP host, a worker with a workspace, and an end-to-end test.
 
 ```go
 // sessionpg is github.com/ryanaldo34/tacklr/session/postgres.
@@ -369,6 +369,8 @@ Custom stores can check themselves against the shared tests in `session/storetes
 | [docs/tools.md](docs/tools.md) | Writing tools, `CallContext`, permissions |
 | [docs/vfs.md](docs/vfs.md) | The workspace, its sources, documents and spreadsheets |
 | [docs/knowledge.md](docs/knowledge.md) | The knowledge store: search, kinds, graph, file indexing |
+| [examples/temporal](examples/temporal) | A production layout on Temporal: an ACP host, a worker, Postgres, an end-to-end test |
+| [examples/cloudflare](examples/cloudflare) | Sessions as Durable Objects on Cloudflare Workers |
 
 ## Contributing
 
