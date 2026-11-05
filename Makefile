@@ -1,5 +1,5 @@
 # Requires Go 1.27 (go.mod).
-.PHONY: test vet lint fmt cover coverage check wasm vet-wasm cloudflare-e2e
+.PHONY: test vet lint fmt cover coverage check wasm vet-wasm cloudflare-e2e deadcode
 
 # The harness core builds for WebAssembly (GOOS=js GOARCH=wasm) so a host can
 # run it outside a Linux worker, for example in a Cloudflare Durable Object.
@@ -35,6 +35,14 @@ fmt:
 	gofmt -w .
 	@command -v goimports >/dev/null 2>&1 && goimports -w -local github.com/ryanaldo34/tacklr . || true
 
+# Functions nothing reaches: not the tests, not a main. Any finding fails.
+# The Linux packages use the tests as roots; the js/wasm bridge uses the
+# example Worker's main.
+DEADCODE = go run golang.org/x/tools/cmd/deadcode@v0.52.0
+deadcode:
+	@out=$$($(DEADCODE) -test ./...; GOOS=js GOARCH=wasm $(DEADCODE) -filter 'session/durableobject/cloudflare|examples/cloudflare' ./examples/cloudflare); \
+	if [ -n "$$out" ]; then echo "$$out"; echo "unreachable code: delete it or cover it"; exit 1; fi
+
 # Static analysis via golangci-lint (config: .golangci.yml).
 lint:
 	golangci-lint run ./...
@@ -50,7 +58,7 @@ cover:
 coverage: cover
 
 # Full local gate: format check + lint + vet + race tests + coverage thresholds.
-check: vet wasm vet-wasm lint cover
+check: vet wasm vet-wasm lint deadcode cover
 	@unformatted=$$(gofmt -l .); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \

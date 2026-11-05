@@ -151,13 +151,6 @@ func (s *traceSlot) shutdownAll(mp *sdkmetric.MeterProvider, lp *sdklog.LoggerPr
 	}
 }
 
-// TracerInstalled reports whether Init has installed the process tracer.
-func TracerInstalled() bool {
-	traces.mu.Lock()
-	defer traces.mu.Unlock()
-	return traces.set
-}
-
 // ReinstallTracer rebuilds the process tracer from the last Init configuration.
 // build owns the provider type. The previous tracer is shut down.
 func ReinstallTracer(ctx context.Context, build func(opts ...sdktrace.TracerProviderOption) (trace.TracerProvider, func(context.Context) error)) error {

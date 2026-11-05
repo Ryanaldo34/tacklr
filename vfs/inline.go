@@ -179,10 +179,8 @@ func parseInline(s string, base map[string]string) []Run {
 	return out
 }
 
+// parseLink reads a [label](href) link at s[i], which is '['.
 func parseLink(s string, i int) (label, href string, next int, ok bool) {
-	if i >= len(s) || s[i] != '[' {
-		return "", "", i, false
-	}
 	depth := 1
 	j := i + 1
 	for j < len(s) {

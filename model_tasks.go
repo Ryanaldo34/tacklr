@@ -310,9 +310,6 @@ func (a *Harness) handoffGenerate(ctx context.Context, window []*message.Message
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
-	if len(window) == 0 || window[0] == nil {
-		return nil, false, fmt.Errorf("handoff: empty window")
-	}
 
 	var planB strings.Builder
 	planB.Grow(len(plan) * 64)

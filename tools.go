@@ -549,12 +549,7 @@ type correctionError struct {
 	cause error
 }
 
-func (e *correctionError) Error() string {
-	if e == nil || e.msg == "" {
-		return ErrCorrection.Error()
-	}
-	return e.msg
-}
+func (e *correctionError) Error() string { return e.msg }
 
 func (e *correctionError) Unwrap() error { return e.cause }
 

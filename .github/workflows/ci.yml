@@ -56,6 +56,10 @@ jobs:
           args: --timeout=5m
           only-new-issues: false
 
+      # Functions nothing reaches (tests and mains as roots) fail the build.
+      - name: Dead code
+        run: make deadcode
+
       # The Cloudflare bridge and its example build only for js/wasm.
       - name: golangci-lint (js/wasm)
         uses: golangci/golangci-lint-action@v8

@@ -89,12 +89,6 @@ func Run(t testing.TB, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// Show returns name at rev in the served repository.
-func (s *Server) Show(t testing.TB, rev, name string) string {
-	t.Helper()
-	return Run(t, s.bare(), "show", rev+":"+name)
-}
-
 func (s *Server) startHTTP(t testing.TB) {
 	gitPath, err := exec.LookPath("git")
 	must(t, err)

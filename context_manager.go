@@ -37,7 +37,6 @@ func (m *modelContextManager) Messages() []*message.Message {
 
 // Restore copies window into storage (caller keeps its slice).
 func (m *modelContextManager) Restore(window []*message.Message) {
-	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(window) == 0 {
@@ -49,7 +48,6 @@ func (m *modelContextManager) Restore(window []*message.Message) {
 
 // Replace takes ownership of window; do not reuse the slice after.
 func (m *modelContextManager) Replace(window []*message.Message) {
-	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.window = window
@@ -58,18 +56,9 @@ func (m *modelContextManager) Replace(window []*message.Message) {
 // Add appends a round without fitting it, for a round whose window effect
 // replaces the window next.
 func (m *modelContextManager) Add(round ...*message.Message) {
-	if err := ValidateMessages(round); err != nil {
-		panic("tacklr: invalid context message: " + err.Error())
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.window = append(m.window, round...)
-}
-
-func assertValidContextWindow(window []*message.Message) {
-	if err := ValidateMessages(window); err != nil {
-		panic("tacklr: invalid context window: " + err.Error())
-	}
 }
 
 // InstallPlanDocument sets the window to [user, plan document].
@@ -79,9 +68,6 @@ func (m *modelContextManager) InstallPlanDocument(planRaw string) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.window) == 0 || m.window[0] == nil {
-		return fmt.Errorf("install plan document: empty window")
-	}
 	m.window = []*message.Message{m.window[0], buildPlanDocumentMessage(planRaw)}
 	return nil
 }
