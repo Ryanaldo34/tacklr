@@ -1,7 +1,6 @@
 package loop
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -412,9 +411,9 @@ func (t *Turn) record(r *tacklr.Round, calls []tacklr.Call, d Executor) error {
 	return errors.Join(errs...)
 }
 
-// startJobs cancels and starts the jobs c asks for. A job id comes from its
-// call, so a job the session already runs is not started again; the job c
-// waits on is marked with c's key.
+// startJobs cancels and starts the jobs c asks for; the job c waits on is
+// marked with c's key. Each start is new: a call's run starts only jobs the
+// session does not run (tacklr.CallContext sees them as Call.Jobs).
 func (t *Turn) startJobs(c tacklr.Call, d Executor) error {
 	for _, id := range c.Cancels {
 		if i := slices.IndexFunc(t.Jobs, func(j Job) bool { return j.ID == session.ID(id) }); i >= 0 {
@@ -426,10 +425,6 @@ func (t *Turn) startJobs(c tacklr.Call, d Executor) error {
 		call := ""
 		if s.ID == c.Await {
 			call = c.Key()
-		}
-		if i := slices.IndexFunc(t.Jobs, func(j Job) bool { return j.ID == session.ID(s.ID) }); i >= 0 {
-			t.Jobs[i].Call = cmp.Or(t.Jobs[i].Call, call)
-			continue
 		}
 		// The job is the session's while its start runs, so the step that
 		// starts it reports it too.
