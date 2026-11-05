@@ -74,15 +74,8 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 			_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": n})
 			return
 		}
-		if r.URL.Path != "/responses" {
-			http.NotFound(w, r)
-			return
-		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+		// The client asks for a token count or a response; this is a response.
+		body, _ := io.ReadAll(r.Body)
 		// Every request must pair each call with its result: a provider
 		// rejects one that does not.
 		if bad := unpairedCalls(body); bad != "" {
@@ -102,10 +95,11 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 				respond(reqCtx, msgs, tools, ch)
 			}
 		}()
-		// A lone error chunk is an HTTP failure so the client classifies
+		// An error chunk first is an HTTP failure so the client classifies
 		// refusal, max tokens, and network the same way a provider would.
 		// Anything else is flushed as SSE so a caller can observe the stream
-		// before the script returns.
+		// before the script returns; an error chunk after it fails the
+		// stream.
 		flush := func() {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
@@ -133,16 +127,13 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 			return
 		}
 		if c.Error != nil {
-			next, ok2 := <-ch
-			if !ok2 {
-				writeProviderError(w, c.Error)
-				return
+			writeProviderError(w, c.Error)
+			cancelReq()
+			for range ch {
 			}
-			emit(c)
-			emit(next)
-		} else {
-			emit(c)
+			return
 		}
+		emit(c)
 		for c := range ch {
 			emit(c)
 		}
@@ -234,9 +225,7 @@ func unpairedCalls(body []byte) string {
 			CallID string `json:"call_id"`
 		} `json:"input"`
 	}
-	if json.Unmarshal(body, &req) != nil {
-		return ""
-	}
+	_ = json.Unmarshal(body, &req)
 	open := map[string]bool{}
 	var order []string
 	for _, item := range req.Input {
@@ -264,13 +253,9 @@ func messagesFromResponses(body []byte) ([]*message.Message, []*tacklr.Tool) {
 		Input json.RawMessage `json:"input"`
 		Tools json.RawMessage `json:"tools"`
 	}
-	if json.Unmarshal(body, &req) != nil || len(req.Input) == 0 {
-		return nil, toolsFromResponses(req.Tools)
-	}
+	_ = json.Unmarshal(body, &req)
 	var raws []json.RawMessage
-	if json.Unmarshal(req.Input, &raws) != nil {
-		return nil, toolsFromResponses(req.Tools)
-	}
+	_ = json.Unmarshal(req.Input, &raws)
 	var msgs []*message.Message
 	var calls []message.ToolCall
 	flush := func() {
@@ -290,9 +275,8 @@ func messagesFromResponses(body []byte) ([]*message.Message, []*tacklr.Tool) {
 			Arguments string          `json:"arguments"`
 			Output    json.RawMessage `json:"output"`
 		}
-		if json.Unmarshal(raw, &item) != nil {
-			continue
-		}
+		// An item that does not decode matches no case.
+		_ = json.Unmarshal(raw, &item)
 		switch {
 		case item.Type == "function_call":
 			ns, name := splitToolName(item.Name)
@@ -314,14 +298,9 @@ func toolsFromResponses(raw json.RawMessage) []*tacklr.Tool {
 	var defs []struct {
 		Name string `json:"name"`
 	}
-	if json.Unmarshal(raw, &defs) != nil {
-		return nil
-	}
+	_ = json.Unmarshal(raw, &defs)
 	tools := make([]*tacklr.Tool, 0, len(defs))
 	for _, d := range defs {
-		if d.Name == "" {
-			continue
-		}
 		ns, name := splitToolName(d.Name)
 		tools = append(tools, tacklr.NewTool(tacklr.ToolConfig{
 			Name:      name,
@@ -341,9 +320,6 @@ func splitToolName(name string) (namespace, short string) {
 }
 
 func messageContent(raw json.RawMessage) (string, []message.ContentPart) {
-	if len(raw) == 0 {
-		return "", nil
-	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
 		return s, nil
@@ -357,9 +333,7 @@ func messageContent(raw json.RawMessage) (string, []message.ContentPart) {
 		FileData string `json:"file_data"`
 		FileID   string `json:"file_id"`
 	}
-	if json.Unmarshal(raw, &parts) != nil {
-		return "", nil
-	}
+	_ = json.Unmarshal(raw, &parts)
 	var b strings.Builder
 	var out []message.ContentPart
 	for _, p := range parts {
@@ -386,22 +360,15 @@ func messageContent(raw json.RawMessage) (string, []message.ContentPart) {
 	return b.String(), out
 }
 
+// mimeFromDataURL is the MIME type of a data URL the client sent:
+// data:<mime>[;base64],<data>.
 func mimeFromDataURL(s string) string {
-	rest, ok := strings.CutPrefix(s, "data:")
-	if !ok {
-		return ""
-	}
-	mime, _, ok := strings.Cut(rest, ";")
-	if !ok {
-		mime, _, _ = strings.Cut(rest, ",")
-	}
+	mime, _, _ := strings.Cut(strings.TrimPrefix(s, "data:"), ",")
+	mime, _, _ = strings.Cut(mime, ";")
 	return mime
 }
 
 func textContent(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
 		return s
@@ -409,12 +376,10 @@ func textContent(raw json.RawMessage) string {
 	var parts []struct {
 		Text string `json:"text"`
 	}
-	if json.Unmarshal(raw, &parts) == nil {
-		var b strings.Builder
-		for _, p := range parts {
-			b.WriteString(p.Text)
-		}
-		return b.String()
+	_ = json.Unmarshal(raw, &parts)
+	var b strings.Builder
+	for _, p := range parts {
+		b.WriteString(p.Text)
 	}
-	return ""
+	return b.String()
 }

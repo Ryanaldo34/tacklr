@@ -224,6 +224,9 @@ func (p *ToolPermissionInterrupt) Error() string {
 // --- Interrupt registry ---
 
 var (
+	// interrupts guards interruptFactories: a host may register a type
+	// while sessions read checkpoints.
+	interrupts         sync.RWMutex
 	interruptFactories = map[string]func() Interrupt{}
 	defaultsOnce       sync.Once
 )
@@ -242,7 +245,9 @@ func RegisterDefaults() {
 // NewInterrupt returns a fresh Interrupt for a registered type name.
 func NewInterrupt(typeName string) (Interrupt, bool) {
 	RegisterDefaults()
+	interrupts.RLock()
 	f, ok := interruptFactories[typeName]
+	interrupts.RUnlock()
 	if !ok {
 		return nil, false
 	}

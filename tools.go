@@ -74,12 +74,6 @@ func (t *Tool) QualifiedName() string {
 	return t.namespace + "__" + t.name
 }
 
-// Category is the coarse streaming category for client presentation.
-func (t *Tool) Category() message.ToolCategory { return t.category }
-
-// Access is the permission bitmask for this tool.
-func (t *Tool) Access() ToolAccess { return t.access }
-
 type ToolConfig struct {
 	Name        string
 	Description string

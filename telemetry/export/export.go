@@ -72,6 +72,33 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 		return nil, err
 	}
 	tp := sdktrace.NewTracerProvider(opts...)
+
+	// Build every provider first, so a failed Init installs none of them.
+	var (
+		mp *sdkmetric.MeterProvider
+		lp *sdklog.LoggerProvider
+	)
+	if endpoint != "" {
+		res := Resource(cfg.ServiceName, cfg.ServiceVersion)
+		insecure := cfg.Insecure || strings.HasPrefix(endpoint, "http://") || !strings.Contains(endpoint, "://")
+		host := stripScheme(endpoint)
+		if !cfg.DisableMetrics {
+			if mp, err = newMeterProvider(ctx, host, protocol, insecure, res); err != nil {
+				_ = tp.Shutdown(ctx)
+				return nil, err
+			}
+		}
+		if !cfg.DisableLogs {
+			if lp, err = newLoggerProvider(ctx, host, protocol, insecure, res); err != nil {
+				if mp != nil {
+					_ = mp.Shutdown(ctx)
+				}
+				_ = tp.Shutdown(ctx)
+				return nil, err
+			}
+		}
+	}
+
 	otel.SetTracerProvider(tp)
 	traces.mu.Lock()
 	traces.cfg = cfg
@@ -80,40 +107,16 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 	traces.set = true
 	traces.shutdown = tp.Shutdown
 	traces.mu.Unlock()
-
 	if endpoint == "" {
 		telemetry.SetMeterProvider(nil)
 		otel.SetLoggerProvider(lognoop.NewLoggerProvider())
-		return traces.shutdownAll(nil, nil), nil
 	}
-
-	res := Resource(cfg.ServiceName, cfg.ServiceVersion)
-	insecure := cfg.Insecure || strings.HasPrefix(endpoint, "http://") || !strings.Contains(endpoint, "://")
-	host := stripScheme(endpoint)
-
-	var mp *sdkmetric.MeterProvider
-	if !cfg.DisableMetrics {
-		mp, err = newMeterProvider(ctx, host, protocol, insecure, res)
-		if err != nil {
-			_ = tp.Shutdown(ctx)
-			return nil, err
-		}
+	if mp != nil {
 		telemetry.SetMeterProvider(mp)
 	}
-
-	var lp *sdklog.LoggerProvider
-	if !cfg.DisableLogs {
-		lp, err = newLoggerProvider(ctx, host, protocol, insecure, res)
-		if err != nil {
-			if mp != nil {
-				_ = mp.Shutdown(ctx)
-			}
-			_ = tp.Shutdown(ctx)
-			return nil, err
-		}
+	if lp != nil {
 		otel.SetLoggerProvider(lp)
 	}
-
 	return traces.shutdownAll(mp, lp), nil
 }
 
@@ -200,79 +203,75 @@ func traceProviderOptions(ctx context.Context, cfg Config, endpoint, protocol st
 }
 
 func newTraceExporter(ctx context.Context, host, protocol string, insecure bool) (*otlptrace.Exporter, error) {
-	switch protocol {
-	case "http", "http/protobuf":
+	var client otlptrace.Client
+	switch {
+	case isHTTP(protocol):
 		opts := []otlptracehttp.Option{otlptracehttp.WithEndpoint(host)}
 		if insecure {
 			opts = append(opts, otlptracehttp.WithInsecure())
 		}
-		exp, err := otlptracehttp.New(ctx, opts...)
-		if err != nil {
-			return nil, fmt.Errorf("otel trace exporter: %w", err)
-		}
-		return exp, nil
-	case "grpc":
+		client = otlptracehttp.NewClient(opts...)
+	case protocol == "grpc":
 		opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(host)}
 		if insecure {
 			opts = append(opts, otlptracegrpc.WithInsecure())
 		}
-		exp, err := otlptracegrpc.New(ctx, opts...)
-		if err != nil {
-			return nil, fmt.Errorf("otel trace exporter: %w", err)
-		}
-		return exp, nil
+		client = otlptracegrpc.NewClient(opts...)
 	default:
 		return nil, fmt.Errorf("otel: unknown protocol %q", protocol)
 	}
+	exp, err := otlptrace.New(ctx, client)
+	if err != nil {
+		return nil, fmt.Errorf("otel trace exporter: %w", err)
+	}
+	return exp, nil
+}
+
+// isHTTP reports whether protocol is OTLP over HTTP. Init builds the trace
+// exporter first, which refuses a protocol that is neither HTTP nor gRPC,
+// so the metric and log exporters take any other protocol as gRPC.
+func isHTTP(protocol string) bool {
+	return protocol == "http" || protocol == "http/protobuf"
 }
 
 func newMeterProvider(ctx context.Context, host, protocol string, insecure bool, res *resource.Resource) (*sdkmetric.MeterProvider, error) {
-	var reader sdkmetric.Reader
-	switch protocol {
-	case "http", "http/protobuf":
+	var exp sdkmetric.Exporter
+	var err error
+	if isHTTP(protocol) {
 		opts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(host)}
 		if insecure {
 			opts = append(opts, otlpmetrichttp.WithInsecure())
 		}
-		exp, err := otlpmetrichttp.New(ctx, opts...)
-		if err != nil {
-			return nil, fmt.Errorf("otel metric exporter: %w", err)
-		}
-		reader = sdkmetric.NewPeriodicReader(exp, sdkmetric.WithInterval(10*time.Second))
-	case "grpc":
+		exp, err = otlpmetrichttp.New(ctx, opts...)
+	} else {
 		opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(host)}
 		if insecure {
 			opts = append(opts, otlpmetricgrpc.WithInsecure())
 		}
-		exp, err := otlpmetricgrpc.New(ctx, opts...)
-		if err != nil {
-			return nil, fmt.Errorf("otel metric exporter: %w", err)
-		}
-		reader = sdkmetric.NewPeriodicReader(exp, sdkmetric.WithInterval(10*time.Second))
-	default:
-		return nil, fmt.Errorf("otel: unknown protocol %q", protocol)
+		exp, err = otlpmetricgrpc.New(ctx, opts...)
 	}
+	if err != nil {
+		return nil, fmt.Errorf("otel metric exporter: %w", err)
+	}
+	reader := sdkmetric.NewPeriodicReader(exp, sdkmetric.WithInterval(10*time.Second))
 	return sdkmetric.NewMeterProvider(sdkmetric.WithResource(res), sdkmetric.WithReader(reader)), nil
 }
 
 func newLoggerProvider(ctx context.Context, host, protocol string, insecure bool, res *resource.Resource) (*sdklog.LoggerProvider, error) {
 	var exporter sdklog.Exporter
 	var err error
-	switch protocol {
-	case "http", "http/protobuf":
+	if isHTTP(protocol) {
 		opts := []otlploghttp.Option{otlploghttp.WithEndpoint(host)}
 		if insecure {
 			opts = append(opts, otlploghttp.WithInsecure())
 		}
 		exporter, err = otlploghttp.New(ctx, opts...)
-	case "grpc":
+	} else {
 		opts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(host)}
 		if insecure {
 			opts = append(opts, otlploggrpc.WithInsecure())
 		}
 		exporter, err = otlploggrpc.New(ctx, opts...)
-	default:
-		return nil, fmt.Errorf("otel: unknown protocol %q", protocol)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("otel log exporter: %w", err)

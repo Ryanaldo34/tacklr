@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -220,6 +221,7 @@ func TestModelSpan_recordsTheRequestAndItsOutcome(t *testing.T) {
 // TestClassifyErrorClass_bucketsEachFailure: each failure falls in one
 // closed error class, by its sentinel, its HTTP status, then its text.
 func TestClassifyErrorClass_bucketsEachFailure(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		err    error
 		status int
@@ -244,6 +246,7 @@ func TestClassifyErrorClass_bucketsEachFailure(t *testing.T) {
 // TestSpans_recordToolPlanAndHandoffOutcomes: tool, plan-install and
 // handoff spans end with their outcome and status; the tool and handoff
 // metrics count each under the turn's agent; a checkpoint save counts by
+// outcome, a turn by its agent and outcome, and a FUSE mount by its
 // outcome. Instruments come from the context, else from the process-wide
 // meter. Each span ends once, and only a named event is emitted.
 func TestSpans_recordToolPlanAndHandoffOutcomes(t *testing.T) {
@@ -268,6 +271,8 @@ func TestSpans_recordToolPlanAndHandoffOutcomes(t *testing.T) {
 	failedHandoff.End(telemetry.HandoffOutcomeOK, nil)
 	telemetry.RecordCheckpointAttempt(global, nil)
 	telemetry.RecordCheckpointAttempt(global, errors.New("save failed"))
+	telemetry.InstrumentsFromContext(global).RecordTurnOutcome(global, "agent-1", "prompt", telemetry.OutcomeOK, time.Second)
+	telemetry.InstrumentsFromContext(global).RecordFuseMount(global, telemetry.FuseMountOutcomeError)
 	telemetry.EmitEvent(global, "")
 	telemetry.EmitEventSeverity(global, telemetry.EventProviderFailed, log.SeverityError)
 
@@ -293,6 +298,8 @@ func TestSpans_recordToolPlanAndHandoffOutcomes(t *testing.T) {
 		{telemetry.MetricHandoffTotal, []attribute.KeyValue{agent, attribute.String(telemetry.LabelOutcome, telemetry.HandoffOutcomeError)}, 1},
 		{telemetry.MetricCheckpointSave, []attribute.KeyValue{attribute.String(telemetry.LabelOutcome, telemetry.OutcomeOK)}, 1},
 		{telemetry.MetricCheckpointSave, []attribute.KeyValue{attribute.String(telemetry.LabelOutcome, telemetry.OutcomeError)}, 1},
+		{telemetry.MetricTurnTotal, []attribute.KeyValue{agent, attribute.String(telemetry.LabelOutcome, telemetry.OutcomeOK)}, 1},
+		{telemetry.MetricFuseMount, []attribute.KeyValue{attribute.String(telemetry.LabelOutcome, telemetry.FuseMountOutcomeError)}, 1},
 	} {
 		if got := o.count(t, tc.name, tc.attrs...); got != tc.want {
 			t.Errorf("%s %v = %d, want %d", tc.name, tc.attrs, got, tc.want)

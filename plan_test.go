@@ -27,6 +27,7 @@ func titles(todos []tacklr.Todo) []string {
 // (leaving the rest pending), streams the todos and unlocks write tools.
 // An empty document, no todos, or a second plan is the model's to correct.
 func TestCreatePlan_installsThePlanAndUnlocksWriteTools(t *testing.T) {
+	t.Parallel()
 	model, _ := scripted(t)
 	mutate := tacklr.NewTool(tacklr.ToolConfig{Name: "mutate", Access: tacklr.ToolWriteAccess, Handler: func(context.Context) (string, error) { return "mutated", nil }})
 	h := newHarness(t, "create", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{mutate}})
@@ -80,6 +81,7 @@ func TestCreatePlan_installsThePlanAndUnlocksWriteTools(t *testing.T) {
 // deletes todos; a revised document hands off with it. Each rejected edit
 // names what is wrong and leaves the plan as it was.
 func TestEditPlan_changesTheTodosOrHandsOffARevisedPlan(t *testing.T) {
+	t.Parallel()
 	model, _ := scripted(t, []tacklr.LLMResponseChunk{text("the handoff")})
 	h := newHarness(t, "edit", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
 	prompt(t, h, "goal")
@@ -124,6 +126,7 @@ func TestEditPlan_changesTheTodosOrHandsOffARevisedPlan(t *testing.T) {
 // once do); the round's Commit replays each change in call order, so every
 // completion lands, and a change that no longer applies is skipped.
 func TestPlanTools_changesOfCallsThatRanAtOnceAllLand(t *testing.T) {
+	t.Parallel()
 	model, _ := scripted(t)
 	const n = 4
 	todos := make([]tacklr.Todo, n)

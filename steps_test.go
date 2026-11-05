@@ -29,6 +29,7 @@ import (
 // request after tools that fails, or that a model cannot send, fails with
 // ErrModelAfterTools. A reply without calls has its text as its result.
 func TestInfer_streamsAReplyWhoseRoundTheNextRequestAnswers(t *testing.T) {
+	t.Parallel()
 	lookup := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "lookup", DisplayName: "Look up {q}", Category: message.ToolCategoryRead, Timeout: time.Minute,
 		Handler: func(context.Context) (string, error) { return "found", nil },
@@ -41,7 +42,8 @@ func TestInfer_streamsAReplyWhoseRoundTheNextRequestAnswers(t *testing.T) {
 			// A provider may name a call by its call id alone.
 			calls(message.ToolCall{CallID: "c1", Name: "lookup", Arguments: `{"q":"x"}`}),
 		},
-		[]tacklr.LLMResponseChunk{failure(fmt.Errorf("%w: upstream", tacklr.ErrNetwork))},
+		// The request after tools fails part way through its stream.
+		[]tacklr.LLMResponseChunk{{Type: session.EventMessage, Content: "part"}, {Type: session.EventError, Content: "upstream"}},
 		[]tacklr.LLMResponseChunk{text("all done")},
 	)
 	opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{lookup}}
@@ -101,6 +103,7 @@ func TestInfer_streamsAReplyWhoseRoundTheNextRequestAnswers(t *testing.T) {
 // context, a call with a result and no body, or content the model cannot
 // read fails and changes nothing.
 func TestCommit_aPromptPastAnOpenRoundCancelsItsOpenCalls(t *testing.T) {
+	t.Parallel()
 	gate := tacklr.NewTool(tacklr.ToolConfig{Name: "gate", OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall}, Handler: func(context.Context) (string, error) { return "gate-ok", nil }})
 	free := tacklr.NewTool(tacklr.ToolConfig{Name: "free", Handler: func(context.Context) (string, error) { return "free-ok", nil }})
 	h := newHarness(t, "cancel-round", tacklr.AgentOptions{Model: testkit.TextHTTPModel(t, nil), MaxWindowSize: 8192, Tools: []*tacklr.Tool{gate, free}})
@@ -144,6 +147,7 @@ func TestCommit_aPromptPastAnOpenRoundCancelsItsOpenCalls(t *testing.T) {
 // result says where; without, the note says it was not kept. A Keep or a
 // count that fails, or a round with no result to cut, fails the commit.
 func TestCommit_cutsAResultTooLargeForTheWindow(t *testing.T) {
+	t.Parallel()
 	ascii, runes := strings.Repeat("x", 2000)+"END", strings.Repeat("─", 700)
 	cases := []struct {
 		name     string
@@ -163,6 +167,7 @@ func TestCommit_cutsAResultTooLargeForTheWindow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			big := tacklr.NewTool(tacklr.ToolConfig{Name: "big", Handler: func(context.Context) (string, error) { return tc.full, nil }})
 			dir := t.TempDir()
 			ms, err := vfs.Tree(vfs.At("work", vfs.Local(dir)))(t.Context(), "trim", vfs.Request{})
@@ -215,6 +220,7 @@ func TestCommit_cutsAResultTooLargeForTheWindow(t *testing.T) {
 // the last request, a round far below the window commits without a token
 // count request, and one near it is counted.
 func TestCommit_countsTokensOnlyNearTheWindow(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name        string
 		inputTokens int
@@ -224,6 +230,7 @@ func TestCommit_countsTokensOnlyNearTheWindow(t *testing.T) {
 		{"near the window", 7000, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var counts atomic.Int32
 			model, _ := counted(t, func([]*message.Message) (int, error) { counts.Add(1); return tc.inputTokens, nil },
 				[]tacklr.LLMResponseChunk{calls(call("f1", "free", "{}"))})

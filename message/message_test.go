@@ -10,6 +10,7 @@ import (
 // TestToolCall_KeyAndWireID: Key prefers the provider item id and WireID
 // prefers the call id; each falls back to the other id.
 func TestToolCall_KeyAndWireID(t *testing.T) {
+	t.Parallel()
 	both := message.ToolCall{ID: "i", CallID: "c"}
 	idOnly := message.ToolCall{ID: "i"}
 	callOnly := message.ToolCall{CallID: "c"}
@@ -27,6 +28,7 @@ func TestToolCall_KeyAndWireID(t *testing.T) {
 // files and an image URL that is not a data URL add nothing. DataURL builds
 // the URL that MIMETypes reads back.
 func TestMessage_MIMETypesListsEachBinaryTypeOnce(t *testing.T) {
+	t.Parallel()
 	m := &message.Message{ContentParts: []message.ContentPart{
 		{Type: message.ContentTypeInputText, Text: "hi"},
 		{Type: message.ContentTypeInputImage, FileData: &message.FileData{MIMEType: " Image/PNG; charset=binary "}},

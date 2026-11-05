@@ -148,8 +148,9 @@ const JobRunning = "running"
 
 // RegisterInterrupt registers a custom interrupt factory for session rehydrate.
 func RegisterInterrupt(factory func() Interrupt) {
-	intr := factory()
-	name := intr.TypeName()
+	name := factory().TypeName()
+	interrupts.Lock()
+	defer interrupts.Unlock()
 	if _, ok := interruptFactories[name]; ok {
 		panic(fmt.Sprintf("interrupt type %q registered twice", name))
 	}

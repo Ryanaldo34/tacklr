@@ -19,6 +19,7 @@ import (
 // restores into a new harness as the same rows; a new session's checkpoint
 // restores as an empty session.
 func TestCheckpoint_restoresEveryRowItSaved(t *testing.T) {
+	t.Parallel()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithConfig(brain.EngineConfig{DefaultLimit: 1}))
 	if err != nil {
 		t.Fatal(err)
@@ -75,6 +76,7 @@ func TestCheckpoint_restoresEveryRowItSaved(t *testing.T) {
 // restore refuses a checkpoint that is empty, corrupt, of another version,
 // holds an invalid window, or a row of a kind it does not know.
 func TestCheckpoint_failsOnStateItCannotKeepOrABadCheckpoint(t *testing.T) {
+	t.Parallel()
 	model, _ := scripted(t)
 	h := newHarness(t, "bad", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
 	if err := h.Commit(t.Context(), tacklr.CommitIn{State: map[string]any{"bad": make(chan int)}}, newStream(t).out); err != nil {
@@ -120,6 +122,7 @@ func TestCheckpoint_failsOnStateItCannotKeepOrABadCheckpoint(t *testing.T) {
 // so a commit that appends to the window and sets one state key changes
 // only those rows; the rest stay as they were saved.
 func TestCheckpoint_aCommitChangesOnlyTheRowsItTouched(t *testing.T) {
+	t.Parallel()
 	model, _ := scripted(t)
 	h := newHarness(t, "touched", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
 	commit := func(in tacklr.CommitIn) []session.CheckpointEntry {

@@ -32,6 +32,7 @@ func skillMD(name, description, body string) string {
 // files and symlinked directories are not skills. The catalog lists each
 // skill's name and description. An empty or missing root loads no skills.
 func TestLoader_loadsEachSkillDirectorySortedByName(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeSkillMD(t, root, "beta", skillMD("beta", "Beta skill", "Do beta things."))
 	writeSkillMD(t, root, "alpha", skillMD("alpha", "Alpha skill", "Do alpha things.\n"))
@@ -63,6 +64,7 @@ func TestLoader_loadsEachSkillDirectorySortedByName(t *testing.T) {
 // TestLoader_failsOnAPackItCannotLoad: each pack that cannot load fails
 // with an error that names the cause.
 func TestLoader_failsOnAPackItCannotLoad(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		docs map[string]string // dir -> SKILL.md; "" makes the dir only
 		want string
@@ -76,6 +78,7 @@ func TestLoader_failsOnAPackItCannotLoad(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			for dir, doc := range tc.docs {
 				if doc == "" {
@@ -100,6 +103,7 @@ func TestLoader_failsOnAPackItCannotLoad(t *testing.T) {
 // skills directory fails the load, and a context that ends stops a load or
 // a Collect between two skills with the context's error.
 func TestLoader_failsOnADirectoryItCannotReadOrAnEndedContext(t *testing.T) {
+	t.Parallel()
 	unreadable := t.TempDir()
 	writeSkillMD(t, unreadable, "alpha", skillMD("alpha", "A", "Body."))
 	if err := os.Chmod(unreadable, 0); err != nil {

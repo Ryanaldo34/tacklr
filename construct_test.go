@@ -27,6 +27,7 @@ import (
 // construction with an error that names it, and a valid configuration
 // without a window takes the model's window.
 func TestNewHarness_refusesAnInvalidConfiguration(t *testing.T) {
+	t.Parallel()
 	model := testkit.HTTPModel(t, nil)
 	noNamespace, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
@@ -67,6 +68,7 @@ func TestNewHarness_refusesAnInvalidConfiguration(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			if tc.opts.Model != nil && name != "a model that reports no window" {
 				tc.opts.MaxWindowSize = 8192
 			}
@@ -115,6 +117,7 @@ func skillPack(t *testing.T, name, description, instructions string) skills.Load
 // the knowledge store and the host's instructions. read_skill reads a
 // skill's body.
 func TestNewHarness_twoBuildsSendTheSameRequestPrefix(t *testing.T) {
+	t.Parallel()
 	srv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "svc", Version: "v0.0.1"}, nil)
 	for _, name := range []string{"zeta", "alpha"} {
 		mcpsdk.AddTool(srv, &mcpsdk.Tool{Name: name, Description: name},

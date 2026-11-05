@@ -66,6 +66,7 @@ func planned(t *testing.T, id string, opts tacklr.AgentOptions, todos ...tacklr.
 // save (its context ends as it embeds) that fails stops the collapse and
 // keeps the window.
 func TestCommit_collapsesAWindowOverPressureIntoASavedSummary(t *testing.T) {
+	t.Parallel()
 	const token = "unique-collapsed-token"
 	summary := []tacklr.LLMResponseChunk{text("summary")}
 	// Each session counts its goal, its two large messages, then the
@@ -85,6 +86,7 @@ func TestCommit_collapsesAWindowOverPressureIntoASavedSummary(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			model, _ := counted(t, tc.count, tc.reply)
@@ -134,6 +136,7 @@ func TestCommit_collapsesAWindowOverPressureIntoASavedSummary(t *testing.T) {
 // session's saved messages, which search finds. Completing the last open
 // todo keeps the window. A wrong title is the model's to correct.
 func TestCompleteTodo_handsOffTheRestOfThePlan(t *testing.T) {
+	t.Parallel()
 	const token = "unique-retain-handoff-token"
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
@@ -205,12 +208,14 @@ func TestCompleteTodo_handsOffTheRestOfThePlan(t *testing.T) {
 // model cannot send, an empty stream and a stream error each install a
 // handoff written from the plan.
 func TestHandoff_fallsBackToThePlanWhenTheModelGivesNoHandoff(t *testing.T) {
+	t.Parallel()
 	for name, reply := range map[string][]tacklr.LLMResponseChunk{
 		"a request that cannot be sent": nil,
 		"an empty stream":               {},
 		"a stream error":                {failure(fmt.Errorf("%w: handoff stream failed", tacklr.ErrNetwork))},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			model, _ := scripted(t, reply)
 			opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}
 			h := planned(t, "fallback", opts, tacklr.Todo{Title: "First"}, tacklr.Todo{Title: "Ship", Description: "finish"})
@@ -237,6 +242,7 @@ func TestHandoff_fallsBackToThePlanWhenTheModelGivesNoHandoff(t *testing.T) {
 // context ends during its save of the window, or after it, fails the
 // commit; the window keeps its messages and the round.
 func TestHandoff_failsAndKeepsTheWindowWhenItsContextEnds(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	audited, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithAudit(func(_ context.Context, ev brain.AuditEvent) error {
 		if ev.Op == brain.AuditSessionSave {
@@ -257,6 +263,7 @@ func TestHandoff_failsAndKeepsTheWindowWhenItsContextEnds(t *testing.T) {
 		"a context that ends after the save":  {audited, ctx, "context canceled"},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			model, _ := scripted(t)
 			h := planned(t, "save-fail", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Brain: tc.brain, SearchNamespace: storetest.Namespace(t, "org", "acme")},
 				tacklr.Todo{Title: "A"}, tacklr.Todo{Title: "B"})
@@ -264,11 +271,13 @@ func TestHandoff_failsAndKeepsTheWindowWhenItsContextEnds(t *testing.T) {
 			out := newStream(t).out
 			tcs := call("c1", "complete_todo", `{"title":"A"}`)
 			r := tacklr.NewRound(reply(tcs))
-			if r.Calls[0], err = h.RunCall(t.Context(), r.Calls[0], out); err != nil {
+			ran, err := h.RunCall(t.Context(), r.Calls[0], out)
+			if err != nil {
 				t.Fatal(err)
 			}
+			r.Calls[0] = ran
 
-			err := h.Commit(tc.ctx, tacklr.CommitIn{Round: r}, out)
+			err = h.Commit(tc.ctx, tacklr.CommitIn{Round: r}, out)
 
 			if window := contents(checkpoint(t, h).window); !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), tc.want) || !slices.Equal(window[2:], []string{"kept-detail", "", r.Calls[0].Body.Text()}) {
 				t.Fatalf("handoff = %v with window %q, want %v and the window with the round", err, window, tc.want)

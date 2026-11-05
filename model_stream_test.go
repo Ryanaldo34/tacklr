@@ -15,8 +15,10 @@ import (
 // real client cannot hold a chunk the watcher cannot hand on at the
 // moment of a cancel, so this is a unit test.
 func TestWatchModelStream_aCancelEndsTheStreamAndFreesTheProvider(t *testing.T) {
+	t.Parallel()
 	for name, unread := range map[string]int{"a reader waiting for a chunk": 0, "a reader that stopped reading": 17} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			in := make(chan LLMResponseChunk, 32)
 			_, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, 1, telemetry.WindowShape{})

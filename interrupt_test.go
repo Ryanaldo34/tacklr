@@ -16,6 +16,7 @@ import (
 // option, and refuses an answer that is not JSON, has no selectionIdx, has
 // one of the wrong type, or one out of range.
 func TestUserSelection_returnsTheChosenOption(t *testing.T) {
+	t.Parallel()
 	usi := &tacklr.UserSelectionInterrupt{Question: "which?", Options: []tacklr.UserChoice{{Title: "A", IsRecommended: true}, {Title: "B"}}}
 
 	wire, err := usi.Serialize()
@@ -50,6 +51,7 @@ func TestUserSelection_returnsTheChosenOption(t *testing.T) {
 // or a wrongly typed optionId, names an unknown option, or an option of an
 // unknown kind.
 func TestToolPermission_resolvesEachKindOfAnswer(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		id, kind string
 		allowed  bool
@@ -126,6 +128,7 @@ func TestRegisterInterrupt_makesATypeReadableOnce(t *testing.T) {
 // TestAuthExpired_namesTheToolAndResumesOnAnyAnswer: an expired credential
 // names its tool when it has one and resumes on any answer.
 func TestAuthExpired_namesTheToolAndResumesOnAnyAnswer(t *testing.T) {
+	t.Parallel()
 	empty, named := &tacklr.AuthExpired{}, &tacklr.AuthExpired{Tool: "read"}
 
 	resumed := empty.Return([]byte(`{}`))

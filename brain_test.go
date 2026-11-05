@@ -52,6 +52,7 @@ func titlesOfPage(p brain.Page) []string {
 // parts; a search's rest carries to the next step through Commit. Each bad
 // request is the model's to correct.
 func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store, brain.WithKinds(
@@ -105,6 +106,7 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 		`{"query":"knowledge","namespace":[{"name":"session","value":"x"}]}`: "reserved",
 		`{"query":"x","namespace":[{"name":"org","value":"other"}]}`:         "outside host scope",
 		`{"query":"knowledge","filters":{"created_after":"yesterday"}}`:      "created_after",
+		`{"query":"knowledge","within":"not a path"}`:                        "neither a UUID nor a path",
 	}
 	badSave := map[string]string{
 		`{"kind":"Memory","title":"x"}`:                                            `kind "Memory" cannot be saved; kinds: Fact`,
@@ -151,8 +153,10 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 // TestRunCall_aSearchCursorCarriesToTheNextStepThroughCommit: a search
 // leaves the rest of its results as the session's cursor; the Tool step
 // saves nothing, the round's Commit keeps the cursor, and the next step's
-// search with more continues it.
+// search with more continues it. A host interceptor that asks for each
+// page in one call continues the call's own cursor.
 func TestRunCall_aSearchCursorCarriesToTheNextStepThroughCommit(t *testing.T) {
+	t.Parallel()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithConfig(brain.EngineConfig{DefaultLimit: 1}))
 	if err != nil {
 		t.Fatal(err)
@@ -163,9 +167,24 @@ func TestRunCall_aSearchCursorCarriesToTheNextStepThroughCommit(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// pageAll gives a search every page of its results in one result.
+	pageAll := func(ctx context.Context, inv tacklr.ToolInvocation, next tacklr.ToolCallFunc) (tacklr.ToolOutcome, error) {
+		out, err := next(ctx, inv)
+		all := out.Output
+		for err == nil && strings.Contains(out.Output, `"more": true`) {
+			inv.ArgsJSON = `{"more":true}`
+			out, err = next(ctx, inv)
+			all += out.Output
+		}
+		out.Output = all
+		return out, err
+	}
 	model, _ := scripted(t)
-	h := newHarness(t, "cursor", tacklr.AgentOptions{Model: model, MaxWindowSize: 100000, Brain: eng, SearchNamespace: ns})
+	opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 100000, Brain: eng, SearchNamespace: ns}
+	h := newHarness(t, "cursor", opts)
 	prompt(t, h, "go")
+	opts.ToolInterceptors = []tacklr.ToolInterceptor{pageAll}
+	paged := result(t, newHarness(t, "cursor-pages", opts), call("s4", "search", `{"query":"cursor"}`))
 	out := newStream(t).out
 	r := tacklr.NewRound(reply(call("s1", "search", `{"query":"cursor"}`)))
 
@@ -179,6 +198,9 @@ func TestRunCall_aSearchCursorCarriesToTheNextStepThroughCommit(t *testing.T) {
 	}
 	if !strings.Contains(before, "no more results") {
 		t.Fatalf("more before the commit = %q, want no cursor yet: the Tool step saved nothing", before)
+	}
+	if !containsAll(paged, "cursor one", "cursor two") {
+		t.Fatalf("every page in one call = %q, want both facts", paged)
 	}
 }
 
@@ -259,6 +281,7 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 // built for a nested specialist reads and searches the parent's Brain in
 // its namespace, and writes without a plan.
 func TestWithSpecialist_aWorkerSharesTheBrainAndSkipsThePlanLock(t *testing.T) {
+	t.Parallel()
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)

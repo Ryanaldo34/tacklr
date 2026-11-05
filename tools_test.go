@@ -23,10 +23,16 @@ type basicArgs struct {
 
 // TestNewTool_runsAHandlerOfEachShape: a tool's result is a string as it
 // is, any other value as JSON; its arguments decode into its struct or a
-// pointer to one, with or without a context before them. Arguments that do not decode, a result that does not
-// encode, a handler error, a handler past its timeout, and the end of the
-// step's context are each the call's result.
+// pointer to one, with or without a context before them. Arguments that
+// do not decode, a result that does not encode, a handler error, a handler
+// past the tool's timeout or its own deadline, and the end of the step's
+// context are each the call's result.
 func TestNewTool_runsAHandlerOfEachShape(t *testing.T) {
+	t.Parallel()
+	// release frees the handler that does not watch its context, when the
+	// test ends.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	tools := []*tacklr.Tool{
 		tacklr.NewTool(tacklr.ToolConfig{Name: "text", Handler: func(context.Context) (string, error) { return "hello", nil }}),
 		tacklr.NewTool(tacklr.ToolConfig{Name: "bare", Handler: func() (string, error) { return "plain", nil }}),
@@ -36,9 +42,14 @@ func TestNewTool_runsAHandlerOfEachShape(t *testing.T) {
 		tacklr.NewTool(tacklr.ToolConfig{Name: "pointer", Handler: func(_ context.Context, a *basicArgs) (string, error) { return a.Name, nil }}),
 		tacklr.NewTool(tacklr.ToolConfig{Name: "channel", Handler: func(context.Context) (chan int, error) { return make(chan int), nil }}),
 		tacklr.NewTool(tacklr.ToolConfig{Name: "fails", Handler: func(context.Context, basicArgs) (string, error) { return "", errors.New("boom") }}),
-		tacklr.NewTool(tacklr.ToolConfig{Name: "stops", Timeout: 5 * time.Millisecond, Handler: func(ctx context.Context) (string, error) { <-ctx.Done(); return "", ctx.Err() }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "inner", Timeout: time.Minute, Handler: func(ctx context.Context) (string, error) {
+			short, cancel := context.WithTimeout(ctx, time.Nanosecond)
+			defer cancel()
+			<-short.Done()
+			return "", short.Err()
+		}}),
 		tacklr.NewTool(tacklr.ToolConfig{Name: "ignores", Timeout: 5 * time.Millisecond, Handler: func(context.Context) (string, error) { time.Sleep(50 * time.Millisecond); return "late", nil }}),
-		tacklr.NewTool(tacklr.ToolConfig{Name: "waits", Timeout: time.Minute, Handler: func(ctx context.Context) (string, error) { <-ctx.Done(); return "", ctx.Err() }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "waits", Timeout: time.Minute, Handler: func(context.Context) (string, error) { <-release; return "", nil }}),
 	}
 	model, _ := scripted(t)
 	h := newHarness(t, "shapes", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: tools})
@@ -58,7 +69,7 @@ func TestNewTool_runsAHandlerOfEachShape(t *testing.T) {
 		{t.Context(), "args", `{bad`, "args: arguments were not valid JSON"},
 		{t.Context(), "channel", "", "marshal result"},
 		{t.Context(), "fails", `{"name":"x","age":1}`, "fails: boom"},
-		{t.Context(), "stops", "", "stops timed out"},
+		{t.Context(), "inner", "", "inner timed out"},
 		{t.Context(), "ignores", "", "ignores timed out"},
 		{ended, "waits", "", "context canceled"},
 	}
@@ -79,6 +90,7 @@ func TestNewTool_runsAHandlerOfEachShape(t *testing.T) {
 // TypeToJSONSchema, for structured output, keeps an optional field
 // optional.
 func TestToolsAsJson_describesEachToolAsAStrictFunction(t *testing.T) {
+	t.Parallel()
 	type Inner struct {
 		Value string `json:"value"`
 	}
@@ -161,6 +173,7 @@ type schema struct {
 // the wrong shape, or an OnCall that is nil or parks on an unregistered
 // type is a programming error.
 func TestNewTool_panicsOnAnInvalidConfig(t *testing.T) {
+	t.Parallel()
 	ok := func(context.Context) (string, error) { return "", nil }
 	for name, tc := range map[string]struct {
 		cfg  tacklr.ToolConfig
@@ -177,6 +190,7 @@ func TestNewTool_panicsOnAnInvalidConfig(t *testing.T) {
 		"an unregistered OnCall":        {tacklr.ToolConfig{Name: "t", Handler: ok, OnCall: []tacklr.OnCallFunc{func(tacklr.ToolInvocation) tacklr.Interrupt { return hostChoice{} }}}, "not registered"},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			defer func() {
 				if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), tc.want) {
 					t.Fatalf("panic = %v, want %q", r, tc.want)
@@ -190,12 +204,16 @@ func TestNewTool_panicsOnAnInvalidConfig(t *testing.T) {
 // TestCorrection_isTheModelsToCorrect: a correction is ErrCorrection and
 // its cause, with its own text, or the cause's without the vfs prefix, or
 // ErrCorrection's when it has neither; a correction of a correction is the
-// first.
+// first. A network mark keeps the error's text, a second mark keeps it
+// too, and a mark of no error is no error.
 func TestCorrection_isTheModelsToCorrect(t *testing.T) {
+	t.Parallel()
 	empty := tacklr.Correction(nil, "  ")
 	fromCause := tacklr.Correction(vfs.ErrNotExist, "")
 	first := tacklr.Correctionf(vfs.ErrUseHTML, "write %s, not plain text", "HTML")
 	again := tacklr.Correction(first, "other")
+	network := tacklr.Network(vfs.ErrNotExist)
+	marks := []error{tacklr.Network(network), tacklr.Network(nil)}
 
 	if !errors.Is(empty, tacklr.ErrCorrection) || empty.Error() != tacklr.ErrCorrection.Error() {
 		t.Fatalf("empty = %v", empty)
@@ -206,13 +224,20 @@ func TestCorrection_isTheModelsToCorrect(t *testing.T) {
 	if again.Error() != "write HTML, not plain text" || !errors.Is(again, vfs.ErrUseHTML) {
 		t.Fatalf("already a correction = %v", again)
 	}
+	if !errors.Is(network, tacklr.ErrNetwork) || !errors.Is(network, vfs.ErrNotExist) || network.Error() != vfs.ErrNotExist.Error() ||
+		!errors.Is(marks[0], tacklr.ErrNetwork) || marks[0].Error() != network.Error() || marks[1] != nil {
+		t.Fatalf("network marks = %v, then %v, want one mark that keeps the text", network, marks)
+	}
 }
 
 // TestRunCall_aToolsOutcomeIsItsCallsResult: a tool's failure, a tool that
 // is not registered, and an interceptor's change are each the call's
 // result in the window; a tool whose credentials expired parks the call on
 // auth_expired. A tool's progress updates name the call and never block it.
+// An outcome that installs the plan document fails its round's Commit when
+// the session has no plan.
 func TestRunCall_aToolsOutcomeIsItsCallsResult(t *testing.T) {
+	t.Parallel()
 	emitted := make(chan struct{})
 	tools := []*tacklr.Tool{
 		tacklr.NewTool(tacklr.ToolConfig{Name: "boom", Handler: func(context.Context) (string, error) {
@@ -223,6 +248,9 @@ func TestRunCall_aToolsOutcomeIsItsCallsResult(t *testing.T) {
 		}}),
 		tacklr.NewTool(tacklr.ToolConfig{Name: "big", Handler: func(context.Context) (string, error) { return "very long output", nil }}),
 		tacklr.NewTool(tacklr.ToolConfig{Name: "needs_call", Handler: func(context.Context, *tacklr.CallContext) (string, error) { return "ran", nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "install", Handler: func(context.Context) (tacklr.ToolOutcome, error) {
+			return tacklr.ToolOutcome{Output: "installed", Effect: tacklr.EffectInstallPlanDocument}, nil
+		}}),
 		tacklr.NewTool(tacklr.ToolConfig{Name: "progress", Handler: func(_ context.Context, cc *tacklr.CallContext) (string, error) {
 			cc.EmitUpdate("half way")
 			cc.EmitUpdate("dropped: the stream is full")
@@ -258,6 +286,8 @@ func TestRunCall_aToolsOutcomeIsItsCallsResult(t *testing.T) {
 	parked, parkErr := h.RunCall(t.Context(), tacklr.NewCall(call("e1", "expired", "{}"), 0), newStream(t).out)
 	stripped := result(t, h, call("n1", "needs_call", "{}"))
 	capped, cappedErr := runRound(t, h, call("c1", "big", "{}"))
+	after := checkpoint(t, h).window
+	_, noPlanErr := runRound(t, h, call("i1", "install", "{}"))
 
 	if update.Type != session.EventToolUpdate || update.Content != "half way" || update.MessageID != "p1" || resultEvent.Type != session.EventToolResult || (<-progress).Body.Text() != "done" {
 		t.Fatalf("events = %+v then %+v, want the update named by the call, then the result", update, resultEvent)
@@ -269,14 +299,18 @@ func TestRunCall_aToolsOutcomeIsItsCallsResult(t *testing.T) {
 	if parkErr != nil || parkType(t, parked) != tacklr.TypeAuthExpired || !strings.Contains(stripped, "requires a CallContext") {
 		t.Fatalf("expired = %+v %v, stripped = %q; want an auth_expired park and the missing CallContext named", parked, parkErr, stripped)
 	}
-	if after := checkpoint(t, h).window; cappedErr != nil || capped.Calls[0].Body.Text() != "very" || !slices.Equal(contents(after), []string{"goal", "the handoff"}) {
+	if cappedErr != nil || capped.Calls[0].Body.Text() != "very" || !slices.Equal(contents(after), []string{"goal", "the handoff"}) {
 		t.Fatalf("capped = %q %v, window %q; want the cut output and the interceptor's handoff", capped.Calls[0].Body.Text(), cappedErr, contents(after))
+	}
+	if noPlanErr == nil || !strings.Contains(noPlanErr.Error(), "no plan document") {
+		t.Fatalf("install without a plan = %v, want the commit to fail for want of a plan document", noPlanErr)
 	}
 }
 
 // TestLLMResponseChunk_anErrorChunkFails: an error chunk fails with its
 // error, or with its text when it has none; any other chunk does not fail.
 func TestLLMResponseChunk_anErrorChunkFails(t *testing.T) {
+	t.Parallel()
 	cause := errors.New("cause")
 
 	got := []error{

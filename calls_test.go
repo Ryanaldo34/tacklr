@@ -42,8 +42,12 @@ func parkType(t *testing.T, c tacklr.Call) string {
 // own writes over the committed state, and a value JSON cannot hold is its
 // tool's error. Neither Tool step changes the session; the round's Commit
 // applies every write in order, and a later call of the gated tool runs
-// without a prompt.
+// without a prompt. When a host interceptor runs a call a second time, the
+// second run sees the first run's writes: create_plan finds the plan it
+// made, and a tool that the user rejected always is rejected again without
+// a prompt.
 func TestRunCall_aCallsWritesFromEachRunLandAtCommit(t *testing.T) {
+	t.Parallel()
 	gate := tacklr.NewTool(tacklr.ToolConfig{Name: "gate", OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall}, Handler: func(context.Context) (string, error) { return "gate-ok", nil }})
 	note := tacklr.NewTool(tacklr.ToolConfig{Name: "note", Handler: func(_ context.Context, cc *tacklr.CallContext) (string, error) {
 		if _, err := cc.Park(&tacklr.UserSelectionInterrupt{Options: []tacklr.UserChoice{{Title: "A"}, {Title: "B"}}}); err != nil {
@@ -62,8 +66,18 @@ func TestRunCall_aCallsWritesFromEachRunLandAtCommit(t *testing.T) {
 	keep := tacklr.NewTool(tacklr.ToolConfig{Name: "keep", Handler: func(_ context.Context, cc *tacklr.CallContext) (string, error) {
 		return "kept", cc.StateSet("fn", func() {})
 	}})
+	shut := tacklr.NewTool(tacklr.ToolConfig{Name: "shut", OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall}, Handler: func(context.Context) (string, error) { return "shut-ok", nil }})
+	// twice runs a call of shut or create_plan a second time when its first
+	// run does not park, as a host that runs a call again does.
+	twice := func(ctx context.Context, inv tacklr.ToolInvocation, next tacklr.ToolCallFunc) (tacklr.ToolOutcome, error) {
+		out, err := next(ctx, inv)
+		if _, parked := errors.AsType[tacklr.Interrupt](err); parked || !slices.Contains([]string{"shut", "create_plan"}, inv.Tool.Name()) {
+			return out, err
+		}
+		return next(ctx, inv)
+	}
 	model, _ := scripted(t)
-	h := newHarness(t, "writes", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{gate, note, keep}})
+	h := newHarness(t, "writes", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{gate, note, keep, shut}, ToolInterceptors: []tacklr.ToolInterceptor{twice}})
 	out := newStream(t).out
 	if err := h.Commit(t.Context(), tacklr.CommitIn{State: map[string]any{"old": true, "kept": true}, Users: []*message.Message{userMsg("go")}}, out); err != nil {
 		t.Fatal(err)
@@ -81,6 +95,9 @@ func TestRunCall_aCallsWritesFromEachRunLandAtCommit(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	shutParked, shutParkErr := h.RunCall(t.Context(), tacklr.NewCall(call("s1", "shut", "{}"), 0), out)
+	shutAgain, shutErr := h.RunCall(t.Context(), answered(shutParked, `{"optionId":"reject-always"}`), out)
+	planTwice := result(t, h, call("p1", "create_plan", `{"plan":"doc","todos":[{"title":"a"}]}`))
 	unsaved := checkpoint(t, h).state
 	commitErr := h.Commit(t.Context(), tacklr.CommitIn{Round: r}, out)
 	again := result(t, h, call("g2", "gate", "{}"))
@@ -98,12 +115,19 @@ func TestRunCall_aCallsWritesFromEachRunLandAtCommit(t *testing.T) {
 	if again != "gate-ok" || !strings.Contains(unkept, `state "fn"`) {
 		t.Fatalf("gate again = %q, keep = %q; want the gate to run without a prompt and the value named", again, unkept)
 	}
+	if shutParkErr != nil || shutErr != nil || parkType(t, shutParked) != "tool_permission" || !shutAgain.Done || !strings.Contains(shutAgain.Body.Text(), "rejected by the user") {
+		t.Fatalf("shut run twice = %+v %v %v, want the second run rejected by the call's own reject-always", shutAgain, shutParkErr, shutErr)
+	}
+	if !strings.Contains(planTwice, "active plan already exists") {
+		t.Fatalf("create_plan run twice = %q, want the second run to find the call's own plan", planTwice)
+	}
 }
 
 // TestRunCall_callsOfOneReplyRunAtOnceOnOneHarness: two calls of one reply
 // run at the same time on one harness; each sees only its own state writes,
 // and both land at commit in call order.
 func TestRunCall_callsOfOneReplyRunAtOnceOnOneHarness(t *testing.T) {
+	t.Parallel()
 	var both sync.WaitGroup
 	both.Add(2)
 	set := tacklr.NewTool(tacklr.ToolConfig{Name: "set", Handler: func(_ context.Context, args struct {
@@ -157,6 +181,7 @@ func (hostChoice) Error() string              { return "host choice" }
 // decode. A bad question, or a park of a type no one registered, is the
 // tool's error.
 func TestAskUserChoice_parksTheCallUntilTheUserAnswers(t *testing.T) {
+	t.Parallel()
 	host := tacklr.NewTool(tacklr.ToolConfig{Name: "host", Handler: func(_ context.Context, cc *tacklr.CallContext) (string, error) {
 		_, err := cc.Park(hostChoice{})
 		return "", err
@@ -229,6 +254,7 @@ func TestAskUserChoice_parksTheCallUntilTheUserAnswers(t *testing.T) {
 // the tool; a host grant runs a tool without a park, but the user's
 // reject-always still wins over it.
 func TestOnCall_permissionParksUntilTheUserAnswers(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	runs := map[string]int{}
 	tool := func(name string, onCall ...tacklr.OnCallFunc) *tacklr.Tool {
