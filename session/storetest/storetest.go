@@ -33,7 +33,7 @@ func Store(t *testing.T, newStore func(t *testing.T) session.Store) {
 		_, foreign := store.Save(ctx, id, []session.CheckpointChange{put("message", "0", "x")}, "not-a-revision")
 		saves := map[string][]session.CheckpointChange{
 			"left":  {put("message", "1", "left"), remove("state", "k/1")},
-			"right": {put("message", "2", "right")},
+			"right": {put("message", "2", "right"), remove("state", "k/1")},
 		}
 		var wg sync.WaitGroup
 		var mu sync.Mutex
@@ -57,7 +57,7 @@ func Store(t *testing.T, newStore func(t *testing.T) session.Store) {
 		current, _ := store.Revision(ctx, id)
 		want := map[string]map[session.CheckpointRow]string{
 			"left":  {{Kind: "message", Key: "0"}: "a", {Kind: "message", Key: "1"}: "left"},
-			"right": {{Kind: "message", Key: "0"}: "a", {Kind: "message", Key: "1"}: "b", {Kind: "message", Key: "2"}: "right", {Kind: "state", Key: "k/1"}: "v"},
+			"right": {{Kind: "message", Key: "0"}: "a", {Kind: "message", Key: "1"}: "b", {Kind: "message", Key: "2"}: "right"},
 		}[winner]
 
 		if noID == nil || before != "" || beforeErr != nil || !errors.Is(unknown, session.ErrNotFound) {
