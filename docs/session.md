@@ -110,6 +110,19 @@ Package `session/durableobject` runs one session per durable object: an object w
 
 Where objects are remote, they reach each other over the object protocol: `Handler(ref)` serves an object over HTTP (create, wake, status, jobs, head, and an NDJSON event stream), and `Remote(client)` is the `Ref` on the caller's side, whose client's Transport reaches the one object. An error keeps its kind (`session.ErrNotFound`, `ErrExists`, `ErrInvalid`) across the protocol. The protocol has no authentication and carries credentials in clear text, so a platform keeps it inside its own network. `dotest.NewWire` sends every call over it, and its `Evict` breaks the object's open streams.
 
+### Cloudflare Workers
+
+Package `session/durableobject/cloudflare` (built with `GOOS=js GOARCH=wasm`) runs each session as a SQLite-backed Durable Object. The host's `main` calls `cloudflare.Serve` with its `App`: the Durable Object binding, the `durableobject.Config` built from the Worker's env, and the Worker's own routes over a `session.Client` of the objects. `shim.js`, in the package directory, is the JavaScript half: the host's Worker entry imports it with Go's `wasm_exec.js` and the compiled program, and exports its `Session` class. `examples/cloudflare` is a complete Worker with an end-to-end test.
+
+| Concern | On Workers |
+|---------|------------|
+| Program | One Go program per isolate serves every object in it. `durableobject.Registry` routes requests by object id, makes a new `Object` when the platform starts a new instance of one, and keeps at most `App.MaxIdleObjects` idle objects in memory (zero: 64); a dropped object starts again from its storage. |
+| Storage | One SQLite table per object (`tacklr_kv`). A value is split into 1 MiB parts, because a row holds at most 2 MB; a `Write` is one `transactionSync`. |
+| Between objects | The object protocol through each object's stub (`fetch`), inside Cloudflare's network. The Worker's own routes are the only way in. |
+| Alarm | The platform's one alarm per object. The alarm handler waits until the object runs nothing (`Object.Idle`), which keeps the object alive while the step it restarted runs (up to 15 minutes). |
+| Eviction | A step in flight keeps the object alive while it waits on the network. An object evicted anyway loses only its memory: the watchdog alarm, or the next request, replays its journal from SQLite. |
+| Size | The example's program is about 16 MB (4 MB gzipped); Workers allow 64 MiB. CI fails it over 24 MiB. |
+
 ```go
 obj := durableobject.NewObject(host, durableobject.Config{Agent: agent, Sealer: sealer, Jobs: jobs})
 sessions := durableobject.NewClient(platform)

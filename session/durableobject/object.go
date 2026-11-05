@@ -156,7 +156,7 @@ func (o *Object) Stop() { o.stop() }
 func (o *Object) Idle(ctx context.Context) error {
 	for {
 		o.mu.Lock()
-		idle, settled := !o.running && !o.out.sending, o.settled
+		idle, settled := o.idleLocked(), o.settled
 		o.mu.Unlock()
 		if idle {
 			return nil
@@ -167,6 +167,17 @@ func (o *Object) Idle(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// idleLocked reports whether the object runs nothing. Call it with o.mu
+// held.
+func (o *Object) idleLocked() bool { return !o.running && !o.out.sending }
+
+// idle reports whether the object runs nothing now.
+func (o *Object) idle() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.idleLocked()
 }
 
 // settle wakes Idle's waiters to look again. Call it with o.mu held.
