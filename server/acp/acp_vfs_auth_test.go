@@ -2,6 +2,7 @@ package acp_test
 
 import (
 	"context"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,11 @@ import (
 	"github.com/ryanaldo34/tacklr/workspace"
 )
 
+// TestACP_vfsBindRefreshUnbind: a client binds a backend to the session's
+// workspace, and the agent reads a file from it; the agent refreshes and
+// unbinds bindings, and refuses a bind with no backends, a refresh of no
+// binding or with no provider, and an unbind with no session; after the
+// unbind the file is not found.
 func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
@@ -53,33 +59,21 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 		return vfs.Tree(vfs.At("docs", vfs.Local(dir)))(ctx, sid, req)
 	}})
 
-	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sessionID := acptest.Result(t, recNew)["sessionId"].(string)
-
-	w := &recordingMessageWriter{}
-	bridge := acp.NewClientBridge(w)
-	bridge.SetCaps(acp.ClientCapabilities{VFSTokenRefresh: true})
-	proto := acpProtocolFor(r)
-	env := server.ProtocolEnv{Client: r.Client, Agent: r.Agent, Workspace: r.Workspace, Conn: &server.Conn{Writer: w, Ask: bridge}}
-	bind := `{"jsonrpc":"2.0","id":2,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[{"provider":"local","params":{"name":"docs"},"auth":{"token":"tok1"}}]}}`
-	if err := proto.HandleInbound(t.Context(), env, []byte(bind)); err != nil {
-		t.Fatal(err)
-	}
-	rebind := `{"jsonrpc":"2.0","id":21,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[{"provider":"local","point":"/docs","auth":{"token":"tok1b"}}]}}`
-	if err := proto.HandleInbound(t.Context(), env, []byte(rebind)); err != nil {
-		t.Fatal(err)
-	}
-	second := `{"jsonrpc":"2.0","id":23,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[{"provider":"other","point":"/other","auth":{"token":"tok-other"}}]}}`
-	if err := proto.HandleInbound(t.Context(), env, []byte(second)); err != nil {
-		t.Fatal(err)
-	}
-	unknown := `{"jsonrpc":"2.0","id":22,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[{"provider":"nope","params":{"name":"x"}}]}}`
-	if err := proto.HandleInbound(t.Context(), env, []byte(unknown)); err != nil {
-		t.Fatal(err)
+	proto := acp.New(nil)
+	env := server.ProtocolEnv{Client: r.Client, Agent: r.Agent, Workspace: r.Workspace}
+	rpc := func(body string) *httptest.ResponseRecorder { return acptest.Serve(t, r, proto, body) }
+	sessionID := acptest.SessionID(t, rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
+	for _, backends := range []string{
+		`[{"provider":"local","params":{"name":"docs"},"auth":{"token":"tok1"}}]`,
+		`[{"provider":"local","point":"/docs","auth":{"token":"tok1b"}}]`,
+		`[{"provider":"other","point":"/other","auth":{"token":"tok-other"}}]`,
+		`[{"provider":"nope","params":{"name":"x"}}]`,
+	} {
+		acptest.Result(t, rpc(`{"jsonrpc":"2.0","id":2,"method":"_tacklr/vfs/bind","params":{"sessionId":"`+sessionID+`","backends":`+backends+`}}`))
 	}
 
 	prompt := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"read"}]}}`
-	recPrompt := serveACPRaw(t, r, prompt)
+	recPrompt := rpc(prompt)
 	body := recPrompt.Body.String()
 	if !strings.Contains(body, "from-workspace") {
 		t.Fatalf("want workspace file in prompt stream, got %s", body)
@@ -87,36 +81,22 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 
 	expires := time.Now().Add(time.Hour).UTC()
 	withExpiry := `{"jsonrpc":"2.0","id":31,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[{"profile":"local","params":{"name":"docs"},"auth":{"token":"tok-exp","expiresAt":"` + expires.Format(time.RFC3339Nano) + `"},"readOnly":false}]}}`
-	if err := proto.HandleInbound(t.Context(), env, []byte(withExpiry)); err != nil {
-		t.Fatal(err)
-	}
-	emptyBackends := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":32,"method":"_tacklr/vfs/bind","params":{"sessionId":"`+sessionID+`","backends":[]}}`)
-	if emptyBackends == nil {
-		t.Fatal("want backends required")
-	}
-	missingRefresh := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":33,"method":"_tacklr/vfs/refresh","params":{"sessionId":"`+sessionID+`","provider":"ghost","auth":{"token":"x"}}}`)
-	if missingRefresh == nil {
-		t.Fatal("want no vfs binding")
-	}
-	noProvider := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":34,"method":"_tacklr/vfs/refresh","params":{"sessionId":"`+sessionID+`"}}`)
-	if noProvider == nil {
-		t.Fatal("want provider required")
-	}
-	noSession := acptest.WrittenError(t, proto, env, `{"jsonrpc":"2.0","id":35,"method":"_tacklr/vfs/unbind","params":{}}`)
-	if noSession == nil {
-		t.Fatal("want sessionId required")
+	acptest.Result(t, rpc(withExpiry))
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","id":32,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[]}}`,
+		`{"jsonrpc":"2.0","id":33,"method":"_tacklr/vfs/refresh","params":{"sessionId":"` + sessionID + `","provider":"ghost","auth":{"token":"x"}}}`,
+		`{"jsonrpc":"2.0","id":34,"method":"_tacklr/vfs/refresh","params":{"sessionId":"` + sessionID + `"}}`,
+		`{"jsonrpc":"2.0","id":35,"method":"_tacklr/vfs/unbind","params":{}}`,
+	} {
+		acptest.WrittenError(t, proto, env, body)
 	}
 
 	refresh := `{"jsonrpc":"2.0","id":4,"method":"_tacklr/vfs/refresh","params":{"sessionId":"` + sessionID + `","provider":"local","auth":{"token":"tok2"}}}`
-	recRef := serveACPRaw(t, r, refresh)
-	if recRef.Body.Len() == 0 {
-		t.Fatal("refresh returned empty")
+	acptest.Result(t, rpc(refresh))
+	for _, params := range []string{`"point":"/other"`, `"provider":"local"`, `"name":"docs"`} {
+		acptest.Result(t, rpc(`{"jsonrpc":"2.0","id":5,"method":"_tacklr/vfs/unbind","params":{"sessionId":"`+sessionID+`",`+params+`}}`))
 	}
-	_ = proto.HandleInbound(t.Context(), env, []byte(`{"jsonrpc":"2.0","id":36,"method":"_tacklr/vfs/unbind","params":{"sessionId":"`+sessionID+`","point":"/other"}}`))
-	unbindProvider := `{"jsonrpc":"2.0","id":5,"method":"_tacklr/vfs/unbind","params":{"sessionId":"` + sessionID + `","provider":"local"}}`
-	_ = serveACPRaw(t, r, unbindProvider)
-	_ = proto.HandleInbound(t.Context(), env, []byte(`{"jsonrpc":"2.0","id":37,"method":"_tacklr/vfs/unbind","params":{"sessionId":"`+sessionID+`","name":"docs"}}`))
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":6,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"again"}]}}`)
+	rec2 := rpc(`{"jsonrpc":"2.0","id":6,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"again"}]}}`)
 	out := rec2.Body.String()
 	if strings.Contains(out, "from-workspace") {
 		t.Fatalf("workspace still readable after unbind: %s", out)

@@ -1,3 +1,6 @@
+// Package livesess runs the session runtime on the live stack for tests: a
+// Temporal worker on the shared Temporal server, over the Postgres session
+// stores.
 package livesess
 
 import (
@@ -117,4 +120,16 @@ func Runtime(t testing.TB, agent tacklr.AgentOptions, ws workspace.Config) sessi
 		}
 	})
 	return rt
+}
+
+// Down is a session client whose Temporal connection is closed, as a host
+// whose Temporal cluster is gone: each call to it fails.
+func Down(t testing.TB) session.Client {
+	t.Helper()
+	c, err := temporal.Dial(client.Options{HostPort: temporaldocker.HostPort(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	return temporal.Open(c, temporal.Config{Store: session.NewMemoryStore(), Secrets: session.NewMemorySecretStorage(), DisableStreams: true})
 }

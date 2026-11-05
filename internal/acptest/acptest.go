@@ -124,22 +124,17 @@ func Frames(t *testing.T, body io.Reader) []map[string]any {
 	}
 }
 
-// WrittenError is the error proto writes, or returns, for body; it fails
-// the test when there is none.
+// WrittenError is the error proto answers body with, as an HTTP client
+// gets it; it fails the test when there is none.
 func WrittenError(t *testing.T, proto server.Protocol, env server.ProtocolEnv, body string) error {
 	t.Helper()
-	w := &testkit.RecordingWriter{}
 	if env.Conn == nil {
 		env.Conn = &server.Conn{}
 	}
-	env.Conn.Writer = w
-	ret := proto.HandleInbound(t.Context(), env, []byte(body))
-	if len(w.Errors) > 0 {
-		return w.Errors[0].Err
+	env.Conn.Writer = acp.HTTPWriter(httptest.NewRecorder())
+	err := proto.HandleInbound(t.Context(), env, []byte(body))
+	if err == nil {
+		t.Fatalf("no error for %s", body)
 	}
-	if ret != nil {
-		return ret
-	}
-	t.Fatalf("no error written or returned for %s", body)
-	return nil
+	return err
 }

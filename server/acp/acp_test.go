@@ -3,24 +3,21 @@ package acp_test
 import (
 	"context"
 	"encoding/json"
-	"net/http"
+	"errors"
 	"net/http/httptest"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
-
-	"github.com/ryanaldo34/tacklr/message"
-
-	"github.com/ryanaldo34/tacklr/server"
-	"github.com/ryanaldo34/tacklr/server/acp"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/livesess"
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/message"
+	"github.com/ryanaldo34/tacklr/server"
+	"github.com/ryanaldo34/tacklr/server/acp"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/telemetry/export"
 	"github.com/ryanaldo34/tacklr/workspace"
@@ -37,47 +34,17 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func newEmptyRuntime(t *testing.T) *acptest.Runtime {
-	t.Helper()
-	return &acptest.Runtime{Client: livesess.Runtime(t, tacklr.AgentOptions{}, workspace.Config{})}
-}
+// errHungUp is what a write to a client that hung up gets.
+var errHungUp = errors.New("connection reset by peer")
 
-func inbound(ctx context.Context, s *server.Server, body []byte, w server.MessageWriter) {
-	_ = s.Protocols[0].HandleInbound(ctx, server.ProtocolEnv{
-		Client: s.Client, Agent: s.Agent, Security: s.Security,
-		Connections: s.Connections, Conn: &server.Conn{Writer: w},
-	}, body)
-}
+// hungUp is an HTTP response whose client hung up: each write fails.
+type hungUp struct{ *httptest.ResponseRecorder }
 
-type recordingMessageWriter = testkit.RecordingWriter
+func (hungUp) Write([]byte) (int, error) { return 0, errHungUp }
 
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
-// acpByRuntime returns a stable ACP protocol per kernel so multi-step
-// serveACPRaw calls share wire state.
-var acpByRuntime sync.Map // *acptest.Runtime → server.Protocol
-
-func acpProtocolFor(r *acptest.Runtime) server.Protocol {
-	if r == nil {
-		return acp.New(server.NewMemoryWireStore())
-	}
-	if v, ok := acpByRuntime.Load(r); ok {
-		return v.(server.Protocol)
-	}
-	p := acp.New(server.NewMemoryWireStore())
-	actual, _ := acpByRuntime.LoadOrStore(r, p)
-	return actual.(server.Protocol)
-}
-
-// serveACPRaw runs one RPC against a per-kernel isolated ACP protocol.
-func serveACPRaw(t *testing.T, r *acptest.Runtime, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	return acptest.Serve(t, r, acpProtocolFor(r), body)
-}
-
-func acpRPCError(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+// rpcError is the error object of a JSON-RPC response; a response with
+// none fails the test.
+func rpcError(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -90,192 +57,32 @@ func acpRPCError(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	return errObj
 }
 
-// ---------------------------------------------------------------------------
-// validateACPRequest
-// ---------------------------------------------------------------------------
-
-func TestHandleRPC_sessionNew_stripsMCPSecretsFromWire(t *testing.T) {
-	r := acptest.NewRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
-	srv := acptest.NewServer(t, r, server.NewMemoryWireStore())
-	rec := srv.RPC(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user","mcpServers":[{"name":"fs","command":"npx","env":[{"name":"API_KEY","value":"never-store"}]}]}}`)
-	sessionID, _ := acptest.Result(t, rec)["sessionId"].(string)
-	if sessionID == "" {
-		t.Fatal("missing sessionId")
-	}
-	raw, err := srv.Wire.Get(context.Background(), sessionID)
-	if err != nil {
-		t.Fatalf("wire store: %v", err)
-	}
-	if strings.Contains(string(raw), "never-store") {
-		t.Fatalf("wire envelope stored stdio MCP secret: %s", raw)
-	}
-}
-
-func TestHandleRPC_sessionClose_thenLoadNotFound(t *testing.T) {
-	r := acptest.NewRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
-	srv := acptest.NewServer(t, r, server.NewMemoryWireStore())
-
-	rec1 := srv.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sessionID, _ := acptest.Result(t, rec1)["sessionId"].(string)
-
-	rec2 := srv.RPC(`{"jsonrpc":"2.0","id":2,"method":"session/close","params":{"sessionId":"` + sessionID + `"}}`)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("close status = %d, want 200", rec2.Code)
-	}
-
-	rec3 := srv.RPC(`{"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/tmp"}}`)
-	errObj := acpRPCError(t, rec3)
-	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "session") {
-		t.Errorf("error = %v, want session not found", errObj)
-	}
-}
-
-func TestHandleRPC_sessionLoad_fromStoreAfterRestart(t *testing.T) {
-	wire := server.NewMemoryWireStore()
-
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "after-restart", IsComplete: true}
-	})
-
-	// Process 1: create session
-	r1 := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
-	s1 := acptest.NewServer(t, r1, wire)
-	rec1 := s1.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[]}]}}`)
-	sessionID, _ := acptest.Result(t, rec1)["sessionId"].(string)
-
-	// New protocol process, same Temporal worker and wire store.
-	s2 := acptest.NewServer(t, r1, wire)
-	rec2 := s2.RPC(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/proj"}}`)
-	if acptest.Result(t, rec2)["sessionId"] != sessionID {
-		t.Fatalf("load result: %v", rec2.Body.String())
-	}
-
-	raw, err := wire.Get(context.Background(), sessionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var env struct {
-		CWD        string              `json:"cwd"`
-		MCPServers []session.MCPServer `json:"mcpServers"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		t.Fatal(err)
-	}
-	if env.CWD != "/proj" || len(env.MCPServers) != 1 {
-		t.Fatalf("wire envelope: %+v", env)
-	}
-
-	rec3 := s2.RPC(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`)
-	var endTurn bool
-	for _, f := range acptest.Frames(t, rec3.Body) {
-		if res, ok := f["result"].(map[string]any); ok && res["stopReason"] == "end_turn" {
-			endTurn = true
-		}
-		if f["error"] != nil {
-			t.Fatalf("prompt after restart: %v", f["error"])
-		}
-	}
-	if !endTurn {
-		t.Fatalf("expected end_turn, body=%s", rec3.Body.String())
-	}
-}
-
-func TestHandleRPC_noAgentConfigured_onPrompt(t *testing.T) {
-	r := newEmptyRuntime(t)
-
-	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	var resp1 map[string]any
-	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
-	if resp1["error"] != nil {
-		t.Fatalf("session/new should succeed without default agent: %v", resp1["error"])
-	}
-	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
-
-	if acptest.Result(t, serveACPRaw(t, r, `{"jsonrpc":"2.0","id":15,"method":"session/load","params":{"sessionId":"`+sessionID+`","cwd":"/tmp"}}`))["sessionId"] != sessionID {
-		t.Fatal("load empty agent should keep session")
-	}
-	bindRec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":16,"method":"_tacklr/vfs/bind","params":{"sessionId":"`+sessionID+`","backends":[{"provider":"local","params":{"name":"docs"},"auth":{"token":"tok"}}]}}`)
-	bindRes := acptest.Result(t, bindRec)
-	errs, _ := bindRes["errors"].([]any)
-	if len(errs) == 0 {
-		t.Fatal("want unknown vfs profile when the runtime has no workspace")
-	}
-
-	promptBody := `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`
-	rec2 := serveACPRaw(t, r, promptBody)
-	var resp2 map[string]any
-	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
-	if resp2["error"] == nil && resp2["result"] == nil {
-		t.Fatalf("prompt with no model: %v", resp2)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// handleRPC — session/prompt (streaming)
-// ---------------------------------------------------------------------------
-
-func TestHandleRPC_sessionPrompt_streamsEvents(t *testing.T) {
-	strategy := testkit.TextHTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{Type: session.EventReasoning, Content: "", IsComplete: false}
-		ch <- tacklr.LLMResponseChunk{Type: session.EventReasoning, Content: "thinking", IsComplete: false}
-		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "", IsComplete: false}
-		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "hello", IsComplete: true}
-	})
-	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
-
-	// Create session
-	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	var resp1 map[string]any
-	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
-	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
-
-	// Send prompt
-	promptBody := `{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`
-	rec2 := serveACPRaw(t, r, promptBody)
-
-	frames := acptest.Frames(t, rec2.Body)
-	if len(frames) == 0 {
-		t.Fatal("expected at least one frame")
-	}
-
-	// Should have session/update notifications followed by a result, and
-	// each text once: streamed, or in the completed message.
-	var hasUpdate, hasResult bool
-	texts := map[any]string{}
-	for _, f := range frames {
-		if f["method"] == "session/update" {
-			hasUpdate = true
-			params, _ := f["params"].(map[string]any)
-			update, _ := params["update"].(map[string]any)
-			if content, ok := update["content"].(map[string]any); ok {
-				texts[update["sessionUpdate"]] += content["text"].(string)
+// stopReason is the stopReason a prompt's frames end with; "" when they
+// end with an error.
+func stopReason(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	for _, f := range acptest.Frames(t, rec.Body) {
+		if res, ok := f["result"].(map[string]any); ok {
+			if sr, _ := res["stopReason"].(string); sr != "" {
+				return sr
 			}
 		}
-		if f["result"] != nil {
-			hasResult = true
-		}
 	}
-	if !hasUpdate {
-		t.Error("expected at least one session/update notification")
-	}
-	if texts["agent_thought_chunk"] != "thinking" || texts["agent_message_chunk"] != "hello" {
-		t.Errorf("texts %v; want the reasoning and the message once each", texts)
-	}
-	if !hasResult {
-		t.Error("expected a result frame")
-	}
-
-	// Text-only model rejects an image part before the turn starts.
-	imgBody := `{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"see"},{"type":"image","mimeType":"image/png","data":"AAAA"}]}}`
-	rec3 := serveACPRaw(t, r, imgBody)
-	errObj := acpRPCError(t, rec3)
-	msg, _ := errObj["message"].(string)
-	if !strings.Contains(msg, "unsupported content type") {
-		t.Fatalf("image reject: %#v", errObj)
-	}
+	return ""
 }
 
-func TestHandleRPC_sessionPrompt_toolTitleAndName(t *testing.T) {
+func prompt(id, sessionID, blocks string) string {
+	return `{"jsonrpc":"2.0","id":` + id + `,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":` + blocks + `}}`
+}
+
+// TestHandleRPC_sessionOutcomes: on a model that sees images, the agent
+// advertises images; each content block reaches the model; a prompt it
+// cannot read, or in another cwd, is refused; a tool call shows its title,
+// name and kind; a refusal or the token limit ends the prompt with its
+// stop reason; a load in another cwd is refused; and a closed session is
+// not found.
+func TestHandleRPC_sessionOutcomes(t *testing.T) {
+	var sawLink, sawImage, sawPDF atomic.Bool
 	mark := tacklr.NewTool(tacklr.ToolConfig{
 		Name:        "mark_item",
 		DisplayName: "Complete {title}",
@@ -286,152 +93,194 @@ func TestHandleRPC_sessionPrompt_toolTitleAndName(t *testing.T) {
 			return "ok:" + args.Title, nil
 		},
 	})
-	var calls atomic.Int32
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		if calls.Add(1) > 1 {
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		last := msgs[len(msgs)-1]
+		switch {
+		case last.Role == message.RoleTool:
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
-			return
-		}
-		ch <- tacklr.LLMResponseChunk{
-			Type:    session.EventFunctionCall,
-			Content: "calling",
-			ToolCalls: []message.ToolCall{
-				{
-					ID: "call_mark", CallID: "call_mark", Name: "mark_item",
-					Arguments: `{"title":"Ship release"}`,
-				},
+		case last.Content == "mark":
+			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, Content: "calling", IsComplete: true, ToolCalls: []message.ToolCall{
+				{ID: "call_mark", CallID: "call_mark", Name: "mark_item", Arguments: `{"title":"Ship release"}`},
 				{ID: "ghost", CallID: "ghost", Name: "ghost_tool", Arguments: `{}`},
-			},
-			IsComplete: true,
-		}
-	})
-	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{mark}})
-	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	var resp1 map[string]any
-	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
-	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"mark"}]}}`)
-	frames := acptest.Frames(t, rec2.Body)
-
-	var sawCall, sawGhost bool
-	for _, f := range frames {
-		if f["method"] != "session/update" {
-			continue
-		}
-		update := f["params"].(map[string]any)["update"].(map[string]any)
-		if update["sessionUpdate"] != "tool_call" {
-			continue
-		}
-		switch update["name"] {
-		case "mark_item":
-			if update["title"] != "Complete Ship release" {
-				t.Fatalf("title = %v, want Complete Ship release", update["title"])
-			}
-			if update["kind"] != "think" {
-				t.Fatalf("kind = %v", update["kind"])
-			}
-			sawCall = true
-		case "ghost_tool":
-			if update["title"] != "ghost_tool" {
-				t.Fatalf("unknown tool title = %v, want ghost_tool", update["title"])
-			}
-			sawGhost = true
-		}
-	}
-	if !sawCall {
-		t.Fatal("expected tool_call with title+name")
-	}
-	if !sawGhost {
-		t.Fatal("expected unknown tool title fallback")
-	}
-}
-
-func TestHandleRPC_sessionPrompt_acpContentBlocks(t *testing.T) {
-	var sawLink, sawImage, sawPDF bool
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		if n := len(msgs); n > 0 {
-			last := msgs[n-1]
-			if last != nil && strings.Contains(last.Content, "[Resource link] name=spec") {
-				sawLink = true
-			}
+			}}
+		case last.Content == "refuse":
+			ch <- tacklr.LLMResponseChunk{Type: session.EventError, Error: session.ErrModelRefused, Content: "model refused", IsComplete: true}
+		case last.Content == "long":
+			ch <- tacklr.LLMResponseChunk{Type: session.EventError, Error: session.ErrMaxTokens, IsComplete: true}
+		default:
+			sawLink.Store(strings.Contains(last.Content, "[Resource link] name=spec"))
 			for _, part := range last.ContentParts {
-				if part.Type == message.ContentTypeInputImage {
-					sawImage = true
-				}
-				if part.FileData != nil && part.FileData.MIMEType == "application/pdf" {
-					sawPDF = true
+				sawImage.Store(sawImage.Load() || part.Type == message.ContentTypeInputImage)
+				sawPDF.Store(sawPDF.Load() || part.FileData != nil && part.FileData.MIMEType == "application/pdf")
+			}
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok-blocks", IsComplete: true}
+		}
+	})
+	r := acptest.NewRuntime(t, model, tacklr.AgentOptions{Tools: []*tacklr.Tool{mark}})
+	srv := acptest.NewServer(t, r, server.NewMemoryWireStore())
+	newSession := func(t *testing.T) string {
+		t.Helper()
+		return acptest.SessionID(t, srv.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj"}}`))
+	}
+
+	t.Run("contentBlocksReachTheModel", func(t *testing.T) {
+		initialize := srv.RPC(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
+		rec := srv.RPC(prompt("3", newSession(t), `[`+
+			`{"type":"text","text":"review"},`+
+			`{"type":"image","mimeType":"image/png","data":"AAAA"},`+
+			`{"type":"image","mimeType":"image/jpeg","uri":"https://example.com/cat.jpg"},`+
+			`{"type":"resource","resource":{"uri":"mem://note","text":"embedded notes"}},`+
+			`{"type":"resource","resource":{"uri":"mem://doc.pdf","mimeType":"application/pdf","blob":"JVBERg=="}},`+
+			`{"type":"resource_link","name":"spec","uri":"https://example.com/spec.md","mimeType":"text/markdown","title":"Spec","description":"the spec","size":12}`+
+			`]`))
+
+		if !strings.Contains(initialize.Body.String(), `"image":true`) {
+			t.Fatalf("a model that sees images should advertise image=true: %s", initialize.Body.String())
+		}
+		if stopReason(t, rec) != "end_turn" || !sawLink.Load() || !sawImage.Load() || !sawPDF.Load() {
+			t.Fatalf("link=%v image=%v pdf=%v, body=%s; want each block in the window and end_turn", sawLink.Load(), sawImage.Load(), sawPDF.Load(), rec.Body.String())
+		}
+	})
+
+	t.Run("unreadablePromptsAreRefused", func(t *testing.T) {
+		sid := newSession(t)
+		for _, blocks := range []string{
+			`[{"type":"audio","mimeType":"audio/wav","data":"AAAA"}]`,
+			`[]`,
+			`[{"type":"text","text":"  "}]`,
+			`[{"type":"image","mimeType":"text/plain","data":"x"}]`,
+			`[{"type":"image","mimeType":"image/png"}]`,
+			`[{"type":"resource"}]`,
+			`[{"type":"resource","resource":{}}]`,
+			`[{"type":"resource","resource":{"blob":"xxxx","mimeType":"image/png"}}]`,
+			`[{"type":"resource_link","name":"x"}]`,
+			`[{"type":"video"}]`,
+			`"not-array"`,
+		} {
+			if msg, _ := rpcError(t, srv.RPC(prompt("4", sid, blocks)))["message"].(string); !strings.Contains(msg, "invalid") {
+				t.Errorf("prompt %s: %q, want it refused as invalid", blocks, msg)
+			}
+		}
+	})
+
+	t.Run("anotherCWDIsRefused", func(t *testing.T) {
+		sid := newSession(t)
+		inPrompt := srv.RPC(`{"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":"` + sid + `","cwd":"/other","prompt":[{"type":"text","text":"x"}]}}`)
+		inLoad := srv.RPC(`{"jsonrpc":"2.0","id":6,"method":"session/load","params":{"sessionId":"` + sid + `","cwd":"/other"}}`)
+		for _, rec := range []*httptest.ResponseRecorder{inPrompt, inLoad} {
+			if msg, _ := rpcError(t, rec)["message"].(string); !strings.Contains(msg, "cwd") {
+				t.Errorf("another cwd = %q, want a cwd mismatch", msg)
+			}
+		}
+	})
+
+	t.Run("toolCallsShowTitleNameAndKind", func(t *testing.T) {
+		rec := srv.RPC(prompt("7", newSession(t), `[{"type":"text","text":"mark"}]`))
+		calls := map[any]map[string]any{}
+		for _, f := range acptest.Frames(t, rec.Body) {
+			if params, ok := f["params"].(map[string]any); ok {
+				if update := params["update"].(map[string]any); update["sessionUpdate"] == "tool_call" {
+					calls[update["name"]] = update
 				}
 			}
 		}
-		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok-blocks", IsComplete: true}
+		if mark := calls["mark_item"]; mark["title"] != "Complete Ship release" || mark["kind"] != "think" {
+			t.Errorf("mark_item call = %v, want its display title and kind", mark)
+		}
+		if ghost := calls["ghost_tool"]; ghost["title"] != "ghost_tool" {
+			t.Errorf("unknown tool call = %v, want its name as title", ghost)
+		}
 	})
-	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
-	initRec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
-	initBody := initRec.Body.String()
-	if !strings.Contains(initBody, `"image":true`) {
-		t.Fatalf("vision model should advertise image=true: %s", initBody)
-	}
 
-	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/proj"}}`)
-	sessionID := acptest.Result(t, recNew)["sessionId"].(string)
-	prompt := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[` +
-		`{"type":"text","text":"review"},` +
-		`{"type":"image","mimeType":"image/png","data":"AAAA"},` +
-		`{"type":"image","mimeType":"image/jpeg","uri":"https://example.com/cat.jpg"},` +
-		`{"type":"resource","resource":{"uri":"mem://note","text":"embedded notes"}},` +
-		`{"type":"resource","resource":{"uri":"mem://doc.pdf","mimeType":"application/pdf","blob":"JVBERg=="}},` +
-		`{"type":"resource_link","name":"spec","uri":"https://example.com/spec.md","mimeType":"text/markdown","title":"Spec","description":"the spec","size":12}` +
-		`]}}`
-	rec := serveACPRaw(t, r, prompt)
-	var endTurn bool
+	t.Run("stopReasons", func(t *testing.T) {
+		refusal := stopReason(t, srv.RPC(prompt("8", newSession(t), `[{"type":"text","text":"refuse"}]`)))
+		maxTokens := stopReason(t, srv.RPC(prompt("9", newSession(t), `[{"type":"text","text":"long"}]`)))
+		if refusal != "refusal" || maxTokens != "max_tokens" {
+			t.Fatalf("stop reasons %q, %q; want refusal, max_tokens", refusal, maxTokens)
+		}
+	})
+
+	t.Run("closedSessionIsNotFound", func(t *testing.T) {
+		sid := newSession(t)
+		closed := acptest.Result(t, srv.RPC(`{"jsonrpc":"2.0","id":10,"method":"session/close","params":{"sessionId":"`+sid+`"}}`))
+		load := rpcError(t, srv.RPC(`{"jsonrpc":"2.0","id":11,"method":"session/load","params":{"sessionId":"`+sid+`","cwd":"/proj"}}`))
+		if msg, _ := load["message"].(string); closed == nil || !strings.Contains(msg, "not found") {
+			t.Fatalf("close = %v, then load = %v; want the session gone", closed, load)
+		}
+	})
+}
+
+// TestHandleRPC_sessionPrompt_streamsEvents: a prompt streams the turn's
+// reasoning and message as session/update chunks, each text once, and ends
+// with a result; a model that reads text only refuses an image.
+func TestHandleRPC_sessionPrompt_streamsEvents(t *testing.T) {
+	model := testkit.TextHTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{Type: session.EventReasoning, Content: "", IsComplete: false}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventReasoning, Content: "thinking", IsComplete: false}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "", IsComplete: false}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "hello", IsComplete: true}
+	})
+	srv := acptest.NewServer(t, acptest.NewRuntime(t, model, tacklr.AgentOptions{}), server.NewMemoryWireStore())
+	sid := acptest.SessionID(t, srv.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
+
+	rec := srv.RPC(prompt("10", sid, `[{"type":"text","text":"hi"}]`))
+	image := rpcError(t, srv.RPC(prompt("11", sid, `[{"type":"text","text":"see"},{"type":"image","mimeType":"image/png","data":"AAAA"}]`)))
+
+	texts := map[any]string{}
+	var end any
 	for _, f := range acptest.Frames(t, rec.Body) {
-		if f["error"] != nil {
-			t.Fatalf("prompt error: %v", f["error"])
+		if params, ok := f["params"].(map[string]any); ok && f["method"] == "session/update" {
+			update := params["update"].(map[string]any)
+			if content, ok := update["content"].(map[string]any); ok {
+				texts[update["sessionUpdate"]] += content["text"].(string)
+			}
 		}
-		if res, ok := f["result"].(map[string]any); ok && res["stopReason"] == "end_turn" {
-			endTurn = true
-		}
-	}
-	if !endTurn {
-		t.Fatalf("expected end_turn, body=%s", rec.Body.String())
-	}
-	if !sawLink || !sawImage || !sawPDF {
-		t.Fatalf("model window missing content blocks link=%v image=%v pdf=%v", sawLink, sawImage, sawPDF)
-	}
-
-	audio := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"audio","mimeType":"audio/wav","data":"AAAA"}]}}`)
-	if msg, _ := acpRPCError(t, audio)["message"].(string); !strings.Contains(msg, "audio") {
-		t.Fatalf("audio reject: %s", audio.Body.String())
-	}
-	for i, body := range []string{
-		`{"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[]}}`,
-		`{"jsonrpc":"2.0","id":6,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"  "}]}}`,
-		`{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"image","mimeType":"text/plain","data":"x"}]}}`,
-		`{"jsonrpc":"2.0","id":8,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"resource"}]}}`,
-		`{"jsonrpc":"2.0","id":9,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"resource","resource":{}}]}}`,
-		`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"resource","resource":{"blob":"xxxx","mimeType":"image/png"}}]}}`,
-		`{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"resource_link","name":"x"}]}}`,
-		`{"jsonrpc":"2.0","id":12,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"video"}]}}`,
-		`{"jsonrpc":"2.0","id":13,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":"not-array"}}`,
-		`{"jsonrpc":"2.0","id":17,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"image","mimeType":"image/png"}]}}`,
-	} {
-		if acpRPCError(t, serveACPRaw(t, r, body)) == nil {
-			t.Fatalf("case %d: want invalid prompt", i)
+		if res, ok := f["result"].(map[string]any); ok {
+			end = res["stopReason"]
 		}
 	}
-	mismatch := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":14,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","cwd":"/other","prompt":[{"type":"text","text":"x"}]}}`)
-	if msg, _ := acpRPCError(t, mismatch)["message"].(string); !strings.Contains(msg, "cwd") {
-		t.Fatalf("prompt cwd mismatch: %v", acpRPCError(t, mismatch))
+	if texts["agent_thought_chunk"] != "thinking" || texts["agent_message_chunk"] != "hello" || end != "end_turn" {
+		t.Errorf("texts %v, end %v; want the reasoning and the message once each, then end_turn", texts, end)
+	}
+	if msg, _ := image["message"].(string); !strings.Contains(msg, "unsupported content type") {
+		t.Fatalf("image on a text model = %v, want unsupported content", image)
 	}
 }
 
-func TestHandleRPC_sessionLoad_cwdMismatch(t *testing.T) {
-	r := acptest.NewRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
-	srv := acptest.NewServer(t, r, server.NewMemoryWireStore())
-	rec := srv.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj"}}`)
-	sessionID := acptest.Result(t, rec)["sessionId"].(string)
-	errObj := acpRPCError(t, srv.RPC(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sessionID+`","cwd":"/other"}}`))
-	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "cwd") {
-		t.Fatalf("cwd mismatch: %v", errObj)
+// TestHandleRPC_noAgentConfigured_onPrompt: a runtime with no model and no
+// workspace makes and loads sessions, refuses a vfs bind with an unknown
+// profile error, and fails a prompt.
+func TestHandleRPC_noAgentConfigured_onPrompt(t *testing.T) {
+	srv := acptest.NewServer(t, &acptest.Runtime{Client: livesess.Runtime(t, tacklr.AgentOptions{}, workspace.Config{})}, server.NewMemoryWireStore())
+	sid := acptest.SessionID(t, srv.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
+
+	loaded := acptest.Result(t, srv.RPC(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sid+`","cwd":"/tmp"}}`))
+	bind := acptest.Result(t, srv.RPC(`{"jsonrpc":"2.0","id":3,"method":"_tacklr/vfs/bind","params":{"sessionId":"`+sid+`","backends":[{"provider":"local","params":{"name":"docs"},"auth":{"token":"tok"}}]}}`))
+	rec := srv.RPC(prompt("4", sid, `[{"type":"text","text":"hi"}]`))
+
+	if errs, _ := bind["errors"].([]any); loaded["sessionId"] != sid || len(errs) == 0 {
+		t.Fatalf("load = %v, bind = %v; want the session kept and the bind refused", loaded, bind)
+	}
+	var failed bool
+	for _, f := range acptest.Frames(t, rec.Body) {
+		failed = failed || f["error"] != nil
+	}
+	if !failed {
+		t.Fatalf("prompt with no model = %s, want an error", rec.Body.String())
+	}
+}
+
+// TestClientBridge_callFailsWhenTheClientIsGone: a call to a client that
+// hung up fails with the write's error, and a call whose context ends
+// returns the context's error.
+func TestClientBridge_callFailsWhenTheClientIsGone(t *testing.T) {
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, hungUpErr := acp.NewClientBridge(acp.HTTPWriter(hungUp{httptest.NewRecorder()})).Call(t.Context(), "x", nil)
+	_, endedErr := acp.NewClientBridge(acp.HTTPWriter(httptest.NewRecorder())).Call(ended, "x", nil)
+
+	if !errors.Is(hungUpErr, errHungUp) || !errors.Is(endedErr, context.Canceled) {
+		t.Fatalf("hung up = %v, ended = %v; want the write's and the context's errors", hungUpErr, endedErr)
 	}
 }

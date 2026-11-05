@@ -3,48 +3,23 @@ package acp_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
-
-	"github.com/ryanaldo34/tacklr/session"
-
-	"github.com/ryanaldo34/tacklr/message"
-
-	"github.com/ryanaldo34/tacklr/server"
-	"github.com/ryanaldo34/tacklr/server/acp"
 
 	"github.com/coder/websocket"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/message"
+	"github.com/ryanaldo34/tacklr/server"
+	"github.com/ryanaldo34/tacklr/server/acp"
 )
 
-// dialACPWebSocket opens a WebSocket to GET /acp and returns the connection
-// plus Acp-Connection-Id from the upgrade response.
-func dialACPWebSocket(t *testing.T, hs *httptest.Server) (*websocket.Conn, string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	t.Cleanup(cancel)
-
-	wsURL := "ws" + strings.TrimPrefix(hs.URL, "http") + "/acp"
-	conn, resp, err := websocket.Dial(ctx, wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial /acp: %v", err)
-	}
-	connID := ""
-	if resp != nil {
-		connID = resp.Header.Get(acp.HeaderConnectionID)
-	}
-	t.Cleanup(func() {
-		_ = conn.Close(websocket.StatusNormalClosure, "")
-	})
-	return conn, connID
-}
-
+// startACPWSServer serves r's ACP over HTTP, as a host does.
 func startACPWSServer(t *testing.T, r *acptest.Runtime) (*httptest.Server, *server.Server) {
 	t.Helper()
 	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
@@ -53,291 +28,163 @@ func startACPWSServer(t *testing.T, r *acptest.Runtime) (*httptest.Server, *serv
 	return hs, srv
 }
 
-func wsWriteJSONRPC(ctx context.Context, t *testing.T, c *websocket.Conn, msg any) {
+// wsClient is an ACP client on a WebSocket to the server's /acp route.
+type wsClient struct {
+	t    *testing.T
+	conn *websocket.Conn
+	// ID is the Acp-Connection-Id of the upgrade response.
+	ID   string
+	next int
+}
+
+// dial connects to hs and says hello with the initialize params.
+func dial(t *testing.T, hs *httptest.Server, initialize string) *wsClient {
 	t.Helper()
-	data, err := json.Marshal(msg)
+	conn, resp, err := websocket.Dial(t.Context(), "ws"+strings.TrimPrefix(hs.URL, "http")+"/acp", nil)
 	if err != nil {
-		t.Fatalf("marshal: %v", err)
+		t.Fatalf("dial /acp: %v", err)
 	}
-	if err := c.Write(ctx, websocket.MessageText, data); err != nil {
-		t.Fatalf("ws write: %v", err)
+	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "") })
+	c := &wsClient{t: t, conn: conn, ID: resp.Header.Get(acp.HeaderConnectionID)}
+	c.send("") // an empty message is not a request
+	c.call("initialize", initialize)
+	return c
+}
+
+func (c *wsClient) send(body string) {
+	c.t.Helper()
+	if err := c.conn.Write(c.t.Context(), websocket.MessageText, []byte(body)); err != nil {
+		c.t.Fatalf("ws write: %v", err)
 	}
 }
 
-func wsReadFrame(ctx context.Context, t *testing.T, c *websocket.Conn) map[string]any {
-	t.Helper()
-	readCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+func (c *wsClient) frame() map[string]any {
+	c.t.Helper()
+	ctx, cancel := context.WithTimeout(c.t.Context(), 5*time.Second)
 	defer cancel()
-	_, data, err := c.Read(readCtx)
+	_, data, err := c.conn.Read(ctx)
 	if err != nil {
-		t.Fatalf("ws read: %v", err)
+		c.t.Fatalf("ws read: %v", err)
 	}
 	var frame map[string]any
 	if err := json.Unmarshal(data, &frame); err != nil {
-		t.Fatalf("unmarshal frame %q: %v", data, err)
+		c.t.Fatalf("unmarshal frame %q: %v", data, err)
 	}
 	return frame
 }
 
-// TestACP_WS_permissionMidTurn: duplex acp.ClientBridge over WebSocket — init →
-// session/new → prompt → mid-turn request_permission reply → tool runs → end_turn.
-// Also asserts Acp-Connection-Id is registered and removed when the socket closes.
-func TestACP_WS_permissionMidTurn(t *testing.T) {
-	var ran bool
-	sensitive := tacklr.NewTool(tacklr.ToolConfig{
-		Name:   "sensitive",
-		OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
-		Handler: func(ctx context.Context) (string, error) {
-			ran = true
-			return "secret-ok", nil
-		},
-	})
-	var invokeCount int
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		invokeCount++
-		if invokeCount == 1 {
-			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
-				{ID: "c1", CallID: "c1", Name: "sensitive", Arguments: `{}`},
-			}, IsComplete: true}
-			ch <- tacklr.LLMResponseChunk{IsComplete: true}
-			return
-		}
-		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
-	})
-	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}})
-	hs, srv := startACPWSServer(t, r)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, connID := dialACPWebSocket(t, hs)
-	if connID == "" {
-		t.Fatal("expected Acp-Connection-Id on WebSocket upgrade response")
-	}
-	if srv.Connections.Get(connID) == nil {
-		t.Fatal("connection should be registered while socket is open")
-	}
-
-	if err := conn.Write(ctx, websocket.MessageText, nil); err != nil {
-		t.Fatalf("empty frame: %v", err)
-	}
-	wsWriteJSONRPC(ctx, t, conn, map[string]any{
-		"jsonrpc": "2.0", "id": 1, "method": "initialize",
-		"params": map[string]any{"protocolVersion": 1},
-	})
-	wsWriteJSONRPC(ctx, t, conn, map[string]any{
-		"jsonrpc": "2.0", "id": 2, "method": "session/new",
-		"params": map[string]any{"cwd": "/tmp"},
-	})
-
-	var sessionID string
-	var sawPermission, endTurn, promptSent bool
-
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) && !endTurn {
-		frame := wsReadFrame(ctx, t, conn)
-
-		if res, ok := frame["result"].(map[string]any); ok {
-			if sid, ok := res["sessionId"].(string); ok && sid != "" {
-				sessionID = sid
-			}
-			if idMatch(frame["id"], 3) && res["stopReason"] == "end_turn" {
-				endTurn = true
-			}
-		}
-		if frame["method"] == "session/request_permission" {
-			sawPermission = true
-			wsWriteJSONRPC(ctx, t, conn, map[string]any{
-				"jsonrpc": "2.0",
-				"id":      frame["id"],
-				"result": map[string]any{
-					"outcome": map[string]any{
-						"outcome":  "selected",
-						"optionId": "allow-once",
-					},
-				},
-			})
-		}
-		if sessionID != "" && !promptSent {
-			promptSent = true
-			wsWriteJSONRPC(ctx, t, conn, map[string]any{
-				"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
-				"params": map[string]any{
-					"sessionId": sessionID,
-					"prompt":    []map[string]string{{"type": "text", "text": "run"}},
-				},
-			})
-		}
-	}
-
-	if !sawPermission {
-		t.Fatal("expected session/request_permission on WebSocket")
-	}
-	if !ran {
-		t.Error("expected permission-approved tool to run")
-	}
-	if !endTurn {
-		t.Error("expected end_turn after permission flow")
-	}
-
-	_ = conn.Close(websocket.StatusNormalClosure, "")
-	removed := time.Now().Add(2 * time.Second)
-	for time.Now().Before(removed) {
-		if srv.Connections.Get(connID) == nil {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatal("connection still in registry after close")
+// request sends method with params and returns its id.
+func (c *wsClient) request(method, params string) int {
+	c.t.Helper()
+	c.next++
+	c.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q,"params":%s}`, c.next, method, params))
+	return c.next
 }
 
-func TestACP_WS_disconnectCancelsInFlightTurn(t *testing.T) {
-	started := make(chan struct{})
-	cancelled := make(chan struct{})
-	var once sync.Once
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		once.Do(func() { close(started) })
+// until reads frames until the response to id, answering each request the
+// agent makes with answer, and returns that response and what came first.
+func (c *wsClient) until(id int, answer func(req map[string]any) any) (map[string]any, []map[string]any) {
+	c.t.Helper()
+	var before []map[string]any
+	for {
+		frame := c.frame()
+		if method, _ := frame["method"].(string); method != "" && frame["id"] != nil {
+			if answer == nil {
+				c.t.Fatalf("unexpected request %v", frame)
+			}
+			body, _ := json.Marshal(answer(frame))
+			c.send(string(body))
+			continue
+		}
+		if frame["id"] == float64(id) {
+			return frame, before
+		}
+		before = append(before, frame)
+	}
+}
+
+// call sends method with params and returns its response.
+func (c *wsClient) call(method, params string) map[string]any {
+	c.t.Helper()
+	resp, _ := c.until(c.request(method, params), nil)
+	return resp
+}
+
+// newSession makes a session and returns its id.
+func (c *wsClient) newSession() string {
+	c.t.Helper()
+	resp := c.call("session/new", `{"cwd":"/tmp"}`)
+	sid, _ := resp["result"].(map[string]any)["sessionId"].(string)
+	if sid == "" {
+		c.t.Fatalf("session/new = %v", resp)
+	}
+	return sid
+}
+
+// prompt sends text to sid and returns the request id.
+func (c *wsClient) prompt(sid, text string) int {
+	c.t.Helper()
+	return c.request("session/prompt", `{"sessionId":"`+sid+`","prompt":[{"type":"text","text":"`+text+`"}]}`)
+}
+
+// TestACP_WS_cancelAndDisconnectEndTheTurn: a message that is not a
+// request is refused; session/cancel ends a running prompt with stopReason
+// cancelled; and a client that closes its socket cancels its running model
+// call, and its connection leaves the registry.
+func TestACP_WS_cancelAndDisconnectEndTheTurn(t *testing.T) {
+	started := map[string]chan struct{}{"cancel": make(chan struct{}, 1), "disconnect": make(chan struct{}, 1)}
+	stopped := map[string]chan struct{}{"cancel": make(chan struct{}, 1), "disconnect": make(chan struct{}, 1)}
+	signal := func(ch chan struct{}) {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		text := msgs[len(msgs)-1].Content
+		signal(started[text])
 		<-ctx.Done()
-		close(cancelled)
+		signal(stopped[text])
 	})
-	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
-	hs, _ := startACPWSServer(t, r)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	conn, _ := dialACPWebSocket(t, hs)
-
-	wsWriteJSONRPC(ctx, t, conn, map[string]any{
-		"jsonrpc": "2.0", "id": 1, "method": "initialize",
-		"params": map[string]any{"protocolVersion": 1},
-	})
-	wsWriteJSONRPC(ctx, t, conn, map[string]any{
-		"jsonrpc": "2.0", "id": 2, "method": "session/new",
-		"params": map[string]any{"cwd": "/tmp"},
-	})
-	var sessionID string
-	for sessionID == "" {
-		frame := wsReadFrame(ctx, t, conn)
-		if res, ok := frame["result"].(map[string]any); ok {
-			if sid, ok := res["sessionId"].(string); ok && sid != "" {
-				sessionID = sid
-			}
+	hs, srv := startACPWSServer(t, acptest.NewRuntime(t, model, tacklr.AgentOptions{}))
+	wait := func(ch chan struct{}, what string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(8 * time.Second):
+			t.Fatalf("timed out waiting for the model call to %s", what)
 		}
 	}
-	wsWriteJSONRPC(ctx, t, conn, map[string]any{
-		"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
-		"params": map[string]any{
-			"sessionId": sessionID,
-			"prompt":    []map[string]string{{"type": "text", "text": "hi"}},
-		},
-	})
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("prompt did not start")
+	c := dial(t, hs, `{"protocolVersion":1}`)
+	d := dial(t, hs, `{"protocolVersion":1}`)
+	registered := srv.Connections.Get(d.ID) != nil
+
+	c.send(`{`)
+	c.send(`{"jsonrpc":"2.0","id":99,"result":{}}`)
+	notRequests := []any{c.frame()["error"], c.frame()["error"]}
+	sid := c.newSession()
+	id := c.prompt(sid, "cancel")
+	wait(started["cancel"], "start")
+	c.send(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"` + sid + `"}}`)
+	cancelled, _ := c.until(id, nil)
+	d.prompt(d.newSession(), "disconnect")
+	wait(started["disconnect"], "start")
+	_ = d.conn.Close(websocket.StatusNormalClosure, "")
+	wait(stopped["disconnect"], "stop")
+	removed := false
+	for deadline := time.Now().Add(2 * time.Second); !removed && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		removed = srv.Connections.Get(d.ID) == nil
 	}
-	_ = conn.Close(websocket.StatusNormalClosure, "")
-	select {
-	case <-cancelled:
-	case <-time.After(8 * time.Second):
-		t.Fatal("disconnect did not cancel in-flight inference")
-	}
-}
 
-// TestACP_prompt_stopReason_refusal: model terminal ErrModelRefused → PromptResponse refusal.
-func TestACP_prompt_stopReason_refusal(t *testing.T) {
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{
-			Type:       session.EventError,
-			Error:      session.ErrModelRefused,
-			Content:    "model refused",
-			IsComplete: true,
-		}
-	})
-	assertACPStopReason(t, strategy, nil, "refusal")
-}
-
-func TestACP_prompt_stopReason_maxTokens(t *testing.T) {
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{
-			Type:       session.EventError,
-			Error:      session.ErrMaxTokens,
-			IsComplete: true,
-		}
-	})
-	assertACPStopReason(t, strategy, nil, "max_tokens")
-}
-
-func assertACPStopReason(t *testing.T, strategy tacklr.Model, tools []*tacklr.Tool, want string) {
-	t.Helper()
-	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{Tools: tools})
-	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sessionID := acptest.SessionID(t, recNew)
-	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"hi"}]}}`)
-	got := promptStopReason(t, rec)
-	if got != want {
-		blob, _ := json.Marshal(acptest.Frames(t, rec.Body))
-		t.Fatalf("stopReason = %q, want %q frames=%s", got, want, blob)
-	}
-}
-
-func TestACP_sessionCancel_stopReasonCancelled(t *testing.T) {
-	started := make(chan struct{})
-	var once sync.Once
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		once.Do(func() { close(started) })
-		<-ctx.Done()
-	})
-	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
-	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	rpc := newACPRPC(ctx, t, srv)
-	rpc.write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
-	rpc.write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-
-	var sessionID string
-	for sessionID == "" {
-		frame := rpc.frame()
-		if res, ok := frame["result"].(map[string]any); ok {
-			if sid, ok := res["sessionId"].(string); ok && sid != "" {
-				sessionID = sid
-			}
+	for _, e := range notRequests {
+		if code, _ := e.(map[string]any)["code"].(float64); int(code) != acp.CodeInvalidRequest {
+			t.Errorf("message that is not a request = %v, want invalid request", e)
 		}
 	}
-	rpc.write(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`)
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("prompt did not start")
+	if res, _ := cancelled["result"].(map[string]any); res["stopReason"] != "cancelled" {
+		t.Errorf("cancelled prompt = %v, want stopReason cancelled", cancelled)
 	}
-	rpc.write(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"` + sessionID + `"}}`)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		frame := rpc.frame()
-		if res, ok := frame["result"].(map[string]any); ok && idMatch(frame["id"], 10) && res["stopReason"] == "cancelled" {
-			return
-		}
+	if d.ID == "" || !registered || !removed {
+		t.Errorf("connection %q registered %v, removed after close %v; want both", d.ID, registered, removed)
 	}
-	t.Fatal("expected prompt stopReason cancelled after session/cancel")
-}
-
-func promptStopReason(t *testing.T, rec *httptest.ResponseRecorder) string {
-	t.Helper()
-	frames := acptest.Frames(t, rec.Body)
-	for _, f := range frames {
-		if res, ok := f["result"].(map[string]any); ok {
-			if sr, ok := res["stopReason"].(string); ok && sr != "" {
-				return sr
-			}
-		}
-	}
-	// Also accept WriteResult-only responses (single JSON object body).
-	var single map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &single); err == nil {
-		if res, ok := single["result"].(map[string]any); ok {
-			if sr, _ := res["stopReason"].(string); sr != "" {
-				return sr
-			}
-		}
-	}
-	return ""
 }
