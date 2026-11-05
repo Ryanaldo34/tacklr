@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -578,12 +579,14 @@ func (o *Object) purge(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var forget []Op
 	if o.cfg.Agent.Brain != nil {
-		ops = append(ops, o.out.post(letter{Forget: m.Init.SessionID})...)
+		forget = o.out.post(letter{Forget: m.Init.SessionID})
 	}
-	if err := o.events.commit(m.Init.SessionID, nil, append(ops, writeMeta(m))...); err != nil {
+	if err := o.events.commit(m.Init.SessionID, nil, slices.Concat(ops, forget, []Op{writeMeta(m)})...); err != nil {
 		return err
 	}
+	o.out.sent(forget)
 	o.m = m
 	o.closed(ctx, m.Init.SessionID)
 	o.sendLocked()

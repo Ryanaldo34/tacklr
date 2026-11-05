@@ -137,8 +137,9 @@ func NewTool(cfg ToolConfig) *Tool {
 		panic(fmt.Sprintf("tool %q: handler has too many parameters (%d)", cfg.Name, numIn))
 	}
 
+	hasCtx := numIn > 0 && fnType.In(0).Implements(ctxType)
 	idx := 0
-	if numIn > 0 && fnType.In(0).Implements(ctxType) {
+	if hasCtx {
 		idx = 1
 	}
 
@@ -208,8 +209,9 @@ func NewTool(cfg ToolConfig) *Tool {
 	handlerValue := reflect.ValueOf(cfg.Handler)
 	t.handlerFunc = func(ctx context.Context, args map[string]any, cc *CallContext) (ToolOutcome, error) {
 		var callArgs []reflect.Value
-
-		callArgs = append(callArgs, reflect.ValueOf(ctx))
+		if hasCtx {
+			callArgs = append(callArgs, reflect.ValueOf(ctx))
+		}
 
 		if argsType != nil {
 			argPtr := reflect.New(argsType)
