@@ -16,7 +16,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr/message"
 
-	"github.com/pkoukk/tiktoken-go"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
 
@@ -36,8 +35,6 @@ type Model struct {
 	reasoningSummary string
 	httpClient       *http.Client
 	baseURL          string
-	// localTokenFallback uses tiktoken when the provider has no input_tokens endpoint.
-	localTokenFallback bool
 	// promptCacheFor overrides cache-profile resolution when non-nil.
 	// NewOpenRouter pins OpenRouter's key-only profile here.
 	promptCacheFor func(model, baseURL, key string) promptCache
@@ -90,13 +87,6 @@ func (s *Model) ModelTelemetryIdentity() telemetry.ModelIdentity {
 
 func (s *Model) WithURL(url string) *Model {
 	s.baseURL = url
-	return s
-}
-
-// WithLocalTokenFallback counts tokens with tiktoken when the provider returns
-// 404/400/422 for /responses/input_tokens. Off by default.
-func (s *Model) WithLocalTokenFallback() *Model {
-	s.localTokenFallback = true
 	return s
 }
 
@@ -154,27 +144,13 @@ func (s *Model) CountTokens(ctx context.Context, req tacklr.ModelRequest) (int, 
 	}
 
 	cache := s.promptCache(req.CacheKey)
-	items := marshalMessagesToInput(req.Messages, req.SystemPrompt, cache.breakpoints())
-	inputJSON, err := json.Marshal(items)
-	if err != nil {
-		return 0, fmt.Errorf("marshal token-count input: %w", err)
-	}
-
-	var toolsJSON json.RawMessage
-	if len(req.Tools) > 0 {
-		toolsJSON = json.RawMessage(tacklr.ToolsAsJson(req.Tools))
-	}
-
-	reqBody := countTokensRequest{
+	_, inputJSON, toolsJSON := requestInput(req, cache)
+	// It encodes: its fields are JSON that json.Marshal built.
+	body, _ := json.Marshal(countTokensRequest{
 		Model: s.model,
 		Input: inputJSON,
 		Tools: toolsJSON,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return 0, fmt.Errorf("marshal token-count request: %w", err)
-	}
+	})
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.baseURL, "/")+"/responses/input_tokens", bytes.NewReader(body))
 	if err != nil {
@@ -195,19 +171,14 @@ func (s *Model) CountTokens(ctx context.Context, req tacklr.ModelRequest) (int, 
 	}
 
 	if httpResp.StatusCode != http.StatusOK {
-		if s.localTokenFallback && (httpResp.StatusCode == http.StatusNotFound || httpResp.StatusCode == http.StatusBadRequest || httpResp.StatusCode == http.StatusUnprocessableEntity) {
-			tke, err := tiktoken.GetEncoding("o200k_base")
-			if err != nil {
-				return 0, fmt.Errorf("tiktoken count tokens: %w", err)
-			}
-			contents := make([]string, 0, len(req.Messages)+2)
-			contents = append(contents, req.SystemPrompt, string(toolsJSON))
-			for _, msg := range req.Messages {
-				contents = append(contents, msg.Content)
-			}
-			return len(tke.Encode(strings.Join(contents, "\n"), nil, nil)), nil
+		err := classifyAPIStatus(&APIStatusError{Status: httpResp.StatusCode, Body: extractErrorMessage(respBody)}, "")
+		switch httpResp.StatusCode {
+		case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+			// Tacklr counts with the provider only: a provider without the
+			// endpoint (Azure OpenAI, local servers) cannot manage a window.
+			return 0, fmt.Errorf("openai: the provider at %s cannot count tokens (no /responses/input_tokens endpoint): %w", s.baseURL, err)
 		}
-		return 0, classifyAPIStatus(&APIStatusError{Status: httpResp.StatusCode, Body: extractErrorMessage(respBody)}, "")
+		return 0, err
 	}
 
 	var countResp struct {
@@ -230,17 +201,7 @@ func (s *Model) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tackl
 	}
 
 	cache := s.promptCache(req.CacheKey)
-	items := marshalMessagesToInput(req.Messages, req.SystemPrompt, cache.breakpoints())
-
-	var toolsJSON json.RawMessage
-	if len(req.Tools) > 0 {
-		toolsJSON = json.RawMessage(tacklr.ToolsAsJson(req.Tools))
-	}
-
-	inputJSON, err := json.Marshal(items)
-	if err != nil {
-		return nil, fmt.Errorf("marshal model input: %w", err)
-	}
+	items, inputJSON, toolsJSON := requestInput(req, cache)
 
 	reqBody := responsesRequest{
 		Model:   s.model,
@@ -261,10 +222,8 @@ func (s *Model) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tackl
 		}
 	}
 
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshal model request: %w", err)
-	}
+	// It encodes: its raw fields are JSON that json.Marshal built.
+	body, _ := json.Marshal(reqBody)
 	inputSummary := summarizeInputItems(items)
 
 	events := make(chan tacklr.LLMResponseChunk, 10)
@@ -281,9 +240,6 @@ func (s *Model) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tackl
 		}
 	}
 	sendErr := func(err error) {
-		if err == nil {
-			return
-		}
 		sendChunk(tacklr.LLMResponseChunk{
 			Type:       session.EventError,
 			Content:    err.Error(),
@@ -331,6 +287,18 @@ func (s *Model) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tackl
 	}()
 
 	return events, nil
+}
+
+// requestInput is req's Responses input items, the items as one JSON array,
+// and its tools as JSON (nil when it has none). Each item is JSON that
+// json.Marshal built, so the array always encodes.
+func requestInput(req tacklr.ModelRequest, cache promptCache) (items []json.RawMessage, input, tools json.RawMessage) {
+	items = marshalMessagesToInput(req.Messages, req.SystemPrompt, cache.breakpoints())
+	input, _ = json.Marshal(items)
+	if len(req.Tools) > 0 {
+		tools = json.RawMessage(tacklr.ToolsAsJson(req.Tools))
+	}
+	return items, input, tools
 }
 
 func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, events chan<- tacklr.LLMResponseChunk, inputSummary string) {
@@ -420,10 +388,8 @@ func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, events cha
 			}
 		case "error":
 			// Azure mid-stream errors often use type=error with HTTP 200.
+			// An error event is always terminal and always classified.
 			_, classified := classifyTerminalSSE("error", data)
-			if classified == nil {
-				classified = &APIStatusError{Status: 200, Body: "stream error event"}
-			}
 			emitProviderFailed(ctx, classified, 200, inputSummary, data)
 			events <- tacklr.LLMResponseChunk{
 				Type:       session.EventError,
@@ -586,11 +552,9 @@ func classifyTerminalSSE(evtType, data string) (terminal bool, err error) {
 	if strings.TrimSpace(apiErr.Body) == "" {
 		var parts []string
 		parts = append(parts, "stream ended without a usable response")
+		// A reason returned above, so the body names only the status.
 		if status != "" {
 			parts = append(parts, "status="+status)
-		}
-		if reason != "" {
-			parts = append(parts, "reason="+reason)
 		}
 		if evtType != "" {
 			parts = append(parts, "event="+evtType)
@@ -625,10 +589,7 @@ func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputIte
 	code := ""
 	if err != nil {
 		var api *APIStatusError
-		if errors.As(err, &api) && api != nil {
-			if httpStatus == 0 {
-				httpStatus = api.Status
-			}
+		if errors.As(err, &api) {
 			code = api.Code
 		}
 	}
@@ -826,11 +787,9 @@ func marshalMessagesToInput(messages []*message.Message, systemPrompt string, st
 	var items []json.RawMessage
 	lastToolOut := -1
 
+	// v is an input type of this package, which always encodes.
 	appendJSON := func(v any) {
-		b, err := json.Marshal(v)
-		if err != nil {
-			panic(fmt.Sprintf("openai: marshal internally constructed model input: %v", err))
-		}
+		b, _ := json.Marshal(v)
 		items = append(items, b)
 	}
 
@@ -850,9 +809,6 @@ func marshalMessagesToInput(messages []*message.Message, systemPrompt string, st
 
 	takeToolOutput := func(tc message.ToolCall) *message.Message {
 		wire, key := tc.WireID(), tc.Key()
-		if wire == "" && key == "" {
-			return nil
-		}
 		var byKey *message.Message
 		for _, m := range messages {
 			if m == nil || m.Role != message.RoleTool || paired[m] {
@@ -991,9 +947,6 @@ func marshalMessagesToInput(messages []*message.Message, systemPrompt string, st
 // marshalRoleContent uses string content when there are no multimodal parts;
 // otherwise Responses array content (input_text / input_image / input_file).
 func marshalRoleContent(role string, msg *message.Message) any {
-	if msg == nil {
-		return easyInputRequest{Role: role, Content: ""}
-	}
 	if len(msg.ContentParts) == 0 {
 		return easyInputRequest{Role: role, Content: msg.Content}
 	}

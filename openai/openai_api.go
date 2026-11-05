@@ -23,9 +23,6 @@ type APIStatusError struct {
 }
 
 func (e *APIStatusError) Error() string {
-	if e == nil {
-		return "provider error"
-	}
 	msg := strings.TrimSpace(e.Body)
 	if msg == "" {
 		msg = "no error body"
@@ -38,17 +35,11 @@ func (e *APIStatusError) Error() string {
 
 // ProviderHTTPStatus implements telemetry.ProviderStatus.
 func (e *APIStatusError) ProviderHTTPStatus() int {
-	if e == nil {
-		return 0
-	}
 	return e.Status
 }
 
 // ProviderErrorCode implements telemetry.ProviderStatus.
 func (e *APIStatusError) ProviderErrorCode() string {
-	if e == nil {
-		return ""
-	}
 	return e.Code
 }
 
