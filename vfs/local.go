@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -347,9 +348,17 @@ func (f *localFile) Stat() (FileInfo, error) {
 var _ documentBackend = localProvider{}
 
 // Local opens providers under a fixed jail. Params: "subpath" (optional),
-// "session_scoped=true" (optional). The jail stays in the closure; providers
-// never expose host roots.
-func Local(base string) Open {
+// "session_scoped=true" (optional: the session's own directory, as
+// SessionLocal gives). The jail stays in the closure; providers never
+// expose host roots.
+func Local(base string) Open { return local(base, false) }
+
+// SessionLocal is Local where each session gets its own directory under
+// base, so no session sees another's files. A child session (a specialist
+// or a job) gets a directory of its own too.
+func SessionLocal(base string) Open { return local(base, true) }
+
+func local(base string, perSession bool) Open {
 	return func(ctx context.Context, sessionID string, b mount.Binding) (Provider, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -369,11 +378,13 @@ func Local(base string) Open {
 			}
 			rel = cleaned
 		}
-		if b.Params["session_scoped"] == "true" && sessionID != "" {
-			if err := safeSegment(sessionID); err != nil {
+		if (perSession || b.Params["session_scoped"] == "true") && sessionID != "" {
+			// One directory name: a child's id has slashes, which escape.
+			dir := url.PathEscape(sessionID)
+			if err := safeSegment(dir); err != nil {
 				return nil, err
 			}
-			rel = filepath.Join(rel, sessionID)
+			rel = filepath.Join(rel, dir)
 		}
 		if rel != "" {
 			// Made through the base's os.Root, so a symlink under the base

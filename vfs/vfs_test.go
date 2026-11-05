@@ -608,10 +608,7 @@ func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 	if _, err := open(ctx, "s", mount.Binding{Params: map[string]string{"subpath": "/abs"}}); err == nil {
 		t.Fatal("absolute subpath")
 	}
-	if _, err := open(ctx, "sess-id", mount.Binding{Params: map[string]string{"session_scoped": "true"}}); err != nil {
-		t.Fatalf("session_scoped: %v", err)
-	}
-	if _, err := open(ctx, "../bad", mount.Binding{Params: map[string]string{"session_scoped": "true"}}); err == nil {
+	if _, err := open(ctx, "..", mount.Binding{Params: map[string]string{"session_scoped": "true"}}); err == nil {
 		t.Fatal("unsafe session id")
 	}
 	if _, err := vfs.Local("rel")(ctx, "s", mount.Binding{}); err == nil {

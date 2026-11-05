@@ -42,6 +42,43 @@ func TestLocal_aSymlinkReportsItsTargetsVersion(t *testing.T) {
 	}
 }
 
+// TestSessionLocal_givesEachSessionItsOwnDirectory: a session, and its
+// specialist (a child id has slashes), each write into a directory of
+// their own under the base, and neither sees the other's file.
+func TestSessionLocal_givesEachSessionItsOwnDirectory(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	ctx, base := t.Context(), t.TempDir()
+	tree := vfs.Tree(vfs.At("work", vfs.SessionLocal(base)))
+	write := func(session, name string) *vfs.MountSession {
+		t.Helper()
+		ms, err := tree(ctx, session, vfs.Request{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ms.Route(ctx, "/workspace/work/"+name).WriteFile(ctx, []byte(session)); err != nil {
+			t.Fatal(err)
+		}
+		return ms
+	}
+
+	// Act
+	parent := write("s1", "parent.txt")
+	child := write("s1/w/researcher/c1", "child.txt")
+
+	// Assert
+	dirs, err := os.ReadDir(base)
+	if err != nil || len(dirs) != 2 {
+		t.Fatalf("base holds %v (%v), want one directory per session", dirs, err)
+	}
+	if _, err := parent.Route(ctx, "/workspace/work/child.txt").Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("the parent stats its child's file: %v, want not found", err)
+	}
+	if _, err := child.Route(ctx, "/workspace/work/parent.txt").Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("the child stats its parent's file: %v, want not found", err)
+	}
+}
+
 // TestLocal_diskFailuresBecomeVFSErrors: each failure of the disk under a
 // local mount becomes the vfs error the agent can act on, and an error with
 // no vfs match keeps its cause but not the host path. The failures are real:
