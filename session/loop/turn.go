@@ -418,10 +418,13 @@ func (t *Turn) startJobs(c tacklr.Call, d Executor) error {
 			t.Jobs[i].Call = cmp.Or(t.Jobs[i].Call, call)
 			continue
 		}
+		// The job is the session's while its start runs, so the step that
+		// starts it reports it too.
+		t.Jobs = append(t.Jobs, Job{ID: session.ID(s.ID), Name: s.Name, Call: call})
 		if err := d.Start(s); err != nil {
+			t.Jobs = t.Jobs[:len(t.Jobs)-1]
 			return err
 		}
-		t.Jobs = append(t.Jobs, Job{ID: session.ID(s.ID), Name: s.Name, Call: call})
 	}
 	return nil
 }

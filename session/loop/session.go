@@ -193,6 +193,12 @@ func (s *runner) drive(d Executor, user *message.Message, resume map[string][]by
 	s.running = true
 	s.turn.drive(d, user, resume, func(block bool) { s.pump(d, block) })
 	s.running = false
+	// A turn that ended or parked has nothing to go on with, even when a
+	// suspend came in with the wakes that ended it: the session handles
+	// what it held (a close, a resume) instead of suspending.
+	if s.turn.Terminal != "" || s.turn.Yielded {
+		s.turn.Suspended = false
+	}
 	s.suspended = s.turn.Suspended
 }
 
