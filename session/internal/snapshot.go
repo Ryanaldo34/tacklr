@@ -74,8 +74,8 @@ func (s *Snapshot) Commit(ctx context.Context, store session.Store, id session.I
 	}
 	if in.Round != nil {
 		r := *in.Round
-		r.Outcomes = slices.Clone(r.Outcomes)
-		if err := LoadRecords(ctx, store, id, r.Outcomes); err != nil {
+		r.Calls = slices.Clone(r.Calls)
+		if err := LoadBodies(ctx, store, id, r.Calls); err != nil {
 			return "", err
 		}
 		in.Round = &r

@@ -247,11 +247,11 @@ func TestPlanTools_changesOfCallsThatRanAtOnceAllLand(t *testing.T) {
 	h.context.Restore([]*message.Message{userMsg("go")})
 	r := NewRound(Reply{Messages: []*message.Message{{Role: message.RoleAssistant, ToolCalls: calls}}, Calls: calls})
 	for i, call := range calls {
-		o, err := h.RunTool(t.Context(), ToolRun{Call: call}, drainEventCh())
+		o, err := h.RunCall(t.Context(), NewCall(call, 0), drainEventCh())
 		if err != nil {
 			t.Fatal(err)
 		}
-		r.Outcomes[i] = o
+		r.Calls[i] = o
 	}
 
 	err := h.Commit(t.Context(), CommitIn{Round: r}, drainEventCh())

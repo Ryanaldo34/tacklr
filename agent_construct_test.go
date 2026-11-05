@@ -218,11 +218,12 @@ func TestHarness_checkpointAfterRun(t *testing.T) {
 	}
 
 	ask := message.ToolCall{ID: "ask1", CallID: "ask1", Name: "ask_user_choice", Arguments: `{"question":"which?","choices":[{"title":"a"},{"title":"b"}]}`}
-	parked, err := h.RunTool(t.Context(), ToolRun{Call: ask}, out)
+	parked, err := h.RunCall(t.Context(), NewCall(ask, 0), out)
 	if err != nil || parked.Park == nil {
 		t.Fatalf("ask = %+v %v, want a park", parked, err)
 	}
-	if _, err := h.RunTool(t.Context(), ToolRun{Call: ask, Prior: &parked, Answer: []byte(`{"selectionIdx":9}`)}, out); err == nil {
+	parked.Answer = []byte(`{"selectionIdx":9}`)
+	if _, err := h.RunCall(t.Context(), parked, out); err == nil {
 		t.Fatal("invalid selection")
 	}
 

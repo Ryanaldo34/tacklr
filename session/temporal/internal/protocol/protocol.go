@@ -94,9 +94,9 @@ type Input struct {
 }
 
 // StreamItem is one event on a session's workflow stream. A tool result's
-// content stays in the session.Store, out of history: Outcome is the call
-// key whose record holds it, and Subscribe puts it back.
+// content stays in the session.Store, out of history: Call is the key of
+// the call whose body holds it, and Subscribe puts it back.
 type StreamItem struct {
 	session.Event
-	Outcome string `json:"outcome,omitempty"`
+	Call string `json:"call,omitempty"`
 }

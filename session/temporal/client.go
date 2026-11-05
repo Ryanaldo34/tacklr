@@ -20,6 +20,7 @@ import (
 	"go.temporal.io/sdk/contrib/workflowstreams"
 	"go.temporal.io/sdk/converter"
 
+	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
@@ -351,18 +352,22 @@ func (r *Client) stream(ctx context.Context, c *workflowstreams.Client, dc conve
 }
 
 // resolve is the event an item stands for: a tool result's content is read
-// back from the Store's outcome of its call.
+// back from its call's body in the Store. A call whose body is gone (its
+// turn ended, or its session was deleted) took its content with it.
 func (r *Client) resolve(ctx context.Context, id session.ID, it protocol.StreamItem) (session.Event, error) {
-	if it.Outcome == "" {
+	if it.Call == "" {
 		return it.Event, nil
 	}
-	outcomes, err := r.store.Outcomes(ctx, id, []string{it.Outcome})
+	bodies, err := r.store.Calls(ctx, id, []string{it.Call})
 	if err != nil {
 		return it.Event, err
 	}
 	ev := it.Event
-	// A session that was deleted took its results with it.
-	ev.Content = outcomes[it.Outcome].Result
+	if raw, ok := bodies[it.Call]; ok {
+		if ev.Content, err = tacklr.ResultText(raw); err != nil {
+			return ev, fmt.Errorf("tool call %s: %w", it.Call, err)
+		}
+	}
 	return ev, nil
 }
 

@@ -19,7 +19,7 @@ const (
 	kindMailboxHead = "mailboxhead"
 	kindSnapshot    = "snapshot"
 	kindCheckpoint  = "checkpoint"
-	kindOutcome     = "outcome"
+	kindBody        = "body"
 	kindSecrets     = "secrets"
 	kindEvent       = "event"
 	kindEventHead   = "eventhead"

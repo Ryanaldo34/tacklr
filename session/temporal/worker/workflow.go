@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
@@ -295,26 +296,27 @@ func (w *executor) stepSession() stepSession {
 	return stepSession{SessionID: w.turn.SessionID, Identity: w.turn.Identity, MCPServers: w.turn.MCP}
 }
 
-// Tools runs one Tool activity per run, at most MaxToolCalls at once: the
-// rest start as earlier ones finish. It returns a result per run, in run
-// order. A queued cancel stops the ones still running.
-func (w *executor) Tools(runs []tacklr.ToolRun) []loop.ToolResult {
+// Tools runs one Tool activity per call, at most MaxToolCalls at once: the
+// rest start as earlier ones finish. It returns each call as its run left
+// it, in order. A queued cancel stops the ones still running.
+func (w *executor) Tools(calls []tacklr.Call) []tacklr.Call {
 	var act *activities
 	cctx, cancelAct := workflow.WithCancel(w.ctx)
 	defer cancelAct()
 	sess := w.stepSession()
+	runs := calls
 	futs := make([]workflow.Future, len(runs))
 	start := func(i int) {
-		runs[i].MaxChildren = cmp.Or(w.in.MaxChildren, defaultMaxChildren)
+		runs[i].MaxJobs = cmp.Or(w.in.MaxChildren, defaultMaxChildren)
 		ctx := workflow.WithStartToCloseTimeout(w.harnessCtx(cctx), max(w.opts.StartToCloseTimeout, runs[i].Timeout+loop.ToolTimeoutMargin))
-		futs[i] = workflow.ExecuteActivity(ctx, act.Tool, toolInput{stepSession: sess, Run: runs[i]})
+		futs[i] = workflow.ExecuteActivity(ctx, act.Tool, toolInput{stepSession: sess, Call: runs[i]})
 	}
 	limit := cmp.Or(w.in.MaxToolCalls, defaultMaxToolCalls)
 	next := min(limit, len(runs))
 	for i := range next {
 		start(i)
 	}
-	results := make([]loop.ToolResult, len(runs))
+	results := slices.Clone(runs)
 	done := make([]bool, len(runs))
 	left := len(runs)
 	w.fill()
@@ -326,10 +328,16 @@ func (w *executor) Tools(runs []tacklr.ToolRun) []loop.ToolResult {
 				continue
 			}
 			sel.AddFuture(fut, func(f workflow.Future) {
-				err := f.Get(w.ctx, &results[i].Outcome)
+				// A zero Call: decoding into the input would keep what the
+				// run cleared.
+				var ran tacklr.Call
+				err := f.Get(w.ctx, &ran)
 				if w.lostWorker(err) {
 					start(i)
 					return
+				}
+				if err == nil {
+					results[i] = ran
 				}
 				results[i].Err = w.stepErr(err)
 				done[i] = true
@@ -353,7 +361,7 @@ func (w *executor) Tools(runs []tacklr.ToolRun) []loop.ToolResult {
 				if i < next {
 					_ = futs[i].Get(w.ctx, nil)
 				}
-				results[i] = loop.ToolResult{Err: context.Canceled}
+				results[i].Err = context.Canceled
 			}
 		}
 	}

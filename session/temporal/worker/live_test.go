@@ -560,12 +560,12 @@ func TestLive_historyHoldsNoSecretsOrToolResults(t *testing.T) {
 	}
 }
 
-// downStore is a session.Store that cannot read call outcomes.
+// downStore is a session.Store that cannot read call bodies.
 type downStore struct{ session.Store }
 
 var errStoreDown = errors.New("session store down")
 
-func (downStore) Outcomes(context.Context, session.ID, []string) (map[string]session.Outcome, error) {
+func (downStore) Calls(context.Context, session.ID, []string) (map[string][]byte, error) {
 	return nil, errStoreDown
 }
 

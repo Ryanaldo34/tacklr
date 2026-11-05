@@ -54,7 +54,7 @@ func replyRound(t *testing.T, h *Harness) (*Round, error) {
 	}
 	r := NewRound(reply)
 	for i, call := range reply.Calls {
-		if r.Outcomes[i], err = h.RunTool(t.Context(), ToolRun{Call: call}, out); err != nil {
+		if r.Calls[i], err = h.RunCall(t.Context(), NewCall(call, 0), out); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -158,10 +158,10 @@ func TestCommitRound_trimsAResultTooLargeForTheWindow(t *testing.T) {
 	}
 }
 
-// TestRunTool_aChildResultIsTheCallsResultWhenItsEpisodeCannotBeKept: a
+// TestRunCall_aChildResultIsTheCallsResultWhenItsEpisodeCannotBeKept: a
 // specialist's result is the call's result even when the Brain cannot keep
 // it as an Episode (the catalog has no Episode kind).
-func TestRunTool_aChildResultIsTheCallsResultWhenItsEpisodeCannotBeKept(t *testing.T) {
+func TestRunCall_aChildResultIsTheCallsResultWhenItsEpisodeCannotBeKept(t *testing.T) {
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{Kind: "Fact", IsParent: true}))
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +171,7 @@ func TestRunTool_aChildResultIsTheCallsResultWhenItsEpisodeCannotBeKept(t *testi
 	h.context.Restore([]*message.Message{userMsg("go")})
 	r := NewRound(Reply{Messages: []*message.Message{{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{call}}}, Calls: []message.ToolCall{call}})
 
-	r.Outcomes[0], err = h.RunTool(t.Context(), ToolRun{Call: call, Child: &session.JobResult{Output: "found it"}}, drainEventCh())
+	r.Calls[0], err = h.RunCall(t.Context(), Call{Tool: call, JobEnd: &session.JobResult{Output: "found it"}}, drainEventCh())
 	commitErr := h.Commit(t.Context(), CommitIn{Round: r}, drainEventCh())
 
 	if got := contents(h.context.Messages()); err != nil || commitErr != nil || len(got) != 3 || got[2] != "found it" {
@@ -179,12 +179,12 @@ func TestRunTool_aChildResultIsTheCallsResultWhenItsEpisodeCannotBeKept(t *testi
 	}
 }
 
-// TestRunTool_aCallsWritesFromEachRunLandAtCommit: a call writes, parks,
+// TestRunCall_aCallsWritesFromEachRunLandAtCommit: a call writes, parks,
 // and on its run after resume writes again; a permission prompt answered
 // allow-always is remembered. Neither Tool step changes the session; the
 // round's Commit applies every write in order, and a later call of the
 // gated tool runs without a prompt.
-func TestRunTool_aCallsWritesFromEachRunLandAtCommit(t *testing.T) {
+func TestRunCall_aCallsWritesFromEachRunLandAtCommit(t *testing.T) {
 	note := NewTool(ToolConfig{Name: "note", Handler: func(_ context.Context, cc *CallContext) (string, error) {
 		if _, err := cc.Park(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}}); err != nil {
 			return "", errors.Join(cc.StateSet("k", "before"), err)
@@ -202,17 +202,17 @@ func TestRunTool_aCallsWritesFromEachRunLandAtCommit(t *testing.T) {
 	answers := []string{`{"selectionIdx":1}`, `{"optionId":"allow-always"}`}
 
 	for i, call := range calls {
-		parked, err := h.RunTool(t.Context(), ToolRun{Call: call}, out)
+		parked, err := h.RunCall(t.Context(), NewCall(call, 0), out)
 		if err != nil || parked.Park == nil {
 			t.Fatalf("%s = %+v %v, want a park", call.Name, parked, err)
 		}
-		if r.Outcomes[i], err = h.RunTool(t.Context(), ToolRun{Call: call, Prior: &parked, Answer: []byte(answers[i])}, out); err != nil {
+		if r.Calls[i], err = h.RunCall(t.Context(), answered(parked, answers[i]), out); err != nil {
 			t.Fatal(err)
 		}
 	}
 	_, written := h.session.state("k")
 	commitErr := h.Commit(t.Context(), CommitIn{Round: r}, out)
-	again, againErr := h.RunTool(t.Context(), ToolRun{Call: toolCall("g2", "gate", "{}")}, out)
+	again, againErr := h.RunCall(t.Context(), NewCall(toolCall("g2", "gate", "{}"), 0), out)
 
 	k, _ := h.session.state("k")
 	_, old := h.session.state("old")
@@ -225,44 +225,49 @@ func TestRunTool_aCallsWritesFromEachRunLandAtCommit(t *testing.T) {
 	}
 }
 
-// TestRunTool_failsOnAnOutcomeItCannotReadOrAStateValueItCannotKeep: a
-// prior outcome with a park of a type this worker does not register, or
-// that is not an outcome, fails the step, and so does its Commit; a tool
-// that stores a value JSON cannot encode gets the error as its result.
-func TestRunTool_failsOnAnOutcomeItCannotReadOrAStateValueItCannotKeep(t *testing.T) {
+// TestCallBody_failsOnABodyItCannotReadOrAStateValueItCannotKeep: a body
+// with a park of a type this worker does not register, or that is not a
+// body, does not decode; a Commit of a call with a result and no body
+// fails; a tool that stores a value JSON cannot encode gets the error as
+// its result.
+func TestCallBody_failsOnABodyItCannotReadOrAStateValueItCannotKeep(t *testing.T) {
 	keep := NewTool(ToolConfig{Name: "keep", Handler: func(_ context.Context, cc *CallContext) (string, error) {
 		return "kept", cc.StateSet("fn", func() {})
 	}})
 	h, _, _ := roundsHarness(t, AgentOptions{sessionID: "unreadable", MaxWindowSize: 8192, Tools: []*Tool{keep}})
 	call := toolCall("c1", "gate", "{}")
-	for name, record := range map[string]string{
-		"not an outcome":       `[`,
+	for name, body := range map[string]string{
+		"not a body":           `[`,
 		"a park not an object": `{"park":1}`,
 		"an unknown park type": `{"park":{"type":"nope","data":{}}}`,
 		"park data that fails": `{"park":{"type":"tool_permission","data":[]}}`,
 	} {
-		prior := CallOutcome{Call: call, Record: json.RawMessage(record)}
-		if _, err := h.RunTool(t.Context(), ToolRun{Call: call, Prior: &prior}, drainEventCh()); err == nil {
-			t.Errorf("%s: run = nil, want it to fail", name)
+		if err := json.Unmarshal([]byte(body), new(CallBody)); err == nil {
+			t.Errorf("%s: decode = nil, want it to fail", name)
 		}
 	}
 	bad := NewRound(Reply{Messages: []*message.Message{{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{call}}}, Calls: []message.ToolCall{call}})
-	bad.Outcomes[0] = CallOutcome{Call: call, Done: true, Record: json.RawMessage(`[`)}
+	bad.Calls[0].Done = true
 	if err := h.Commit(t.Context(), CommitIn{Round: bad}, drainEventCh()); err == nil {
-		t.Error("commit of an unreadable outcome = nil, want it to fail")
+		t.Error("commit of a call with no body = nil, want it to fail")
 	}
-	o, err := h.RunTool(t.Context(), ToolRun{Call: toolCall("c2", "keep", "{}")}, drainEventCh())
-	rec, _ := record(&o)
-	if err != nil || !o.Done || rec.Result == nil || !strings.Contains(rec.Result.Content, `state "fn"`) {
-		t.Fatalf("keep = %+v %v, want an error result naming the value", rec.Result, err)
+	o, err := h.RunCall(t.Context(), NewCall(toolCall("c2", "keep", "{}"), 0), drainEventCh())
+	if err != nil || !o.Done || !strings.Contains(o.Body.Text(), `state "fn"`) {
+		t.Fatalf("keep = %+v %v, want an error result naming the value", o, err)
 	}
 }
 
-// TestRunTool_aSearchCursorCarriesToTheNextStepThroughCommit: a search
+// answered is c with answer to its park, for its next run.
+func answered(c Call, answer string) Call {
+	c.Answer = []byte(answer)
+	return c
+}
+
+// TestRunCall_aSearchCursorCarriesToTheNextStepThroughCommit: a search
 // leaves the rest of its results as the session's cursor; the Tool step
 // saves nothing, the round's Commit keeps the cursor, and the next step's
 // search with more continues it.
-func TestRunTool_aSearchCursorCarriesToTheNextStepThroughCommit(t *testing.T) {
+func TestRunCall_aSearchCursorCarriesToTheNextStepThroughCommit(t *testing.T) {
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithConfig(brain.EngineConfig{DefaultLimit: 1}))
 	if err != nil {
 		t.Fatal(err)
@@ -278,24 +283,23 @@ func TestRunTool_aSearchCursorCarriesToTheNextStepThroughCommit(t *testing.T) {
 	first := toolCall("s1", "search", `{"query":"cursor"}`)
 	r := NewRound(Reply{Messages: []*message.Message{{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{first}}}, Calls: []message.ToolCall{first}})
 
-	r.Outcomes[0], err = h.RunTool(t.Context(), ToolRun{Call: first}, drainEventCh())
-	before, beforeErr := h.RunTool(t.Context(), ToolRun{Call: toolCall("s2", "search", `{"more":true}`)}, drainEventCh())
+	r.Calls[0], err = h.RunCall(t.Context(), NewCall(first, 0), drainEventCh())
+	before, beforeErr := h.RunCall(t.Context(), NewCall(toolCall("s2", "search", `{"more":true}`), 0), drainEventCh())
 	commitErr := h.Commit(t.Context(), CommitIn{Round: r}, drainEventCh())
-	more, moreErr := h.RunTool(t.Context(), ToolRun{Call: toolCall("s3", "search", `{"more":true}`)}, drainEventCh())
+	more, moreErr := h.RunCall(t.Context(), NewCall(toolCall("s3", "search", `{"more":true}`), 0), drainEventCh())
 
-	rec, _ := record(&more)
-	if err != nil || commitErr != nil || moreErr != nil || rec.Result == nil || !strings.Contains(rec.Result.Content, "cursor") {
-		t.Fatalf("search %v, commit %v, more %v %+v; want the next step to continue the committed cursor", err, commitErr, moreErr, rec.Result)
+	if err != nil || commitErr != nil || moreErr != nil || !strings.Contains(more.Body.Text(), "cursor") {
+		t.Fatalf("search %v, commit %v, more %v %q; want the next step to continue the committed cursor", err, commitErr, moreErr, more.Body.Text())
 	}
-	if beforeRec, _ := record(&before); beforeErr != nil || !strings.Contains(beforeRec.Result.Content, "no more results") {
-		t.Fatalf("more before the commit = %v %+v, want no cursor yet: the Tool step saved nothing", beforeErr, beforeRec.Result)
+	if beforeErr != nil || !strings.Contains(before.Body.Text(), "no more results") {
+		t.Fatalf("more before the commit = %v %q, want no cursor yet: the Tool step saved nothing", beforeErr, before.Body.Text())
 	}
 }
 
-// TestRunTool_callsOfOneReplyRunAtOnceOnOneHarness: two calls of one reply
+// TestRunCall_callsOfOneReplyRunAtOnceOnOneHarness: two calls of one reply
 // run at the same time on one harness; each sees only its own state writes,
 // and both land at commit in call order.
-func TestRunTool_callsOfOneReplyRunAtOnceOnOneHarness(t *testing.T) {
+func TestRunCall_callsOfOneReplyRunAtOnceOnOneHarness(t *testing.T) {
 	var both sync.WaitGroup
 	both.Add(2)
 	set := NewTool(ToolConfig{Name: "set", Handler: func(_ context.Context, args struct {
@@ -320,7 +324,7 @@ func TestRunTool_callsOfOneReplyRunAtOnceOnOneHarness(t *testing.T) {
 	var runs sync.WaitGroup
 	errs := make([]error, len(calls))
 	for i, call := range calls {
-		runs.Go(func() { r.Outcomes[i], errs[i] = h.RunTool(t.Context(), ToolRun{Call: call}, out) })
+		runs.Go(func() { r.Calls[i], errs[i] = h.RunCall(t.Context(), NewCall(call, 0), out) })
 	}
 	runs.Wait()
 	commitErr := h.Commit(t.Context(), CommitIn{Round: r}, out)
@@ -366,7 +370,7 @@ func TestCommit_countsTokensOnlyNearTheWindow(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := NewRound(reply)
-			if r.Outcomes[0], err = h.RunTool(t.Context(), ToolRun{Call: reply.Calls[0]}, out); err != nil {
+			if r.Calls[0], err = h.RunCall(t.Context(), NewCall(reply.Calls[0], 0), out); err != nil {
 				t.Fatal(err)
 			}
 			counts = 0
@@ -388,7 +392,7 @@ func TestSchedule_aSessionAtItsChildLimitGetsACorrection(t *testing.T) {
 	h.jobs = []string{"ci"}
 	call := toolCall("c1", "x", `{}`)
 	running := ChildID(h.sessionId, "ci", "other", false)
-	cc := newCallContext(drainEventCh(), h, ToolRun{Call: call, Children: []string{running}, MaxChildren: 1}, roundCall{Call: call}, callWrites{})
+	cc := newCallContext(drainEventCh(), h, Call{Tool: call, Body: &CallBody{}}, []string{running}, 1)
 
 	_, err := cc.Schedule(t.Context(), JobRequest{Name: "ci", Task: "build"})
 
@@ -397,7 +401,7 @@ func TestSchedule_aSessionAtItsChildLimitGetsACorrection(t *testing.T) {
 	}
 }
 
-func TestRunTool_aToolFailureIsItsCallsResultInTheWindow(t *testing.T) {
+func TestRunCall_aToolFailureIsItsCallsResultInTheWindow(t *testing.T) {
 	boom := NewTool(ToolConfig{Name: "boom", Handler: func(context.Context) (string, error) {
 		return "", fmt.Errorf("upstream: the search provider failed: %w", ErrFailed)
 	}})

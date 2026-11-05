@@ -172,7 +172,7 @@ func TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents(t *testing.T) {
 	st, stErr := f.c.Status(ctx, id)
 	logged := fromStart()
 	turn()
-	events, outcomes := stored(f.p, id, "event"), stored(f.p, id, "outcome")
+	events, outcomes := stored(f.p, id, "event"), stored(f.p, id, "body")
 
 	if last(evs).Type != session.EventComplete || toolResult(evs) != "42" {
 		t.Fatalf("events %+v; want the tool's result, then the end of the turn", evs)
@@ -422,7 +422,7 @@ func TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth(t *testing.T) {
 	again := f.c.Close(ctx, id)
 	left := 0
 	for _, obj := range []session.ID{id, child} {
-		for _, kind := range []string{"snapshot", "checkpoint", "event", "secrets", "journal", "mailbox", "outcome", "child", "outbox"} {
+		for _, kind := range []string{"snapshot", "checkpoint", "event", "secrets", "journal", "mailbox", "body", "child", "outbox"} {
 			left += stored(f.p, obj, kind)
 		}
 	}

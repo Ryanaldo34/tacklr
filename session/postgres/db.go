@@ -1,5 +1,5 @@
 // Package postgres keeps sessions durable in Postgres: the session Store
-// (checkpoints and tool-call outcomes), SecretStorage (the users' delegated
+// (checkpoints and tool-call bodies), SecretStorage (the users' delegated
 // tokens, sealed before they are written) and the EventLog.
 //
 // The host owns the connection pool and passes it in; the three share it,
@@ -80,11 +80,10 @@ CREATE TABLE IF NOT EXISTS {s}.session_checkpoint_rows (
 	PRIMARY KEY (session_id, kind, key)
 );
 
-CREATE TABLE IF NOT EXISTS {s}.session_outcomes (
+CREATE TABLE IF NOT EXISTS {s}.session_calls (
 	session_id text NOT NULL,
 	call_key   text NOT NULL,
-	result     text NOT NULL,
-	record     bytea,
+	body       bytea NOT NULL,
 	PRIMARY KEY (session_id, call_key)
 );
 

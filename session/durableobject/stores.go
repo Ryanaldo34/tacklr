@@ -13,7 +13,7 @@ import (
 )
 
 // snapshots is session.Store on an object's storage: the checkpoint's rows,
-// one key each, its revision, and each tool call's outcome by call key. It
+// one key each, its revision, and each tool call's body by call key. It
 // keeps each session's revision in memory as storage has it, since the
 // object is its storage's only writer.
 type snapshots struct {
@@ -134,43 +134,33 @@ func (st *snapshots) Revision(_ context.Context, id session.ID) (session.Revisio
 	return revisionOf(gen), err
 }
 
-func outcomeKey(id session.ID, callKey string) string {
-	return prefix(kindOutcome, id) + url.PathEscape(callKey)
+func bodyKey(id session.ID, callKey string) string {
+	return prefix(kindBody, id) + url.PathEscape(callKey)
 }
 
-// PutOutcome implements session.Store.
-func (st *snapshots) PutOutcome(_ context.Context, id session.ID, callKey string, o session.Outcome) error {
-	return st.s.Write(outcomeOp(id, callKey, o))
+// PutCall implements session.Store.
+func (st *snapshots) PutCall(_ context.Context, id session.ID, callKey string, body []byte) error {
+	return st.s.Write(put(bodyKey(id, callKey), body))
 }
 
-func outcomeOp(id session.ID, callKey string, o session.Outcome) Op {
-	raw, _ := json.Marshal(o) // a string and bytes always encode
-	return put(outcomeKey(id, callKey), raw)
-}
-
-// Outcomes implements session.Store.
-func (st *snapshots) Outcomes(_ context.Context, id session.ID, callKeys []string) (map[string]session.Outcome, error) {
-	out := make(map[string]session.Outcome, len(callKeys))
+// Calls implements session.Store.
+func (st *snapshots) Calls(_ context.Context, id session.ID, callKeys []string) (map[string][]byte, error) {
+	out := make(map[string][]byte, len(callKeys))
 	for _, k := range callKeys {
-		raw, ok, err := st.s.Get(outcomeKey(id, k))
+		body, ok, err := st.s.Get(bodyKey(id, k))
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
-			continue
+		if ok {
+			out[k] = body
 		}
-		var o session.Outcome
-		if err := json.Unmarshal(raw, &o); err != nil {
-			return nil, err
-		}
-		out[k] = o
 	}
 	return out, nil
 }
 
-// ClearOutcomes implements session.Store.
-func (st *snapshots) ClearOutcomes(_ context.Context, id session.ID) error {
-	ops, err := deleteAll(st.s, prefix(kindOutcome, id))
+// ClearCalls implements session.Store.
+func (st *snapshots) ClearCalls(_ context.Context, id session.ID) error {
+	ops, err := deleteAll(st.s, prefix(kindBody, id))
 	if err != nil {
 		return err
 	}
@@ -182,7 +172,7 @@ func (st *snapshots) Delete(_ context.Context, id session.ID) error {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	var ops []Op
-	for _, kind := range []string{kindOutcome, kindCheckpoint} {
+	for _, kind := range []string{kindBody, kindCheckpoint} {
 		more, err := deleteAll(st.s, prefix(kind, id))
 		if err != nil {
 			return err
@@ -207,7 +197,7 @@ func (st *snapshots) forget(id session.ID) {
 }
 
 // staged is one step's view of the session store: its Save and its
-// PutOutcome become writes of the step's one write (ops), so the step's
+// PutCall become writes of the step's one write (ops), so the step's
 // journal entry, its events and what it stored land together or not at
 // all. Call applied once that write is done.
 type staged struct {
@@ -231,9 +221,9 @@ func (s *staged) Save(_ context.Context, id session.ID, changes []session.Checkp
 	return revisionOf(gen), nil
 }
 
-// PutOutcome implements session.Store.
-func (s *staged) PutOutcome(_ context.Context, id session.ID, callKey string, o session.Outcome) error {
-	s.ops = append(s.ops, outcomeOp(id, callKey, o))
+// PutCall implements session.Store.
+func (s *staged) PutCall(_ context.Context, id session.ID, callKey string, body []byte) error {
+	s.ops = append(s.ops, put(bodyKey(id, callKey), body))
 	return nil
 }
 

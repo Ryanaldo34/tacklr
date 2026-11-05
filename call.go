@@ -23,20 +23,17 @@ type CallContext struct {
 	out     chan session.Event
 	turn    *Harness
 	session *sessionManager
-	// running are the session's running children, from the run, and
-	// maxChildren how many it may run at once (zero: no limit).
+	// running are the session's running jobs, and maxChildren how many it
+	// may run at once (zero: no limit).
 	running     []string
 	maxChildren int
 	mu          sync.Mutex
-	// call is the call with its park and the OnCall layers it completed.
-	call   roundCall
-	writes callWrites
+	// call is the call the run changes: its body (park, layers, writes),
+	// the jobs it starts and cancels, and the job it waits on.
+	call Call
 	// user is the call's own user-state values by key, as its tools set
 	// them; a deleted key maps to deleted.
-	user    map[string]userValue
-	starts  []JobStart
-	cancels []string
-	await   string
+	user map[string]userValue
 }
 
 type userValue struct {
@@ -44,11 +41,11 @@ type userValue struct {
 	deleted bool
 }
 
-// newCallContext opens call's run on sm. prior is what the call's
-// earlier runs wrote (before a park), which this run reads and keeps.
-func newCallContext(out chan session.Event, turn *Harness, run ToolRun, call roundCall, prior callWrites) *CallContext {
-	cc := &CallContext{out: out, turn: turn, session: turn.session, running: run.Children, maxChildren: run.MaxChildren, call: call, writes: prior, user: map[string]userValue{}}
-	for _, w := range prior.State {
+// newCallContext opens a run of c on turn. It reads and keeps what c's
+// earlier runs wrote (before a park).
+func newCallContext(out chan session.Event, turn *Harness, c Call, running []string, maxChildren int) *CallContext {
+	cc := &CallContext{out: out, turn: turn, session: turn.session, running: running, maxChildren: maxChildren, call: c, user: map[string]userValue{}}
+	for _, w := range c.Body.writes.State {
 		v := userValue{deleted: w.Deleted}
 		// The value is JSON a StateSet of this call encoded.
 		_ = json.Unmarshal(w.Value, &v.value)
@@ -62,7 +59,7 @@ func newCallContext(out chan session.Event, turn *Harness, run ToolRun, call rou
 // tool with external side effects (a write, a send, a charge) passes the
 // id as its idempotency key.
 func (cc *CallContext) CurrentToolCallID() string {
-	return cc.call.Call.Key()
+	return cc.call.Key()
 }
 
 // EmitUpdate sends a non-blocking progress update for the call.
@@ -93,7 +90,7 @@ func (cc *CallContext) StateSet(key string, value any) error {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 	cc.user[key] = userValue{value: value}
-	cc.writes.State = append(cc.writes.State, stateWrite{Key: key, Value: raw})
+	cc.call.Body.writes.State = append(cc.call.Body.writes.State, stateWrite{Key: key, Value: raw})
 	return nil
 }
 
@@ -102,7 +99,7 @@ func (cc *CallContext) StateDelete(key string) {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
 	cc.user[key] = userValue{deleted: true}
-	cc.writes.State = append(cc.writes.State, stateWrite{Key: key, Deleted: true})
+	cc.call.Body.writes.State = append(cc.call.Body.writes.State, stateWrite{Key: key, Deleted: true})
 }
 
 // Park parks the call on intr and returns it as the error the tool
@@ -124,7 +121,7 @@ func (cc *CallContext) Park(intr Interrupt) (Interrupt, error) {
 func (cc *CallContext) park(intr Interrupt) error {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	cc.call.Park = &callPark{Interrupt: intr}
+	cc.call.Body.park = &callPark{Interrupt: intr}
 	return intr
 }
 
@@ -133,9 +130,9 @@ func (cc *CallContext) park(intr Interrupt) error {
 func (cc *CallContext) resume(payload []byte) error {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	p := cc.call.Park
+	p := cc.call.Body.park
 	if p == nil || p.Answered {
-		return fmt.Errorf("interrupt %q: %w", cc.call.Call.Key(), ErrInterruptNotFound)
+		return fmt.Errorf("interrupt %q: %w", cc.call.Key(), ErrInterruptNotFound)
 	}
 	if err := p.Interrupt.Return(payload); err != nil {
 		return err
@@ -148,11 +145,11 @@ func (cc *CallContext) resume(payload []byte) error {
 func (cc *CallContext) takeAnswer(typeName string) (Interrupt, bool) {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	p := cc.call.Park
+	p := cc.call.Body.park
 	if p == nil || !p.Answered || p.Interrupt.TypeName() != typeName {
 		return nil, false
 	}
-	cc.call.Park = nil
+	cc.call.Body.park = nil
 	return p.Interrupt, true
 }
 
@@ -160,7 +157,7 @@ func (cc *CallContext) takeAnswer(typeName string) (Interrupt, bool) {
 func (cc *CallContext) layer(typeName string) (onCallLayer, bool) {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	return cc.call.layer(typeName)
+	return cc.call.Body.layer(typeName)
 }
 
 // recordLayer keeps a completed OnCall layer, so the call's run after a
@@ -168,15 +165,15 @@ func (cc *CallContext) layer(typeName string) (onCallLayer, bool) {
 func (cc *CallContext) recordLayer(l onCallLayer) {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	cc.call.Layers = append(cc.call.Layers, l)
+	cc.call.Body.layers = append(cc.call.Body.layers, l)
 }
 
 // decision is the permission answer for the tool qualified-named name: the
 // call's own answer, else the committed one.
 func (cc *CallContext) decision(name string) permissionDecision {
 	cc.mu.Lock()
-	for i := len(cc.writes.Permissions) - 1; i >= 0; i-- {
-		if w := cc.writes.Permissions[i]; w.Tool == name {
+	for i := len(cc.call.Body.writes.Permissions) - 1; i >= 0; i-- {
+		if w := cc.call.Body.writes.Permissions[i]; w.Tool == name {
 			cc.mu.Unlock()
 			return w.Decision
 		}
@@ -199,15 +196,15 @@ func (cc *CallContext) rememberAnswer(perm *ToolPermissionInterrupt) {
 	}
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	cc.writes.Permissions = append(cc.writes.Permissions, permissionWrite{Tool: perm.ToolName, Decision: d})
+	cc.call.Body.writes.Permissions = append(cc.call.Body.writes.Permissions, permissionWrite{Tool: perm.ToolName, Decision: d})
 }
 
 // rest is the ranked remainder of the last call of tool: the call's own,
 // else the committed one.
 func (cc *CallContext) rest(tool string) brain.Rest {
 	cc.mu.Lock()
-	for i := len(cc.writes.Rests) - 1; i >= 0; i-- {
-		if w := cc.writes.Rests[i]; w.Key == tool {
+	for i := len(cc.call.Body.writes.Rests) - 1; i >= 0; i-- {
+		if w := cc.call.Body.writes.Rests[i]; w.Key == tool {
 			cc.mu.Unlock()
 			return w.Rest
 		}
@@ -219,7 +216,7 @@ func (cc *CallContext) rest(tool string) brain.Rest {
 func (cc *CallContext) setRest(tool string, rest brain.Rest) {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	cc.writes.Rests = append(cc.writes.Rests, restWrite{Key: tool, Rest: rest})
+	cc.call.Body.writes.Rests = append(cc.call.Body.writes.Rests, restWrite{Key: tool, Rest: rest})
 }
 
 // plan is the plan the call sees: the committed plan with the call's own
@@ -228,7 +225,7 @@ func (cc *CallContext) plan() ([]Todo, string) {
 	todos, doc := cc.session.Plan.snapshot()
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	for _, op := range cc.writes.Plan {
+	for _, op := range cc.call.Body.writes.Plan {
 		if next, nextDoc, _, err := op.change()(todos, doc); err == nil {
 			todos, doc = next, nextDoc
 		}
@@ -246,7 +243,7 @@ func (cc *CallContext) changePlan(op planOp) (ToolOutcome, error) {
 	}
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	cc.writes.Plan = append(cc.writes.Plan, op)
+	cc.call.Body.writes.Plan = append(cc.call.Body.writes.Plan, op)
 	return out, nil
 }
 
@@ -281,14 +278,14 @@ func (cc *CallContext) startJob(job JobRequest, specialist bool) (Job, error) {
 	s := JobStart{ID: ChildID(cc.turn.sessionId, name, cc.CurrentToolCallID(), specialist), Name: name, Task: task, Specialist: specialist}
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	if !slices.Contains(cc.running, s.ID) && !slices.ContainsFunc(cc.starts, func(o JobStart) bool { return o.ID == s.ID }) {
-		if n := len(cc.running) + len(cc.starts); cc.maxChildren > 0 && n >= cc.maxChildren {
+	if !slices.Contains(cc.running, s.ID) && !slices.ContainsFunc(cc.call.Starts, func(o JobStart) bool { return o.ID == s.ID }) {
+		if n := len(cc.running) + len(cc.call.Starts); cc.maxChildren > 0 && n >= cc.maxChildren {
 			return Job{}, Correctionf(ErrInvalid, "%s: this session already runs %d jobs, the most it may run at once. Wait for one to finish, or stop one with cancel_child", name, n)
 		}
-		cc.starts = append(cc.starts, s)
+		cc.call.Starts = append(cc.call.Starts, s)
 	}
 	if job.Wait {
-		cc.await = s.ID
+		cc.call.Await = s.ID
 	}
 	return Job{ID: s.ID, Name: s.Name, State: JobRunning}, nil
 }
@@ -303,7 +300,7 @@ func (cc *CallContext) Jobs() []Job {
 	}
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	for _, s := range cc.starts {
+	for _, s := range cc.call.Starts {
 		out = append(out, Job{ID: s.ID, Name: s.Name, State: JobRunning})
 	}
 	return out
@@ -316,6 +313,6 @@ func (cc *CallContext) CancelJob(_ context.Context, id string) error {
 	}
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
-	cc.cancels = append(cc.cancels, id)
+	cc.call.Cancels = append(cc.call.Cancels, id)
 	return nil
 }

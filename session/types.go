@@ -174,29 +174,21 @@ type Store interface {
 	// worker reads it to learn whether the committed state it holds is
 	// current, without loading the snapshot.
 	Revision(ctx context.Context, sessionID ID) (Revision, error)
-	// PutOutcome keeps one tool call's outcome under its session and
-	// call key, so the durable runtime's history holds only that it exists.
-	// A Put of a key replaces it: a step that runs again leaves one record.
-	// Records stay until ClearOutcomes or Delete, so a Subscribe in the
-	// turn can read every result.
-	PutOutcome(ctx context.Context, sessionID ID, callKey string, o Outcome) error
-	// Outcomes returns the records kept under callKeys; a key with none is
+	// PutCall keeps the body of one tool call (tacklr.CallBody) under its
+	// session and call key, so the durable runtime's history holds only
+	// that the call ran. A Put of a key replaces it: a step that runs again
+	// leaves one. Bodies stay until ClearCalls or Delete, so a Subscribe in
+	// the turn can read every result.
+	PutCall(ctx context.Context, sessionID ID, callKey string, body []byte) error
+	// Calls returns the bodies kept under callKeys; a key with none is
 	// absent from the map.
-	Outcomes(ctx context.Context, sessionID ID, callKeys []string) (map[string]Outcome, error)
-	// ClearOutcomes removes the session's outcome records. The runtime
-	// calls it when a new turn starts: the turns before it committed their
-	// rounds, so no step reads their records again.
-	ClearOutcomes(ctx context.Context, sessionID ID) error
-	// Delete removes the session's snapshot and its outcome records.
+	Calls(ctx context.Context, sessionID ID, callKeys []string) (map[string][]byte, error)
+	// ClearCalls removes the session's call bodies. The runtime calls it
+	// when a new turn starts: the turns before it committed their rounds,
+	// so no step reads their calls again.
+	ClearCalls(ctx context.Context, sessionID ID) error
+	// Delete removes the session's snapshot and its call bodies.
 	Delete(ctx context.Context, sessionID ID) error
-}
-
-// Outcome is what the Store keeps for one tool call. Result is the text
-// its tool-result event carried, which a client reads back into the event
-// stream; Record is the harness's own encoding of the call's outcome.
-type Outcome struct {
-	Result string `json:"result,omitempty"`
-	Record []byte `json:"record,omitempty"`
 }
 
 // WithoutSecrets returns a copy with Credential Token and ExpiresAt cleared.

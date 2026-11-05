@@ -45,7 +45,7 @@ func TestCall_readsItsOwnWritesAndCommitAppliesThem(t *testing.T) {
 // TestRuntime_emitUpdateNamesTheCallAndNeverBlocks covers EmitUpdate.
 func TestRuntime_emitUpdateNamesTheCallAndNeverBlocks(t *testing.T) {
 	ch := make(chan session.Event, 1)
-	cc := newCallContext(ch, &Harness{session: newSessionManager()}, ToolRun{}, roundCall{Call: message.ToolCall{ID: "id1", CallID: "id1"}}, callWrites{})
+	cc := newCallContext(ch, &Harness{session: newSessionManager()}, Call{Tool: message.ToolCall{ID: "id1", CallID: "id1"}, Body: &CallBody{}}, nil, 0)
 
 	cc.EmitUpdate("hello")
 	cc.EmitUpdate("dropped: the channel is full")

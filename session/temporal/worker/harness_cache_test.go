@@ -20,22 +20,22 @@ import (
 // returns a checkpoint that does not decode.
 type failingStore struct {
 	*session.MemoryStore
-	revision, load, save, put, outcomes error
-	unreadable                          bool
+	revision, load, save, put, calls error
+	unreadable                       bool
 }
 
-func (s *failingStore) PutOutcome(ctx context.Context, id session.ID, key string, o session.Outcome) error {
+func (s *failingStore) PutCall(ctx context.Context, id session.ID, key string, body []byte) error {
 	if s.put != nil {
 		return s.put
 	}
-	return s.MemoryStore.PutOutcome(ctx, id, key, o)
+	return s.MemoryStore.PutCall(ctx, id, key, body)
 }
 
-func (s *failingStore) Outcomes(ctx context.Context, id session.ID, keys []string) (map[string]session.Outcome, error) {
-	if s.outcomes != nil {
-		return nil, s.outcomes
+func (s *failingStore) Calls(ctx context.Context, id session.ID, keys []string) (map[string][]byte, error) {
+	if s.calls != nil {
+		return nil, s.calls
 	}
-	return s.MemoryStore.Outcomes(ctx, id, keys)
+	return s.MemoryStore.Calls(ctx, id, keys)
 }
 
 func (s *failingStore) Revision(ctx context.Context, id session.ID) (session.Revision, error) {
@@ -99,17 +99,17 @@ func TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes(t *testing.T) {
 		return err
 	}
 	call := message.ToolCall{ID: "c", CallID: "c", Name: "nope"}
-	runTool := func(run tacklr.ToolRun) func(*harnessCache, session.Store, harnessSpec) error {
+	runCall := func(c tacklr.Call) func(*harnessCache, session.Store, harnessSpec) error {
 		return func(ws *harnessCache, store session.Store, w harnessSpec) error {
 			return ws.Read(t.Context(), store, w, func(h *tacklr.Harness) error {
-				_, err := adapter.RunTool(t.Context(), store, w.ID, h, run, events())
+				_, err := adapter.RunCall(t.Context(), store, w.ID, h, c, events())
 				return err
 			})
 		}
 	}
-	stored := &tacklr.CallOutcome{Call: call, Done: true, Stored: true}
+	ran := tacklr.Call{Tool: call, Done: true}
 	commitGone := func(ws *harnessCache, store session.Store, w harnessSpec) error {
-		round := &tacklr.Round{Reply: tacklr.Reply{Calls: []message.ToolCall{call}}, Outcomes: []tacklr.CallOutcome{*stored}}
+		round := &tacklr.Round{Reply: tacklr.Reply{Calls: []message.ToolCall{call}}, Calls: []tacklr.Call{ran}}
 		_, err := ws.Commit(t.Context(), store, w, "", tacklr.CommitIn{Round: round}, events())
 		return err
 	}
@@ -119,15 +119,15 @@ func TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes(t *testing.T) {
 		build error
 		step  func(*harnessCache, session.Store, harnessSpec) error
 	}{
-		"a harness that cannot be built":              {store: &failingStore{}, build: boom, step: read},
-		"a revision the store cannot read":            {store: &failingStore{revision: boom}, step: read},
-		"a revision the store cannot read at commit":  {store: &failingStore{revision: boom}, step: commit},
-		"a snapshot the store cannot load":            {store: &failingStore{load: boom}, saved: true, step: read},
-		"a snapshot that does not decode":             {store: &failingStore{unreadable: true}, saved: true, step: read},
-		"a call result the store cannot keep":         {store: &failingStore{put: boom}, step: runTool(tacklr.ToolRun{Call: call})},
-		"a call result the store cannot read back":    {store: &failingStore{outcomes: boom}, step: runTool(tacklr.ToolRun{Call: call, Prior: stored})},
-		"a stored call result that is gone at commit": {store: &failingStore{}, step: commitGone},
-		"a run that fails":                            {store: &failingStore{}, step: runTool(tacklr.ToolRun{Call: call, Answer: []byte(`{}`)})},
+		"a harness that cannot be built":             {store: &failingStore{}, build: boom, step: read},
+		"a revision the store cannot read":           {store: &failingStore{revision: boom}, step: read},
+		"a revision the store cannot read at commit": {store: &failingStore{revision: boom}, step: commit},
+		"a snapshot the store cannot load":           {store: &failingStore{load: boom}, saved: true, step: read},
+		"a snapshot that does not decode":            {store: &failingStore{unreadable: true}, saved: true, step: read},
+		"a call body the store cannot keep":          {store: &failingStore{put: boom}, step: runCall(tacklr.NewCall(call, 0))},
+		"a call body the store cannot read back":     {store: &failingStore{calls: boom}, step: runCall(ran)},
+		"a call body that is gone at commit":         {store: &failingStore{}, step: commitGone},
+		"a run that fails":                           {store: &failingStore{}, step: runCall(tacklr.Call{Tool: call, Answer: []byte(`{}`)})},
 	} {
 		t.Run(name, func(t *testing.T) {
 			tc.store.MemoryStore = session.NewMemoryStore()

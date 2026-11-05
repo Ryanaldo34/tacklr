@@ -71,24 +71,24 @@ func Store(t *testing.T, newStore func(t *testing.T) session.Store) {
 		}
 	})
 
-	t.Run("a call's outcome is replaced by a later put, a clear drops outcomes only, and delete removes the session", func(t *testing.T) {
+	t.Run("a call's body is replaced by a later put, a clear drops calls only, and delete removes the session", func(t *testing.T) {
 		ctx, store, id := t.Context(), newStore(t), session.ID("s")
 		if _, err := store.Save(ctx, id, []session.CheckpointChange{put("message", "0", "cp")}, ""); err != nil {
 			t.Fatal(err)
 		}
-		for _, rec := range []string{"first", "second"} {
-			if err := store.PutOutcome(ctx, id, "call", session.Outcome{Result: "result " + rec, Record: []byte(rec)}); err != nil {
+		for _, body := range []string{"first", "second"} {
+			if err := store.PutCall(ctx, id, "call", []byte(body)); err != nil {
 				t.Fatal(err)
 			}
 		}
-		got, err := store.Outcomes(ctx, id, []string{"call", "unknown"})
-		none, noneErr := store.Outcomes(ctx, id, nil)
-		if err := store.ClearOutcomes(ctx, id); err != nil {
+		got, err := store.Calls(ctx, id, []string{"call", "unknown"})
+		none, noneErr := store.Calls(ctx, id, nil)
+		if err := store.ClearCalls(ctx, id); err != nil {
 			t.Fatal(err)
 		}
-		cleared, _ := store.Outcomes(ctx, id, []string{"call"})
+		cleared, _ := store.Calls(ctx, id, []string{"call"})
 		_, _, keptErr := store.Load(ctx, id)
-		if err := store.PutOutcome(ctx, id, "next", session.Outcome{Result: "next"}); err != nil {
+		if err := store.PutCall(ctx, id, "next", []byte("next")); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.Delete(ctx, id); err != nil {
@@ -96,19 +96,19 @@ func Store(t *testing.T, newStore func(t *testing.T) session.Store) {
 		}
 		_, _, deleted := store.Load(ctx, id)
 		rev, _ := store.Revision(ctx, id)
-		gone, _ := store.Outcomes(ctx, id, []string{"next"})
+		gone, _ := store.Calls(ctx, id, []string{"next"})
 
-		if err != nil || len(got) != 1 || got["call"].Result != "result second" || string(got["call"].Record) != "second" {
-			t.Fatalf("outcomes %+v %v; want the later outcome only", got, err)
+		if err != nil || len(got) != 1 || string(got["call"]) != "second" {
+			t.Fatalf("calls %q %v; want the later body only", got, err)
 		}
 		if len(none) != 0 || noneErr != nil {
-			t.Fatalf("outcomes of no keys %v %v; want none", none, noneErr)
+			t.Fatalf("calls of no keys %v %v; want none", none, noneErr)
 		}
 		if len(cleared) != 0 || keptErr != nil {
-			t.Fatalf("after a clear: outcomes %v, load %v; want no outcomes and the snapshot kept", cleared, keptErr)
+			t.Fatalf("after a clear: calls %v, load %v; want no calls and the snapshot kept", cleared, keptErr)
 		}
 		if !errors.Is(deleted, session.ErrNotFound) || rev != "" || len(gone) != 0 {
-			t.Fatalf("after delete: load %v, revision %q, outcomes %v; want nothing left", deleted, rev, gone)
+			t.Fatalf("after delete: load %v, revision %q, calls %v; want nothing left", deleted, rev, gone)
 		}
 	})
 }

@@ -111,17 +111,17 @@ func reloadHarness(t *testing.T, h *Harness, opts AgentOptions) *Harness {
 
 // callRuntime is the runtime of one call, id, on sm (events drained).
 func callRuntime(sm *sessionManager, id string) *CallContext {
-	return newCallContext(drainEventCh(), &Harness{session: sm}, ToolRun{}, roundCall{Call: message.ToolCall{ID: id, CallID: id}}, callWrites{})
+	return newCallContext(drainEventCh(), &Harness{session: sm}, Call{Tool: message.ToolCall{ID: id, CallID: id}, Body: &CallBody{}}, nil, 0)
 }
 
 // turnRuntime is the runtime of one call on h.
 func turnRuntime(h *Harness) *CallContext {
-	return newCallContext(drainEventCh(), h, ToolRun{}, roundCall{}, callWrites{})
+	return newCallContext(drainEventCh(), h, Call{Body: &CallBody{}}, nil, 0)
 }
 
 // commit applies what the call wrote to the committed state, as Commit does.
 func (cc *CallContext) commit() {
-	cc.session.apply(cc.writes)
+	cc.session.apply(cc.call.Body.writes)
 }
 
 func mustNewHarness(t testing.TB, opts AgentOptions) *Harness {

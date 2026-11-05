@@ -11,9 +11,9 @@ import (
 
 // MemoryStore is an in-memory Store.
 type MemoryStore struct {
-	mu       sync.Mutex
-	records  map[ID]snapRecord
-	outcomes map[ID]map[string]Outcome
+	mu      sync.Mutex
+	records map[ID]snapRecord
+	calls   map[ID]map[string][]byte
 }
 
 type snapRecord struct {
@@ -23,7 +23,7 @@ type snapRecord struct {
 
 // NewMemoryStore returns an empty Store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{records: make(map[ID]snapRecord), outcomes: make(map[ID]map[string]Outcome)}
+	return &MemoryStore{records: make(map[ID]snapRecord), calls: make(map[ID]map[string][]byte)}
 }
 
 func revisionOf(gen uint64) Revision {
@@ -89,36 +89,35 @@ func (s *MemoryStore) Revision(_ context.Context, sessionID ID) (Revision, error
 	return revisionOf(cur.gen), nil
 }
 
-// PutOutcome implements Store.
-func (s *MemoryStore) PutOutcome(_ context.Context, sessionID ID, callKey string, o Outcome) error {
+// PutCall implements Store.
+func (s *MemoryStore) PutCall(_ context.Context, sessionID ID, callKey string, body []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.outcomes[sessionID] == nil {
-		s.outcomes[sessionID] = map[string]Outcome{}
+	if s.calls[sessionID] == nil {
+		s.calls[sessionID] = map[string][]byte{}
 	}
-	o.Record = slices.Clone(o.Record)
-	s.outcomes[sessionID][callKey] = o
+	s.calls[sessionID][callKey] = slices.Clone(body)
 	return nil
 }
 
-// Outcomes implements Store.
-func (s *MemoryStore) Outcomes(_ context.Context, sessionID ID, callKeys []string) (map[string]Outcome, error) {
+// Calls implements Store.
+func (s *MemoryStore) Calls(_ context.Context, sessionID ID, callKeys []string) (map[string][]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make(map[string]Outcome, len(callKeys))
+	out := make(map[string][]byte, len(callKeys))
 	for _, key := range callKeys {
-		if rec, ok := s.outcomes[sessionID][key]; ok {
-			out[key] = rec
+		if body, ok := s.calls[sessionID][key]; ok {
+			out[key] = slices.Clone(body)
 		}
 	}
 	return out, nil
 }
 
-// ClearOutcomes implements Store.
-func (s *MemoryStore) ClearOutcomes(_ context.Context, sessionID ID) error {
+// ClearCalls implements Store.
+func (s *MemoryStore) ClearCalls(_ context.Context, sessionID ID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.outcomes, sessionID)
+	delete(s.calls, sessionID)
 	return nil
 }
 
@@ -127,7 +126,7 @@ func (s *MemoryStore) Delete(_ context.Context, sessionID ID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.records, sessionID)
-	delete(s.outcomes, sessionID)
+	delete(s.calls, sessionID)
 	return nil
 }
 

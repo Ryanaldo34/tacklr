@@ -2,12 +2,12 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -97,20 +97,22 @@ func TestActivities_commitIsTheOnlyWriterAndAppliesItsInputOnce(t *testing.T) {
 	}
 	round := tacklr.NewRound(reply)
 	for i, call := range reply.Calls {
-		if round.Outcomes[i], err = acts.Tool(t.Context(), toolInput{stepSession: stepSession{SessionID: id}, Run: tacklr.ToolRun{Call: call}}); err != nil {
+		if round.Calls[i], err = acts.Tool(t.Context(), toolInput{stepSession: stepSession{SessionID: id}, Call: tacklr.NewCall(call, 0)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	retried, err := acts.Tool(t.Context(), toolInput{stepSession: stepSession{SessionID: id}, Run: tacklr.ToolRun{Call: reply.Calls[0]}})
+	retried, err := acts.Tool(t.Context(), toolInput{stepSession: stepSession{SessionID: id}, Call: tacklr.NewCall(reply.Calls[0], 0)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := acts.Store.Outcomes(t.Context(), id, []string{"a", "b"})
+	bodies, err := acts.Store.Calls(t.Context(), id, []string{"a", "b"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(retried, round.Outcomes[0]) || retried.Record != nil || !retried.Stored || len(records) != 2 {
-		t.Fatalf("outcome %+v, again %+v, records %d; want small stored outcomes, the same again, one record per call", round.Outcomes[0], retried, len(records))
+	ran, _ := json.Marshal(round.Calls[0])
+	rerun, _ := json.Marshal(retried)
+	if string(rerun) != string(ran) || retried.Body != nil || !retried.Done || len(bodies) != 2 {
+		t.Fatalf("call %+v, again %+v, bodies %d; want small calls whose bodies are stored, the same again, one body per call", round.Calls[0], retried, len(bodies))
 	}
 	_, afterTools, err := acts.Store.Load(t.Context(), id)
 	if err != nil {

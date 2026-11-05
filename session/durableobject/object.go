@@ -585,7 +585,7 @@ func (o *Object) purge(ctx context.Context) error {
 func (o *Object) leftovers(id session.ID, all bool) ([]Op, error) {
 	kinds := []string{kindJournal, kindMailbox, kindCall}
 	if all {
-		kinds = append(kinds, kindChild, kindCheckpoint, kindOutcome, kindEvent)
+		kinds = append(kinds, kindChild, kindCheckpoint, kindBody, kindEvent)
 	}
 	var ops []Op
 	for _, kind := range kinds {

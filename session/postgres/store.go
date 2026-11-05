@@ -112,55 +112,55 @@ func (s *Store) Revision(ctx context.Context, sessionID session.ID) (session.Rev
 	return revision(rev), nil
 }
 
-// PutOutcome implements session.Store: a Put of a key replaces it.
-func (s *Store) PutOutcome(ctx context.Context, sessionID session.ID, callKey string, o session.Outcome) error {
+// PutCall implements session.Store: a Put of a key replaces it.
+func (s *Store) PutCall(ctx context.Context, sessionID session.ID, callKey string, body []byte) error {
 	_, err := s.db.pool.Exec(ctx, s.db.sql(`
-		INSERT INTO {s}.session_outcomes (session_id, call_key, result, record) VALUES ($1, $2, $3, $4)
-		ON CONFLICT (session_id, call_key) DO UPDATE SET result = excluded.result, record = excluded.record`),
-		sessionID, callKey, o.Result, o.Record)
+		INSERT INTO {s}.session_calls (session_id, call_key, body) VALUES ($1, $2, $3)
+		ON CONFLICT (session_id, call_key) DO UPDATE SET body = excluded.body`),
+		sessionID, callKey, body)
 	if err != nil {
-		return fmt.Errorf("put outcome %q %q: %w", sessionID, callKey, err)
+		return fmt.Errorf("put call %q %q: %w", sessionID, callKey, err)
 	}
 	return nil
 }
 
-// Outcomes implements session.Store in one query for every key.
-func (s *Store) Outcomes(ctx context.Context, sessionID session.ID, callKeys []string) (map[string]session.Outcome, error) {
-	out := make(map[string]session.Outcome, len(callKeys))
+// Calls implements session.Store in one query for every key.
+func (s *Store) Calls(ctx context.Context, sessionID session.ID, callKeys []string) (map[string][]byte, error) {
+	out := make(map[string][]byte, len(callKeys))
 	if len(callKeys) == 0 {
 		return out, nil
 	}
 	// A failed query is Rows in an error state, which ForEachRow reports.
 	rows, _ := s.db.pool.Query(ctx, s.db.sql(`
-		SELECT call_key, result, record FROM {s}.session_outcomes WHERE session_id = $1 AND call_key = ANY($2)`),
+		SELECT call_key, body FROM {s}.session_calls WHERE session_id = $1 AND call_key = ANY($2)`),
 		sessionID, callKeys)
 	var key string
-	var o session.Outcome
-	_, err := pgx.ForEachRow(rows, []any{&key, &o.Result, &o.Record}, func() error {
-		out[key] = o
+	var body []byte
+	_, err := pgx.ForEachRow(rows, []any{&key, &body}, func() error {
+		out[key] = body
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("outcomes %q: %w", sessionID, err)
+		return nil, fmt.Errorf("calls %q: %w", sessionID, err)
 	}
 	return out, nil
 }
 
-// ClearOutcomes implements session.Store.
-func (s *Store) ClearOutcomes(ctx context.Context, sessionID session.ID) error {
-	if _, err := s.db.pool.Exec(ctx, s.db.sql(`DELETE FROM {s}.session_outcomes WHERE session_id = $1`), sessionID); err != nil {
-		return fmt.Errorf("clear outcomes %q: %w", sessionID, err)
+// ClearCalls implements session.Store.
+func (s *Store) ClearCalls(ctx context.Context, sessionID session.ID) error {
+	if _, err := s.db.pool.Exec(ctx, s.db.sql(`DELETE FROM {s}.session_calls WHERE session_id = $1`), sessionID); err != nil {
+		return fmt.Errorf("clear calls %q: %w", sessionID, err)
 	}
 	return nil
 }
 
-// Delete implements session.Store: the checkpoint and every outcome go in
+// Delete implements session.Store: the checkpoint and every call go in
 // one statement.
 func (s *Store) Delete(ctx context.Context, sessionID session.ID) error {
 	_, err := s.db.pool.Exec(ctx, s.db.sql(`
 		WITH cp AS (DELETE FROM {s}.session_checkpoints WHERE session_id = $1),
 		     cr AS (DELETE FROM {s}.session_checkpoint_rows WHERE session_id = $1)
-		DELETE FROM {s}.session_outcomes WHERE session_id = $1`), sessionID)
+		DELETE FROM {s}.session_calls WHERE session_id = $1`), sessionID)
 	if err != nil {
 		return fmt.Errorf("delete snapshot %q: %w", sessionID, err)
 	}

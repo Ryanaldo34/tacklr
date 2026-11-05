@@ -90,10 +90,19 @@ func (e *stepError) err() error {
 	return e.Kind.WithText(e.Text)
 }
 
-// toolResult is one loop.ToolResult as the journal keeps it.
-type toolResult struct {
-	Outcome tacklr.CallOutcome `json:"outcome"`
-	Err     *stepError         `json:"err,omitempty"`
+// journaledCall is a call as the journal keeps it: the call, and the error
+// that stopped its step, which a Call does not carry.
+type journaledCall struct {
+	Call tacklr.Call `json:"call"`
+	Err  *stepError  `json:"err,omitempty"`
+}
+
+func journaled(c tacklr.Call) journaledCall { return journaledCall{Call: c, Err: encodeErr(c.Err)} }
+
+func (j journaledCall) call() tacklr.Call {
+	c := j.Call
+	c.Err = j.Err.err()
+	return c
 }
 
 // buffer collects the durable events of a step, for its write.
@@ -219,8 +228,8 @@ func (e *executor) status() statusRecord {
 
 // Begin implements loop.Executor. The object holds no turn-scoped resources
 // besides its harness, which it keeps across turns. A new turn drops the
-// events of the turns before it, and its first Commit their outcome
-// records, once it committed what they left open. A replay already did,
+// events of the turns before it, and its first Commit their call bodies,
+// once it committed what they left open. A replay already did,
 // and a run again after a stop only deletes again.
 func (e *executor) Begin(kind string, _, _ int) {
 	if kind != session.WakePrompt || e.replaying() {
@@ -417,39 +426,43 @@ func (e *executor) Infer() (tacklr.Reply, error) {
 }
 
 // Tools implements loop.Executor: one goroutine per call, at most
-// MaxToolCalls at once. A call writes its outcome, its result event and its
-// result in one write when it ends, so a run again after a stop runs only
-// the calls that did not end. A cancel stops the calls still running, and
-// each of them reports the cancel.
-func (e *executor) Tools(runs []tacklr.ToolRun) []loop.ToolResult {
-	var stored []toolResult
+// MaxToolCalls at once. A call writes its body, its result event and itself
+// in one write when its run ends, so a step that runs again runs only the
+// calls that did not end. A cancel stops the calls still running, and each
+// of them reports the cancel.
+func (e *executor) Tools(calls []tacklr.Call) []tacklr.Call {
+	var stored []journaledCall
 	if ok, _ := e.replay("tools", &stored); ok {
-		return toolResults(stored)
+		out := make([]tacklr.Call, len(stored))
+		for i, j := range stored {
+			out[i] = j.call()
+		}
+		return out
 	}
 	e.busy()
-	stored = make([]toolResult, len(runs))
-	finished := make([]bool, len(runs))
+	out := slices.Clone(calls)
+	finished := make([]bool, len(calls))
 	var mu sync.Mutex
 	var stop error
 	cancelled, _ := e.wait(func(ctx context.Context) error {
 		h, err := e.o.harness.read(ctx, e)
 		sem := make(chan struct{}, e.o.cfg.MaxToolCalls)
 		var wg sync.WaitGroup
-		for i := range runs {
+		for i := range calls {
 			wg.Go(func() {
 				if err != nil {
-					stored[i] = toolResult{Outcome: tacklr.CallOutcome{Call: runs[i].Call}, Err: encodeErr(err)}
+					out[i].Err = err
 					return
 				}
-				r, ended, rerr := e.ended(runs[i])
+				c, ended, rerr := e.ended(calls[i])
 				if !ended && rerr == nil {
 					sem <- struct{}{}
-					r, ended, rerr = e.runCall(ctx, h, runs[i])
+					c, ended, rerr = e.runCall(ctx, h, calls[i])
 					<-sem
 				}
 				mu.Lock()
 				defer mu.Unlock()
-				stored[i], finished[i] = r, ended
+				out[i], finished[i] = c, ended
 				stop = cmp.Or(stop, rerr)
 			})
 		}
@@ -460,85 +473,78 @@ func (e *executor) Tools(runs []tacklr.ToolRun) []loop.ToolResult {
 		fail(stop)
 	}
 	if cancelled {
-		for i := range runs {
+		for i := range calls {
 			if !finished[i] {
-				stored[i] = toolResult{Outcome: tacklr.CallOutcome{Call: runs[i].Call}, Err: encodeErr(context.Canceled)}
+				out[i] = calls[i]
+				out[i].Err = context.Canceled
 			}
 		}
 	}
-	// The entry holds the results now; the calls' own records go.
-	ops := make([]Op, len(runs))
-	for i, run := range runs {
-		ops[i] = del(e.callKey(run))
+	// The entry holds the calls now; their own records go.
+	ops := make([]Op, len(calls))
+	entry := make([]journaledCall, len(out))
+	for i, c := range out {
+		ops[i], entry[i] = del(e.callKey(c)), journaled(c)
 	}
-	_ = e.write("tools", stored, nil, ops)
-	return toolResults(stored)
+	_ = e.write("tools", entry, nil, ops)
+	return out
 }
 
-// callKey is where a call of this turn keeps its result once it ended.
-func (e *executor) callKey(run tacklr.ToolRun) string {
-	return prefix(kindCall, e.init.SessionID) + url.PathEscape(run.Call.Key())
+// callKey is where a call of this step keeps itself once its run ended.
+func (e *executor) callKey(c tacklr.Call) string {
+	return prefix(kindCall, e.init.SessionID) + url.PathEscape(c.Key())
 }
 
-// ended is the result of run's call when a run of this step before a stop
+// ended is c as its run left it, when a run of this step before a stop
 // ended it.
-func (e *executor) ended(run tacklr.ToolRun) (toolResult, bool, error) {
-	raw, ok, err := e.o.host.Get(e.callKey(run))
+func (e *executor) ended(c tacklr.Call) (tacklr.Call, bool, error) {
+	raw, ok, err := e.o.host.Get(e.callKey(c))
 	if err != nil || !ok {
-		return toolResult{}, false, err
+		return c, false, err
 	}
-	var r toolResult
-	err = json.Unmarshal(raw, &r)
-	return r, true, err
+	var j journaledCall
+	err = json.Unmarshal(raw, &j)
+	return j.call(), true, err
 }
 
-// runCall is one call's step: it runs the tool and, unless the turn
-// cancelled it meanwhile, writes its outcome by call key, its result event
-// and its result in one write. ended is false for a call the turn
-// cancelled, which reports the cancel, not what its tool returned.
-func (e *executor) runCall(ctx context.Context, h *tacklr.Harness, run tacklr.ToolRun) (r toolResult, ended bool, err error) {
+// runCall is one call's step: it runs the call and, unless the turn
+// cancelled it meanwhile, writes the call's body, its result event and the
+// call in one write. ended is false for a call the turn cancelled, which
+// reports the cancel, not what its tool returned.
+func (e *executor) runCall(ctx context.Context, h *tacklr.Harness, c tacklr.Call) (ran tacklr.Call, ended bool, err error) {
 	turnCtx := ctx
-	run.MaxChildren = e.o.cfg.MaxChildren
-	if run.Timeout > 0 {
+	c.MaxJobs = e.o.cfg.MaxChildren
+	if c.Timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, run.Timeout+loop.ToolTimeoutMargin)
+		ctx, cancel = context.WithTimeout(ctx, c.Timeout+loop.ToolTimeoutMargin)
 		defer cancel()
 	}
 	st := &staged{snapshots: e.o.snapshots}
 	var b buffer
-	var o tacklr.CallOutcome
 	callErr := e.attempt(ctx, func(ctx context.Context) error {
 		st.ops = nil
 		b.take()
 		out, stop := tacklr.PipeEvents(e.emitter(&b))
 		defer stop()
 		var err error
-		o, err = adapter.RunTool(ctx, st, e.init.SessionID, h, run, out)
+		ran, err = adapter.RunCall(ctx, st, e.init.SessionID, h, c, out)
 		return err
 	})
-	r = toolResult{Outcome: o, Err: encodeErr(cmp.Or(callErr, ctx.Err()))}
+	ran.Err = cmp.Or(callErr, ctx.Err())
 	if turnCtx.Err() != nil {
-		return r, false, nil
+		return ran, false, nil
 	}
-	raw, err := json.Marshal(r)
+	raw, err := json.Marshal(journaled(ran))
 	if err != nil {
-		return r, false, err
+		return ran, false, err
 	}
-	return r, true, e.o.events.commit(e.init.SessionID, b.take(), append(st.ops, put(e.callKey(run), raw))...)
-}
-
-func toolResults(stored []toolResult) []loop.ToolResult {
-	out := make([]loop.ToolResult, len(stored))
-	for i, r := range stored {
-		out[i] = loop.ToolResult{Outcome: r.Outcome, Err: r.Err.err()}
-	}
-	return out
+	return ran, true, e.o.events.commit(e.init.SessionID, b.take(), append(st.ops, put(e.callKey(ran), raw))...)
 }
 
 // Commit implements loop.Executor. It runs to completion: a cancel queued
 // meanwhile stays queued for the turn. The checkpoint's changed rows, its
 // events and the entry are one write; a new turn's first Commit also drops
-// the outcome records of the turns before it, which it committed.
+// the call bodies of the turns before it, which it committed.
 func (e *executor) Commit(base session.Revision, in tacklr.CommitIn) (session.Revision, error) {
 	var rev session.Revision
 	if ok, err := e.replay("commit", &rev); ok {
@@ -557,11 +563,11 @@ func (e *executor) Commit(base session.Revision, in tacklr.CommitIn) (session.Re
 	if err == nil {
 		ops = st.ops
 		if e.newTurn {
-			outcomes, oerr := deleteAll(e.o.host, prefix(kindOutcome, e.init.SessionID))
-			if oerr != nil {
-				fail(oerr)
+			bodies, berr := deleteAll(e.o.host, prefix(kindBody, e.init.SessionID))
+			if berr != nil {
+				fail(berr)
 			}
-			ops = append(ops, outcomes...)
+			ops = append(ops, bodies...)
 		}
 	}
 	werr := e.write("commit", rev, err, ops)

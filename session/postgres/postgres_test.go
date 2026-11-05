@@ -135,16 +135,16 @@ func TestStores_failEveryCallOnAClosedPool(t *testing.T) {
 	_, saveErr := store.Save(ctx, "s", nil, "")
 	_, _, loadErr := store.Load(ctx, "s")
 	_, revErr := store.Revision(ctx, "s")
-	_, outcomesErr := store.Outcomes(ctx, "s", []string{"k"})
+	_, callsErr := store.Calls(ctx, "s", []string{"k"})
 	_, getErr := secrets.Get(ctx, "s")
 	_, headErr := log.Head(ctx, "s")
 	errs := map[string]error{
 		"setup": db.Setup(ctx), "save": saveErr, "load": loadErr, "revision": revErr,
-		"put outcome": store.PutOutcome(ctx, "s", "k", session.Outcome{}), "outcomes": outcomesErr,
+		"put call": store.PutCall(ctx, "s", "k", nil), "calls": callsErr,
 		"delete": store.Delete(ctx, "s"), "put secrets": secrets.Put(ctx, "s", bag), "get secrets": getErr,
 		"delete secrets": secrets.Delete(ctx, "s"), "append": log.Append(ctx, "s", session.TopicEvents, session.Event{}),
 		"head": headErr, "close session": log.CloseSession(ctx, "s"),
-		"clear outcomes": store.ClearOutcomes(ctx, "s"), "trim": log.Trim(ctx, "s", 1),
+		"clear calls": store.ClearCalls(ctx, "s"), "trim": log.Trim(ctx, "s", 1),
 	}
 	sub, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()

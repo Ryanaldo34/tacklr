@@ -1660,7 +1660,7 @@ func TestSessionWorkflow_aSpecialistThatParksIsResumedAndItsResultReachesItsCall
 	env := newTestWorkflow(t)
 	const parent = session.ID("sess-child-hitl")
 	child := tacklr.ChildID(string(parent), "researcher", "sp1", true)
-	var parentSaw string
+	var parentSaw atomic.Pointer[string]
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		last := lastMsg(msgs)
 		switch {
@@ -1669,7 +1669,7 @@ func TestSessionWorkflow_aSpecialistThatParksIsResumedAndItsResultReachesItsCall
 		case last != nil && last.Role == message.RoleTool && last.Content == "gated-ok":
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "child-found", IsComplete: true}
 		case last != nil && last.Role == message.RoleTool:
-			parentSaw = last.Content
+			parentSaw.Store(&last.Content)
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
 		default:
 			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true, ToolCalls: []message.ToolCall{{
@@ -1692,15 +1692,17 @@ func TestSessionWorkflow_aSpecialistThatParksIsResumedAndItsResultReachesItsCall
 	when(env, childParked, func() {
 		_ = env.SignalWorkflowByID(child, protocol.SignalWake, session.Wake{Kind: session.WakeResume, Resume: session.Resume{Responses: map[string][]byte{"g1": allow}}})
 	})
-	signalAt(env, time.Minute, session.Wake{Kind: session.WakeClose})
+	when(env, func() bool { return parentSaw.Load() != nil }, func() {
+		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeClose})
+	})
 
 	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: parent})
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(parentSaw, "child-found") {
-		t.Fatalf("parent call result = %q, want the resumed specialist's", parentSaw)
+	if saw := parentSaw.Load(); saw == nil || !strings.Contains(*saw, "child-found") {
+		t.Fatalf("parent call result = %v, want the resumed specialist's", saw)
 	}
 }
 
