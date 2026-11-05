@@ -2,7 +2,6 @@ package testdrive
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,125 +11,61 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-type docState struct {
-	snap vfs.DocsSnapshot
-}
-
 // SeedDoc sets documents.get state for id.
 func (d *FX) SeedDoc(id, rev string, spans []vfs.DocsSpan, tabs []vfs.DocTab) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.seedDocLocked(id, rev, spans, tabs)
-}
-
-func (d *FX) seedDocLocked(id, rev string, spans []vfs.DocsSpan, tabs []vfs.DocTab) {
-	if d.docs == nil {
-		d.docs = map[string]*docState{}
-	}
-	d.docs[id] = &docState{snap: vfs.DocsSnapshot{
-		DocumentID: id, RevisionID: rev, Tabs: tabs, Body: spans, Lists: map[string]vfs.DocsListProps{},
-	}}
+	d.docs[id] = &vfs.DocsSnapshot{DocumentID: id, RevisionID: rev, Tabs: tabs, Body: spans}
 }
 
 // SetDocRev is an out-of-band revision bump (CAS tests).
 func (d *FX) SetDocRev(id, rev string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if s, ok := d.docs[id]; ok {
-		s.snap.RevisionID = rev
-	}
+	d.ensureDoc(id).RevisionID = rev
 }
 
 // FailNextDocWrites makes the next n documents.batchUpdate calls return a revision conflict.
 func (d *FX) FailNextDocWrites(n int) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.docConflictLeft = n
+	for range n {
+		d.Fail(Fault{Call: "documents.batchUpdate", Status: http.StatusBadRequest, Message: "requiredRevisionId must be the latest revision"})
+	}
 }
 
-// FailDocBatch makes documents.batchUpdate return HTTP 400 (ErrInvalidWrite).
+// FailDocBatch makes the next documents.batchUpdate call return HTTP 400 (ErrInvalidWrite).
 func (d *FX) FailDocBatch() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.docBatchFail = true
+	d.Fail(Fault{Call: "documents.batchUpdate", Status: http.StatusBadRequest, Message: "invalid write"})
 }
 
-func (d *FX) serveDocs(w http.ResponseWriter, r *http.Request) {
-	id, rpc := docsID(r.URL.Path)
-	if id == "" {
-		writeDriveErr(w, http.StatusNotFound, "not found")
-		return
-	}
-	switch {
-	case r.Method == http.MethodGet && rpc == "":
-		d.serveDocsGet(w, id)
-	case r.Method == http.MethodPost && rpc == "batchUpdate":
-		d.serveDocsBatch(w, r, id)
-	default:
-		http.NotFound(w, r)
-	}
-}
-
-func docsID(path string) (id, rpc string) {
-	for _, pref := range []string{"/v1/documents/", "/documents/"} {
-		if i := strings.Index(path, pref); i >= 0 {
-			rest := path[i+len(pref):]
-			id, rpc, _ = strings.Cut(rest, ":")
-			id = strings.Trim(id, "/")
-			return id, rpc
-		}
-	}
-	return "", ""
-}
-
-func (d *FX) serveDocsGet(w http.ResponseWriter, id string) {
-	s := d.ensureDoc(id)
-	writeDriveJSON(w, http.StatusOK, documentJSON(s.snap))
+func (d *FX) serveDocsGet(w http.ResponseWriter, _ *http.Request, id string) {
+	writeDriveJSON(w, http.StatusOK, documentJSON(*d.ensureDoc(id)))
 }
 
 func (d *FX) serveDocsBatch(w http.ResponseWriter, r *http.Request, id string) {
-	raw, _ := io.ReadAll(r.Body)
 	var body docs.BatchUpdateDocumentRequest
-	if err := json.Unmarshal(raw, &body); err != nil {
-		writeDriveErr(w, http.StatusBadRequest, "invalid write")
-		return
-	}
-	if d.docBatchFail {
-		writeDriveErr(w, http.StatusBadRequest, "invalid write")
-		return
-	}
-	if d.docConflictLeft > 0 {
-		d.docConflictLeft--
-		writeDriveErr(w, http.StatusBadRequest, "requiredRevisionId must be the latest revision")
-		return
-	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
 	s := d.ensureDoc(id)
-	if body.WriteControl != nil && body.WriteControl.RequiredRevisionID != "" && s.snap.RevisionID != "" && body.WriteControl.RequiredRevisionID != s.snap.RevisionID {
+	if body.WriteControl != nil && body.WriteControl.RequiredRevisionID != "" && body.WriteControl.RequiredRevisionID != s.RevisionID {
 		writeDriveErr(w, http.StatusBadRequest, "requiredRevisionId must be the latest revision")
 		return
 	}
-	applyDocsBatch(&s.snap, body.Requests)
-	next := s.snap.RevisionID + "+1"
-	if s.snap.RevisionID == "" {
-		next = "R1"
-	}
-	s.snap.RevisionID = next
-	d.DocsBatches = append(d.DocsBatches, &body)
+	applyDocsBatch(s, body.Requests)
+	s.RevisionID += "+1"
 	writeDriveJSON(w, http.StatusOK, map[string]any{
-		"writeControl": map[string]any{"requiredRevisionId": next},
+		"writeControl": map[string]any{"requiredRevisionId": s.RevisionID},
 	})
 }
 
-func (d *FX) ensureDoc(id string) *docState {
-	if d.docs == nil {
-		d.docs = map[string]*docState{}
-	}
+// ensureDoc is the Docs state of id. A Doc that was not seeded (a new one)
+// is empty, with one tab, as Docs returns it.
+func (d *FX) ensureDoc(id string) *vfs.DocsSnapshot {
 	s, ok := d.docs[id]
 	if !ok {
-		s = &docState{snap: vfs.DocsSnapshot{
+		s = &vfs.DocsSnapshot{
 			DocumentID: id, RevisionID: "R0",
+			Tabs: []vfs.DocTab{{ID: "t.0"}},
 			Body: []vfs.DocsSpan{{StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"}},
-		}}
+		}
 		d.docs[id] = s
 	}
 	return s
@@ -258,18 +193,9 @@ func tableJSON(sp vfs.DocsSpan) map[string]any {
 	return map[string]any{"tableRows": tableRows}
 }
 
+// listsJSON is a bulleted list for each list id of the list items.
 func listsJSON(snap vfs.DocsSnapshot) map[string]any {
 	out := map[string]any{}
-	for id, p := range snap.Lists {
-		levels := make([]any, 0, len(p.GlyphTypes))
-		for _, g := range p.GlyphTypes {
-			levels = append(levels, map[string]any{"glyphType": g})
-		}
-		if len(levels) == 0 {
-			levels = append(levels, map[string]any{"glyphType": "BULLET"})
-		}
-		out[id] = map[string]any{"listProperties": map[string]any{"nestingLevels": levels}}
-	}
 	for _, sp := range snap.Body {
 		if sp.Kind == "list_item" && sp.ListID != "" {
 			if _, ok := out[sp.ListID]; !ok {
@@ -309,7 +235,6 @@ func objectsJSON(spans []vfs.DocsSpan) map[string]any {
 // applyDocsBatch applies a batchUpdate's requests to s, as the Docs service
 // would. Every request names its tab or none (the whole document).
 func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
-	tabOf := func(tab string) string { return tab }
 	sameTab := func(spTab, reqTab string) bool {
 		if reqTab == "" {
 			return true
@@ -317,46 +242,33 @@ func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
 		return spTab == reqTab || spTab == ""
 	}
 	for _, r := range reqs {
-		if r == nil {
-			continue
-		}
 		if del := r.DeleteContentRange; del != nil && del.Range != nil {
 			start, end := int(del.Range.StartIndex), int(del.Range.EndIndex)
-			tab := tabOf(del.Range.TabID)
+			tab := del.Range.TabID
 			var next []vfs.DocsSpan
 			for _, sp := range s.Body {
-				if !sameTab(sp.TabID, tab) {
+				switch {
+				case !sameTab(sp.TabID, tab), sp.Kind == "sectionBreak" && sp.StartIndex == 1:
 					next = append(next, sp)
-					continue
-				}
-				if sp.Kind == "sectionBreak" && sp.StartIndex == 1 {
-					next = append(next, sp)
-					continue
-				}
-				if sp.Kind == "table" {
-					changed := false
+				case sp.Kind == "table" && start > sp.StartIndex && end < sp.EndIndex:
+					// A range inside a table is the content of the cell it
+					// starts at.
 					for i := range sp.Cells {
-						if sp.Cells[i].StartIndex >= start && sp.Cells[i].StartIndex < end {
-							sp.Cells[i].Text = ""
-							changed = true
+						if sp.Cells[i].StartIndex == start {
+							sp.Cells[i].Text, sp.Cells[i].EndIndex = "", start+1
 						}
 					}
-					if changed {
-						sp.Text = tsvFromCells(sp)
-						next = append(next, sp)
-						continue
-					}
+					sp.Text = tsvFromCells(sp)
+					next = append(next, sp)
+				case sp.StartIndex >= end || sp.EndIndex <= start:
+					next = append(next, sp)
 				}
-				if sp.StartIndex < end && sp.EndIndex > start {
-					continue
-				}
-				next = append(next, sp)
 			}
 			s.Body = next
 		}
 		if ins := r.InsertText; ins != nil && ins.Location != nil {
 			idx := int(ins.Location.Index)
-			tab := tabOf(ins.Location.TabID)
+			tab := ins.Location.TabID
 			text := ins.Text
 			filled := false
 			for i := range s.Body {
@@ -364,8 +276,9 @@ func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
 					continue
 				}
 				for j := range s.Body[i].Cells {
-					if s.Body[i].Cells[j].StartIndex == idx {
-						s.Body[i].Cells[j].Text = strings.TrimSuffix(text, "\n")
+					if c := &s.Body[i].Cells[j]; c.StartIndex == idx {
+						c.Text = strings.TrimSuffix(text, "\n")
+						c.EndIndex = idx + 1 + len(c.Text)
 						filled = true
 					}
 				}
@@ -391,7 +304,7 @@ func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
 		if st := r.UpdateParagraphStyle; st != nil && st.ParagraphStyle != nil && st.Range != nil {
 			named := st.ParagraphStyle.NamedStyleType
 			start := int(st.Range.StartIndex)
-			tab := tabOf(st.Range.TabID)
+			tab := st.Range.TabID
 			if strings.HasPrefix(named, "HEADING_") {
 				n, _ := strconv.Atoi(strings.TrimPrefix(named, "HEADING_"))
 				for i := range s.Body {
@@ -405,7 +318,7 @@ func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
 		}
 		if b := r.CreateParagraphBullets; b != nil && b.Range != nil {
 			start, end := int(b.Range.StartIndex), int(b.Range.EndIndex)
-			tab := tabOf(b.Range.TabID)
+			tab := b.Range.TabID
 			for i := range s.Body {
 				if !sameTab(s.Body[i].TabID, tab) {
 					continue
@@ -421,14 +334,14 @@ func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
 		}
 		if tbl := r.InsertTable; tbl != nil && tbl.Location != nil {
 			idx := int(tbl.Location.Index)
-			tab := tabOf(tbl.Location.TabID)
+			tab := tbl.Location.TabID
 			rows, cols := int(tbl.Rows), int(tbl.Columns)
 			var cells []vfs.DocsCell
 			base := idx + 2
 			for row := 0; row < rows; row++ {
 				for col := 0; col < cols; col++ {
 					ci := base + row*cols*2 + col*2
-					cells = append(cells, vfs.DocsCell{Row: row, Col: col, StartIndex: ci, EndIndex: ci + 2})
+					cells = append(cells, vfs.DocsCell{Row: row, Col: col, StartIndex: ci, EndIndex: ci + 1})
 				}
 			}
 			end := base + rows*cols*2

@@ -17,6 +17,7 @@ import (
 // Readers func's principals land on the Document and Chunks, search only
 // shows the file to holders, and a sharing change re-indexes unchanged text.
 func TestMountIndexer_sourceReadersLimitSearchAndAnACLChangeReindexes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
 	eng, err := brain.NewEngine(brain.NewMemoryStore())

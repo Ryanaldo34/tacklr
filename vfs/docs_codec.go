@@ -146,9 +146,6 @@ func (d *htmlDecoder) emit(b Block) {
 }
 
 func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
-	if n == nil {
-		return
-	}
 	if n.Type == html.TextNode {
 		if s := strings.TrimSpace(n.Data); s != "" {
 			d.emit(Block{
@@ -286,9 +283,6 @@ func collectInlineContent(n *html.Node, marks map[string]string, keepImgs bool) 
 	seq := 0
 	var walk func(*html.Node, map[string]string)
 	walk = func(n *html.Node, marks map[string]string) {
-		if n == nil {
-			return
-		}
 		if n.Type == html.TextNode {
 			if strings.TrimSpace(n.Data) == "" {
 				if strings.ContainsRune(n.Data, ' ') {
@@ -299,10 +293,7 @@ func collectInlineContent(n *html.Node, marks map[string]string, keepImgs bool) 
 			out = append(out, Run{Text: n.Data, Marks: marks})
 			return
 		}
-		if n.Type != html.ElementNode {
-			for c := n.FirstChild; c != nil; c = c.NextSibling {
-				walk(c, marks)
-			}
+		if n.Type != html.ElementNode { // a comment, which has no children
 			return
 		}
 		switch n.Data {
@@ -349,9 +340,6 @@ func collectItemInline(n *html.Node) []Run {
 }
 
 func findHTMLBody(n *html.Node) *html.Node {
-	if n == nil {
-		return nil
-	}
 	if n.Type == html.ElementNode && n.Data == "body" {
 		return n
 	}

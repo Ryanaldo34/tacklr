@@ -10,12 +10,15 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// TestTree_aMemberNeedsANameAndAnOpenAndAnEmptyOneIsSkipped: a member with
-// no name or no Open fails the tree, two members with one name are
-// ambiguous, and a canceled context fails the tree, also
-// for an Open that returns a provider it built before; a member whose Open
-// returns no provider is left out of the tree.
+// TestTree_aMemberNeedsANameAndAnOpenAndAnEmptyOneIsSkipped: a tree with no
+// session id fails, a member with no name, a name of more than one segment
+// or no Open fails the tree, two members with one name are ambiguous, and a
+// canceled context fails the tree, also for an Open that returns a provider
+// it built before; a member whose Open returns no provider is left out of
+// the tree. A binding found by its provider name with no params mounts the
+// member, and a member that is not indexed says so in its spec.
 func TestTree_aMemberNeedsANameAndAnOpenAndAnEmptyOneIsSkipped(t *testing.T) {
+	t.Parallel()
 	skip := vfs.Open(func(context.Context, string, mount.Binding) (vfs.Provider, error) { return nil, nil })
 	built, err := vfs.NewLocalProvider(t.TempDir())
 	if err != nil {
@@ -25,19 +28,30 @@ func TestTree_aMemberNeedsANameAndAnOpenAndAnEmptyOneIsSkipped(t *testing.T) {
 	canceled, cancel := context.WithCancel(t.Context())
 	cancel()
 
+	_, noSession := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(t.Context(), " ", vfs.Request{})
 	_, noName := vfs.Tree(vfs.At("", vfs.Local(t.TempDir())))(t.Context(), t.Name(), vfs.Request{})
+	_, twoSegments := vfs.Tree(vfs.At("a/b", vfs.Local(t.TempDir())))(t.Context(), t.Name(), vfs.Request{})
 	_, noOpen := vfs.Tree(vfs.At("work", nil))(t.Context(), t.Name(), vfs.Request{})
 	_, twice := vfs.Tree(vfs.At("legal", vfs.Local(t.TempDir())), vfs.At("legal", vfs.Local(t.TempDir())))(t.Context(), t.Name(), vfs.Request{})
 	_, canceledErr := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(canceled, t.Name(), vfs.Request{})
 	_, canceledPrebuilt := vfs.Tree(vfs.At("work", prebuilt))(canceled, t.Name(), vfs.Request{})
-	ms, err := vfs.Tree(vfs.At("gone", skip), vfs.At("work", vfs.Local(t.TempDir())))(t.Context(), t.Name(), vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("gone", skip), vfs.At("work", vfs.Local(t.TempDir())).NotIndexed())(t.Context(), t.Name(), vfs.Request{
+		Bindings: []mount.Binding{{Provider: "work"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	spec, specErr := ms.SpecAt("/workspace/work")
 	ents, readErr := ms.Route(t.Context(), mount.WorkspacePoint).ReadDir(t.Context())
 
+	if !errors.Is(noSession, vfs.ErrInvalidPath) || !errors.Is(twoSegments, vfs.ErrInvalidPath) {
+		t.Fatalf("no session id = %v, a name of two segments = %v; want ErrInvalidPath", noSession, twoSegments)
+	}
 	if noName == nil || noOpen == nil {
 		t.Fatalf("no name = %v, no open = %v; want both refused", noName, noOpen)
+	}
+	if specErr != nil || !spec.NotIndexed || spec.Params[mount.ParamName] != "work" {
+		t.Fatalf("spec = %+v err=%v, want a not-indexed member named work", spec, specErr)
 	}
 	if !errors.Is(twice, vfs.ErrAmbiguous) {
 		t.Fatalf("one name twice = %v, want ErrAmbiguous", twice)
@@ -53,6 +67,7 @@ func TestTree_aMemberNeedsANameAndAnOpenAndAnEmptyOneIsSkipped(t *testing.T) {
 // WithCodecs fails the open when the tree fails, and when a codec is for a
 // type the session already has.
 func TestWithCodecs_failsTheOpen(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 
 	_, badTree := vfs.Tree(vfs.At("", nil)).WithCodecs()(ctx, "s", vfs.Request{})

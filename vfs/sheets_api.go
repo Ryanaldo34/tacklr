@@ -61,7 +61,7 @@ func snapshotToTabular(path string, snap SheetsSnapshot) (*IR, error) {
 	return td, nil
 }
 
-func tabularOverlayBatch(td *gridBody) (SheetsValuesBatch, error) {
+func tabularOverlayBatch(td *gridBody) SheetsValuesBatch {
 	var data []SheetsValueRange
 	for _, sh := range td.sheets {
 		rows := sh.Rows
@@ -90,7 +90,7 @@ func tabularOverlayBatch(td *gridBody) (SheetsValuesBatch, error) {
 			Values: grid,
 		})
 	}
-	return SheetsValuesBatch{Data: data}, nil
+	return SheetsValuesBatch{Data: data}
 }
 
 func tabularFormatBatch(td *gridBody) SheetsBatch {
@@ -162,13 +162,6 @@ func (g googleSheets) Get(ctx context.Context, spreadsheetID string) (SheetsSnap
 		}
 		snap.Sheets = append(snap.Sheets, item)
 	}
-	cells := 0
-	for i := range snap.Sheets {
-		cells += snap.Sheets[i].Rows * snap.Sheets[i].Cols
-		if cells > MaxSheetCells {
-			return SheetsSnapshot{}, fmt.Errorf("%w (max %d cells)", ErrTooLarge, MaxSheetCells)
-		}
-	}
 	for _, nr := range meta.NamedRanges {
 		if nr == nil {
 			continue
@@ -226,10 +219,13 @@ func (g googleSheets) BatchUpdate(ctx context.Context, spreadsheetID string, req
 	return mapDocsError(err)
 }
 
+// fillSheetGrid lays the grid data blocks of one sheet into sh.Cells.
 func fillSheetGrid(sh *Sheet, data []*sheets.GridData) error {
-	if len(data) == 0 {
-		return nil
+	type origin struct {
+		gd     *sheets.GridData
+		sr, sc int
 	}
+	blocks := make([]origin, 0, len(data))
 	rows, cols := 0, 0
 	for _, gd := range data {
 		if gd == nil {
@@ -239,17 +235,14 @@ func fillSheetGrid(sh *Sheet, data []*sheets.GridData) error {
 		if err != nil {
 			return err
 		}
-		if sr+len(gd.RowData) > rows {
-			rows = sr + len(gd.RowData)
-		}
+		blocks = append(blocks, origin{gd, sr, sc})
+		rows = max(rows, sr+len(gd.RowData))
 		for _, rd := range gd.RowData {
 			n := sc
 			if rd != nil {
 				n += len(rd.Values)
 			}
-			if n > cols {
-				cols = n
-			}
+			cols = max(cols, n)
 		}
 	}
 	if rows == 0 || cols == 0 {
@@ -262,14 +255,8 @@ func fillSheetGrid(sh *Sheet, data []*sheets.GridData) error {
 	for r := range grid {
 		grid[r] = make([]Cell, cols)
 	}
-	for _, gd := range data {
-		if gd == nil {
-			continue
-		}
-		sr, sc, err := gridOrigin(gd.StartRow, gd.StartColumn)
-		if err != nil {
-			return err
-		}
+	for _, b := range blocks {
+		gd, sr, sc := b.gd, b.sr, b.sc
 		for i, rd := range gd.RowData {
 			if rd == nil {
 				continue
@@ -288,10 +275,7 @@ func fillSheetGrid(sh *Sheet, data []*sheets.GridData) error {
 }
 
 func gridCell(cd *sheets.CellData) Cell {
-	c := Cell{Value: cd.FormattedValue}
-	if cd.UserEnteredValue != nil {
-		c.Input = extendedInput(cd.UserEnteredValue)
-	}
+	c := Cell{Value: cd.FormattedValue, Input: extendedInput(cd.UserEnteredValue)}
 	if c.Input == "" {
 		c.Input = c.Value
 	}
@@ -314,10 +298,10 @@ func extendedInput(v *sheets.ExtendedValue) string {
 		return *v.StringValue
 	}
 	if v.NumberValue != nil {
-		return cellString(*v.NumberValue)
+		return numberString(*v.NumberValue)
 	}
 	if v.BoolValue != nil {
-		return cellString(*v.BoolValue)
+		return strings.ToUpper(strconv.FormatBool(*v.BoolValue))
 	}
 	return ""
 }
@@ -415,10 +399,10 @@ func borderFromSheets(b *sheets.Borders) *CellBorder {
 	return out
 }
 
+// sheetsBorderStyle is the vfs name of a Sheets border style other than
+// NONE. SOLID and unknown styles are thin.
 func sheetsBorderStyle(s string) string {
 	switch s {
-	case "SOLID":
-		return "thin"
 	case "SOLID_MEDIUM":
 		return "medium"
 	case "SOLID_THICK":
@@ -429,8 +413,6 @@ func sheetsBorderStyle(s string) string {
 		return "dotted"
 	case "DOUBLE":
 		return "double"
-	case "NONE":
-		return "none"
 	default:
 		return "thin"
 	}
@@ -472,15 +454,9 @@ func colorHex(c *sheets.Color, style *sheets.ColorStyle) string {
 	return FormatRGB(round255(c.Red), round255(c.Green), round255(c.Blue))
 }
 
+// round255 is a 0..1 color component as 0..255, clamped.
 func round255(v float64) uint8 {
-	n := v*255 + 0.5
-	if n < 0 {
-		return 0
-	}
-	if n > 255 {
-		return 255
-	}
-	return uint8(uint(n) & 0xff)
+	return uint8(min(max(v*255+0.5, 0), 255))
 }
 
 func hexColor(s string) *sheets.Color {
@@ -673,31 +649,15 @@ func minuteContext(p string, i int) bool {
 	return false
 }
 
-func cellString(v any) string {
-	switch x := v.(type) {
-	case nil:
-		return ""
-	case string:
-		return x
-	case float64:
-		if x == float64(int64(x)) {
-			return strconv.FormatInt(int64(x), 10)
-		}
-		return strconv.FormatFloat(x, 'f', -1, 64)
-	case bool:
-		if x {
-			return "TRUE"
-		}
-		return "FALSE"
-	default:
-		return fmt.Sprint(x)
+// numberString is a number cell input: an integer has no fraction.
+func numberString(x float64) string {
+	if x == float64(int64(x)) {
+		return strconv.FormatInt(int64(x), 10)
 	}
+	return strconv.FormatFloat(x, 'f', -1, 64)
 }
 
 func gridRangeA1(r *sheets.GridRange) string {
-	if r == nil {
-		return ""
-	}
 	r1 := int(r.StartRowIndex) + 1
 	c1 := int(r.StartColumnIndex) + 1
 	r2 := int(r.EndRowIndex)

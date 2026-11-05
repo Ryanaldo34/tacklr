@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -53,9 +54,6 @@ type mountEntry struct {
 }
 
 func (m *MountSession) rememberRev(virtualPath, hash string) {
-	if hash == "" {
-		return
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.lastRev == nil {
@@ -78,23 +76,18 @@ func NewMountSession(sessionID string) (*MountSession, error) {
 	return &MountSession{id: sessionID, mounts: map[string]mountEntry{}, codecs: builtinCodecs}, nil
 }
 
-// mount puts p at spec.Point.
+// mount puts p at spec.Point, which Tree builds clean from a checked member
+// name.
 func (m *MountSession) mount(ctx context.Context, spec MountSpec, p Provider) error {
 	if err := ctx.Err(); err != nil {
-		return err
-	}
-	cleaned, err := CleanPath(spec.Point)
-	if err != nil {
 		return err
 	}
 	if err := p.Validate(ctx); err != nil {
 		return err
 	}
-	stored := cloneSpec(spec)
-	stored.Point = cleaned
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.mounts[cleaned] = mountEntry{provider: p, spec: stored}
+	m.mounts[spec.Point] = mountEntry{provider: p, spec: cloneSpec(spec)}
 	return nil
 }
 
@@ -123,21 +116,15 @@ func (m *MountSession) SpecAt(virtualPath string) (MountSpec, error) {
 	return cloneSpec(rt.Spec), nil
 }
 
-// memberEntries lists the /workspace/<name> backends.
+// memberEntries lists the /workspace/<name> backends. Tree mounts every
+// backend at exactly that depth.
 func (m *MountSession) memberEntries() []DirEntry {
-	if m == nil {
-		return nil
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	prefix := mount.WorkspacePoint + "/"
 	out := make([]DirEntry, 0, len(m.mounts))
 	for mp := range m.mounts {
-		name := strings.TrimPrefix(mp, prefix)
-		if name == mp || strings.Contains(name, "/") {
-			continue
-		}
-		out = append(out, DirEntry{Name: name, IsDir: true, Type: fs.ModeDir})
+		out = append(out, DirEntry{Name: strings.TrimPrefix(mp, prefix), IsDir: true, Type: fs.ModeDir})
 	}
 	slices.SortFunc(out, func(a, b DirEntry) int { return cmp.Compare(a.Name, b.Name) })
 	return out
@@ -169,10 +156,7 @@ func (m *MountSession) Route(ctx context.Context, virtualPath string) Route {
 }
 
 func (r Route) virtual() string {
-	if r.Rel == "" {
-		return r.Point
-	}
-	return r.Point + "/" + r.Rel
+	return path.Join(r.Point, r.Rel)
 }
 
 func (m *MountSession) lookup(virtualPath string) (Route, error) {

@@ -3,8 +3,10 @@ package vfs_test
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/vfs/mount"
@@ -31,7 +33,9 @@ func mountGit(t *testing.T, sessionID string, repo vfs.GitRepo) *vfs.MountSessio
 	return ms
 }
 
+// A deploy key clones a ref over SSH at the depth the repo asks for.
 func TestGit_sshKeyClonesRefAtDepth(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	ctx := t.Context()
 	srv := testgit.Start(t, map[string]string{"docs/index.md": "# Site\n"})
@@ -56,7 +60,15 @@ func TestGit_sshKeyClonesRefAtDepth(t *testing.T) {
 	}
 }
 
+// TestGit_rejectsBadConfigAndCredentials: an open fails for a repo with no
+// URL, a token or deploy key the host refuses or cannot make, a ref or
+// repository the host does not have, a host key that is not known, and an
+// unsafe session id. It also fails when the disk refuses the checkout: a
+// directory it cannot make, a temp clone directory it cannot make, a
+// checkout path under a file, and a checkout path that has files but no
+// clone.
 func TestGit_rejectsBadConfigAndCredentials(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	srv := testgit.Start(t, map[string]string{"README.md": "# hi\n"})
 	other := testgit.Start(t, map[string]string{"a": "a"})
@@ -78,6 +90,12 @@ func TestGit_rejectsBadConfigAndCredentials(t *testing.T) {
 		"unknown host key": withRepo(func(r *vfs.GitRepo) {
 			r.URL, r.Auth = srv.SSHURL, vfs.GitSSHKey(srv.KeyPEM, other.KnownHosts)
 		}),
+		"unknown deploy key": withRepo(func(r *vfs.GitRepo) {
+			r.URL, r.Auth = srv.SSHURL, vfs.GitSSHKey(other.KeyPEM, srv.KnownHosts)
+		}),
+		"missing repository": withRepo(func(r *vfs.GitRepo) {
+			r.URL, r.Auth = strings.Replace(srv.SSHURL, "/repo.git", "/nope.git", 1), vfs.GitSSHKey(srv.KeyPEM, srv.KnownHosts)
+		}),
 	}
 	for name, repo := range cases {
 		if _, err := vfs.Git(repo)(ctx, "s3", mount.Binding{Params: map[string]string{mount.ParamName: "code"}}); err == nil {
@@ -87,11 +105,38 @@ func TestGit_rejectsBadConfigAndCredentials(t *testing.T) {
 	if _, err := vfs.Git(good)(ctx, "..", mount.Binding{Params: map[string]string{mount.ParamName: "code"}}); err == nil {
 		t.Error("unsafe session id accepted")
 	}
-	blocked := withRepo(func(*vfs.GitRepo) {})
-	if err := os.WriteFile(filepath.Join(blocked.Dir, "s3"), nil, 0o600); err != nil {
-		t.Fatal(err)
+	for name, prepare := range map[string]func(dir string) error{
+		"checkout under a file":   func(dir string) error { return os.WriteFile(filepath.Join(dir, "s3"), nil, 0o600) },
+		"checkout dir not made":   func(dir string) error { return os.Chmod(dir, 0o500) },
+		"temp clone dir not made": func(dir string) error { return os.Mkdir(filepath.Join(dir, "s3"), 0o500) },
+		"checkout with files and no clone": func(dir string) error {
+			return os.MkdirAll(filepath.Join(dir, "s3", "code", "kept"), 0o750)
+		},
+	} {
+		repo := withRepo(func(*vfs.GitRepo) {})
+		t.Cleanup(func() { _ = os.Chmod(repo.Dir, 0o750); _ = os.Chmod(filepath.Join(repo.Dir, "s3"), 0o750) })
+		if err := prepare(repo.Dir); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := vfs.Git(repo)(ctx, "s3", mount.Binding{Params: map[string]string{mount.ParamName: "code"}}); err == nil {
+			t.Errorf("%s: open succeeded", name)
+		}
 	}
-	if _, err := vfs.Git(blocked)(ctx, "s3", mount.Binding{Params: map[string]string{mount.ParamName: "code"}}); err == nil {
-		t.Error("checkout under a file accepted")
+}
+
+// A deploy key needs a temp directory for the key files, so a clone fails
+// when there is none. It stays serial: it sets TMPDIR for the process.
+func TestGit_sshKeyNeedsATempDir(t *testing.T) {
+	repo := vfs.GitRepo{
+		URL:  "ssh://git@127.0.0.1:1/repo.git",
+		Auth: vfs.GitSSHKey([]byte("key"), []byte("known host")),
+		Dir:  t.TempDir(),
+	}
+	t.Setenv("TMPDIR", filepath.Join(repo.Dir, "missing"))
+
+	_, err := vfs.Git(repo)(t.Context(), "s", mount.Binding{Params: map[string]string{mount.ParamName: "code"}})
+
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("open with no temp dir = %v, want ErrNotExist", err)
 	}
 }

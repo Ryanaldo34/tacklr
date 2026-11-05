@@ -22,6 +22,7 @@ import (
 
 // TestVFSTools_readWrite: read/write outcomes over an in-process mount.
 func TestVFSTools_readWrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	base := t.TempDir()
 	ms := mustMountTree(t, "tools-vfs", vfs.At("work", vfs.Local(base)), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
@@ -396,6 +397,7 @@ func requireWriteUnchanged(t *testing.T, ms *vfs.MountSession, write tool, path,
 }
 
 func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	api := toolDriveFX(t)
 	api.SeedDoc("doc1", "R0", []vfs.DocsSpan{
@@ -605,6 +607,7 @@ func fieldKV(s, key string) string {
 }
 
 func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	base := t.TempDir()
 	ms := mustMountTree(t, "tools-docx", vfs.At("work", vfs.Local(base)))
@@ -657,6 +660,7 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 }
 
 func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	api := testdrive.New()
 	api.Add("", vfs.DriveMeta{ID: "root", Name: ".", MimeType: "application/vnd.google-apps.folder"}, nil)

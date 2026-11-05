@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -32,38 +33,52 @@ func (c *fifo[T]) get(key string) (T, bool) {
 	return v, ok
 }
 
+// put keeps val for key. A new key evicts the oldest key when c is full.
+func (c *fifo[T]) put(key string, val T) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.items[key]; !ok {
+		if len(c.keys) >= c.cap {
+			delete(c.items, c.keys[0])
+			c.keys = c.keys[1:]
+		}
+		c.keys = append(c.keys, key)
+	}
+	c.items[key] = val
+}
+
+// load is the value for key, from c or else from fetch, which c then keeps.
+func (c *fifo[T]) load(key string, fetch func() (T, error)) (T, error) {
+	if v, ok := c.get(key); ok {
+		return v, nil
+	}
+	v, err := fetch()
+	if err != nil {
+		return v, err
+	}
+	c.put(key, v)
+	return v, nil
+}
+
+// persistNative writes a rich Google Doc or a grid Google Sheet through
+// the Docs or Sheets API. It reports false for any other document.
 func (p *driveProvider) persistNative(ctx context.Context, name string, doc Document) (bool, error) {
 	d, ok := asIR(doc)
 	if !ok {
 		return false, nil
 	}
-	switch normalizeMediaType(d.MediaType()) {
-	case mimeGoogleDocument:
-		if _, ok := asRichBody(d); ok {
-			return true, p.writeGoogleDoc(ctx, name, d)
+	mt := normalizeMediaType(d.MediaType())
+	switch body := d.body.(type) {
+	case *richBody:
+		if mt == mimeGoogleDocument {
+			return true, p.writeGoogleDoc(ctx, name, d, body)
 		}
-	case mimeGoogleSpreadsheet:
-		if _, ok := asGridBody(d); ok {
-			return true, p.writeGoogleSheet(ctx, name, d)
+	case *gridBody:
+		if mt == mimeGoogleSpreadsheet {
+			return true, p.writeGoogleSheet(ctx, name, d, body)
 		}
 	}
 	return false, nil
-}
-
-func (c *fifo[T]) put(key string, val T) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, ok := c.items[key]; ok {
-		c.items[key] = val
-		return
-	}
-	if len(c.keys) >= c.cap {
-		old := c.keys[0]
-		c.keys = c.keys[1:]
-		delete(c.items, old)
-	}
-	c.keys = append(c.keys, key)
-	c.items[key] = val
 }
 
 func (c *fifo[T]) dropFile(fileID string) {
@@ -160,10 +175,10 @@ func (p *driveProvider) resolveLeaf(ctx context.Context, name string) (DriveMeta
 	if err != nil {
 		return DriveMeta{}, err
 	}
-	parts := strings.Split(rel, "/")
+	dir, leaf := path.Split(rel)
 	parentID := root.ID
-	for i, part := range parts {
-		if i < len(parts)-1 {
+	if dir != "" {
+		for part := range strings.SplitSeq(strings.TrimSuffix(dir, "/"), "/") {
 			child, err := p.child(ctx, parentID, part)
 			if err != nil {
 				return DriveMeta{}, err
@@ -172,39 +187,17 @@ func (p *driveProvider) resolveLeaf(ctx context.Context, name string) (DriveMeta
 				return DriveMeta{}, ErrNotExist
 			}
 			parentID = child.ID
-			continue
 		}
-		return p.childRaw(ctx, parentID, part)
 	}
-	return DriveMeta{}, ErrNotExist
+	return p.childRaw(ctx, parentID, leaf)
 }
 
-func (p *driveProvider) parentAndLeaf(ctx context.Context, name string) (parentID, leaf string, parentMeta DriveMeta, err error) {
-	rel, err := cleanRel(name)
-	if err != nil {
-		return "", "", DriveMeta{}, err
-	}
-	if rel == "" {
-		return "", "", DriveMeta{}, ErrInvalidPath
-	}
-	root, err := p.getMeta(ctx, p.rootID)
-	if err != nil {
-		return "", "", DriveMeta{}, err
-	}
-	root, err = p.follow(ctx, root, 4)
-	if err != nil {
-		return "", "", DriveMeta{}, err
-	}
+// parentAndLeaf makes the missing folders above rel, a clean path that is
+// not the root, and returns the ID of its parent and its last name.
+func (p *driveProvider) parentAndLeaf(ctx context.Context, rel string) (parentID, leaf string, err error) {
 	dir, leaf := path.Split(rel)
-	dir = strings.TrimSuffix(dir, "/")
-	if dir == "" {
-		return root.ID, leaf, root, nil
-	}
-	parent, err := p.ensureDir(ctx, dir)
-	if err != nil {
-		return "", "", DriveMeta{}, err
-	}
-	return parent.ID, leaf, parent, nil
+	parent, err := p.ensureDir(ctx, strings.TrimSuffix(dir, "/"))
+	return parent.ID, leaf, err
 }
 
 func (p *driveProvider) ensureDir(ctx context.Context, rel string) (DriveMeta, error) {
@@ -219,32 +212,28 @@ func (p *driveProvider) ensureDir(ctx context.Context, rel string) (DriveMeta, e
 	if rel == "" {
 		return root, nil
 	}
-	parentID := root.ID
-	var cur DriveMeta
-	for _, part := range strings.Split(rel, "/") {
-		child, err := p.child(ctx, parentID, part)
+	cur := root
+	for part := range strings.SplitSeq(rel, "/") {
+		child, err := p.child(ctx, cur.ID, part)
 		if err == nil {
 			if !child.dir() {
 				return DriveMeta{}, fmt.Errorf("%w: %q is not a folder", ErrNotSupported, part)
 			}
 			cur = child
-			parentID = child.ID
 			continue
 		}
 		if !isNotExist(err) {
 			return DriveMeta{}, err
 		}
-		var created DriveMeta
-		cerr := p.call(ctx, func() error {
+		parentID := cur.ID
+		err = p.call(ctx, func() error {
 			var e error
-			created, e = p.api.Mkdir(ctx, parentID, part)
+			cur, e = p.api.Mkdir(ctx, parentID, part)
 			return e
 		})
-		if cerr != nil {
-			return DriveMeta{}, cerr
+		if err != nil {
+			return DriveMeta{}, err
 		}
-		cur = created
-		parentID = created.ID
 	}
 	return cur, nil
 }
@@ -253,69 +242,52 @@ func isNotExist(err error) bool {
 	return errors.Is(err, ErrNotExist)
 }
 
+// openGoogleDoc reads a Google Doc from the Docs API on a writable mount,
+// and from its HTML export on a read-only one. Both are kept per
+// modification time.
 func (p *driveProvider) openGoogleDoc(ctx context.Context, name string, meta DriveMeta) (Document, error) {
 	key := cacheKey(meta.ID, meta.ModTime)
-	if p.writable && p.docs != nil {
-		if snap, ok := p.getCache.get(key); ok {
-			return snapshotToRich(name, snap), nil
-		}
-		snap, err := p.docsGet(ctx, meta.ID)
+	if !p.writable || p.docs == nil {
+		html, err := p.zipCache.load(key, func() ([]byte, error) { return p.exportHTML(ctx, meta.ID) })
 		if err != nil {
 			return nil, err
 		}
-		p.getCache.put(key, snap)
-		return snapshotToRich(name, snap), nil
-	}
-	if html, ok := p.zipCache.get(key); ok {
 		return DocsCodec{}.Decode(ctx, name, mimeGoogleDocument, html)
 	}
-	html, err := p.exportHTML(ctx, meta.ID)
+	snap, err := p.getCache.load(key, func() (DocsSnapshot, error) { return p.docsGet(ctx, meta.ID) })
 	if err != nil {
 		return nil, err
 	}
-	p.zipCache.put(key, html)
-	return DocsCodec{}.Decode(ctx, name, mimeGoogleDocument, html)
+	return snapshotToRich(name, snap), nil
 }
 
+// openGoogleSheet reads a Google Sheet from the Sheets API on a writable
+// mount, and from its HTML export on a read-only one. Both are kept per
+// modification time.
 func (p *driveProvider) openGoogleSheet(ctx context.Context, name string, meta DriveMeta) (Document, error) {
 	key := cacheKey(meta.ID, meta.ModTime)
-	if p.writable && p.sheets != nil {
-		if snap, ok := p.sheetCache.get(key); ok {
-			td, err := snapshotToTabular(name, snap)
-			if err != nil {
-				return nil, err
-			}
-			td.hint.fileID = meta.ID
-			td.hint.revisionID = snap.RevisionID
-			return td, nil
+	if !p.writable || p.sheets == nil {
+		raw, err := p.zipCache.load(key, func() ([]byte, error) { return p.exportBytes(ctx, meta.ID) })
+		if err != nil {
+			return nil, err
 		}
+		return SheetsCodec{}.Decode(ctx, name, mimeGoogleSpreadsheet, raw)
+	}
+	snap, err := p.sheetCache.load(key, func() (SheetsSnapshot, error) {
 		snap, err := p.sheetsGet(ctx, meta.ID)
-		if err != nil {
-			return nil, err
-		}
 		snap.RevisionID = driveRevision(meta)
-		p.sheetCache.put(key, snap)
-		td, err := snapshotToTabular(name, snap)
-		if err != nil {
-			return nil, err
-		}
-		td.hint.fileID = meta.ID
-		td.hint.revisionID = snap.RevisionID
-		return td, nil
-	}
-	if html, ok := p.zipCache.get(key); ok {
-		return SheetsCodec{}.Decode(ctx, name, mimeGoogleSpreadsheet, html)
-	}
-	raw, err := p.exportZip(ctx, meta.ID)
+		return snap, err
+	})
 	if err != nil {
 		return nil, err
 	}
-	p.zipCache.put(key, raw)
-	return SheetsCodec{}.Decode(ctx, name, mimeGoogleSpreadsheet, raw)
-}
-
-func (p *driveProvider) exportZip(ctx context.Context, fileID string) ([]byte, error) {
-	return p.exportBytes(ctx, fileID)
+	td, err := snapshotToTabular(name, snap)
+	if err != nil {
+		return nil, err
+	}
+	td.hint.fileID = meta.ID
+	td.hint.revisionID = snap.RevisionID
+	return td, nil
 }
 
 func (p *driveProvider) exportHTML(ctx context.Context, fileID string) ([]byte, error) {
@@ -370,55 +342,44 @@ func (p *driveProvider) PutFile(ctx context.Context, name string, r io.Reader, s
 	if rel == "" {
 		return ErrInvalidPath
 	}
-	meta, err := p.resolve(ctx, name)
-	if err == nil {
-		if isGoogleNativeFile(meta.MimeType) {
-			return ErrNotSupported
-		}
-		media := s3KnownType(meta.MimeType)
-		if media == "" {
-			media = DetectMediaType(meta.Name, nil)
-		}
-		if media == "" || media == "application/octet-stream" {
-			media = "application/octet-stream"
-		}
-		body, err := bufferUpload(r, size)
-		if err != nil {
-			return err
-		}
-		err = p.call(ctx, func() error {
-			_, e := p.api.PutMedia(ctx, meta.ID, media, bytes.NewReader(body), int64(len(body)))
-			return e
-		})
-		if err != nil {
-			return err
-		}
-		p.invalidate(meta.ID)
-		return nil
-	}
-	if !isNotExist(err) {
-		return err
-	}
-	parentID, leaf, _, err := p.parentAndLeaf(ctx, name)
-	if err != nil {
-		return err
-	}
-	media := DetectMediaType(leaf, nil)
 	body, err := bufferUpload(r, size)
 	if err != nil {
 		return err
 	}
-	var created DriveMeta
+	meta, err := p.resolve(ctx, rel)
+	if isNotExist(err) {
+		return p.createFile(ctx, rel, body)
+	}
+	if err != nil {
+		return err
+	}
+	if isGoogleNativeFile(meta.MimeType) {
+		return ErrNotSupported
+	}
+	media := cmp.Or(s3KnownType(meta.MimeType), DetectMediaType(meta.Name, nil))
 	err = p.call(ctx, func() error {
-		var e error
-		created, e = p.api.Create(ctx, parentID, leaf, media, media, bytes.NewReader(body), int64(len(body)))
+		_, e := p.api.PutMedia(ctx, meta.ID, media, bytes.NewReader(body), int64(len(body)))
 		return e
 	})
 	if err != nil {
 		return err
 	}
-	p.invalidate(created.ID)
+	p.invalidate(meta.ID)
 	return nil
+}
+
+// createFile uploads body as a new file at rel and makes its missing
+// folders.
+func (p *driveProvider) createFile(ctx context.Context, rel string, body []byte) error {
+	parentID, leaf, err := p.parentAndLeaf(ctx, rel)
+	if err != nil {
+		return err
+	}
+	media := DetectMediaType(leaf, nil)
+	return p.call(ctx, func() error {
+		_, e := p.api.Create(ctx, parentID, leaf, media, media, bytes.NewReader(body), int64(len(body)))
+		return e
+	})
 }
 
 // WriteDocument implements documentBackend.
@@ -446,10 +407,9 @@ func (p *driveProvider) WriteDocument(ctx context.Context, name string, doc Docu
 	return p.PutFile(ctx, name, bytes.NewReader(data), int64(len(data)))
 }
 
+// bufferUpload reads the whole upload, so that a call can send it again
+// after a token refresh.
 func bufferUpload(r io.Reader, size int64) ([]byte, error) {
-	if r == nil {
-		return nil, nil
-	}
 	if size > 0 {
 		return readCapped(r, int(size), size)
 	}
@@ -472,13 +432,15 @@ func zipSizeHint(n uint64, limit int) int64 {
 	return int64(n) //nolint:gosec // G115: n is capped at limit (≤ MaxReadFileBytes)
 }
 
-func (p *driveProvider) writeGoogleSheet(ctx context.Context, name string, td *IR) error {
+// writeGoogleSheet writes the values and formats of g over the Google
+// Sheet at name, or creates the Sheet.
+func (p *driveProvider) writeGoogleSheet(ctx context.Context, name string, td *IR, g *gridBody) error {
 	if p.sheets == nil {
 		return ErrNotSupported
 	}
 	meta, err := p.resolve(ctx, name)
 	if isNotExist(err) {
-		return p.createGoogleSheet(ctx, name, td)
+		return p.createGoogleSheet(ctx, name, td, g)
 	}
 	if err != nil {
 		return err
@@ -486,30 +448,31 @@ func (p *driveProvider) writeGoogleSheet(ctx context.Context, name string, td *I
 	if meta.MimeType != mimeGoogleSpreadsheet {
 		return ErrNotSupported
 	}
-	g, ok := asGridBody(td)
-	if !ok {
-		return ErrNotSupported
-	}
-	batch, err := tabularOverlayBatch(g)
-	if err != nil {
+	if err := p.writeSheetCells(ctx, meta.ID, g); err != nil {
 		return err
-	}
-	if len(batch.Data) > 0 {
-		if err := p.sheetsBatchValues(ctx, meta.ID, batch); err != nil {
-			return err
-		}
-	}
-	if formats := tabularFormatBatch(g); len(formats.Requests) > 0 {
-		if err := p.sheetsBatchUpdate(ctx, meta.ID, formats); err != nil {
-			return err
-		}
 	}
 	p.invalidate(meta.ID)
 	return p.refreshSheetHint(ctx, meta.ID, td)
 }
 
-func (p *driveProvider) createGoogleSheet(ctx context.Context, name string, td *IR) error {
-	parentID, leaf, _, err := p.parentAndLeaf(ctx, name)
+// writeSheetCells writes the values and then the formats of g.
+func (p *driveProvider) writeSheetCells(ctx context.Context, id string, g *gridBody) error {
+	if batch := tabularOverlayBatch(g); len(batch.Data) > 0 {
+		if err := p.sheetsBatchValues(ctx, id, batch); err != nil {
+			return err
+		}
+	}
+	if formats := tabularFormatBatch(g); len(formats.Requests) > 0 {
+		return p.sheetsBatchUpdate(ctx, id, formats)
+	}
+	return nil
+}
+
+// createGoogleSheet creates a Google Sheet at name and writes the first
+// sheet of g into the sheet that Sheets makes for it.
+func (p *driveProvider) createGoogleSheet(ctx context.Context, name string, td *IR, g *gridBody) error {
+	rel, _ := cleanRel(name) // resolve accepted name
+	parentID, leaf, err := p.parentAndLeaf(ctx, rel)
 	if err != nil {
 		return err
 	}
@@ -522,59 +485,21 @@ func (p *driveProvider) createGoogleSheet(ctx context.Context, name string, td *
 	if err != nil {
 		return err
 	}
-	var last error
-	for attempt := 0; attempt < 4; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Duration(attempt) * 200 * time.Millisecond):
-			}
-		}
+	if len(g.sheets) > 0 {
 		snap, err := p.sheetsGet(ctx, created.ID)
 		if err != nil {
 			return err
 		}
-		overlayBody, ok := asGridBody(td)
-		if !ok {
-			return ErrNotSupported
-		}
-		if len(overlayBody.sheets) == 0 || overlayBody.sheets[0].Rows == 0 {
-			last = nil
-			break
-		}
-		overlay := *overlayBody
+		sh := g.sheets[0]
 		if len(snap.Sheets) > 0 {
-			sh := overlay.sheets[0]
-			sh.Title = snap.Sheets[0].Title
-			sh.ID = snap.Sheets[0].ID
-			overlay.sheets = []Sheet{sh}
+			sh.Title, sh.ID = snap.Sheets[0].Title, snap.Sheets[0].ID
 		}
-		batch, err := tabularOverlayBatch(&overlay)
-		if err != nil {
+		first := *g
+		first.sheets = []Sheet{sh}
+		if err := p.writeSheetCells(ctx, created.ID, &first); err != nil {
 			return err
 		}
-		if len(batch.Data) == 0 {
-			last = nil
-			break
-		}
-		last = p.sheetsBatchValues(ctx, created.ID, batch)
-		if last == nil {
-			if formats := tabularFormatBatch(&overlay); len(formats.Requests) > 0 {
-				last = p.sheetsBatchUpdate(ctx, created.ID, formats)
-			}
-		}
-		if last == nil {
-			break
-		}
-		if !errors.Is(last, ErrConflict) {
-			return last
-		}
 	}
-	if last != nil {
-		return last
-	}
-	p.invalidate(created.ID)
 	return p.refreshSheetHint(ctx, created.ID, td)
 }
 
@@ -596,25 +521,20 @@ func (p *driveProvider) refreshSheetHint(ctx context.Context, id string, td *IR)
 	return nil
 }
 
-func (p *driveProvider) writeGoogleDoc(ctx context.Context, name string, rd *IR) error {
+// writeGoogleDoc writes rb over the Google Doc at name, or creates the
+// Doc.
+func (p *driveProvider) writeGoogleDoc(ctx context.Context, name string, rd *IR, rb *richBody) error {
 	if p.docs == nil {
 		return ErrNotSupported
 	}
 	meta, err := p.resolve(ctx, name)
 	if isNotExist(err) {
-		return p.createGoogleDoc(ctx, name, rd)
+		return p.createGoogleDoc(ctx, name, rd, rb)
 	}
 	if err != nil {
 		return err
 	}
-	if isGoogleNativeFile(meta.MimeType) && meta.MimeType != mimeGoogleDocument {
-		return ErrNotSupported
-	}
 	if meta.MimeType != mimeGoogleDocument {
-		return ErrNotSupported
-	}
-	rb, ok := asRichBody(rd)
-	if !ok {
 		return ErrNotSupported
 	}
 	if rd.hint.revisionID == "" {
@@ -625,11 +545,10 @@ func (p *driveProvider) writeGoogleDoc(ctx context.Context, name string, rd *IR)
 	} else {
 		err = p.replaceBlocksDoc(ctx, meta.ID, rd, rb)
 	}
+	p.invalidate(meta.ID)
 	if err != nil {
-		p.invalidate(meta.ID)
 		return err
 	}
-	p.invalidate(meta.ID)
 	return p.refreshHint(ctx, meta.ID, rd)
 }
 
@@ -661,6 +580,7 @@ func (p *driveProvider) setBlocksDoc(ctx context.Context, id string, rd *IR, rb 
 	} else if len(tabs) == 1 {
 		tabID = tabs[0]
 	}
+	// tabBlocks always holds rb.tree[0]: its tab is tabID, or it has none.
 	tabBlocks := make([]Block, 0, len(rb.tree))
 	for _, b := range rb.tree {
 		id := blockAttr(b, "tab_id")
@@ -668,9 +588,6 @@ func (p *driveProvider) setBlocksDoc(ctx context.Context, id string, rd *IR, rb 
 		if tabID == "" || id == "" || id == tabID {
 			tabBlocks = append(tabBlocks, b)
 		}
-	}
-	if len(tabBlocks) == 0 {
-		return ErrEmptyReplace
 	}
 	keep := keepImageObjectIDs(tabBlocks)
 	dels := mapSetBlocksDeletes(rd.hint, tabID, keep)
@@ -687,8 +604,12 @@ func (p *driveProvider) setBlocksDoc(ctx context.Context, id string, rd *IR, rb 
 	return p.insertBlocks(ctx, id, tabID, cas, tabBlocks)
 }
 
-func (p *driveProvider) createGoogleDoc(ctx context.Context, name string, rd *IR) error {
-	parentID, leaf, _, err := p.parentAndLeaf(ctx, name)
+// createGoogleDoc creates a Google Doc at name and inserts rb into its
+// first tab. A write that meets a revision conflict starts again from a
+// new read, at most four times.
+func (p *driveProvider) createGoogleDoc(ctx context.Context, name string, rd *IR, rb *richBody) error {
+	rel, _ := cleanRel(name) // resolve accepted name
+	parentID, leaf, err := p.parentAndLeaf(ctx, rel)
 	if err != nil {
 		return err
 	}
@@ -701,8 +622,7 @@ func (p *driveProvider) createGoogleDoc(ctx context.Context, name string, rd *IR
 	if err != nil {
 		return err
 	}
-	var last error
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := range 4 {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -710,30 +630,21 @@ func (p *driveProvider) createGoogleDoc(ctx context.Context, name string, rd *IR
 			case <-time.After(time.Duration(attempt) * 200 * time.Millisecond):
 			}
 		}
-		snap, err := p.docsGet(ctx, created.ID)
-		if err != nil {
-			return err
+		snap, gerr := p.docsGet(ctx, created.ID)
+		if gerr != nil {
+			return gerr
 		}
 		tabID := ""
 		if len(snap.Tabs) > 0 {
 			tabID = snap.Tabs[0].ID
 		}
-		rb, ok := asRichBody(rd)
-		if !ok {
-			return ErrNotSupported
-		}
-		last = p.insertAt(ctx, created.ID, tabID, snap.RevisionID, rb.tree, snap)
-		if last == nil {
+		if err = p.insertAt(ctx, created.ID, tabID, snap.RevisionID, rb.tree, snap); !errors.Is(err, ErrConflict) {
 			break
 		}
-		if !errors.Is(last, ErrConflict) {
-			return last
-		}
 	}
-	if last != nil {
-		return last
+	if err != nil {
+		return err
 	}
-	p.invalidate(created.ID)
 	return p.refreshHint(ctx, created.ID, rd)
 }
 
@@ -753,9 +664,6 @@ func (p *driveProvider) insertAt(ctx context.Context, id, tabID, cas string, blo
 	remaining := blocks
 	for len(remaining) > 0 {
 		head, rest := splitInsertHead(remaining)
-		if len(head) == 0 {
-			return nil
-		}
 		chunks, endIdx, err := mapInsertBlocks(head, idx, tabID)
 		if err != nil {
 			return err
@@ -875,29 +783,22 @@ func (p *driveProvider) refreshHint(ctx context.Context, id string, rd *IR) erro
 	return nil
 }
 
+// uniqueTabIDs is the tab IDs of tabs and then of blocks, each once.
 func uniqueTabIDs(blocks []Block, tabs []DocTab) []string {
 	seen := map[string]struct{}{}
 	var out []string
-	for _, t := range tabs {
-		if t.ID == "" {
-			continue
-		}
-		if _, ok := seen[t.ID]; ok {
-			continue
-		}
-		seen[t.ID] = struct{}{}
-		out = append(out, t.ID)
-	}
-	for _, b := range blocks {
-		id := blockAttr(b, "tab_id")
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
+	add := func(id string) {
+		if _, ok := seen[id]; ok || id == "" {
+			return
 		}
 		seen[id] = struct{}{}
 		out = append(out, id)
+	}
+	for _, t := range tabs {
+		add(t.ID)
+	}
+	for _, b := range blocks {
+		add(blockAttr(b, "tab_id"))
 	}
 	return out
 }

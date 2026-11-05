@@ -124,13 +124,10 @@ func mapReplaceTable(loc blockLocation, b Block) ([]DocsRequest, error) {
 	if err != nil {
 		return nil, err
 	}
+	// parseTableText pads or refuses ragged rows, so only the row count
+	// can differ from the shape.
 	if len(grid) != rows {
 		return nil, fmt.Errorf("%w: table shape must stay %dx%d", ErrNotSupported, rows, cols)
-	}
-	for _, row := range grid {
-		if len(row) != cols {
-			return nil, fmt.Errorf("%w: table shape must stay %dx%d", ErrNotSupported, rows, cols)
-		}
 	}
 	if len(loc.cells) == 0 {
 		return nil, fmt.Errorf("%w: table has no cell locations", ErrNotSupported)
@@ -171,15 +168,12 @@ func mapReplaceBlocks(hint persistHint, blocks []Block) ([]DocsRequest, error) {
 		b   Block
 	}
 	items := make([]item, 0, len(hint.locations))
+	// Every location names a block: a replace keeps the block IDs.
 	for _, loc := range hint.locations {
-		b, ok := byID[loc.id]
-		if !ok {
+		if loc.kind == BlockKindImage {
 			continue
 		}
-		if loc.kind == BlockKindImage || loc.kind == "image" {
-			continue
-		}
-		items = append(items, item{loc: loc, b: b})
+		items = append(items, item{loc: loc, b: byID[loc.id]})
 	}
 	slices.SortFunc(items, func(a, b item) int { return cmp.Compare(b.loc.startIndex, a.loc.startIndex) })
 	reqs := make([]DocsRequest, 0, len(items)*2)
@@ -231,9 +225,7 @@ func mapSetBlocksDeletes(hint persistHint, tabID string, keepObjectIDs map[strin
 		if s.kind == "sectionBreak" && s.start == lowestSection {
 			continue
 		}
-		if s.kind == BlockKindParagraph || s.kind == "paragraph" ||
-			s.kind == BlockKindHeading || s.kind == "heading" ||
-			s.kind == BlockKindListItem || s.kind == "list_item" {
+		if s.kind == BlockKindParagraph || s.kind == BlockKindHeading || s.kind == BlockKindListItem {
 			if lastPara == nil || s.end > lastPara.end {
 				lastPara = s
 			}
@@ -301,20 +293,11 @@ func paragraphAppendIndex(spans []DocsSpan, tabID string) int {
 	if last == nil {
 		return paragraphInsertIndex(spans, tabID)
 	}
-	if last.EndIndex > last.StartIndex {
-		return last.EndIndex - 1
-	}
-	if last.StartIndex >= 1 {
-		return last.StartIndex
-	}
-	return 1
+	return max(last.EndIndex-1, 1)
 }
 
 func mapInsertBlocks(blocks []Block, startIdx int, tabID string) (chunks []insertChunk, endIdx int, err error) {
-	idx := startIdx
-	if idx < 1 {
-		idx = 1
-	}
+	idx := max(startIdx, 1)
 	var cur insertChunk
 	flush := func() {
 		if len(cur.reqs) > 0 || cur.tableFill {
@@ -364,11 +347,7 @@ func mapInsertBlocks(blocks []Block, startIdx int, tabID string) (chunks []inser
 			tabUnits := 0
 			for i < len(blocks) && blocks[i].Kind == BlockKindListItem && blockAttr(blocks[i], "list_id") == listID {
 				item := blocks[i]
-				level := item.Style.Level
-				if level < 1 {
-					level = 1
-				}
-				tabs := strings.Repeat("\t", level-1)
+				tabs := strings.Repeat("\t", max(item.Style.Level, 1)-1)
 				cur.reqs, idx = appendInsertStyled(cur.reqs, idx, tabID, "NORMAL_TEXT", tabs, item)
 				tabUnits += docsIndexLen(tabs)
 				i++

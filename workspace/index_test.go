@@ -72,6 +72,7 @@ func titles(t *testing.T, eng *brain.Engine, scope brain.Scope, query string) []
 // and keeps the file; indexing again restores it. A batch that names a
 // directory indexes nothing.
 func TestIndexTools_indexSkipUnindex(t *testing.T) {
+	t.Parallel()
 	f := newIndexFixture(t)
 	const path = "/workspace/work/note.txt"
 	f.write(t, map[string]string{path: "alpha line\nbeta TODO findme-xyz\ngamma\n", "/workspace/work/batch.txt": "batch-unique-phrase-zzz\n"})
@@ -120,6 +121,7 @@ func TestIndexTools_indexSkipUnindex(t *testing.T) {
 // be found is an error line in a batch that indexes the rest; a brain that
 // cannot be read fails unindex.
 func TestIndexTools_rejectBadRequestsAndReportEachFailure(t *testing.T) {
+	t.Parallel()
 	var failReads atomic.Bool
 	f := newIndexFixture(t, brain.WithAudit(func(_ context.Context, ev brain.AuditEvent) error {
 		if failReads.Load() && ev.Op == brain.AuditRead {

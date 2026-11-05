@@ -105,10 +105,7 @@ func BlockReplaceSpan(b Block, includeHeading bool) (start, end int, err error) 
 		return 0, 0, ErrLineOutOfRange
 	}
 	if b.Kind == BlockKindHeading && !includeHeading {
-		start++
-		if start > end {
-			return start, end, nil // empty body
-		}
+		start++ // body only; an empty body gives start == end
 	}
 	return start, end, nil
 }
@@ -150,14 +147,12 @@ func NewTextDocument(path, mediaType, encoding, text string) *IR {
 	return d
 }
 
-func newIR(path, mediaType, encoding string, b body) *IR {
-	if encoding == "" {
-		encoding = "utf-8"
-	}
+// newIR is a UTF-8 checkout of body b.
+func newIR(path, mediaType string, b body) *IR {
 	if mediaType == "" {
 		mediaType = "text/plain"
 	}
-	return &IR{path: path, mediaType: mediaType, encoding: encoding, body: b}
+	return &IR{path: path, mediaType: mediaType, encoding: "utf-8", body: b}
 }
 
 func asIR(doc Document) (*IR, bool) {
@@ -177,11 +172,7 @@ type Grid interface {
 
 // AsGrid reports whether doc is represented as a spreadsheet grid.
 func AsGrid(doc Document) (Grid, bool) {
-	d, ok := asIR(doc)
-	if !ok {
-		return nil, false
-	}
-	g, ok := d.body.(*gridBody)
+	g, ok := asGridBody(doc)
 	if !ok {
 		return nil, false
 	}

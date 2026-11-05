@@ -87,6 +87,7 @@ func numberedLines(n int) string {
 }
 
 func TestMountIndexer_anEditReembedsOnlyTheChunksAroundIt(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	h := newHarness(t)
 	const vpath = "/workspace/work/big.txt"
@@ -124,6 +125,7 @@ func TestMountIndexer_anEditReembedsOnlyTheChunksAroundIt(t *testing.T) {
 }
 
 func TestMountIndexer_aReindexThatAnotherIndexerCommitsFirstIsRetried(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	h := newHarness(t)
 	const vpath = "/workspace/work/a.txt"
@@ -150,6 +152,7 @@ func TestMountIndexer_aReindexThatAnotherIndexerCommitsFirstIsRetried(t *testing
 }
 
 func TestMountIndexer_chunkSizesOutOfOrderFailTheIndex(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.write(t, "a.txt", "text\n")
 	h.idx.Chunking = vfsindex.ChunkSizes{Min: 64, Avg: 32}
@@ -162,6 +165,7 @@ func TestMountIndexer_chunkSizesOutOfOrderFailTheIndex(t *testing.T) {
 }
 
 func TestMountIndexer_aFileThatCannotBeReadOrChunkedFailsTheIndexAndKeepsThePreviousOne(t *testing.T) {
+	t.Parallel()
 	const vpath = "/workspace/work/a.txt"
 	for name, tc := range map[string]struct {
 		arrange func(*testing.T, context.CancelFunc, harness)
@@ -185,6 +189,7 @@ func TestMountIndexer_aFileThatCannotBeReadOrChunkedFailsTheIndexAndKeepsThePrev
 		}, "Unregistered"},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			h := newHarness(t)
@@ -208,6 +213,7 @@ func TestMountIndexer_aFileThatCannotBeReadOrChunkedFailsTheIndexAndKeepsThePrev
 }
 
 func TestMountIndexer_anAuditFailureOnTheVersionCheckFailsTheIndex(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	h := newHarness(t, brain.WithAudit(func(_ context.Context, ev brain.AuditEvent) error {
 		if ev.Op == brain.AuditRead {

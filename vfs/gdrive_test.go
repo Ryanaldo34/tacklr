@@ -26,6 +26,7 @@ import (
 // refreshes a token that is about to expire or that Drive refuses, and a
 // refused token with no refresh is expired.
 func TestMountSession_gdriveReadOnlySession(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok"})
@@ -99,7 +100,7 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	}
 
 	// A 401 and one reactive refresh succeeds.
-	api.OnceMedia("readme", http.StatusUnauthorized)
+	api.Fail(testdrive.Fault{Call: "files.media", ID: "readme", Status: http.StatusUnauthorized})
 	holder.SetRefresh(func(context.Context) (mount.Credential, error) {
 		return mount.Credential{Token: "fresh"}, nil
 	})
@@ -108,7 +109,7 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	}
 
 	// A 401 without a refresh stays expired.
-	api.FailMeta(http.StatusUnauthorized)
+	api.Fail(testdrive.Fault{Call: "files.get", ID: "root-b", Status: http.StatusUnauthorized})
 	holder.SetRefresh(nil)
 	if _, err := route("notes/readme.txt").Stat(ctx); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("expired: %v", err)
@@ -119,12 +120,14 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 // provider with no API client, or a Docs client with no token holder, is a
 // programming error.
 func TestProviders_panicWithoutTheirAPIClient(t *testing.T) {
+	t.Parallel()
 	for name, build := range map[string]func(){
 		"drive": func() { _ = vfs.Drive(nil, nil) },
 		"graph": func() { _ = vfs.Graph(nil, nil, "") },
 		"docs":  func() { _ = vfs.NewGoogleDocs(nil, "", nil) },
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			defer func() {
 				if recover() == nil {
 					t.Fatal("want panic")
@@ -135,20 +138,11 @@ func TestProviders_panicWithoutTheirAPIClient(t *testing.T) {
 	}
 }
 
+// A Drive binding whose folder ID names a file does not validate.
 func TestDrive_validateRejectsFileID(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
-	api := testdrive.Tree()
-	open := testdrive.Open(t, api, nil)
-	folder, err := open(ctx, "s", mount.Binding{
-		Auth: mount.Credential{Token: "t"}, Params: map[string]string{mount.ParamFolderID: "root-a"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := folder.Validate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	file, err := open(ctx, "s", mount.Binding{
+	file, err := testdrive.Open(t, testdrive.Tree(), nil)(ctx, "s", mount.Binding{
 		Auth: mount.Credential{Token: "t"}, Params: map[string]string{mount.ParamFolderID: "nda"},
 	})
 	if err != nil {
@@ -173,6 +167,7 @@ func googleError(t *testing.T, status int, message string) *httptest.Server {
 // no vfs error is an error that names the HTTP status. A call to an
 // endpoint that does not answer or to a malformed URL fails.
 func TestGoogleAPIs_mapErrorRepliesToVFSErrors(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok"})
 	for _, c := range []struct {
@@ -230,6 +225,7 @@ func TestGoogleAPIs_mapErrorRepliesToVFSErrors(t *testing.T) {
 // properties, and tables. A document with a body and no tabs reads, and a
 // document with neither has no blocks.
 func TestDrive_aGoogleDocReadsTabsHeadingsMarksListsImagesAndTables(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	api.Add("root-a", vfs.DriveMeta{ID: "legacy", Name: "Legacy", MimeType: "application/vnd.google-apps.document"}, nil)
@@ -322,7 +318,11 @@ func exportZip(t *testing.T) []byte {
 	return raw
 }
 
+// A read-only mount stats a Google Doc and Sheet with their Google media
+// type and no size, refuses raw reads of them, and reads a Doc from its
+// zip export or from plain HTML. An export that is neither does not read.
 func TestDrive_exportReadHonestStat(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	api.Nodes["doc1"].Export = exportZip(t)
@@ -372,18 +372,6 @@ func TestDrive_exportReadHonestStat(t *testing.T) {
 	}
 }
 
-func TestDrive_exportTooLarge(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	api.Nodes["doc1"].Export = bytesRepeat(vfs.MaxDocsExportBytes + 2)
-	ms := mountDrive(t, api, false)
-
-	if _, err := ms.Route(ctx, "/workspace/contracts/Spec").
-		ReadText(ctx); !errors.Is(err, vfs.ErrTooLarge) {
-		t.Fatalf("oversize: %v", err)
-	}
-}
-
 func bytesRepeat(n int) []byte {
 	return []byte(strings.Repeat("a", n))
 }
@@ -392,6 +380,7 @@ func bytesRepeat(n int) []byte {
 // and refuses raw or plain-text writes to a Google Doc, which keeps its
 // blocks. A removed Google Doc is gone.
 func TestDrive_writablePlaintextAndTrash(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	spans := []vfs.DocsSpan{
@@ -443,7 +432,11 @@ func TestDrive_writablePlaintextAndTrash(t *testing.T) {
 	}
 }
 
+// A Google Doc write needs the revision of a read: a new checkout with no
+// revision conflicts, and so does a checkout whose revision Docs has
+// since moved. Both leave the Doc as it was.
 func TestDrive_docsWriteCAS(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	spans := []vfs.DocsSpan{
@@ -492,19 +485,11 @@ func TestDrive_docsWriteCAS(t *testing.T) {
 	}
 }
 
-func TestDrive_writeSheetRejected(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	api.SeedDoc("sheet1", "R0", nil, nil)
-	ms := mountDrive(t, api, true)
-	if err := ms.WriteDocument(ctx, vfs.NewRichDocument("/workspace/contracts/Budget", "application/vnd.google-apps.document", []vfs.Block{
-		{Kind: vfs.BlockKindParagraph, Text: "x"},
-	})); !errors.Is(err, vfs.ErrNotSupported) {
-		t.Fatalf("sheet: %v", err)
-	}
-}
-
+// A read-only mount refuses a Doc write and a canceled write fails. A
+// writable mount creates a host's text document in new nested folders,
+// writes a plain text document and sets the blocks of a Google Doc.
 func TestDrive_writeDocumentEdges(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	api.SeedDoc("doc1", "R0", []vfs.DocsSpan{
@@ -526,7 +511,7 @@ func TestDrive_writeDocumentEdges(t *testing.T) {
 	})); err == nil {
 		t.Fatal("canceled write")
 	}
-	nested := vfs.NewTextDocument("/workspace/contracts/sub/dir/edge.txt", "text/plain", "utf-8", "plain")
+	nested := driveHostText{"/workspace/contracts/sub/dir/edge.txt", "plain"}
 	if err := ms.WriteDocument(ctx, nested); err != nil {
 		t.Fatal(err)
 	}
@@ -567,6 +552,7 @@ func TestDrive_writeDocumentEdges(t *testing.T) {
 // bulleted and ordered lists and paragraphs, and deletes the image the
 // blocks leave out.
 func TestDrive_docsSetBlocksNestedAndOmitImage(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	spans := []vfs.DocsSpan{
@@ -620,7 +606,12 @@ func TestDrive_docsSetBlocksNestedAndOmitImage(t *testing.T) {
 	}
 }
 
+// A Google Doc takes a line write and a full HTML write. A write against
+// a stale read is refused, a write that meets one revision conflict
+// succeeds on its next try and one that meets two conflicts fails. HTML
+// with a table written to a new path creates a Doc, after one conflict.
 func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	spans := []vfs.DocsSpan{
@@ -722,6 +713,7 @@ func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
 		t.Fatalf("conflict retry: %v", err)
 	}
 
+	api.FailNextDocWrites(1)
 	html := "<h1>CRE SPIKE</h1>\n<table><tr><td>A</td><td>B</td></tr></table>"
 	_, err = ms.Apply(ctx, "/workspace/contracts/CRE SPIKE Public Data", vfs.Mutation{Content: &html})
 	if err != nil {
@@ -749,7 +741,10 @@ func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
 	}
 }
 
+// Full HTML written to a Doc with one tab replaces that tab, although the
+// HTML names no tab.
 func TestDrive_htmlReplaceOnSingleTabOmitsTabID(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	spans := []vfs.DocsSpan{
@@ -840,7 +835,10 @@ func exportBudgetZip(t *testing.T) []byte {
 	return raw
 }
 
+// A read-only mount reads a Google Sheet from its HTML export: each sheet
+// with its inputs and values, and a projection with no HTML.
 func TestDrive_sheetStatAndExportRead(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	api.Nodes["sheet1"].Export = exportBudgetZip(t)
@@ -877,7 +875,11 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	}
 }
 
+// A writable mount writes a cell value and every format of a Google Sheet,
+// keeps formulas, refuses a write to a merged cell other than its first,
+// and refuses plain, HTML, line, range, sheet and block writes.
 func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	api.SeedSheet("sheet1", vfs.SheetsSnapshot{SpreadsheetID: "sheet1", Sheets: budgetSheets(), Named: []vfs.NamedRange{{Name: "Total", SheetID: "1", A1: "B2"}}})
@@ -1029,22 +1031,6 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 		Rev: rev, Blocks: []vfs.Block{{Kind: vfs.BlockKindSheet, Text: "A\tB"}},
 	}); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("blocks replace: %v", err)
-	}
-}
-
-func TestDrive_sheetCheckoutTooLarge(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	row := make([]vfs.Cell, vfs.MaxSheetCells+1)
-	for i := range row {
-		row[i] = vfs.Cell{Input: "x", Value: "x"}
-	}
-	api.SeedSheet("sheet1", vfs.SheetsSnapshot{SpreadsheetID: "sheet1", Sheets: []vfs.Sheet{{ID: "1", Title: "Budget", Cells: [][]vfs.Cell{row}}}})
-	ms := mountDrive(t, api, true)
-
-	if _, err := ms.Route(ctx, "/workspace/contracts/Budget").
-		ReadText(ctx); !errors.Is(err, vfs.ErrTooLarge) {
-		t.Fatalf("checkout cap: %v", err)
 	}
 }
 

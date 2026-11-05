@@ -34,6 +34,8 @@ type graphNode struct {
 	body                        []byte
 	// wholeBody makes content ignore Range and answer HTTP 200.
 	wholeBody bool
+	// serve, when set, answers content requests in place of the body.
+	serve func(w http.ResponseWriter)
 }
 
 // graphFX is an in-memory OneDrive that speaks the Graph driveItem REST API.
@@ -55,7 +57,8 @@ type graphFX struct {
 //	             bare.bin (no MIME type), huge.bin (over the read cap),
 //	             whole.txt (ignores Range), lost.txt (content 404),
 //	             exp.txt (content 401), deny.txt (403), boom.txt (500),
-//	             locked/ (children 403), vanish/
+//	             cut.txt (content cut short), liar.txt (content over the
+//	             cap, size 1), locked/ (children 403), vanish/
 //	drv          file.txt (a file item outside the root)
 //	site-1 root  note.txt "from-site"
 func startGraph(t *testing.T) (*graphFX, *httptest.Server) {
@@ -86,6 +89,13 @@ func startGraph(t *testing.T) (*graphFX, *httptest.Server) {
 		{id: "bare", name: "bare.bin", parent: "root", body: []byte("x")},
 		{id: "huge", name: "huge.bin", parent: "root", mime: "application/octet-stream", size: int64(vfs.MaxReadFileBytes) + 1},
 		{id: "whole", name: "whole.txt", parent: "root", mime: "text/plain", body: []byte("abc"), wholeBody: true},
+		{id: "cut", name: "cut.txt", parent: "root", mime: "text/plain", size: 10, serve: func(w http.ResponseWriter) {
+			w.Header().Set("Content-Length", "10")
+			_, _ = w.Write([]byte("abc"))
+		}},
+		{id: "liar", name: "liar.txt", parent: "root", mime: "text/plain", size: 1, serve: func(w http.ResponseWriter) {
+			_, _ = io.Copy(w, io.LimitReader(zeros{}, int64(vfs.MaxReadFileBytes)+1))
+		}},
 		{id: "locked", name: "locked", parent: "root", folder: true},
 		{id: "vanish", name: "vanish", parent: "root", folder: true},
 		text("f1", "a.txt", "one"), text("c2", "c.txt", "c"), text("lost", "lost.txt", "x"),
@@ -219,6 +229,8 @@ func (g *graphFX) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeGraphJSON(w, g.json(n))
 	case n == nil:
 		w.WriteHeader(http.StatusNotFound)
+	case tail == "content" && n.serve != nil:
+		n.serve(w)
 	case tail == "content" && n.wholeBody:
 		_, _ = w.Write(n.body)
 	case tail == "content" && r.URL.Query().Get("direct") == "":
@@ -316,6 +328,7 @@ func mountGraphHTTP(t *testing.T, srv *httptest.Server, writable bool) (*vfs.Mou
 // Content Graph refuses fails with the matching vfs error, and a read-only
 // mount reads but does not write.
 func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	fx, srv := startGraph(t)
 	ms, holder := mountGraphHTTP(t, srv, true)
@@ -403,13 +416,18 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 }
 
 // TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail: a file item
-// id, an organization binding without a site or drive, and an unknown account
-// fail; a site binding opens that site's library and a personal one /me/drive.
+// id, an organization binding without a site or drive, an unknown account
+// and a binding with no token for a factory with no holder fail; a site
+// binding opens that site's library and a personal one /me/drive with the
+// binding's token.
 func TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	fx, srv := startGraph(t)
 	open := mustGraph(srv, nil, "")
 	personal := mustGraph(srv, nil, vfs.AccountPersonal)
+	// unheld takes the token of each binding.
+	unheld := vfs.Graph(vfs.NewMicrosoftGraph(vfs.NewTokenHolder(mount.Credential{Token: "tok"}), srv.URL+"/", srv.Client()), nil, vfs.AccountPersonal)
 	bind := func(params map[string]string) mount.Binding {
 		return mount.Binding{Auth: mount.Credential{Token: "tok"}, Params: params}
 	}
@@ -425,7 +443,7 @@ func TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail(t *testing.T) 
 	if got, err := siteMS.Route(ctx, "/workspace/lib/note.txt").ReadFile(ctx); err != nil || string(got) != "from-site" {
 		t.Fatalf("site bind = %q err=%v", got, err)
 	}
-	if p, err := personal(ctx, "s", bind(nil)); err != nil || p == nil {
+	if p, err := unheld(ctx, "s", bind(nil)); err != nil || p == nil {
 		t.Fatalf("personal /me/drive = %v err=%v", p, err)
 	}
 
@@ -441,6 +459,7 @@ func TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail(t *testing.T) 
 		"unknown site":         {open, ctx, bind(map[string]string{mount.ParamSiteID: "no-site"}), vfs.ErrNotExist.Error()},
 		"missing item":         {open, ctx, bind(map[string]string{mount.ParamDriveID: "drv", mount.ParamItemID: "missing"}), vfs.ErrNotExist.Error()},
 		"canceled":             {personal, canceled, bind(nil), context.Canceled.Error()},
+		"no token":             {unheld, ctx, mount.Binding{}, "access token required"},
 	} {
 		if _, err := c.open(c.ctx, "s", c.b); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Fatalf("%s: %v, want %q", name, err, c.want)
@@ -455,16 +474,7 @@ func TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail(t *testing.T) 
 	}
 }
 
-// graphProvider is the Graph provider's surface: Provider plus its one-shot
-// put and document I/O.
-type graphProvider interface {
-	vfs.Provider
-	PutFile(ctx context.Context, name string, r io.Reader, size int64) error
-	OpenDocument(ctx context.Context, name string, reg *vfs.ContentRegistry) (vfs.Document, error)
-	WriteDocument(ctx context.Context, name string, doc vfs.Document, reg *vfs.ContentRegistry) error
-}
-
-func openGraphProvider(t *testing.T, srv *httptest.Server, holder *vfs.TokenHolder, itemID string, writable bool) graphProvider {
+func openGraphProvider(t *testing.T, srv *httptest.Server, holder *vfs.TokenHolder, itemID string, writable bool) backendProvider {
 	t.Helper()
 	p, err := mustGraph(srv, holder, vfs.AccountPersonal)(t.Context(), "s", mount.Binding{
 		Params: map[string]string{mount.ParamDriveID: "drv", mount.ParamItemID: itemID}, Writable: writable,
@@ -472,7 +482,7 @@ func openGraphProvider(t *testing.T, srv *httptest.Server, holder *vfs.TokenHold
 	if err != nil {
 		t.Fatal(err)
 	}
-	return p.(graphProvider)
+	return p.(backendProvider)
 }
 
 // TestGraphProvider_returnPaths: every provider call fails with the vfs
@@ -480,8 +490,10 @@ func openGraphProvider(t *testing.T, srv *httptest.Server, holder *vfs.TokenHold
 // read-only mount, an oversize or unreadable upload, a root that is gone,
 // a canceled context and an empty token.
 func TestGraphProvider_returnPaths(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	fx, srv := startGraph(t)
+	fx.add(&graphNode{id: "flip", folder: true})
 	codecs, err := vfs.NewContentRegistry()
 	if err != nil {
 		t.Fatal(err)
@@ -490,26 +502,28 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 	p := openGraphProvider(t, srv, holder, "root", true)
 	ro := openGraphProvider(t, srv, holder, "root", false)
 	gone := openGraphProvider(t, srv, holder, "vanish", true)
+	flipped := openGraphProvider(t, srv, holder, "flip", true)
 	fx.mu.Lock()
 	delete(fx.nodes, "vanish")
+	fx.nodes["flip"].folder = false
 	fx.mu.Unlock()
 	text := vfs.NewTextDocument("a.txt", "text/plain", "utf-8", "x")
-	put := func(p graphProvider, name string) func(context.Context) error {
+	put := func(p backendProvider, name string) func(context.Context) error {
 		return func(ctx context.Context) error { return p.PutFile(ctx, name, bytes.NewReader([]byte("x")), 1) }
 	}
-	open := func(p graphProvider, name string, flag int) func(context.Context) error {
+	open := func(p backendProvider, name string, flag int) func(context.Context) error {
 		return func(ctx context.Context) error { _, err := p.OpenFile(ctx, name, flag, 0); return err }
 	}
 	doc := func(name string) func(context.Context) error {
 		return func(ctx context.Context) error { _, err := p.OpenDocument(ctx, name, codecs); return err }
 	}
-	stat := func(p graphProvider, name string) func(context.Context) error {
+	stat := func(p backendProvider, name string) func(context.Context) error {
 		return func(ctx context.Context) error { _, err := p.Stat(ctx, name); return err }
 	}
 	list := func(name string) func(context.Context) error {
 		return func(ctx context.Context) error { _, err := p.ReadDir(ctx, name); return err }
 	}
-	mkdir := func(p graphProvider, name string) func(context.Context) error {
+	mkdir := func(p backendProvider, name string) func(context.Context) error {
 		return func(ctx context.Context) error { return p.MkdirAll(ctx, name, fs.ModeDir) }
 	}
 
@@ -529,23 +543,28 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 		call func(context.Context) error
 		want error
 	}{
-		"open without MIME":     {open(p, "bare.bin", os.O_RDONLY), vfs.ErrNoCodec},
-		"document without MIME": {doc("bare.bin"), vfs.ErrNoCodec},
-		"document over the cap": {doc("huge.bin"), vfs.ErrTooLarge},
-		"document of a folder":  {doc("."), vfs.ErrIsDir},
-		"document missing":      {doc("missing"), vfs.ErrNotExist},
-		"document content 404":  {doc("lost.txt"), vfs.ErrNotExist},
-		"open for write":        {open(p, "a.txt", os.O_WRONLY), vfs.ErrNotSupported},
-		"read-only open":        {open(ro, "a.txt", os.O_WRONLY), vfs.ErrReadOnly},
-		"read-only remove":      {func(ctx context.Context) error { return ro.Remove(ctx, "a.txt") }, vfs.ErrReadOnly},
-		"read-only mkdir":       {mkdir(ro, "sub"), vfs.ErrReadOnly},
-		"read-only put":         {put(ro, "a.txt"), vfs.ErrReadOnly},
-		"read-only document":    {func(ctx context.Context) error { return ro.WriteDocument(ctx, "a.txt", text, codecs) }, vfs.ErrReadOnly},
-		"remove the root":       {func(ctx context.Context) error { return p.Remove(ctx, "") }, vfs.ErrInvalidPath},
-		"remove missing":        {func(ctx context.Context) error { return p.Remove(ctx, "missing") }, vfs.ErrNotExist},
-		"put the root":          {put(p, ""), vfs.ErrInvalidPath},
-		"put denied":            {put(p, "deny.txt"), vfs.ErrPermission},
-		"put over the cap":      {func(ctx context.Context) error { return p.PutFile(ctx, "big.bin", nil, int64(vfs.MaxReadFileBytes)+1) }, vfs.ErrTooLarge},
+		"open without MIME":                  {open(p, "bare.bin", os.O_RDONLY), vfs.ErrNoCodec},
+		"document without MIME":              {doc("bare.bin"), vfs.ErrNoCodec},
+		"document over the cap":              {doc("huge.bin"), vfs.ErrTooLarge},
+		"document of a folder":               {doc("."), vfs.ErrIsDir},
+		"document missing":                   {doc("missing"), vfs.ErrNotExist},
+		"document content 404":               {doc("lost.txt"), vfs.ErrNotExist},
+		"document cut short":                 {doc("cut.txt"), io.ErrUnexpectedEOF},
+		"document over its size and the cap": {doc("liar.txt"), vfs.ErrTooLarge},
+		"open for write":                     {open(p, "a.txt", os.O_WRONLY), vfs.ErrNotSupported},
+		"read-only open":                     {open(ro, "a.txt", os.O_WRONLY), vfs.ErrReadOnly},
+		"read-only remove":                   {func(ctx context.Context) error { return ro.Remove(ctx, "a.txt") }, vfs.ErrReadOnly},
+		"read-only mkdir":                    {mkdir(ro, "sub"), vfs.ErrReadOnly},
+		"read-only put":                      {put(ro, "a.txt"), vfs.ErrReadOnly},
+		"read-only document":                 {func(ctx context.Context) error { return ro.WriteDocument(ctx, "a.txt", text, codecs) }, vfs.ErrReadOnly},
+		"remove the root":                    {func(ctx context.Context) error { return p.Remove(ctx, "") }, vfs.ErrInvalidPath},
+		"remove missing":                     {func(ctx context.Context) error { return p.Remove(ctx, "missing") }, vfs.ErrNotExist},
+		"put the root":                       {put(p, ""), vfs.ErrInvalidPath},
+		"put denied":                         {put(p, "deny.txt"), vfs.ErrPermission},
+		"put over the cap":                   {func(ctx context.Context) error { return p.PutFile(ctx, "big.bin", nil, int64(vfs.MaxReadFileBytes)+1) }, vfs.ErrTooLarge},
+		"put an unsized body over the cap": {func(ctx context.Context) error {
+			return p.PutFile(ctx, "big.bin", io.LimitReader(zeros{}, int64(vfs.MaxReadFileBytes)+1), 0)
+		}, vfs.ErrTooLarge},
 		"mkdir through denied":  {mkdir(p, "deny.txt/x"), vfs.ErrPermission},
 		"list missing":          {list("missing"), vfs.ErrNotExist},
 		"list a file":           {list("a.txt"), vfs.ErrNotDir},
@@ -575,6 +594,9 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 		}
 	}
 
+	if err := flipped.Validate(ctx); err == nil || !strings.Contains(err.Error(), "not a folder") {
+		t.Fatalf("validate a root that is now a file: %v", err)
+	}
 	if st, err := p.Stat(ctx, "."); err != nil || !st.IsDir {
 		t.Fatalf("stat root = %+v err=%v", st, err)
 	}

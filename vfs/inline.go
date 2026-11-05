@@ -79,10 +79,9 @@ func (b Block) PlainText() string {
 	return PlainInline(b.Text)
 }
 
+// inlineRuns is the marked runs of a text block. Callers never pass an image
+// or a table block: those have no inline marks.
 func (b Block) inlineRuns() []Run {
-	if b.Kind == BlockKindImage || b.Kind == BlockKindTable {
-		return nil
-	}
 	if len(b.Runs) > 0 {
 		return b.Runs
 	}

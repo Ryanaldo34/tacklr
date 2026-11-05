@@ -48,7 +48,8 @@
           {"startIndex": 45, "endIndex": 48, "paragraph": {
             "elements": [
               {"textRun": {"content": "Fig"}},
-              {"startIndex": 46, "endIndex": 47, "inlineObjectElement": {"inlineObjectId": "kix.bare"}}
+              {"startIndex": 46, "endIndex": 47, "inlineObjectElement": {"inlineObjectId": "kix.bare"}},
+              {"startIndex": 47, "endIndex": 48, "pageBreak": {}}
             ]
           }},
           {"startIndex": 48, "endIndex": 49, "tableOfContents": {}},

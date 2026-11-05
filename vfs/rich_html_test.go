@@ -18,9 +18,11 @@ func decodeDocsHTML(t *testing.T, html string) []vfs.Block {
 }
 
 // A rich document projects its blocks as HTML: headings at levels 1 to 6,
-// inline marks, nested and ordered lists, tables, images and escaped text.
-// The Docs codec reads the projection back with its marks.
+// inline marks, nested and ordered lists (a list item at level 0 is at
+// level 1), tables, images and escaped text. The Docs codec reads the
+// projection back with its marks.
 func TestProjectHTMLSpans_tabsListsTablesMarks(t *testing.T) {
+	t.Parallel()
 	doc := vfs.NewRichDocument("/Spec", googleDocMIME, []vfs.Block{
 		{Kind: vfs.BlockKindHeading, Text: "H & **x**", Style: vfs.StyleMeta{Level: 0}},
 		{Kind: vfs.BlockKindHeading, Text: "Deep", Style: vfs.StyleMeta{Level: 9}},
@@ -28,6 +30,7 @@ func TestProjectHTMLSpans_tabsListsTablesMarks(t *testing.T) {
 		{Kind: vfs.BlockKindListItem, Text: "one", Style: vfs.StyleMeta{Level: 1, Attributes: map[string]string{"list_type": "ul", "list_id": "l1"}}},
 		{Kind: vfs.BlockKindListItem, Text: "nest", Style: vfs.StyleMeta{Level: 2, Attributes: map[string]string{"list_type": "ul", "list_id": "l1"}}},
 		{Kind: vfs.BlockKindListItem, Text: "two", Style: vfs.StyleMeta{Level: 1, Attributes: map[string]string{"list_type": "ol", "list_id": "l2"}}},
+		{Kind: vfs.BlockKindListItem, Text: "zero", Style: vfs.StyleMeta{Attributes: map[string]string{"list_id": "l3"}}},
 		{Kind: vfs.BlockKindTable, Text: "A\tB\nC\t**D**", Style: vfs.StyleMeta{Attributes: map[string]string{"rows": "2", "cols": "2"}}},
 		{Kind: vfs.BlockKindImage, Text: `alt "q"`, Style: vfs.StyleMeta{Attributes: map[string]string{"object_id": "kix.1", "content_uri": "https://img"}}},
 		{Kind: "quote", Text: "aside"},
@@ -36,7 +39,7 @@ func TestProjectHTMLSpans_tabsListsTablesMarks(t *testing.T) {
 	html := doc.Text()
 	blocks := decodeDocsHTML(t, html)
 
-	for _, want := range []string{"<h1>H &amp; <strong>x</strong></h1>", "<h6>Deep</h6>", "<em>i</em>", "<a href=", "<s>s</s>", "<ul>", "<ol>", "<table>", "data-object-id", "&#34;"} {
+	for _, want := range []string{"<h1>H &amp; <strong>x</strong></h1>", "<h6>Deep</h6>", "<em>i</em>", "<a href=", "<s>s</s>", "<ul>", "<ol>", "<ul>\n<li>zero</li>\n</ul>", "<table>", "data-object-id", "&#34;"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("missing %q in %s", want, html)
 		}
@@ -56,6 +59,7 @@ func TestProjectHTMLSpans_tabsListsTablesMarks(t *testing.T) {
 // it projects. It keeps inline marks, the tab of each section, figures,
 // nested lists and table headers.
 func TestDocsCodec_decodesHTMLBlocksAndMarks(t *testing.T) {
+	t.Parallel()
 	bare := decodeDocsHTML(t, "<html><body>hello from CRE</body></html>")
 	empty := decodeDocsHTML(t, "<html><body><div></div></body></html>")
 	marks := decodeDocsHTML(t, `<html><body><p>See <strong>x</strong><em></em> and <a href="https://e">y</a><br><em>i</em> <s>s</s></p></body></html>`)

@@ -100,26 +100,25 @@ func (f CellFormat) IsZero() bool {
 
 func (f CellFormat) has(bit uint16) bool { return f.known&bit != 0 }
 
-func (f *CellFormat) mark(bit uint16) {
-	if f != nil {
-		f.known |= bit
-	}
-}
+func (f *CellFormat) mark(bit uint16) { f.known |= bit }
 
 func (b CellBorder) zero() bool {
 	return b.Style == "" && b.Color == "" && b.Edges == ""
 }
 
+// equal compares the fields and the border value (not the border pointer).
 func (f CellFormat) equal(o CellFormat) bool {
-	if f.known != o.known || f.Number != o.Number || f.Bold != o.Bold || f.Italic != o.Italic ||
-		f.Strike != o.Strike || f.Underline != o.Underline || f.Fill != o.Fill ||
-		f.Color != o.Color || f.Align != o.Align || f.VAlign != o.VAlign || f.Wrap != o.Wrap {
-		return false
+	fb, ob := f.border(), o.border()
+	f.Border, o.Border = nil, nil
+	return f == o && fb == ob
+}
+
+// border is the border value; a nil border is the zero border.
+func (f CellFormat) border() CellBorder {
+	if f.Border == nil {
+		return CellBorder{}
 	}
-	if f.Border == nil || o.Border == nil {
-		return f.Border == nil && o.Border == nil
-	}
-	return *f.Border == *o.Border
+	return *f.Border
 }
 
 // String is the tool format bag: number=$#,##0.00,bold,border=thin:bottom
@@ -222,79 +221,66 @@ func normalizeWrap(s string) string {
 
 // Overlay copies src fields that are known or non-zero onto f.
 func (f *CellFormat) Overlay(src CellFormat) {
-	if f == nil {
-		return
-	}
-	overlayCellFormat(f, src)
-}
-
-func overlayCellFormat(dst *CellFormat, src CellFormat) {
-	if dst == nil {
-		return
-	}
 	if src.has(fmtNumber) || src.Number != "" {
-		dst.Number = src.Number
-		dst.mark(fmtNumber)
+		f.Number = src.Number
+		f.mark(fmtNumber)
 	}
 	if src.has(fmtBold) || src.Bold {
-		dst.Bold = src.Bold
-		dst.mark(fmtBold)
+		f.Bold = src.Bold
+		f.mark(fmtBold)
 	}
 	if src.has(fmtItalic) || src.Italic {
-		dst.Italic = src.Italic
-		dst.mark(fmtItalic)
+		f.Italic = src.Italic
+		f.mark(fmtItalic)
 	}
 	if src.has(fmtStrike) || src.Strike {
-		dst.Strike = src.Strike
-		dst.mark(fmtStrike)
+		f.Strike = src.Strike
+		f.mark(fmtStrike)
 	}
 	if src.has(fmtUnderline) || src.Underline {
-		dst.Underline = src.Underline
-		dst.mark(fmtUnderline)
+		f.Underline = src.Underline
+		f.mark(fmtUnderline)
 	}
 	if src.has(fmtFill) || src.Fill != "" {
-		dst.Fill = src.Fill
-		dst.mark(fmtFill)
+		f.Fill = src.Fill
+		f.mark(fmtFill)
 	}
 	if src.has(fmtColor) || src.Color != "" {
-		dst.Color = src.Color
-		dst.mark(fmtColor)
+		f.Color = src.Color
+		f.mark(fmtColor)
 	}
 	if src.has(fmtAlign) || src.Align != "" {
 		if a := normalizeAlign(src.Align); a != "" || src.has(fmtAlign) {
-			dst.Align = a
-			dst.mark(fmtAlign)
+			f.Align = a
+			f.mark(fmtAlign)
 		}
 	}
 	if src.has(fmtVAlign) || src.VAlign != "" {
 		if a := normalizeVAlign(src.VAlign); a != "" || src.has(fmtVAlign) {
-			dst.VAlign = a
-			dst.mark(fmtVAlign)
+			f.VAlign = a
+			f.mark(fmtVAlign)
 		}
 	}
 	if src.has(fmtWrap) || src.Wrap != "" {
 		if a := normalizeWrap(src.Wrap); a != "" || src.has(fmtWrap) {
-			dst.Wrap = a
-			dst.mark(fmtWrap)
+			f.Wrap = a
+			f.mark(fmtWrap)
 		}
 	}
 	if src.has(fmtBorder) || src.Border != nil {
 		if src.Border == nil || src.Border.zero() {
-			dst.Border = nil
+			f.Border = nil
 		} else {
 			b := *src.Border
 			b.Style = normalizeBorderStyle(b.Style)
-			dst.Border = &b
+			f.Border = &b
 		}
-		dst.mark(fmtBorder)
+		f.mark(fmtBorder)
 	}
 }
 
 // ApplyPatch writes each set field, including false and empty.
 func (f *CellFormat) ApplyPatch(p FormatPatch) {
-	if f == nil {
-		return
-	}
 	if p.Number != nil {
 		f.Number = *p.Number
 		f.mark(fmtNumber)
@@ -349,9 +335,6 @@ func (f *CellFormat) ApplyPatch(p FormatPatch) {
 
 // Normalize maps align, valign, wrap, and border style onto the portable bag.
 func (f *CellFormat) Normalize() {
-	if f == nil {
-		return
-	}
 	if f.Align != "" {
 		f.Align = normalizeAlign(f.Align)
 	}
@@ -452,7 +435,7 @@ func adoptTabularDocument(path, mediaType string, sheets []Sheet, named []NamedR
 	}
 	b := &gridBody{sheets: sheets, named: named}
 	b.reproject()
-	return newIR(path, mediaType, "utf-8", b), nil
+	return newIR(path, mediaType, b), nil
 }
 
 func (d *gridBody) text() string              { return d.proj }
@@ -771,9 +754,6 @@ func sheetA1(title string, r1, c1, r2, c2 int) string {
 }
 
 func quoteSheetTitle(title string) string {
-	if title == "" {
-		return "Sheet1"
-	}
 	if strings.ContainsAny(title, " '![]") {
 		return "'" + strings.ReplaceAll(title, "'", "''") + "'"
 	}
@@ -926,11 +906,7 @@ func growSheet(sh *Sheet, rows, cols int) {
 		extendCells(&sh.Cells[i], cols)
 	}
 	sh.Rows = len(sh.Cells)
-	if len(sh.Cells) > 0 {
-		sh.Cols = len(sh.Cells[0])
-	} else {
-		sh.Cols = cols
-	}
+	sh.Cols = len(sh.Cells[0])
 }
 
 func trimSheet(sh *Sheet) {
@@ -973,16 +949,8 @@ func normalizeSheetShape(sh *Sheet) {
 			cols = len(row)
 		}
 	}
-	if cols > 0 {
-		for i := range sh.Cells {
-			extendCells(&sh.Cells[i], cols)
-		}
-	}
-	if extra := sh.Rows - len(sh.Cells); extra > 0 {
-		sh.Cells = slices.Grow(sh.Cells, extra)
-		for len(sh.Cells) < sh.Rows {
-			sh.Cells = append(sh.Cells, make([]Cell, cols))
-		}
+	for i := range sh.Cells {
+		extendCells(&sh.Cells[i], cols)
 	}
 	sh.Rows = len(sh.Cells)
 	sh.Cols = cols
@@ -1094,9 +1062,6 @@ func unescapeToolCell(s string) string {
 }
 
 func encodeToolRow(row []Cell) string {
-	if len(row) == 0 {
-		return ""
-	}
 	var b strings.Builder
 	writeToolRow(&b, row)
 	return b.String()
@@ -1112,9 +1077,6 @@ func writeToolRow(b *strings.Builder, row []Cell) {
 }
 
 func splitToolRow(line string) []string {
-	if line == "" {
-		return []string{""}
-	}
 	parts := strings.Split(line, "\t")
 	for i, p := range parts {
 		parts[i] = unescapeToolCell(p)
@@ -1123,11 +1085,7 @@ func splitToolRow(line string) []string {
 }
 
 func parseToolTSV(text string) [][]string {
-	text = strings.TrimRight(text, "\r\n")
-	if text == "" {
-		return nil
-	}
-	lines := strings.Split(text, "\n")
+	lines := strings.Split(strings.TrimRight(text, "\r\n"), "\n")
 	out := make([][]string, len(lines))
 	for i, line := range lines {
 		out[i] = splitToolRow(strings.TrimSuffix(line, "\r"))
@@ -1141,9 +1099,6 @@ func padStringGrid(rows [][]string) [][]string {
 		if len(row) > cols {
 			cols = len(row)
 		}
-	}
-	if cols == 0 {
-		return rows
 	}
 	for i := range rows {
 		if n := cols - len(rows[i]); n > 0 {
@@ -1162,9 +1117,6 @@ type formatRect struct {
 }
 
 func formatRects(sh Sheet, rows, cols int) []formatRect {
-	if rows < 1 || cols < 1 {
-		return nil
-	}
 	visited := make([][]bool, rows)
 	for i := range visited {
 		visited[i] = make([]bool, cols)
@@ -1175,19 +1127,19 @@ func formatRects(sh Sheet, rows, cols int) []formatRect {
 			if visited[r][c] {
 				continue
 			}
-			f := formatAt(sh, r, c)
+			f := sh.Cells[r][c].Format
 			if f.IsZero() {
 				continue
 			}
 			w := 1
-			for c+w < cols && !visited[r][c+w] && formatAt(sh, r, c+w).equal(f) {
+			for c+w < cols && !visited[r][c+w] && sh.Cells[r][c+w].Format.equal(f) {
 				w++
 			}
 			h := 1
 			grow := true
 			for grow && r+h < rows {
 				for x := 0; x < w; x++ {
-					if visited[r+h][c+x] || !formatAt(sh, r+h, c+x).equal(f) {
+					if visited[r+h][c+x] || !sh.Cells[r+h][c+x].Format.equal(f) {
 						grow = false
 						break
 					}
@@ -1205,13 +1157,6 @@ func formatRects(sh Sheet, rows, cols int) []formatRect {
 		}
 	}
 	return out
-}
-
-func formatAt(sh Sheet, r, c int) CellFormat {
-	if r < 0 || c < 0 || r >= len(sh.Cells) || c >= len(sh.Cells[r]) {
-		return CellFormat{}
-	}
-	return sh.Cells[r][c].Format
 }
 
 // HexColor normalizes a CSS/Office color to #rrggbb. Empty if not hex.

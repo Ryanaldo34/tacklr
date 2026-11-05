@@ -18,7 +18,9 @@ import (
 // server across cases gives each case its own prefix, so cases never see
 // each other's files and nothing is reset between them.
 
+// TestLocal_contract: a local directory meets the backend contract.
 func TestLocal_contract(t *testing.T) {
+	t.Parallel()
 	vfstest.Run(t, func(t *testing.T) vfstest.Backend {
 		ms, err := vfs.Tree(vfs.At("data", vfs.Local(t.TempDir())))(t.Context(), "sess-local", vfs.Request{})
 		if err != nil {
@@ -28,27 +30,35 @@ func TestLocal_contract(t *testing.T) {
 	})
 }
 
+// TestS3_contract: an S3 bucket meets the backend contract.
 func TestS3_contract(t *testing.T) {
-	client, bucket := startS3(t.Context(), t)
+	t.Parallel()
+	client, bucket := startS3(t)
 	vfstest.Run(t, func(t *testing.T) vfstest.Backend {
 		return prefixedBackend(t, vfs.S3(awss3.API{Client: client}, bucket))
 	})
 }
 
+// TestBlob_contract: an Azure Blob container meets the backend contract.
 func TestBlob_contract(t *testing.T) {
-	client, container := startAzurite(t.Context(), t)
+	t.Parallel()
+	client, container := startAzurite(t)
 	vfstest.Run(t, func(t *testing.T) vfstest.Backend {
 		return prefixedBackend(t, vfs.Blob(azureblob.API{Client: client}, container))
 	})
 }
 
+// TestDrive_contract: a Google Drive folder meets the backend contract.
 func TestDrive_contract(t *testing.T) {
+	t.Parallel()
 	vfstest.Run(t, func(t *testing.T) vfstest.Backend {
 		return vfstest.Backend{Session: mountDrive(t, testdrive.Tree(), true), Root: "/workspace/contracts"}
 	})
 }
 
+// TestGraph_contract: a Microsoft Graph drive meets the backend contract.
 func TestGraph_contract(t *testing.T) {
+	t.Parallel()
 	vfstest.Run(t, func(t *testing.T) vfstest.Backend {
 		_, srv := startGraph(t)
 		ms, _ := mountGraphHTTP(t, srv, true)

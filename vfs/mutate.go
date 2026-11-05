@@ -80,9 +80,8 @@ func (ms *MountSession) Apply(ctx context.Context, virtualPath string, mut Mutat
 		return ApplyResult{}, fmt.Errorf("write: pass only one change: content, line range, or block_id")
 	}
 
-	fi, err := ms.Route(ctx, p).
-		Stat(ctx)
-
+	rt := ms.Route(ctx, p)
+	fi, err := rt.Stat(ctx)
 	exists := err == nil
 	if err != nil && !errors.Is(err, ErrNotExist) {
 		return ApplyResult{}, err
@@ -93,9 +92,9 @@ func (ms *MountSession) Apply(ctx context.Context, virtualPath string, mut Mutat
 
 	switch {
 	case mut.Content != nil:
-		return ms.applyFull(ctx, p, exists, fi, mut)
+		return ms.applyFull(ctx, p, nativeRichOf(rt.Provider), exists, fi, mut)
 	case mut.Blocks != nil:
-		return ms.applyBlocks(ctx, p, exists, fi, mut)
+		return ms.applyBlocks(ctx, p, nativeRichOf(rt.Provider), exists, fi, mut)
 	case mut.Old != nil:
 		return ms.applySubstring(ctx, p, mut)
 	case mut.BlockID != "":
@@ -105,7 +104,9 @@ func (ms *MountSession) Apply(ctx context.Context, virtualPath string, mut Mutat
 	}
 }
 
-func (ms *MountSession) applyFull(ctx context.Context, p string, exists bool, fi FileInfo, mut Mutation) (ApplyResult, error) {
+// applyFull writes the whole body. native is the rich media type of the
+// path's backend, for a new HTML body without an extension.
+func (ms *MountSession) applyFull(ctx context.Context, p, native string, exists bool, fi FileInfo, mut Mutation) (ApplyResult, error) {
 	body := ""
 	if mut.Content != nil {
 		body = *mut.Content
@@ -120,7 +121,7 @@ func (ms *MountSession) applyFull(ctx context.Context, p string, exists bool, fi
 		return ms.stage(ctx, NewTextDocument(p, fi.MediaType, "utf-8", body))
 	}
 	n := min(len(body), 512)
-	mt := ms.createMediaType(p, mut.MediaType, []byte(body[:n]))
+	mt := createMediaType(p, mut.MediaType, native, []byte(body[:n]))
 	doc, err := ms.codecs.create(p, mt, mut)
 	if err != nil {
 		return ApplyResult{}, err
@@ -163,27 +164,17 @@ func (ms *MountSession) applyProjectedFull(ctx context.Context, p string, mut Mu
 	return ms.stage(ctx, d)
 }
 
-func (ms *MountSession) createMediaType(p, requested string, sample []byte) string {
+func createMediaType(p, requested, native string, sample []byte) string {
 	if path.Ext(p) != "" {
 		return DetectMediaType(path.Base(p), sample)
 	}
 	if requested != "" {
 		return requested
 	}
-	if looksLikeHTML(string(sample)) {
-		if mt := ms.nativeRichMediaType(p); mt != "" {
-			return mt
-		}
+	if native != "" && looksLikeHTML(string(sample)) {
+		return native
 	}
 	return DetectMediaType(path.Base(p), sample)
-}
-
-func (ms *MountSession) nativeRichMediaType(p string) string {
-	rt, err := ms.lookup(p)
-	if err != nil {
-		return ""
-	}
-	return nativeRichOf(rt.Provider)
 }
 
 func nativeRichOf(p Provider) string {
@@ -323,7 +314,7 @@ func (ms *MountSession) applyTabularBlock(ctx context.Context, td *IR, g *gridBo
 	return ms.stage(ctx, td)
 }
 
-func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, fi FileInfo, mut Mutation) (ApplyResult, error) {
+func (ms *MountSession) applyBlocks(ctx context.Context, p, native string, exists bool, fi FileInfo, mut Mutation) (ApplyResult, error) {
 	next := make([]Block, 0, len(mut.Blocks))
 	for _, b := range mut.Blocks {
 		attrs := maps.Clone(b.Style.Attributes)
@@ -337,7 +328,7 @@ func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, 
 		next = append(next, b)
 	}
 	if !exists {
-		mt := ms.createMediaType(p, mut.MediaType, nil)
+		mt := createMediaType(p, mut.MediaType, native, nil)
 		created := mut
 		created.Blocks = next
 		doc, err := ms.codecs.create(p, mt, created)
@@ -489,11 +480,11 @@ func (ms *MountSession) retryRichPersist(ctx context.Context, doc Textual) (Text
 	if err != nil {
 		return nil, err
 	}
-	d, ok := asIR(doc)
-	f, fok := asIR(fresh)
-	if !ok || !fok {
+	f, ok := asIR(fresh)
+	if !ok {
 		return nil, ErrConflict
 	}
+	d, _ := asIR(doc) // AsRich holds only for an *IR.
 	d.hint = f.hint
 	if err := ms.WriteDocument(ctx, d); err != nil {
 		return nil, err

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -70,35 +71,18 @@ func (c gitSSHKey) cloneEnv(context.Context, string) ([]string, func(), error) {
 	if len(bytes.TrimSpace(c.key)) == 0 || len(bytes.TrimSpace(c.knownHosts)) == 0 {
 		return nil, nil, errors.New("vfs: git ssh key and known_hosts are required")
 	}
-	var files []string
-	cleanup := func() {
-		for _, f := range files {
-			_ = os.Remove(f)
-		}
+	// MkdirTemp makes the directory 0700, so only this user reads the key.
+	dir, err := os.MkdirTemp("", "tacklr-git-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("vfs: git ssh key dir: %w", err)
 	}
-	for _, data := range [][]byte{c.key, c.knownHosts} {
-		name, err := writeTemp(data)
-		if err != nil {
-			cleanup()
-			return nil, nil, err
-		}
-		files = append(files, name)
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	key, hosts := filepath.Join(dir, "key"), filepath.Join(dir, "known_hosts")
+	if err := errors.Join(os.WriteFile(key, c.key, 0o600), os.WriteFile(hosts, c.knownHosts, 0o600)); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("vfs: git ssh key: %w", err)
 	}
 	ssh := fmt.Sprintf("ssh -F /dev/null -i %q -o IdentitiesOnly=yes -o BatchMode=yes "+
-		"-o StrictHostKeyChecking=yes -o UserKnownHostsFile=%q", files[0], files[1])
+		"-o StrictHostKeyChecking=yes -o UserKnownHostsFile=%q", key, hosts)
 	return []string{"GIT_SSH_COMMAND=" + ssh}, cleanup, nil
-}
-
-// writeTemp writes data to a new 0600 temp file.
-func writeTemp(data []byte) (string, error) {
-	f, err := os.CreateTemp("", "tacklr-git-*")
-	if err != nil {
-		return "", err
-	}
-	_, werr := f.Write(data)
-	if err := errors.Join(werr, f.Close()); err != nil {
-		_ = os.Remove(f.Name())
-		return "", err
-	}
-	return f.Name(), nil
 }

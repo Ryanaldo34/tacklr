@@ -123,7 +123,7 @@ func newRichDocument(path, mediaType string, blocks []Block, tabs []DocTab) *IR 
 	b := &richBody{tabs: tabs}
 	b.tree = assignBlockIDs(cloneBlocks(blocks), tabs)
 	b.reproject()
-	return newIR(path, mediaType, "utf-8", b)
+	return newIR(path, mediaType, b)
 }
 
 func (d *richBody) text() string      { return d.html }
@@ -162,21 +162,10 @@ func (d *richBody) Tabs() []DocTab          { return d.tabs }
 
 // ReplaceBlock mutates one IR block and re-projects HTML.
 func (d *richBody) ReplaceBlock(id string, text string, includeHeading bool) error {
-	i := -1
-	for j, b := range d.tree {
-		if b.ID == id {
-			i = j
-			break
-		}
-	}
+	i := slices.IndexFunc(d.tree, func(b Block) bool { return b.ID == id })
 	if i < 0 {
-		if b, ok := FindBlock(d.tree, id); ok {
-			for j, x := range d.tree {
-				if x.ID == b.ID {
-					i = j
-					break
-				}
-			}
+		if found, ok := FindBlock(d.tree, id); ok {
+			i = slices.IndexFunc(d.tree, func(b Block) bool { return b.ID == found.ID })
 		}
 	}
 	if i < 0 {
@@ -476,9 +465,6 @@ func parsePipeTable(text string) ([][]string, bool) {
 		if isPipeSeparatorRow(cells) {
 			continue
 		}
-		if len(cells) == 0 {
-			continue
-		}
 		rows = append(rows, cells)
 	}
 	if len(rows) == 0 {
@@ -513,10 +499,8 @@ func parsePipeRow(line string) []string {
 	return out
 }
 
+// isPipeSeparatorRow reports a |---|:--:| row. cells is never empty.
 func isPipeSeparatorRow(cells []string) bool {
-	if len(cells) == 0 {
-		return false
-	}
 	for _, c := range cells {
 		t := strings.TrimSpace(c)
 		if t == "" {

@@ -59,7 +59,6 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 
 	curTab := "\x00"
 	openLists := make([]string, 0, 4)
-	var curListID string
 
 	closeLists := func(to int) {
 		for len(openLists) > to {
@@ -68,15 +67,9 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 			write(">\n")
 			openLists = openLists[:len(openLists)-1]
 		}
-		if len(openLists) == 0 {
-			curListID = ""
-		}
 	}
 
 	openTab := func(tabID string) {
-		if !useSections {
-			return
-		}
 		if curTab != "\x00" {
 			write("</section>\n")
 		}
@@ -99,11 +92,7 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 			closeLists(0)
 			openTab(tabID)
 		}
-		if bl.Kind != BlockKindListItem {
-			if len(openLists) > 0 {
-				closeLists(0)
-			}
-		}
+		// The last item of a list closes it, so no list is open here.
 		start := line
 		switch bl.Kind {
 		case BlockKindHeading:
@@ -136,11 +125,6 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 			if level < 1 {
 				level = 1
 			}
-			if listID != curListID && curListID != "" {
-				closeLists(0)
-				start = line
-			}
-			curListID = listID
 			for len(openLists) < level {
 				write("<")
 				write(listType)
@@ -207,14 +191,7 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 				write("</p>\n")
 			}
 		}
-		end := line
-		if end < start {
-			end = start
-		}
-		spans[i] = Span{StartLine: start, EndLine: end}
-	}
-	if len(openLists) > 0 {
-		closeLists(0)
+		spans[i] = Span{StartLine: start, EndLine: line}
 	}
 	if useSections && curTab != "\x00" {
 		write("</section>\n")

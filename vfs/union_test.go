@@ -3,6 +3,7 @@ package vfs_test
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,7 +42,10 @@ func unionSession(t *testing.T, dirs ...string) *vfs.MountSession {
 	return ms
 }
 
+// A union lists and reads the files of all its members as one read-only
+// member.
 func TestMountSession_unionMergesBackends(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	a, b := t.TempDir(), t.TempDir()
 	writeUnionTree(t, a, map[string]string{"alpha/SKILL.md": "---\nname: alpha\ndescription: A\n---\n\nA"})
@@ -131,6 +135,7 @@ func TestMountSession_unionMergesBackends(t *testing.T) {
 // A name that two union members both have is ambiguous: at mount, and when
 // a member gains it after the mount.
 func TestMountSession_unionNameInTwoMembersIsAmbiguous(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	a, b, c, d := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	writeUnionTree(t, a, map[string]string{"alpha/SKILL.md": "a"})
@@ -151,7 +156,10 @@ func TestMountSession_unionNameInTwoMembersIsAmbiguous(t *testing.T) {
 	}
 }
 
+// A union needs members, each with an open; it fails when a member open
+// fails and leaves out a member that opens no provider.
 func TestUnion_constructErrors(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	if _, err := vfs.Union()(ctx, t.Name(), mount.Binding{}); err == nil {
 		t.Fatal("empty Union")
@@ -174,7 +182,10 @@ func TestUnion_constructErrors(t *testing.T) {
 	}
 }
 
+// A name no member has is not found, the union root is no file, and a
+// canceled context stops every call.
 func TestMountSession_unionMissingAndCanceled(t *testing.T) {
+	t.Parallel()
 	ms := unionSession(t, t.TempDir())
 	ctx := t.Context()
 
@@ -241,7 +252,9 @@ func TestMountSession_unionMissingAndCanceled(t *testing.T) {
 	}
 }
 
+// The union provider refuses every write and a name that leaves its root.
 func TestUnion_providerRejectsWritesAndInvalidPaths(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	p, err := vfs.Union(vfs.Local(t.TempDir()))(ctx, t.Name(), mount.Binding{})
 	if err != nil {
@@ -264,5 +277,80 @@ func TestUnion_providerRejectsWritesAndInvalidPaths(t *testing.T) {
 	}
 	if _, err := p.ReadDir(ctx, ".."); err == nil {
 		t.Fatal("ReadDir invalid")
+	}
+	docs := p.(interface {
+		OpenDocument(ctx context.Context, name string, reg *vfs.ContentRegistry) (vfs.Document, error)
+	})
+	if _, err := docs.OpenDocument(ctx, "..", nil); !errors.Is(err, vfs.ErrInvalidPath) {
+		t.Fatalf("OpenDocument invalid = %v", err)
+	}
+}
+
+// TestUnion_aMemberFailureFailsTheUnion: a member root that is gone or that
+// the user cannot list fails the mount. A first name that a member cannot
+// stat, for example a symlink out of its root, fails the lookup. A member with
+// no document I/O has no documents, and a union that the tree mounts
+// writable still refuses a document write.
+func TestUnion_aMemberFailureFailsTheUnion(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	goneRoot, err := vfs.NewLocalProvider(gone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	locked := t.TempDir()
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o750) })
+	linked := t.TempDir()
+	if err := os.Symlink(t.TempDir(), filepath.Join(linked, "out")); err != nil {
+		t.Fatal(err)
+	}
+	host := func(context.Context, string, mount.Binding) (vfs.Provider, error) {
+		return hostProvider{open: opens(hostFile{})}, nil
+	}
+	tree := func(member vfs.Open) (*vfs.MountSession, error) {
+		return vfs.Tree(vfs.At("skills", vfs.Union(member)))(ctx, t.Name(), vfs.Request{})
+	}
+	prebuilt := func(p vfs.Provider) vfs.Open {
+		return func(context.Context, string, mount.Binding) (vfs.Provider, error) { return p, nil }
+	}
+	links, err := tree(vfs.Local(linked))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hosted, err := tree(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, goneErr := tree(prebuilt(goneRoot))
+	_, lockedErr := tree(vfs.Local(locked))
+	_, linkErr := links.Route(ctx, "/workspace/skills/out/x").Stat(ctx)
+	_, hostDocErr := hosted.Route(ctx, "/workspace/skills/f").OpenDocument(ctx)
+	writeErr := links.WriteDocument(ctx, vfs.NewTextDocument("/workspace/skills/new.md", "text/markdown", "", "x"))
+
+	if !errors.Is(goneErr, fs.ErrNotExist) {
+		t.Fatalf("mount with a gone member root = %v", goneErr)
+	}
+	if !errors.Is(lockedErr, vfs.ErrPermission) {
+		t.Fatalf("mount with a member root the user cannot list = %v", lockedErr)
+	}
+	if !errors.Is(linkErr, vfs.ErrInvalidPath) {
+		t.Fatalf("stat through a symlink out of a member = %v", linkErr)
+	}
+	if !errors.Is(hostDocErr, vfs.ErrNotSupported) {
+		t.Fatalf("document of a member with no document I/O = %v", hostDocErr)
+	}
+	if !errors.Is(writeErr, vfs.ErrReadOnly) {
+		t.Fatalf("document write to a writable union = %v", writeErr)
 	}
 }

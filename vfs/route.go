@@ -117,7 +117,7 @@ func (r Route) ReadDir(ctx context.Context) ([]DirEntry, error) {
 			return nil, ErrNotExist
 		}
 		if r.Point == "/" {
-			if r.sess != nil && len(r.sess.memberEntries()) > 0 {
+			if len(r.sess.memberEntries()) > 0 {
 				return []DirEntry{{Name: "workspace", IsDir: true, Type: fs.ModeDir}}, nil
 			}
 			return []DirEntry{}, nil
@@ -187,9 +187,7 @@ func (r Route) ReadText(ctx context.Context) (Textual, error) {
 	if !ok {
 		return nil, ErrNotTextual
 	}
-	if r.sess != nil {
-		r.sess.rememberRev(t.Path(), ContentToken(t))
-	}
+	r.sess.rememberRev(t.Path(), ContentToken(t))
 	return t, nil
 }
 

@@ -11,6 +11,7 @@ import (
 // given runs (empty ones dropped, equal marks joined), and its tables keep
 // their cell marks as text.
 func TestNormalizeInline_setsCanonicalText(t *testing.T) {
+	t.Parallel()
 	doc := vfs.NewRichDocument("/Spec", googleDocMIME, []vfs.Block{
 		{Kind: vfs.BlockKindParagraph, Text: "Hello *world*"},
 		{Kind: vfs.BlockKindTable, Text: "A\t**B**"},
@@ -38,6 +39,7 @@ func TestNormalizeInline_setsCanonicalText(t *testing.T) {
 // and escaped brackets stay in the label, and adjacent runs with the same
 // marks merge.
 func TestParseInline_unclosedAndEscapes(t *testing.T) {
+	t.Parallel()
 	for in, want := range map[string]string{
 		"[nope":       `\[nope`,
 		"[x](nope":    `\[x\](nope`,

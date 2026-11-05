@@ -131,7 +131,7 @@ func (n *node) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uint3
 	if wantWrite && !n.sess.Codecs().Identity(st.MediaType) {
 		return nil, 0, syscall.EROFS
 	}
-	f, errno := openFile(ctx, n.sess, n.path, st, wantWrite, flags&syscall.O_TRUNC != 0, flags&syscall.O_APPEND != 0)
+	f, errno := openFile(ctx, n.sess, n.path, flags&syscall.O_TRUNC != 0, flags&syscall.O_APPEND != 0)
 	if errno != 0 {
 		return nil, 0, errno
 	}
@@ -156,7 +156,7 @@ func (n *node) Create(ctx context.Context, name string, flags uint32, mode uint3
 	if err != nil {
 		return nil, nil, 0, toErrno(err)
 	}
-	fh, errno := openFile(ctx, n.sess, p, st, true, flags&syscall.O_TRUNC != 0, flags&syscall.O_APPEND != 0)
+	fh, errno := openFile(ctx, n.sess, p, flags&syscall.O_TRUNC != 0, flags&syscall.O_APPEND != 0)
 	if errno != 0 {
 		return nil, nil, 0, errno
 	}
@@ -197,10 +197,7 @@ func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *node) Rename(ctx context.Context, name string, newParent fusefs.InodeEmbedder, newName string, _ uint32) syscall.Errno {
-	np, ok := newParent.(*node)
-	if !ok {
-		return syscall.EIO
-	}
+	np := newParent.(*node) //nolint:errcheck // every inode of the tree is a *node
 	if n.path == "/" || np.path == "/" {
 		return syscall.EPERM
 	}
@@ -281,33 +278,32 @@ func (n *node) stat(ctx context.Context, virtualPath string) (vfs.FileInfo, erro
 	return vfs.FileInfo{}, err
 }
 
-// file is one kernel open. Text is a plaintext snapshot; binaries keep ReaderAt.
+// file is one kernel open. Text is a plaintext snapshot; binaries keep
+// ReaderAt. The kernel sends writes and truncates only to a handle opened
+// for writing, and Open refuses those on a file that is not plain text.
 type file struct {
-	mu       sync.Mutex
-	sess     *vfs.MountSession
-	path     string
-	body     []byte
-	bin      vfs.File
-	ra       io.ReaderAt
-	dirty    bool
-	writable bool
-	oappend  bool
+	mu      sync.Mutex
+	sess    *vfs.MountSession
+	path    string
+	body    []byte
+	bin     vfs.File
+	ra      io.ReaderAt
+	dirty   bool
+	oappend bool
 }
 
-func openFile(ctx context.Context, sess *vfs.MountSession, virtualPath string, st vfs.FileInfo, writable, trunc, oappend bool) (*file, syscall.Errno) {
-	if st.IsDir {
-		return nil, syscall.EISDIR
+// openFile opens virtualPath, a file (callers stat it first). trunc implies
+// a write: Open counts O_TRUNC as one, and Create always writes.
+func openFile(ctx context.Context, sess *vfs.MountSession, virtualPath string, trunc, oappend bool) (*file, syscall.Errno) {
+	if trunc {
+		return &file{sess: sess, path: virtualPath, oappend: oappend}, 0
 	}
-	if !trunc {
-		plain, err := plaintext(ctx, sess, virtualPath)
-		if err == nil {
-			return &file{sess: sess, path: virtualPath, body: []byte(plain), writable: writable, oappend: oappend}, 0
-		}
-		if !errors.Is(err, vfs.ErrNoCodec) && !errors.Is(err, vfs.ErrNotTextual) && !errors.Is(err, vfs.ErrNotExist) {
-			return nil, toErrno(err)
-		}
-	} else if writable {
-		return &file{sess: sess, path: virtualPath, writable: true, oappend: oappend}, 0
+	plain, err := plaintext(ctx, sess, virtualPath)
+	if err == nil {
+		return &file{sess: sess, path: virtualPath, body: []byte(plain), oappend: oappend}, 0
+	}
+	if !errors.Is(err, vfs.ErrNoCodec) && !errors.Is(err, vfs.ErrNotTextual) && !errors.Is(err, vfs.ErrNotExist) {
+		return nil, toErrno(err)
 	}
 
 	h, err := sess.Route(ctx, virtualPath).Open(ctx)
@@ -330,10 +326,8 @@ func plaintext(ctx context.Context, sess *vfs.MountSession, virtualPath string) 
 	return t.Text(), nil
 }
 
+// Read reads at off. The kernel never sends a negative offset.
 func (f *file) Read(_ context.Context, dest []byte, off int64) (gofuse.ReadResult, syscall.Errno) {
-	if off < 0 {
-		return nil, syscall.EINVAL
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.ra != nil {
@@ -353,14 +347,8 @@ func (f *file) Read(_ context.Context, dest []byte, off int64) (gofuse.ReadResul
 func (f *file) Write(_ context.Context, data []byte, off int64) (uint32, syscall.Errno) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.writable {
-		return 0, syscall.EROFS
-	}
 	if f.oappend {
 		off = int64(len(f.body))
-	}
-	if off < 0 {
-		return 0, syscall.EINVAL
 	}
 	end := int(off) + len(data)
 	if end > vfs.MaxReadFileBytes || off > int64(vfs.MaxReadFileBytes) {
@@ -403,10 +391,6 @@ func (f *file) persist(ctx context.Context) syscall.Errno {
 func (f *file) setattr(ctx context.Context, in *gofuse.SetAttrIn, out *gofuse.AttrOut) syscall.Errno {
 	if sz, ok := in.GetSize(); ok {
 		f.mu.Lock()
-		if !f.writable {
-			f.mu.Unlock()
-			return syscall.EROFS
-		}
 		if sz > uint64(vfs.MaxReadFileBytes) {
 			f.mu.Unlock()
 			return syscall.EFBIG
@@ -435,8 +419,6 @@ func (f *file) getattr(out *gofuse.AttrOut) syscall.Errno {
 		if fi, err := f.bin.Stat(); err == nil {
 			st = fi
 		}
-	} else if f.writable {
-		st.MediaType = "text/plain"
 	}
 	fillAttr(&out.Attr, st, f.sess.Codecs())
 	if f.ra == nil {

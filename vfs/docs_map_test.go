@@ -5,7 +5,11 @@ import (
 	"testing"
 )
 
+// A replace of an image is refused, a replace of an empty paragraph with
+// no text sends nothing, table cells keep their inline marks, a paragraph
+// with an emoji maps, and a table that changes shape is refused.
 func TestMapReplace_imageAndEmptyAndTableMarks(t *testing.T) {
+	t.Parallel()
 	if _, err := mapReplaceBlock(blockLocation{startIndex: 1, endIndex: 2}, Block{Kind: BlockKindImage}); !errors.Is(err, ErrNotSupported) {
 		t.Fatalf("image: %v", err)
 	}
@@ -44,7 +48,11 @@ func TestMapReplace_imageAndEmptyAndTableMarks(t *testing.T) {
 	}
 }
 
+// An insert goes into the first paragraph, not a section break, and to
+// index 1 when there is none. An append after a table goes to the end of
+// the paragraph that follows it.
 func TestParagraphInsertIndex_skipsSectionBreak(t *testing.T) {
+	t.Parallel()
 	spans := []DocsSpan{
 		{StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
 		{StartIndex: 2, EndIndex: 3, Kind: "paragraph"},
@@ -69,6 +77,7 @@ func TestParagraphInsertIndex_skipsSectionBreak(t *testing.T) {
 // Only an image that came from the document keeps its object: an image
 // decoded from HTML has no Docs object to keep.
 func TestKeepImageObjectIDs_keepsOnlyDocumentImages(t *testing.T) {
+	t.Parallel()
 	got := keepImageObjectIDs([]Block{
 		{Kind: BlockKindParagraph},
 		{Kind: BlockKindImage, Style: StyleMeta{Attributes: map[string]string{"object_id": "kix.z"}}},
