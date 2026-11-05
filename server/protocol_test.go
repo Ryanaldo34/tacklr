@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -68,12 +69,21 @@ func (hostProtocol) OnStreamClosed(context.Context, server.ProtocolEnv, string, 
 // harness whose model sends nothing.
 func memoryHost(t *testing.T) *acptest.Runtime {
 	t.Helper()
+	_, k := objectHost(t, dotest.New, testkit.HTTPModel(t, nil))
+	return k
+}
+
+// objectHost is a host on the durable object platform that newPlatform
+// makes, with a real harness on model.
+func objectHost(t *testing.T, newPlatform func(durableobject.Config) *dotest.Platform, model tacklr.Model) (*dotest.Platform, *acptest.Runtime) {
+	t.Helper()
 	sealer, err := session.NewAESGCM(make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent := tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192, SystemPrompt: "test prompt"}
-	return &acptest.Runtime{Client: durableobject.NewClient(dotest.New(durableobject.Config{Agent: agent, Sealer: sealer})), Agent: agent}
+	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, SystemPrompt: "test prompt"}
+	p := newPlatform(durableobject.Config{Agent: agent, Sealer: sealer})
+	return p, &acptest.Runtime{Client: durableobject.NewClient(p), Agent: agent}
 }
 
 // errHungUp is what a write to a client that hung up gets.
@@ -87,6 +97,7 @@ func (hungUp) Write([]byte) (int, error) { return 0, errHungUp }
 // TestRunTurn_midPromptCancelThenNextPrompt: Cancel during a turn ends the
 // turn, and the next prompt on the session completes with new content.
 func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
+	t.Parallel()
 	started := make(chan struct{})
 	var startedOnce sync.Once
 	var next atomic.Bool
@@ -112,27 +123,26 @@ func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 	}
 	env := server.ProtocolEnv{Client: k.Client, Agent: k.Agent}
 
-	var sawStream atomic.Bool
+	streamed := make(chan struct{})
+	var streamedOnce sync.Once
 	firstDone := make(chan error, 1)
 	go func() {
 		firstDone <- server.RunTurn(ctx, env, hostProtocol{onEvent: func(ev session.Event) server.StreamControl {
 			if ev.Type == session.EventMessage {
-				sawStream.Store(true)
+				streamedOnce.Do(func() { close(streamed) })
 			}
 			return server.StreamControl{Finished: ev.Type == session.EventComplete || ev.Type == session.EventError}
 		}}, string(id), nil, server.PromptOrResume{Prompt: session.Prompt{Text: "hi"}})
 	}()
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("prompt did not start")
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for !sawStream.Load() {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for first stream event")
+	for _, step := range []struct {
+		done <-chan struct{}
+		what string
+	}{{started, "the prompt to start"}, {streamed, "the first stream event"}} {
+		select {
+		case <-step.done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %s", step.what)
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 	if err := k.Client.Cancel(ctx, id); err != nil {
 		t.Fatal(err)
@@ -167,8 +177,10 @@ func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 // TestRunTurn_returnsEachFailureOfTheTurn: RunTurn fails for a session the
 // client does not have, a prompt or resume it cannot encode, a resume after
 // the session closed, a stream that ends before the turn's result, a
+// stream that breaks when the platform evicts the session's object, a
 // failure of the protocol, and a frame the client cannot get.
 func TestRunTurn_returnsEachFailureOfTheTurn(t *testing.T) {
+	t.Parallel()
 	k := acptest.NewRuntime(t, testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "x", IsComplete: true}
 	}), tacklr.AgentOptions{})
@@ -191,8 +203,25 @@ func TestRunTurn_returnsEachFailureOfTheTurn(t *testing.T) {
 	}
 	encodeErr := errors.New("encode")
 	sid, resumed, ended := newSession(), newSession(), newSession()
+	// The object platform: each call goes over the object protocol, and
+	// its model streams until the turn ends.
+	platform, objects := objectHost(t, dotest.NewWire, testkit.HTTPModel(t, func(ctx context.Context, _ []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "early"}
+		<-ctx.Done()
+	}))
+	objectEnv := server.ProtocolEnv{Client: objects.Client, Agent: objects.Agent}
+	evict, err := objects.Client.CreateSession(t.Context(), session.CreateSession{})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	missing := server.RunTurn(t.Context(), env, hostProtocol{}, "missing", nil, hi)
+	missing := server.RunTurn(t.Context(), objectEnv, hostProtocol{}, "missing", nil, hi)
+	evicted := server.RunTurn(t.Context(), objectEnv, hostProtocol{onEvent: func(ev session.Event) server.StreamControl {
+		if ev.Type == session.EventMessage {
+			platform.Evict(evict)
+		}
+		return server.StreamControl{}
+	}}, string(evict), nil, hi)
 	badPrompt := server.RunTurn(t.Context(), env, hostProtocol{}, sid, nil, server.PromptOrResume{
 		Prompt: session.Prompt{Text: "hi", State: map[string]any{"ch": make(chan int)}},
 	})
@@ -217,6 +246,9 @@ func TestRunTurn_returnsEachFailureOfTheTurn(t *testing.T) {
 	if streamEnded == nil || !strings.Contains(streamEnded.Error(), "without a result") {
 		t.Errorf("stream ended: RunTurn = %v, want the turn without a result", streamEnded)
 	}
+	if evicted == nil || !strings.Contains(evicted.Error(), "turn stream:") {
+		t.Errorf("evicted: RunTurn = %v, want the broken stream's failure", evicted)
+	}
 	if !errors.Is(protocolErr, encodeErr) || !errors.Is(writeErr, errHungUp) {
 		t.Errorf("protocol failure = %v, write failure = %v; want each failure", protocolErr, writeErr)
 	}
@@ -224,45 +256,63 @@ func TestRunTurn_returnsEachFailureOfTheTurn(t *testing.T) {
 
 // TestServeHTTP_servesItsRoutesUntilItsContextEnds: a server with no
 // network policy does not serve; one that allows anonymous access serves
-// its protocols' routes until its context ends; and a second server on the
-// same address fails to listen.
+// its protocols' routes until its context ends, at once when it has ended
+// already; and a server fails on an address in use and on a listener that
+// cannot accept.
 func TestServeHTTP_servesItsRoutesUntilItsContextEnds(t *testing.T) {
+	t.Parallel()
 	k := memoryHost(t)
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	newServer := func() *server.Server { return server.NewServer(k.Client, k.Agent, hostProtocol{}) }
+	listen := func() net.Listener {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ln
 	}
-	addr := l.Addr().String()
-	_ = l.Close()
+	ln, closed, refused := listen(), listen(), listen()
+	_ = closed.Close()
+	ended, end := context.WithCancel(t.Context())
+	end()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	served := make(chan error, 1)
+	go func() { served <- newServer().AllowAnonymousNetwork().Serve(ctx, ln) }()
 
-	noPolicy := server.NewServer(k.Client, k.Agent, hostProtocol{}).ServeHTTP(t.Context(), addr)
-	go func() {
-		served <- server.NewServer(k.Client, k.Agent, hostProtocol{}).AllowAnonymousNetwork().ServeHTTP(ctx, addr)
-	}()
-	var body string
-	for deadline := time.Now().Add(5 * time.Second); body == "" && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if resp, err := http.Get("http://" + addr + "/healthz"); err == nil {
-			b := make([]byte, 2)
-			_, _ = resp.Body.Read(b)
-			_ = resp.Body.Close()
-			body = string(b)
-		}
+	noPolicy := newServer().ServeHTTP(t.Context(), "127.0.0.1:0")
+	noPolicyListener := newServer().Serve(t.Context(), refused)
+	inUse := newServer().AllowAnonymousNetwork().ServeHTTP(t.Context(), ln.Addr().String())
+	cannotAccept := newServer().AllowAnonymousNetwork().Serve(t.Context(), closed)
+	endedFirst := newServer().AllowAnonymousNetwork().ServeHTTP(ended, "127.0.0.1:0")
+	// The listener is open, so the request waits in its backlog until the
+	// server accepts it.
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+ln.Addr().String()+"/healthz", nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	inUse := server.NewServer(k.Client, k.Agent, hostProtocol{}).AllowAnonymousNetwork().ServeHTTP(t.Context(), addr)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
 	cancel()
 
-	if !errors.Is(noPolicy, server.ErrNetworkSecurityPolicyRequired) || body != "ok" || inUse == nil {
-		t.Fatalf("no policy = %v, served %q, address in use = %v; want refused, ok, a listen failure", noPolicy, body, inUse)
+	for name, err := range map[string]error{"ServeHTTP": noPolicy, "Serve": noPolicyListener} {
+		if !errors.Is(err, server.ErrNetworkSecurityPolicyRequired) {
+			t.Errorf("%s with no policy = %v, want it refused", name, err)
+		}
+	}
+	if string(body) != "ok" || inUse == nil || cannotAccept == nil || !errors.Is(endedFirst, context.Canceled) {
+		t.Fatalf("served %q, address in use = %v, closed listener = %v, ended context = %v; want ok, then each failure", body, inUse, cannotAccept, endedFirst)
 	}
 	select {
 	case err := <-served:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("ServeHTTP = %v, want the context's end", err)
+			t.Fatalf("Serve = %v, want the context's end", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("ServeHTTP did not return after its context ended")
+		t.Fatal("Serve did not return after its context ended")
 	}
 }

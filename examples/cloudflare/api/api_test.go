@@ -106,6 +106,7 @@ func events(t *testing.T, srv *httptest.Server, id string, until session.EventTy
 // status and no jobs, cancels with nothing running, and closes the session,
 // which is then gone.
 func TestAPI_aClientRunsAParkedTurnToItsEndAndClosesTheSession(t *testing.T) {
+	t.Parallel()
 	srv, _ := server(t)
 	created, body := call(t, srv, http.MethodPost, "/sessions", "")
 	var out struct{ ID string }
@@ -141,6 +142,7 @@ func TestAPI_aClientRunsAParkedTurnToItsEndAndClosesTheSession(t *testing.T) {
 // unknown session is not found; and storage that is down is a server
 // error.
 func TestAPI_refusesRequestsItCannotServe(t *testing.T) {
+	t.Parallel()
 	srv, p := server(t)
 	open := httptest.NewServer(api.Handler(nil, ""))
 	t.Cleanup(open.Close)

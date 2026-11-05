@@ -18,6 +18,7 @@ import (
 // the session is its principal's, so another principal cannot load it; and
 // after logout the client cannot make one.
 func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
+	t.Parallel()
 	service := &server.Service{
 		Authenticator: authenticatorFunc(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
 			if attempt.Scheme != "host-login" {
@@ -75,8 +76,10 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 // TestServer_WithSecurity_authenticatesHTTPRequests: a route that needs
 // authentication serves a request with a credential the host accepts, and
 // answers 401 to one with no credential or a bad one; the ACP route, which
-// authenticates in its own protocol, asks a plain GET to upgrade.
+// authenticates in its own protocol, asks a plain GET to upgrade, and
+// refuses an upgrade with no WebSocket version as a bad request.
 func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
+	t.Parallel()
 	service := &server.Service{
 		Authenticator: authenticatorFunc(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
 			if string(attempt.Credential.Bytes()) == "bad" {
@@ -90,11 +93,14 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		return server.Attempt{Scheme: "bearer", Credential: server.NewSecret([]byte(token))}, ok
 	}).HTTPMux()
-	serve := func(path, token string) *httptest.ResponseRecorder {
+	serve := func(path, token string, header ...string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		for i := 0; i < len(header); i += 2 {
+			req.Header.Set(header[i], header[i+1])
 		}
 		mux.ServeHTTP(rec, req)
 		return rec
@@ -104,6 +110,7 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 	anonymous := serve("/healthz", "")
 	bad := serve("/healthz", "bad")
 	acpGet := serve("/acp", "")
+	badUpgrade := serve("/acp", "", "Connection", "Upgrade", "Upgrade", "websocket")
 
 	if authorized.Code != http.StatusOK || authorized.Body.String() != "ok" {
 		t.Fatalf("authorized = %d %s", authorized.Code, authorized.Body.String())
@@ -111,7 +118,36 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 	if anonymous.Code != http.StatusUnauthorized || bad.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous = %d, bad credential = %d; want 401 each", anonymous.Code, bad.Code)
 	}
-	if acpGet.Code != http.StatusUpgradeRequired {
-		t.Fatalf("unauthenticated ACP GET = %d, want upgrade required", acpGet.Code)
+	if acpGet.Code != http.StatusUpgradeRequired || badUpgrade.Code != http.StatusBadRequest {
+		t.Fatalf("unauthenticated ACP GET = %d, upgrade with no version = %d; want upgrade required, bad request", acpGet.Code, badUpgrade.Code)
+	}
+}
+
+// TestServer_panicsOnAConfigurationItCannotServe: a server with no session
+// client or no protocol, security with no service, and ACP auth methods
+// with no id, no name or the same id twice are programming errors of the
+// host, so each panics.
+func TestServer_panicsOnAConfigurationItCannotServe(t *testing.T) {
+	t.Parallel()
+	k := memoryHost(t)
+	for name, configure := range map[string]func(){
+		"no session client": func() { server.NewServer(nil, k.Agent, acp.New(nil)) },
+		"no protocol":       func() { server.NewServer(k.Client, k.Agent) },
+		"no security":       func() { server.NewServer(k.Client, k.Agent, acp.New(nil)).WithSecurity(nil, nil) },
+		"auth method no id": func() { acp.NewWithAuth(nil, []acp.ACPAuthMethod{{Name: "Login"}}, false) },
+		"auth method twice": func() {
+			acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login"}, {ID: "login", Name: "Again"}}, false)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				if recover() == nil {
+					t.Fatal("configured, want a panic")
+				}
+			}()
+
+			configure()
+		})
 	}
 }

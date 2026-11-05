@@ -5,7 +5,7 @@
 // More protocols can be mounted on the same Server:
 //
 //	srv := server.NewServer(rt, agent, acp.New(nil), myProtocol{})
-//	_ = srv.ServeHTTP(ctx, addr)
+//	_ = srv.ServeHTTP(ctx, addr) // or srv.Serve(ctx, listener)
 //
 // The program on the other end of a connection is the caller's. This module
 // does not ship that program. A protocol asks it through Conn.Ask.

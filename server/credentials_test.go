@@ -10,6 +10,7 @@ import (
 // TestCredentialBag_rejectsAnInvalidBinding: a binding the VFS cannot
 // mount is not kept.
 func TestCredentialBag_rejectsAnInvalidBinding(t *testing.T) {
+	t.Parallel()
 	var bag server.CredentialBag
 
 	err := bag.Bind(mount.Binding{})

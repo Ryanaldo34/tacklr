@@ -96,14 +96,11 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env server.ProtocolEnv,
 	var errs []itemErr
 	for _, item := range params.Backends {
 		b := item.binding()
-		if err := b.Validate(); err != nil {
-			errs = append(errs, itemErr{Point: item.Point, Error: err.Error()})
-			continue
-		}
 		if !env.Workspace {
 			errs = append(errs, itemErr{Point: item.Point, Error: "unknown vfs profile " + b.Provider})
 			continue
 		}
+		// Bind validates b.
 		if err := sess.creds.Bind(b); err != nil {
 			errs = append(errs, itemErr{Point: item.Point, Error: err.Error()})
 			continue

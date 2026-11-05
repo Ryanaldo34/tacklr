@@ -21,36 +21,27 @@ import (
 
 // acpWireSession is live ACP wire state for one session id (not harness state).
 type acpWireSession struct {
-	mu           sync.Mutex
-	cwd          string
-	mcpServers   []session.MCPServer
-	configValues map[string]string
-	owner        string
-	creds        server.CredentialBag
+	mu         sync.Mutex
+	cwd        string
+	mcpServers []session.MCPServer
+	owner      string
+	creds      server.CredentialBag
 }
 
 // acpWireEnvelope is the durable JSON blob in server.ProtocolWireStore.
 type acpWireEnvelope struct {
-	CWD          string              `json:"cwd"`
-	ConfigValues map[string]string   `json:"configValues"`
-	MCPServers   []session.MCPServer `json:"mcpServers"`
-	Owner        string              `json:"owner,omitempty"`
+	CWD        string              `json:"cwd"`
+	MCPServers []session.MCPServer `json:"mcpServers"`
+	Owner      string              `json:"owner,omitempty"`
 }
 
 func (s *acpWireSession) envelope() acpWireEnvelope {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Copy map/slice so concurrent setConfig/bindTurn cannot race json.Marshal
-	// after this lock is released.
-	cfg := make(map[string]string, len(s.configValues))
-	for k, v := range s.configValues {
-		cfg[k] = v
-	}
 	return acpWireEnvelope{
-		CWD:          s.cwd,
-		ConfigValues: cfg,
-		MCPServers:   session.DurableMCPServers(s.mcpServers),
-		Owner:        s.owner,
+		CWD:        s.cwd,
+		MCPServers: session.DurableMCPServers(s.mcpServers),
+		Owner:      s.owner,
 	}
 }
 
@@ -62,15 +53,10 @@ func (s *acpWireSession) cwdMismatch(cwd string) error {
 }
 
 func wireSessionFromEnvelope(env acpWireEnvelope) *acpWireSession {
-	cfg := make(map[string]string, len(env.ConfigValues))
-	for k, v := range env.ConfigValues {
-		cfg[k] = v
-	}
 	return &acpWireSession{
-		cwd:          env.CWD,
-		mcpServers:   append([]session.MCPServer(nil), env.MCPServers...),
-		configValues: cfg,
-		owner:        env.Owner,
+		cwd:        env.CWD,
+		mcpServers: env.MCPServers,
+		owner:      env.Owner,
 	}
 }
 
@@ -116,10 +102,9 @@ func (p *acpProtocol) createSession(ctx context.Context, env server.ProtocolEnv,
 	}
 	sessionID := uuid.NewString()
 	sess := &acpWireSession{
-		cwd:          pr.CWD,
-		mcpServers:   pr.MCPServers,
-		configValues: map[string]string{},
-		owner:        securitySubject(env),
+		cwd:        pr.CWD,
+		mcpServers: pr.MCPServers,
+		owner:      securitySubject(env),
 	}
 	p.mu.Lock()
 	p.sessions[sessionID] = sess
@@ -237,7 +222,8 @@ func (p *acpProtocol) closeSession(ctx context.Context, env server.ProtocolEnv, 
 	return nil
 }
 
-func (p *acpProtocol) setConfig(ctx context.Context, env server.ProtocolEnv, sessionID, configID, _ string) (any, error) {
+// setConfig refuses each config option: the agent advertises none.
+func (p *acpProtocol) setConfig(ctx context.Context, env server.ProtocolEnv, sessionID, configID string) (any, error) {
 	if _, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionConfig); err != nil {
 		return nil, err
 	}

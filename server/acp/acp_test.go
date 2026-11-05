@@ -82,6 +82,7 @@ func prompt(id, sessionID, blocks string) string {
 // stop reason; a load in another cwd is refused; and a closed session is
 // not found.
 func TestHandleRPC_sessionOutcomes(t *testing.T) {
+	t.Parallel()
 	var sawLink, sawImage, sawPDF atomic.Bool
 	mark := tacklr.NewTool(tacklr.ToolConfig{
 		Name:        "mark_item",
@@ -124,6 +125,7 @@ func TestHandleRPC_sessionOutcomes(t *testing.T) {
 	}
 
 	t.Run("contentBlocksReachTheModel", func(t *testing.T) {
+		t.Parallel()
 		initialize := srv.RPC(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
 		rec := srv.RPC(prompt("3", newSession(t), `[`+
 			`{"type":"text","text":"review"},`+
@@ -143,6 +145,7 @@ func TestHandleRPC_sessionOutcomes(t *testing.T) {
 	})
 
 	t.Run("unreadablePromptsAreRefused", func(t *testing.T) {
+		t.Parallel()
 		sid := newSession(t)
 		for _, blocks := range []string{
 			`[{"type":"audio","mimeType":"audio/wav","data":"AAAA"}]`,
@@ -164,6 +167,7 @@ func TestHandleRPC_sessionOutcomes(t *testing.T) {
 	})
 
 	t.Run("anotherCWDIsRefused", func(t *testing.T) {
+		t.Parallel()
 		sid := newSession(t)
 		inPrompt := srv.RPC(`{"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":"` + sid + `","cwd":"/other","prompt":[{"type":"text","text":"x"}]}}`)
 		inLoad := srv.RPC(`{"jsonrpc":"2.0","id":6,"method":"session/load","params":{"sessionId":"` + sid + `","cwd":"/other"}}`)
@@ -175,6 +179,7 @@ func TestHandleRPC_sessionOutcomes(t *testing.T) {
 	})
 
 	t.Run("toolCallsShowTitleNameAndKind", func(t *testing.T) {
+		t.Parallel()
 		rec := srv.RPC(prompt("7", newSession(t), `[{"type":"text","text":"mark"}]`))
 		calls := map[any]map[string]any{}
 		for _, f := range acptest.Frames(t, rec.Body) {
@@ -193,6 +198,7 @@ func TestHandleRPC_sessionOutcomes(t *testing.T) {
 	})
 
 	t.Run("stopReasons", func(t *testing.T) {
+		t.Parallel()
 		refusal := stopReason(t, srv.RPC(prompt("8", newSession(t), `[{"type":"text","text":"refuse"}]`)))
 		maxTokens := stopReason(t, srv.RPC(prompt("9", newSession(t), `[{"type":"text","text":"long"}]`)))
 		if refusal != "refusal" || maxTokens != "max_tokens" {
@@ -201,6 +207,7 @@ func TestHandleRPC_sessionOutcomes(t *testing.T) {
 	})
 
 	t.Run("closedSessionIsNotFound", func(t *testing.T) {
+		t.Parallel()
 		sid := newSession(t)
 		closed := acptest.Result(t, srv.RPC(`{"jsonrpc":"2.0","id":10,"method":"session/close","params":{"sessionId":"`+sid+`"}}`))
 		load := rpcError(t, srv.RPC(`{"jsonrpc":"2.0","id":11,"method":"session/load","params":{"sessionId":"`+sid+`","cwd":"/proj"}}`))
@@ -211,12 +218,15 @@ func TestHandleRPC_sessionOutcomes(t *testing.T) {
 }
 
 // TestHandleRPC_sessionPrompt_streamsEvents: a prompt streams the turn's
-// reasoning and message as session/update chunks, each text once, and ends
-// with a result; a model that reads text only refuses an image.
+// reasoning and message as session/update chunks, each text once (a
+// complete reasoning or message whose deltas streamed sends no text again),
+// and ends with a result; a model that reads text only refuses an image.
 func TestHandleRPC_sessionPrompt_streamsEvents(t *testing.T) {
+	t.Parallel()
 	model := testkit.TextHTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		ch <- tacklr.LLMResponseChunk{Type: session.EventReasoning, Content: "", IsComplete: false}
 		ch <- tacklr.LLMResponseChunk{Type: session.EventReasoning, Content: "thinking", IsComplete: false}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventReasoning, IsComplete: true}
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "", IsComplete: false}
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "hello", IsComplete: true}
 	})
@@ -251,6 +261,7 @@ func TestHandleRPC_sessionPrompt_streamsEvents(t *testing.T) {
 // workspace makes and loads sessions, refuses a vfs bind with an unknown
 // profile error, and fails a prompt.
 func TestHandleRPC_noAgentConfigured_onPrompt(t *testing.T) {
+	t.Parallel()
 	srv := acptest.NewServer(t, &acptest.Runtime{Client: livesess.Runtime(t, tacklr.AgentOptions{}, workspace.Config{})}, server.NewMemoryWireStore())
 	sid := acptest.SessionID(t, srv.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
 
@@ -274,6 +285,7 @@ func TestHandleRPC_noAgentConfigured_onPrompt(t *testing.T) {
 // hung up fails with the write's error, and a call whose context ends
 // returns the context's error.
 func TestClientBridge_callFailsWhenTheClientIsGone(t *testing.T) {
+	t.Parallel()
 	ended, cancel := context.WithCancel(t.Context())
 	cancel()
 
@@ -282,5 +294,38 @@ func TestClientBridge_callFailsWhenTheClientIsGone(t *testing.T) {
 
 	if !errors.Is(hungUpErr, errHungUp) || !errors.Is(endedErr, context.Canceled) {
 		t.Fatalf("hung up = %v, ended = %v; want the write's and the context's errors", hungUpErr, endedErr)
+	}
+}
+
+// TestOnEvent_presentsTheEventsAHostPumps: a host that pumps the events of
+// its own model through the ACP stream policy gets the text of a tool
+// call's message before the call, and an error with no text ends the
+// prompt as an internal error.
+func TestOnEvent_presentsTheEventsAHostPumps(t *testing.T) {
+	t.Parallel()
+	proto := acp.New(nil)
+	call := session.Event{Type: session.EventFunctionCall, Content: "calling", ToolCalls: []message.ToolCall{{ID: "c1", CallID: "c1", Name: "lookup"}}}
+
+	called := proto.OnEvent(t.Context(), server.ProtocolEnv{}, "s1", call, nil)
+	failed := proto.OnEvent(t.Context(), server.ProtocolEnv{}, "s1", session.Event{Type: session.EventError}, json.RawMessage(`7`))
+
+	var frames []map[string]any
+	for _, f := range append(called.Frames, failed.Frames...) {
+		var frame map[string]any
+		if err := json.Unmarshal(f, &frame); err != nil {
+			t.Fatal(err)
+		}
+		frames = append(frames, frame)
+	}
+	if len(frames) != 3 {
+		t.Fatalf("frames = %v, want the text, the call and the error", frames)
+	}
+	text, _ := frames[0]["params"].(map[string]any)["update"].(map[string]any)
+	tool, _ := frames[1]["params"].(map[string]any)["update"].(map[string]any)
+	if text["sessionUpdate"] != "agent_message_chunk" || text["content"].(map[string]any)["text"] != "calling" || tool["sessionUpdate"] != "tool_call" {
+		t.Errorf("tool call frames = %v, want its text, then the call", frames[:2])
+	}
+	if msg, _ := frames[2]["error"].(map[string]any)["message"].(string); msg != "internal error" || frames[2]["id"] != float64(7) || !failed.Finished {
+		t.Errorf("error with no text = %v (finished %v), want the prompt's internal error", frames[2], failed.Finished)
 	}
 }

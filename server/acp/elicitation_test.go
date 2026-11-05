@@ -31,14 +31,16 @@ func (*plainInterrupt) Error() string              { return "waiting" }
 func init() { tacklr.RegisterInterrupt(func() tacklr.Interrupt { return &plainInterrupt{} }) }
 
 // TestACP_interruptOutcomes: when a turn parks and the client can answer,
-// the agent asks it mid-turn: an allowed permission runs the tool, and an
-// accepted choice resumes the turn with it, to end_turn. An answer the
+// the agent asks it mid-turn: an allowed permission runs the tool (a tool
+// whose title is empty is shown by its name), and an accepted choice
+// resumes the turn with it, to end_turn. An answer the
 // agent cannot use, or an error from the client, ends the prompt with an
 // error, and a client that hangs up while asked cancels the turn. A park
 // the client cannot answer (no form support, an interrupt with no ACP
 // form, or a client on HTTP) ends the prompt with an error that the turn
 // needs user input.
 func TestACP_interruptOutcomes(t *testing.T) {
+	t.Parallel()
 	askUser := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, cc *tacklr.CallContext) (string, error) {
@@ -56,6 +58,13 @@ func TestACP_interruptOutcomes(t *testing.T) {
 		Name:    "sensitive",
 		OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) { return "approved", nil },
+	})
+	// The title of untitled names an argument the model does not send.
+	untitled := tacklr.NewTool(tacklr.ToolConfig{
+		Name:        "untitled",
+		DisplayName: "{target}",
+		OnCall:      []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
+		Handler:     func(ctx context.Context) (string, error) { return "approved untitled", nil },
 	})
 	waitChild := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "wait_child",
@@ -75,7 +84,7 @@ func TestACP_interruptOutcomes(t *testing.T) {
 			{ID: "c-" + last.Content, CallID: "c-" + last.Content, Name: last.Content, Arguments: `{}`},
 		}}
 	})
-	r := acptest.NewRuntime(t, model, tacklr.AgentOptions{Tools: []*tacklr.Tool{askUser, sensitive, waitChild}})
+	r := acptest.NewRuntime(t, model, tacklr.AgentOptions{Tools: []*tacklr.Tool{askUser, sensitive, untitled, waitChild}})
 	hs, srv := startACPWSServer(t, r)
 	form := dial(t, hs, `{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{},"url":null}}}`)
 	plain := dial(t, hs, `{"protocolVersion":1,"clientCapabilities":{"_meta":{"tacklr":{"vfs":{"tokenRefresh":true}}}}}`)
@@ -99,6 +108,12 @@ func TestACP_interruptOutcomes(t *testing.T) {
 		ends bool
 	}{
 		{"allowedPermission", plain, "sensitive", permission(map[string]any{"outcome": "selected", "optionId": "allow-once"}), "approved", true},
+		{"untitledPermissionShowsTheToolName", plain, "untitled", func(req map[string]any) any {
+			if req["params"].(map[string]any)["toolCall"].(map[string]any)["title"] != "untitled" {
+				return permission(map[string]any{"outcome": "cancelled"})(req)
+			}
+			return permission(map[string]any{"outcome": "selected", "optionId": "allow-once"})(req)
+		}, "approved untitled", true},
 		{"acceptedChoice", form, "ask_user", reply(map[string]any{"action": "accept", "content": map[string]any{"choice": "A"}}), "selected: A", true},
 		{"cancelledPermission", plain, "sensitive", permission(map[string]any{"outcome": "cancelled"}), "cancelled", false},
 		{"unknownPermissionOutcome", plain, "sensitive", permission(map[string]any{"outcome": "nope"}), "", false},
@@ -178,6 +193,7 @@ func TestACP_interruptOutcomes(t *testing.T) {
 // checkpoints, then a second session/prompt loads the store and list_plan shows
 // restored statuses.
 func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	phase := "turn1"
 	var turn1Steps, turn2Steps int

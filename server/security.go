@@ -17,9 +17,6 @@ type HTTPAttemptExtractor func(*http.Request) (Attempt, bool)
 // extraction. Protocol-native flows such as ACP authenticate can use service
 // without an extractor.
 func (s *Server) WithSecurity(service *Service, extract HTTPAttemptExtractor) *Server {
-	if s == nil {
-		panic("server: nil Server")
-	}
 	if service == nil {
 		panic("server: security Service is required")
 	}
@@ -33,9 +30,6 @@ func (s *Server) WithSecurity(service *Service, extract HTTPAttemptExtractor) *S
 // AllowAnonymousNetwork explicitly enables unauthenticated network serving.
 // It is intended for local development and trusted private environments.
 func (s *Server) AllowAnonymousNetwork() *Server {
-	if s == nil {
-		panic("server: nil Server")
-	}
 	s.Security = nil
 	s.HTTPAttempt = nil
 	s.allowAnonymousNetwork = true

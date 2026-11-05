@@ -132,6 +132,7 @@ func (c *wsClient) prompt(sid, text string) int {
 // cancelled; and a client that closes its socket cancels its running model
 // call, and its connection leaves the registry.
 func TestACP_WS_cancelAndDisconnectEndTheTurn(t *testing.T) {
+	t.Parallel()
 	started := map[string]chan struct{}{"cancel": make(chan struct{}, 1), "disconnect": make(chan struct{}, 1)}
 	stopped := map[string]chan struct{}{"cancel": make(chan struct{}, 1), "disconnect": make(chan struct{}, 1)}
 	signal := func(ch chan struct{}) {
@@ -157,7 +158,7 @@ func TestACP_WS_cancelAndDisconnectEndTheTurn(t *testing.T) {
 	}
 	c := dial(t, hs, `{"protocolVersion":1}`)
 	d := dial(t, hs, `{"protocolVersion":1}`)
-	registered := srv.Connections.Get(d.ID) != nil
+	connection := srv.Connections.Get(d.ID)
 
 	c.send(`{`)
 	c.send(`{"jsonrpc":"2.0","id":99,"result":{}}`)
@@ -171,9 +172,15 @@ func TestACP_WS_cancelAndDisconnectEndTheTurn(t *testing.T) {
 	wait(started["disconnect"], "start")
 	_ = d.conn.Close(websocket.StatusNormalClosure, "")
 	wait(stopped["disconnect"], "stop")
-	removed := false
-	for deadline := time.Now().Add(2 * time.Second); !removed && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-		removed = srv.Connections.Get(d.ID) == nil
+	// The registry ends a connection's context when it removes it.
+	removed := connection != nil
+	if removed {
+		select {
+		case <-connection.Context().Done():
+			removed = srv.Connections.Get(d.ID) == nil
+		case <-time.After(2 * time.Second):
+			removed = false
+		}
 	}
 
 	for _, e := range notRequests {
@@ -184,7 +191,7 @@ func TestACP_WS_cancelAndDisconnectEndTheTurn(t *testing.T) {
 	if res, _ := cancelled["result"].(map[string]any); res["stopReason"] != "cancelled" {
 		t.Errorf("cancelled prompt = %v, want stopReason cancelled", cancelled)
 	}
-	if d.ID == "" || !registered || !removed {
-		t.Errorf("connection %q registered %v, removed after close %v; want both", d.ID, registered, removed)
+	if d.ID == "" || connection == nil || !removed {
+		t.Errorf("connection %q registered %v, removed after close %v; want both", d.ID, connection != nil, removed)
 	}
 }

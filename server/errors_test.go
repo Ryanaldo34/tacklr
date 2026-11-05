@@ -28,6 +28,7 @@ import (
 // each sentinel is reachable from HandleInbound, errors.Is holds, and the
 // JSON-RPC code on the wire is the one consumers should switch on.
 func TestHandleInbound_errorContract(t *testing.T) {
+	t.Parallel()
 	assert := func(t *testing.T, err, sentinel error, code int, public error) {
 		t.Helper()
 		if !errors.Is(err, sentinel) {
@@ -48,21 +49,25 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	login := []acp.ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}
 
 	t.Run("methodNotFound", func(t *testing.T) {
+		t.Parallel()
 		err := acptest.WrittenError(t, acp.New(nil), env, `{"jsonrpc":"2.0","id":1,"method":"session/foo","params":{}}`)
 		assert(t, err, server.ErrMethodNotFound, acp.CodeMethodNotFound, server.ErrMethodNotFound)
 	})
 
 	t.Run("invalidRequest", func(t *testing.T) {
+		t.Parallel()
 		err := acptest.WrittenError(t, acp.New(nil), env, `{"jsonrpc":"2.0","id":1,"method":"session/load","params":{}}`)
 		assert(t, err, server.ErrInvalidRequest, acp.CodeInvalidRequest, server.ErrInvalidRequest)
 	})
 
 	t.Run("sessionNotFound", func(t *testing.T) {
+		t.Parallel()
 		err := acptest.WrittenError(t, acp.New(nil), env, `{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"missing"}}`)
 		assert(t, err, server.ErrSessionNotFound, acp.CodeApplication, server.ErrSessionNotFound)
 	})
 
 	t.Run("unknownConfig", func(t *testing.T) {
+		t.Parallel()
 		proto := acp.New(nil)
 		sid := acptest.SessionID(t, acptest.Serve(t, k, proto, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
 		err := acptest.WrittenError(t, proto, env,
@@ -71,11 +76,13 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	})
 
 	t.Run("authenticationRequired", func(t *testing.T) {
+		t.Parallel()
 		err := acptest.WrittenError(t, acp.NewWithAuth(nil, login, false), env, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 		assert(t, err, server.ErrAuthenticationRequired, acp.CodeApplication, server.ErrAuthenticationRequired)
 	})
 
 	t.Run("authenticationFailed", func(t *testing.T) {
+		t.Parallel()
 		service := &server.Service{Authenticator: authenticatorFunc(func(context.Context, server.Attempt) (server.Principal, error) {
 			return server.Principal{}, server.ErrAuthenticationFailed
 		})}
@@ -86,6 +93,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	})
 
 	t.Run("authorizationDenied", func(t *testing.T) {
+		t.Parallel()
 		alice, err := server.NewPrincipal("alice")
 		if err != nil {
 			t.Fatal(err)
@@ -107,6 +115,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	})
 
 	t.Run("cancelledContext", func(t *testing.T) {
+		t.Parallel()
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 		err := acp.New(nil).HandleInbound(ctx, server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: &server.Conn{Writer: acp.HTTPWriter(httptest.NewRecorder())}},
@@ -117,6 +126,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	})
 
 	t.Run("internalProviderFailure", func(t *testing.T) {
+		t.Parallel()
 		failing := acptest.NewRuntime(t, testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{Type: session.EventError, Error: errors.New("provider down"), Content: "provider down"}
 		}), tacklr.AgentOptions{})
@@ -138,8 +148,10 @@ func TestHandleInbound_errorContract(t *testing.T) {
 // TestHandleInbound_sessionWireOutcomes: the protocol answers each request
 // it can serve, and refuses each one it cannot: a bad request, an unknown
 // session or auth method, a client that has not said hello, a principal the
-// host denies, a wire store or a Temporal cluster that is down.
+// host denies, a wire store or a Temporal cluster that is down, and a
+// connection with no writer, which gets the error only as the return.
 func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
+	t.Parallel()
 	k := memoryHost(t)
 	proto := acp.New(nil)
 	env := server.ProtocolEnv{Client: k.Client, Agent: k.Agent}
@@ -249,6 +261,7 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 		refused[name] = req.proto.HandleInbound(ctx, req.env, []byte(req.body))
 		cancel()
 	}
+	refused["no writer"] = proto.HandleInbound(t.Context(), server.ProtocolEnv{Client: k.Client, Conn: &server.Conn{}}, []byte(`{`))
 	closeDown := acptest.WrittenError(t, pgProto, env, `{"jsonrpc":"2.0","id":29,"method":"session/close","params":{"sessionId":"`+pgSID+`"}}`)
 
 	for name, err := range served {

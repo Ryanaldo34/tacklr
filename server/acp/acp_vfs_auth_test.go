@@ -29,6 +29,7 @@ import (
 // binding or with no provider, and an unbind with no session; after the
 // unbind the file is not found.
 func TestACP_vfsBindRefreshUnbind(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)

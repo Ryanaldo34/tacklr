@@ -41,6 +41,7 @@ func newTestMCPServer(t *testing.T, toolName string) *httptest.Server {
 // the new server's tools in place of the old one's, and a call to one
 // returns the server's result to the client.
 func TestHandleRPC_sessionResume_overridesMCPServers(t *testing.T) {
+	t.Parallel()
 	serverA := newTestMCPServer(t, "tool_a")
 	serverB := newTestMCPServer(t, "tool_b")
 	var mu sync.Mutex

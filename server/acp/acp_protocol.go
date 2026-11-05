@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
@@ -55,10 +56,12 @@ func New(wire server.ProtocolWireStore) server.Protocol {
 
 // NewWithAuth configures the ACP v1 presentation for a generic host
 // security service. It does not implement credential verification itself.
+// It does not change methods.
 func NewWithAuth(wire server.ProtocolWireStore, methods []ACPAuthMethod, logout bool) server.Protocol {
 	if wire == nil {
 		wire = server.NewMemoryWireStore()
 	}
+	methods = slices.Clone(methods)
 	seen := make(map[string]struct{}, len(methods))
 	for i := range methods {
 		methods[i].ID = strings.TrimSpace(methods[i].ID)
@@ -78,7 +81,7 @@ func NewWithAuth(wire server.ProtocolWireStore, methods []ACPAuthMethod, logout 
 	return &acpProtocol{
 		sessions:    make(map[string]*acpWireSession),
 		wire:        wire,
-		authMethods: append([]ACPAuthMethod(nil), methods...),
+		authMethods: methods,
 		logout:      logout,
 	}
 }
@@ -216,7 +219,7 @@ func (p *acpProtocol) dispatch(ctx context.Context, env server.ProtocolEnv, pr *
 	case "session/load":
 		return p.loadSession(ctx, env, pr)
 	case "session/set_config_option":
-		return p.setConfig(ctx, env, pr.ThreadID, pr.ConfigID, pr.ConfigValue)
+		return p.setConfig(ctx, env, pr.ThreadID, pr.ConfigID)
 	case "session/close":
 		if err := p.closeSession(ctx, env, pr.ThreadID); err != nil {
 			return nil, err
