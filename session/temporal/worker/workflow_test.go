@@ -438,12 +438,16 @@ func newTestWorkflow(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	// A job tells its parent its result by signal, the one way a result
 	// arrives; this delivers it as Temporal would. The root workflow runs
 	// under the environment's own id, not its session id, so a signal to
-	// an id the environment does not run is the root's.
+	// an id the environment does not run is the root's. The environment
+	// runs this on a goroutine of its own, so the signal goes through its
+	// main loop, which owns the workflows it runs.
 	env.OnSignalExternalWorkflow(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(
 		func(_, workflowID, _, signal string, arg any) error {
-			if env.SignalWorkflowByID(workflowID, signal, arg) != nil {
-				env.SignalWorkflow(signal, arg)
-			}
+			env.RegisterDelayedCallback(func() {
+				if env.SignalWorkflowByID(workflowID, signal, arg) != nil {
+					env.SignalWorkflow(signal, arg)
+				}
+			}, 0)
 			return nil
 		})
 	return env

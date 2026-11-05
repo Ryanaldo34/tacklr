@@ -57,13 +57,12 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 		wakeCh:      wakeCh,
 		childDoneCh: workflow.GetSignalChannel(ctx, signalChildDone),
 	}
-	// Route now, so a client that subscribes before the first step finds
-	// the worker whose live endpoint streams the session's deltas.
 	if in.Task != "" && prev == nil {
 		// A task session's first run: its task is its first prompt.
 		ex.queue = []session.Wake{{Kind: session.WakePrompt, Prompt: session.Prompt{Text: in.Task}}}
 	}
-	ex.route()
+	// Queries answer from the first moment, before the route's local
+	// activity returns: a client may ask for the status at once.
 	_ = workflow.SetQueryHandler(ctx, protocol.QueryLive, func() (string, error) {
 		return ex.liveURL, nil
 	})
@@ -77,6 +76,9 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 		}
 		return out, nil
 	})
+	// Route now, so a client that subscribes before the first step finds
+	// the worker whose live endpoint streams the session's deltas.
+	ex.route()
 	result, err := loop.Run(ex, turn)
 	if errors.Is(err, loop.ErrSuspended) {
 		// Continue as new from the main loop, not a signal handler, once
