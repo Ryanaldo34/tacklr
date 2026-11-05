@@ -12,6 +12,7 @@ import (
 // refuses a short key, the ciphertext of another session and a truncated
 // ciphertext.
 func TestAESGCM_opensWhatItSealedOnlyForTheSameSessionAndAWholeCiphertext(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	ctx := t.Context()
 	s, err := session.NewAESGCM(bytes.Repeat([]byte{7}, 32))

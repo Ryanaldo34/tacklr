@@ -14,6 +14,7 @@ import (
 // workspace unmounts and removes it. A FuseRoot that cannot hold a mount
 // fails the open.
 func TestOpenWorkspace_showsTheTreeOnTheHostUntilClosed(t *testing.T) {
+	t.Parallel()
 	work := t.TempDir()
 	if err := os.WriteFile(filepath.Join(work, "note.md"), []byte("hello"), 0o600); err != nil {
 		t.Fatal(err)

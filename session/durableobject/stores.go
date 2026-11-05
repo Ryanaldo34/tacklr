@@ -376,13 +376,31 @@ func (l *eventLog) commit(id session.ID, evs []storedEvent, ops ...Op) error {
 // then tails until ctx ends or the session's log closes. Retries are not
 // sent.
 func (l *eventLog) Subscribe(ctx context.Context, id session.ID, after session.Seq) (<-chan session.Event, error) {
+	t, err := l.tail(ctx, id, after)
+	if err != nil {
+		return nil, err
+	}
+	return t.ch, nil
+}
+
+// tailing is one reader of a session's log: its events, and why it stopped
+// early (err, set before ch closes).
+type tailing struct {
+	ch  chan session.Event
+	err error
+}
+
+// tail reads id's events after after, as they come, until ctx ends, the
+// session closes, or a read of the log fails.
+func (l *eventLog) tail(ctx context.Context, id session.ID, after session.Seq) (*tailing, error) {
 	l.mu.Lock()
 	sl, err := l.log(id)
 	l.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	ch := make(chan session.Event, 64)
+	t := &tailing{ch: make(chan session.Event, 64)}
+	ch := t.ch
 	go func() {
 		defer close(ch)
 		next := uint64(after)
@@ -395,6 +413,7 @@ func (l *eventLog) Subscribe(ctx context.Context, id session.ID, after session.S
 			}
 			entries, err := l.s.Scan(prefix(kindEvent, id), seqKey(kindEvent, id, next), tailBatch)
 			if err != nil {
+				t.err = fmt.Errorf("durableobject: read events: %w", err)
 				return
 			}
 			for _, e := range entries {
@@ -419,7 +438,7 @@ func (l *eventLog) Subscribe(ctx context.Context, id session.ID, after session.S
 			}
 		}
 	}()
-	return ch, nil
+	return t, nil
 }
 
 // Head implements session.EventLog.

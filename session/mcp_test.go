@@ -17,6 +17,7 @@ func (f credentialResolverFunc) ResolveMCP(ctx context.Context, ref string) (ses
 // Durable copies of MCP servers keep only a credential reference, and a
 // copy resolves its credentials through the host's resolver, which it needs.
 func TestMCPServer_durableCopiesHoldNoInlineCredentialsAndResolveThroughTheHost(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	vault := session.MCPServer{
 		Name:          "remote",
@@ -53,6 +54,7 @@ func TestMCPServer_durableCopiesHoldNoInlineCredentialsAndResolveThroughTheHost(
 // env name that can inject, and an unknown transport. It accepts a whole
 // HTTP server.
 func TestMCPServer_validateRejectsUnsafeOrIncompleteDefinitions(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	cases := map[string]session.MCPServer{
 		"no name":                  {},

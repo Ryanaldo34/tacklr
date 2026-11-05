@@ -15,6 +15,7 @@ import (
 // token. A turn then gets one binding for that recipe, with the recipe's
 // params and the first real token of its provider.
 func TestApplyAuth_dropsRebindsAndGivesTheTurnTheTokenOfEachRecipe(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	start := []session.MountRecipe{
 		{Provider: "gdrive", Alias: "docs", Params: map[string]string{mount.ParamName: "docs", mount.ParamFolderID: "fld-1"},

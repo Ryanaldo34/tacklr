@@ -13,6 +13,7 @@ import (
 // object, never one with an open request, so a dropped id gets a new
 // object and a held one keeps its own.
 func TestRegistry_keepsABoundOfIdleObjectsAndNoneInUse(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	sealer, err := session.NewAESGCM(make([]byte, 32))
 	if err != nil {

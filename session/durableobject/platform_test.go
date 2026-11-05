@@ -11,6 +11,7 @@ import (
 // stores an object keeps over its storage meet the contract every session
 // store must meet.
 func TestStores_meetTheSessionStoreContracts(t *testing.T) {
+	t.Parallel()
 	sealer, err := session.NewAESGCM(make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)

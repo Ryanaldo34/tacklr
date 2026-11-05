@@ -31,6 +31,7 @@ func (a answerWith) RoundTrip(req *http.Request) (*http.Response, error) {
 // protocol, a value that cannot be sent, and a caller that left each fail
 // the call with their own error.
 func TestRemote_aCallerGetsWhyTheObjectOrItsNetworkFailed(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	f := newWireFixture(t, callThenAnswer("none", `{}`), nil)
 	ctx := t.Context()

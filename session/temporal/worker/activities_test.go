@@ -25,6 +25,7 @@ import (
 // run again after it saved (its result lost) finds the snapshot past its
 // base and applies nothing again.
 func TestActivities_commitIsTheOnlyWriterAndAppliesItsInputOnce(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	calls := []message.ToolCall{{ID: "a", CallID: "a", Name: "set", Arguments: `{"v":"a"}`}, {ID: "b", CallID: "b", Name: "set", Arguments: `{"v":"b"}`}}
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -108,6 +109,7 @@ func TestActivities_commitIsTheOnlyWriterAndAppliesItsInputOnce(t *testing.T) {
 // boundary typed with their kind. The test workflow environment does not
 // cancel a running step, so this small test holds the mapping.
 func TestActivityError_retriesOnlyWhatCanClear(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()

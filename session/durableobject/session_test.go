@@ -147,6 +147,7 @@ func toolResult(evs []session.Event) string {
 // next turn sees the conversation, and then the log and the stored call
 // results hold that turn's alone.
 func TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	lookup := tacklr.NewTool(tacklr.ToolConfig{Name: "lookup", Timeout: time.Minute, Handler: func(context.Context) (string, error) { return "42", nil }})
 	var sawFirstTurn atomic.Bool
@@ -256,6 +257,7 @@ func answers(evs []session.Event) []string {
 // replays the journal, so the model is not asked again for the reply it
 // already gave, the unfinished tool call runs again, and the turn ends.
 func TestSession_anObjectStoppedMidToolReplaysAndFinishesTheTurn(t *testing.T) {
+	t.Parallel()
 	var runs atomic.Int32
 	started, release := make(chan struct{}), make(chan struct{})
 	slow := tacklr.NewTool(tacklr.ToolConfig{Name: "slow", Handler: func(ctx context.Context) (string, error) {
@@ -276,8 +278,10 @@ func TestSession_anObjectStoppedMidToolReplaysAndFinishesTheTurn(t *testing.T) {
 	}
 	<-started
 	first := f.p.Alarm(id)
-	time.Sleep(60 * time.Millisecond)
-	armed := f.p.Alarm(id)
+	armed, err := f.p.WaitAlarm(ctx, id, first)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	f.p.Evict(id)
 	close(release) // the stopped object's tool returns into storage it can no longer write
@@ -287,7 +291,7 @@ func TestSession_anObjectStoppedMidToolReplaysAndFinishesTheTurn(t *testing.T) {
 	}
 	evs := untilEnd(t, sub)
 
-	if first.IsZero() || !armed.After(first) {
+	if first.IsZero() || armed.IsZero() {
 		t.Fatalf("watchdog alarm %v, then %v; want it set while the tool ran, and set again while it kept running", first, armed)
 	}
 	if last(evs).Type != session.EventComplete || runs.Load() != 2 || f.infers.Load() != 2 {
@@ -300,6 +304,7 @@ func TestSession_anObjectStoppedMidToolReplaysAndFinishesTheTurn(t *testing.T) {
 // waiting from storage. The answer restarts it, the parked call returns
 // the answer, and the turn ends with it.
 func TestSession_aParkedTurnResumesAfterItsObjectStopped(t *testing.T) {
+	t.Parallel()
 	confirm := tacklr.NewTool(tacklr.ToolConfig{Name: "confirm", Handler: func(_ context.Context, cc *tacklr.CallContext) (string, error) {
 		answer, err := cc.Park(&tacklr.UserSelectionInterrupt{Question: "Delete?", Options: []tacklr.UserChoice{{Title: "Delete"}, {Title: "Keep"}}})
 		if err != nil {
@@ -342,9 +347,13 @@ func TestSession_aParkedTurnResumesAfterItsObjectStopped(t *testing.T) {
 }
 
 // TestSession_aCancelStopsWhatRunsAndTheSessionGoesOn: a cancel stops the
-// tool that is running, then the job a call waits on in its own object, and
-// fails each turn as cancelled; the session runs the next prompt.
+// tool that is running, the job a call waits on in its own object, and a
+// model request that failed on the network, and fails each turn as
+// cancelled; the session runs the next prompt. A close after a cancel also
+// closes the job's object.
 func TestSession_aCancelStopsWhatRunsAndTheSessionGoesOn(t *testing.T) {
+	t.Parallel()
+	// Arrange
 	started := make(chan struct{}, 2)
 	block := tacklr.NewTool(tacklr.ToolConfig{Name: "block", Handler: func(ctx context.Context) (string, error) {
 		started <- struct{}{}
@@ -361,10 +370,14 @@ func TestSession_aCancelStopsWhatRunsAndTheSessionGoesOn(t *testing.T) {
 			return tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "hi", IsComplete: true}
 		case "job":
 			return callThenAnswer("wait", `{}`)(msgs)
+		case "offline":
+			started <- struct{}{}
+			return tacklr.LLMResponseChunk{Type: session.EventError, Error: tacklr.Network(errors.New("connection reset"))}
 		}
 		return callThenAnswer("block", `{}`)(msgs)
 	}
 	f := newFixture(t, answer, []*tacklr.Tool{block, wait}, func(cfg *durableobject.Config) {
+		cfg.RetryBackoff = time.Hour // the model request waits until the cancel
 		cfg.Jobs = map[string]session.JobHandler{"long": func(ctx context.Context, _ string) (string, error) {
 			started <- struct{}{}
 			<-ctx.Done()
@@ -377,39 +390,72 @@ func TestSession_aCancelStopsWhatRunsAndTheSessionGoesOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	sub := f.subscribe(t, id)
-	cancelled := func(text string) (session.Event, []session.Status) {
+	running := func(text string) {
 		t.Helper()
 		if err := f.c.Prompt(ctx, id, session.Prompt{Text: text}); err != nil {
 			t.Fatal(err)
 		}
 		<-started
+	}
+	// jobs is the session's jobs: a job that runs is listed, since the
+	// write that starts it holds it.
+	jobs := func() []session.Status {
+		t.Helper()
 		jobs, err := f.c.Jobs(ctx, id)
 		if err != nil {
 			t.Fatal(err)
 		}
+		return jobs
+	}
+	cancelled := func() session.Event {
+		t.Helper()
 		if err := f.c.Cancel(ctx, id); err != nil {
 			t.Fatal(err)
 		}
-		return last(untilEnd(t, sub)), jobs
+		return last(untilEnd(t, sub))
 	}
 
-	tool, _ := cancelled("wait")
-	job, running := cancelled("job")
+	// Act
+	running("wait")
+	tool := cancelled()
+	running("job")
+	waited := jobs()
+	job := cancelled()
+	running("offline")
+	model := cancelled()
 	if err := f.c.Prompt(ctx, id, session.Prompt{Text: "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	next := last(untilEnd(t, sub))
+	running("job")
+	child := jobs()[0].ID
+	if err := f.c.Cancel(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.c.Close(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	for _, obj := range []session.ID{id, child} {
+		if err := f.p.Idle(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, childGone := f.c.Status(ctx, child)
 
-	for name, ev := range map[string]session.Event{"tool": tool, "job": job} {
+	// Assert
+	for name, ev := range map[string]session.Event{"tool": tool, "job": job, "model request": model} {
 		if ev.Type != session.EventError || ev.FailKind != session.FailCancelled {
 			t.Fatalf("after cancelling the %s: %+v; want the turn failed as cancelled", name, ev)
 		}
 	}
-	if len(running) != 1 || running[0].State != session.Running || running[0].Kind != session.KindWorker {
-		t.Fatalf("jobs while the job ran: %+v; want the one running job", running)
+	if len(waited) != 1 || waited[0].State != session.Running || waited[0].Kind != session.KindWorker {
+		t.Fatalf("jobs while the job ran: %+v; want the one running job", waited)
 	}
 	if next.Type != session.EventComplete {
 		t.Fatalf("next turn %+v; want it to end", next)
+	}
+	if !errors.Is(childGone, session.ErrNotFound) {
+		t.Fatalf("the job after its session closed: %v; want it gone", childGone)
 	}
 }
 
@@ -419,6 +465,7 @@ func TestSession_aCancelStopsWhatRunsAndTheSessionGoesOn(t *testing.T) {
 // call's result. Once the session has that result it closes the job's
 // object, and closing the session deletes what it saved.
 func TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth(t *testing.T) {
+	t.Parallel()
 	var jobID atomic.Value
 	export := tacklr.NewTool(tacklr.ToolConfig{Name: "export", Handler: func(ctx context.Context, cc *tacklr.CallContext) (string, error) {
 		job, err := cc.Schedule(ctx, tacklr.JobRequest{Name: "export", Task: "q3", Wait: true})
@@ -465,6 +512,7 @@ func TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth(t *testing.T) {
 		}
 	}
 	_, parentGone := f.c.Status(ctx, id)
+	promptGone := f.c.Prompt(ctx, id, session.Prompt{Text: "more"})
 	again := f.c.Close(ctx, id)
 	parentKeys, childKeys := f.p.Keys(id), f.p.Keys(child)
 
@@ -472,8 +520,8 @@ func TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth(t *testing.T) {
 	if last(evs).Type != session.EventComplete || toolResult(evs) != "exported q3" {
 		t.Fatalf("events %+v; want the job's output as the call's result", evs)
 	}
-	if !errors.Is(jobGone, session.ErrNotFound) || !errors.Is(parentGone, session.ErrNotFound) || again != nil {
-		t.Fatalf("job once its result was taken %v, session after close %v, second close %v; want both gone and the close safe to repeat", jobGone, parentGone, again)
+	if !errors.Is(jobGone, session.ErrNotFound) || !errors.Is(parentGone, session.ErrNotFound) || !errors.Is(promptGone, session.ErrNotFound) || again != nil {
+		t.Fatalf("job once its result was taken %v, session after close %v, a prompt after close %v, second close %v; want both gone and the close safe to repeat", jobGone, parentGone, promptGone, again)
 	}
 	if kept := []string{"meta", "status"}; !slices.Equal(parentKeys, kept) || !slices.Equal(childKeys, kept) {
 		t.Fatalf("storage after close: session %v, job %v; want only who each object is and its status (every letter delivered), %v", parentKeys, childKeys, kept)
@@ -493,6 +541,7 @@ func driveAuth(token string) session.AuthContext {
 // specialist and a worker, an id that is taken, and state JSON cannot hold
 // are refused; every call on an unknown session is not found.
 func TestClient_refusesBadAndUnknownSessions(t *testing.T) {
+	t.Parallel()
 	f := newWireFixture(t, callThenAnswer("none", `{}`), nil)
 	ctx := t.Context()
 	_, both := f.c.CreateSession(ctx, session.CreateSession{Specialist: "a", Worker: "b"})
@@ -537,6 +586,7 @@ func TestClient_refusesBadAndUnknownSessions(t *testing.T) {
 // its retries ran out, and one that hits the token limit fails it as max
 // tokens.
 func TestSession_aModelFailureRunsAgainOrFailsTheTurnWithItsKind(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	var flaky atomic.Int32
 	answer := func(msgs []*message.Message) tacklr.LLMResponseChunk {
@@ -583,8 +633,10 @@ func TestSession_aModelFailureRunsAgainOrFailsTheTurnWithItsKind(t *testing.T) {
 // TestSession_aSpecialistRunsInItsOwnObjectAndAnUnknownKindFails: the model
 // starts a specialist, which runs in its own object with its own
 // instructions, and its answer is the call's result. A session for a
-// specialist or a job the deployment does not have fails its turn.
+// specialist or a job the deployment does not have fails its turn, and so
+// does a prompt with MCP servers on a deployment without an MCP connector.
 func TestSession_aSpecialistRunsInItsOwnObjectAndAnUnknownKindFails(t *testing.T) {
+	t.Parallel()
 	var specialistRan atomic.Bool
 	answer := func(msgs []*message.Message) tacklr.LLMResponseChunk {
 		if strings.Contains(msgs[0].Content, "Review strictly.") {
@@ -597,27 +649,34 @@ func TestSession_aSpecialistRunsInItsOwnObjectAndAnUnknownKindFails(t *testing.T
 		cfg.Agent.Specialists = []*tacklr.Specialist{{Name: "reviewer", Description: "Reviews.", Instructions: "Review strictly.", Model: cfg.Agent.Model}}
 	})
 	ctx := t.Context()
-	run := func(req session.CreateSession) []session.Event {
+	prompt := func(id session.ID, p session.Prompt) []session.Event {
+		t.Helper()
+		sub := f.subscribe(t, id)
+		if err := f.c.Prompt(ctx, id, p); err != nil {
+			t.Fatal(err)
+		}
+		return untilEnd(t, sub)
+	}
+	run := func(req session.CreateSession) (session.ID, []session.Event) {
 		t.Helper()
 		id, err := f.c.CreateSession(ctx, req)
 		if err != nil {
 			t.Fatal(err)
 		}
-		sub := f.subscribe(t, id)
-		if err := f.c.Prompt(ctx, id, session.Prompt{Text: "check"}); err != nil {
-			t.Fatal(err)
-		}
-		return untilEnd(t, sub)
+		return id, prompt(id, session.Prompt{Text: "check"})
 	}
 
-	spawned := run(session.CreateSession{})
-	noSpecialist := last(run(session.CreateSession{Specialist: "nobody"}))
-	noJob := last(run(session.CreateSession{Worker: "nojob"}))
+	id, spawned := run(session.CreateSession{})
+	noMCP := last(prompt(id, session.Prompt{Text: "check", MCPServers: []session.MCPServer{{Name: "tools", Type: session.MCPHTTP, URL: "http://127.0.0.1:1/mcp"}}}))
+	_, evs := run(session.CreateSession{Specialist: "nobody"})
+	noSpecialist := last(evs)
+	_, evs = run(session.CreateSession{Worker: "nojob"})
+	noJob := last(evs)
 
 	if last(spawned).Type != session.EventComplete || toolResult(spawned) != "reviewed" || !specialistRan.Load() {
 		t.Fatalf("events %+v, specialist ran %v; want its answer as the call's result", spawned, specialistRan.Load())
 	}
-	for name, ev := range map[string]session.Event{"nobody": noSpecialist, "nojob": noJob} {
+	for name, ev := range map[string]session.Event{"nobody": noSpecialist, "nojob": noJob, "MCP": noMCP} {
 		if ev.Type != session.EventError || !strings.Contains(ev.Fail, name) {
 			t.Fatalf("session for %s: %+v; want the turn failed naming it", name, ev)
 		}
@@ -625,10 +684,12 @@ func TestSession_aSpecialistRunsInItsOwnObjectAndAnUnknownKindFails(t *testing.T
 }
 
 // TestSession_aStorageOutageStopsTheObjectAndTheAlarmFinishesTheTurn: while
-// storage is down a prompt fails, and a turn whose tool returns into the
-// outage stops; once storage is back, the watchdog alarm restarts the object
-// and the turn ends.
+// an object's storage is down, a prompt and a resume with credentials and
+// the create of its session fail with the outage's error, and a turn whose
+// tool returns into the outage stops. Other objects work. Once storage is
+// back, the watchdog alarm restarts the object and the turn ends.
 func TestSession_aStorageOutageStopsTheObjectAndTheAlarmFinishesTheTurn(t *testing.T) {
+	t.Parallel()
 	started, release := make(chan struct{}), make(chan struct{})
 	var runs atomic.Int32
 	slow := tacklr.NewTool(tacklr.ToolConfig{Name: "slow", Handler: func(context.Context) (string, error) {
@@ -645,8 +706,14 @@ func TestSession_aStorageOutageStopsTheObjectAndTheAlarmFinishesTheTurn(t *testi
 		t.Fatal(err)
 	}
 	f.p.FailWrites(id, always)
-	refused := f.c.Prompt(ctx, id, session.Prompt{Text: "go"})
-	_, noCreate := f.c.CreateSession(ctx, session.CreateSession{SessionID: id + "-x", State: nil})
+	f.p.FailWrites("down", always)
+	refused := []error{
+		f.c.Prompt(ctx, id, session.Prompt{Text: "go", Auth: driveAuth("tok")}),
+		f.c.Resume(ctx, id, session.Resume{Auth: driveAuth("tok")}),
+	}
+	_, err = f.c.CreateSession(ctx, session.CreateSession{SessionID: "down"})
+	refused = append(refused, err)
+	_, other := f.c.CreateSession(ctx, session.CreateSession{SessionID: id + "-x"})
 	f.p.FailWrites(id, nil)
 	if err := f.c.Prompt(ctx, id, session.Prompt{Text: "go"}); err != nil {
 		t.Fatal(err)
@@ -665,8 +732,13 @@ func TestSession_aStorageOutageStopsTheObjectAndTheAlarmFinishesTheTurn(t *testi
 	}
 	ended := last(untilEnd(t, sub))
 
-	if refused == nil || !strings.Contains(refused.Error(), "storage unavailable") || noCreate != nil {
-		t.Fatalf("a prompt while storage was down %v, another session's create %v; want the outage's error, and the other session made", refused, noCreate)
+	for i, err := range refused {
+		if err == nil || !strings.Contains(err.Error(), "storage unavailable") {
+			t.Fatalf("request %d while storage was down: %v; want the outage's error", i, err)
+		}
+	}
+	if other != nil {
+		t.Fatalf("another object's create: %v; want the session made", other)
 	}
 	if ended.Type != session.EventComplete || runs.Load() < 2 {
 		t.Fatalf("after the outage %+v, tool runs %d; want the turn ended", ended, runs.Load())
@@ -677,6 +749,7 @@ func TestSession_aStorageOutageStopsTheObjectAndTheAlarmFinishesTheTurn(t *testi
 // session without an id, and the constructors refuse what they cannot run
 // without.
 func TestObject_refusesAnInitWithoutAnIDAndNeedsItsParts(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	f := newFixture(t, callThenAnswer("none", `{}`), nil)
 
@@ -703,14 +776,60 @@ func TestObject_refusesAnInitWithoutAnIDAndNeedsItsParts(t *testing.T) {
 	}
 }
 
-// TestSession_anObjectStoppedAtAnyWriteGoesOnToTheSameTurn: the object
-// stops at the write of each kind of step: taking the prompt, a commit,
-// the model's reply, the tool calls' results, the turn's end. A new object
+// TestSession_anObjectStoppedAtAnyStepGoesOnToTheSameTurn: a cold object
+// stops at the write of each kind of step (taking the prompt, a commit, the
+// model's reply, the tool calls' results, the turn's end, the suspend that
+// keeps the session's carry), or because it cannot read what a step needs:
+// the session's carry, its journal, its event head, its events to trim, the
+// call results to drop, or the journal to drop at the suspend. A new object
 // over the same storage ends the same turn, with each event once and the
 // tool run once.
-func TestSession_anObjectStoppedAtAnyWriteGoesOnToTheSameTurn(t *testing.T) {
-	for _, kind := range []string{"next", "commit", "infer", "tools", "emit"} {
-		t.Run(kind, func(t *testing.T) {
+func TestSession_anObjectStoppedAtAnyStepGoesOnToTheSameTurn(t *testing.T) {
+	t.Parallel()
+	// write fails, once, the write of the step of kind.
+	write := func(kind string) func(fixture, session.ID, *atomic.Bool) {
+		return func(f fixture, id session.ID, failed *atomic.Bool) {
+			f.p.FailWrites(id, func(ops []durableobject.Op) bool {
+				return slices.ContainsFunc(ops, func(op durableobject.Op) bool {
+					return strings.HasPrefix(op.Key, "journal/") && strings.Contains(string(op.Value), `"kind":"`+kind+`"`)
+				}) && failed.CompareAndSwap(false, true)
+			})
+		}
+	}
+	// suspend fails, once, the write that keeps the session's carry.
+	suspend := func(f fixture, id session.ID, failed *atomic.Bool) {
+		f.p.FailWrites(id, func(ops []durableobject.Op) bool {
+			return slices.ContainsFunc(ops, func(op durableobject.Op) bool {
+				return op.Key == "carry/"+url.PathEscape(string(id)) && !op.Delete
+			}) && failed.CompareAndSwap(false, true)
+		})
+	}
+	// read fails, once, the nth read of key (a format of the session id).
+	read := func(key string, nth int32) func(fixture, session.ID, *atomic.Bool) {
+		return func(f fixture, id session.ID, failed *atomic.Bool) {
+			var reads atomic.Int32
+			f.p.FailReads(id, func(k string) bool {
+				return k == fmt.Sprintf(key, url.PathEscape(string(id))) && reads.Add(1) == nth && failed.CompareAndSwap(false, true)
+			})
+		}
+	}
+	for name, fail := range map[string]func(fixture, session.ID, *atomic.Bool){
+		"next":            write("next"),
+		"commit":          write("commit"),
+		"infer":           write("infer"),
+		"tools":           write("tools"),
+		"emit":            write("emit"),
+		"suspend":         suspend,
+		"carry":           read("carry/%s", 1),
+		"journal":         read("journal/%s/", 1),
+		"event head":      read("eventhead/%s", 1),
+		"events":          read("event/%s/", 1),
+		"call results":    read("body/%s/", 1),
+		"journal to drop": read("journal/%s/", 2),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange
 			var runs atomic.Int32
 			lookup := tacklr.NewTool(tacklr.ToolConfig{Name: "lookup", Handler: func(context.Context) (string, error) {
 				runs.Add(1)
@@ -722,13 +841,14 @@ func TestSession_anObjectStoppedAtAnyWriteGoesOnToTheSameTurn(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if err := f.p.Idle(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			f.p.Evict(id)
 			var failed atomic.Bool
-			f.p.FailWrites(id, func(ops []durableobject.Op) bool {
-				return slices.ContainsFunc(ops, func(op durableobject.Op) bool {
-					return strings.HasPrefix(op.Key, "journal/") && strings.Contains(string(op.Value), `"kind":"`+kind+`"`)
-				}) && failed.CompareAndSwap(false, true)
-			})
+			fail(f, id, &failed)
 
+			// Act
 			if err := f.c.Prompt(ctx, id, session.Prompt{Text: "what is it?"}); err != nil {
 				t.Fatal(err)
 			}
@@ -751,6 +871,7 @@ func TestSession_anObjectStoppedAtAnyWriteGoesOnToTheSameTurn(t *testing.T) {
 			evs := untilEnd(t, sub)
 			st, _ := f.c.Status(ctx, id)
 
+			// Assert
 			want := []session.EventType{session.EventFunctionCall, session.EventToolResult, session.EventMessage, session.EventComplete}
 			if !failed.Load() || !slices.Equal(types(evs), want) || toolResult(evs) != "42" || runs.Load() != 1 || st.State != session.Complete {
 				t.Fatalf("stopped %v; events %v, tool runs %d, status %+v; want each event once, the tool run once, and the turn complete", failed.Load(), types(evs), runs.Load(), st)
@@ -759,13 +880,275 @@ func TestSession_anObjectStoppedAtAnyWriteGoesOnToTheSameTurn(t *testing.T) {
 	}
 }
 
+// TestSession_aTurnThatCannotReadWhatItCommitsFailsAndTheNextTurnRuns: a
+// turn reads the session's checkpoint revision and rows when its object
+// starts again (also to resume a parked call), the results of its tool
+// calls when it commits them, and the session's credentials when it starts
+// a job. A turn whose read of one of them fails ends with the outage's
+// error. Once reads work, the next turn runs.
+func TestSession_aTurnThatCannotReadWhatItCommitsFailsAndTheNextTurnRuns(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		tool string
+		// fails reports whether the read of key fails, for session id.
+		fails func(key string, id session.ID) bool
+	}{
+		"checkpoint revision":       {"lookup", func(k string, id session.ID) bool { return k == "snapshot/"+string(id) }},
+		"checkpoint rows":           {"lookup", func(k string, id session.ID) bool { return k == "checkpoint/"+string(id)+"/" }},
+		"checkpoint rows to resume": {"confirm", func(k string, id session.ID) bool { return k == "checkpoint/"+string(id)+"/" }},
+		"call results": {"lookup", func(k string, id session.ID) bool {
+			return strings.HasPrefix(k, "body/"+string(id)+"/") && k != "body/"+string(id)+"/"
+		}},
+		"credentials": {"export", func(k string, id session.ID) bool { return k == "secrets/"+string(id) }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange
+			lookup := tacklr.NewTool(tacklr.ToolConfig{Name: "lookup", Handler: func(context.Context) (string, error) { return "42", nil }})
+			export := tacklr.NewTool(tacklr.ToolConfig{Name: "export", Handler: func(ctx context.Context, cc *tacklr.CallContext) (string, error) {
+				_, err := cc.Schedule(ctx, tacklr.JobRequest{Name: "export", Task: "q3", Wait: true})
+				return "", err
+			}})
+			confirm := tacklr.NewTool(tacklr.ToolConfig{Name: "confirm", Handler: func(_ context.Context, cc *tacklr.CallContext) (string, error) {
+				_, err := cc.Park(&tacklr.UserSelectionInterrupt{Question: "Go?", Options: []tacklr.UserChoice{{Title: "Go"}}})
+				return "went", err
+			}})
+			answer := func(msgs []*message.Message) tacklr.LLMResponseChunk {
+				if msgs[len(msgs)-1].Content == "again" {
+					return tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ready", IsComplete: true}
+				}
+				return callThenAnswer(tc.tool, `{}`)(msgs)
+			}
+			f := newFixture(t, answer, []*tacklr.Tool{lookup, export, confirm}, func(cfg *durableobject.Config) {
+				cfg.Jobs = map[string]session.JobHandler{"export": func(_ context.Context, task string) (string, error) { return "exported " + task, nil }}
+			})
+			ctx := t.Context()
+			id, err := f.c.CreateSession(ctx, session.CreateSession{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// turn sends wake (a prompt, or a resume when the turn parked) and
+			// returns the turn's end.
+			turn := func(wake func() error) session.Event {
+				t.Helper()
+				sub := f.subscribe(t, id)
+				if err := wake(); err != nil {
+					t.Fatal(err)
+				}
+				return last(untilEnd(t, sub))
+			}
+			prompt := func(text string) func() error {
+				return func() error { return f.c.Prompt(ctx, id, session.Prompt{Text: text}) }
+			}
+			warm := turn(prompt("warm up"))
+			if err := f.p.Idle(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			f.p.Evict(id)
+			f.p.FailReads(id, func(k string) bool { return tc.fails(k, id) })
+			next := prompt("go")
+			if warm.Type == session.EventInterrupt {
+				next = func() error {
+					return f.c.Resume(ctx, id, session.Resume{Responses: map[string][]byte{warm.MessageID: []byte(`{"selectionIdx":0}`)}})
+				}
+			}
+
+			// Act
+			failed := turn(next)
+			f.p.FailReads(id, nil)
+			again := turn(prompt("again"))
+
+			// Assert
+			if failed.Type != session.EventError || !strings.Contains(failed.Fail, "storage unavailable") {
+				t.Fatalf("a turn that cannot read its %s: %+v; want it failed with the outage's error", name, failed)
+			}
+			if again.Type != session.EventComplete {
+				t.Fatalf("the next turn: %+v; want it to end", again)
+			}
+		})
+	}
+}
+
+// TestSession_aCloseThatCannotReadOrWriteItsStorageEndsOnceStorageWorks: a
+// close deletes what the session saved. While storage cannot give the
+// session's jobs, its tool calls or its journal, or cannot take the close's
+// last write, the close stops: the close of an ended task fails its caller,
+// and the close of a live session goes on at the alarm. Once storage works,
+// the close ends, and the object keeps only who it was and its status.
+func TestSession_aCloseThatCannotReadOrWriteItsStorageEndsOnceStorageWorks(t *testing.T) {
+	t.Parallel()
+	// read fails each read of key (a format of the session id).
+	read := func(key string) func(fixture, session.ID, *atomic.Bool) {
+		return func(f fixture, id session.ID, failed *atomic.Bool) {
+			f.p.FailReads(id, func(k string) bool {
+				fails := k == fmt.Sprintf(key, url.PathEscape(string(id)))
+				if fails {
+					failed.Store(true)
+				}
+				return fails
+			})
+		}
+	}
+	// final fails each write that closes the session.
+	final := func(f fixture, id session.ID, failed *atomic.Bool) {
+		f.p.FailWrites(id, func(ops []durableobject.Op) bool {
+			closes := slices.ContainsFunc(ops, func(op durableobject.Op) bool {
+				return op.Key == "meta" && strings.Contains(string(op.Value), `"closed":true`)
+			})
+			if closes {
+				failed.Store(true)
+			}
+			return closes
+		})
+	}
+	for name, tc := range map[string]struct {
+		task bool
+		fail func(fixture, session.ID, *atomic.Bool)
+	}{
+		"a session's jobs":           {false, read("child/%s/")},
+		"a session's tool calls":     {false, read("call/%s/")},
+		"a session's last write":     {false, final},
+		"an ended task's journal":    {true, read("journal/%s/")},
+		"an ended task's last write": {true, final},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange
+			f := newFixture(t, func([]*message.Message) tacklr.LLMResponseChunk {
+				return tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "hi", IsComplete: true}
+			}, nil)
+			ctx := t.Context()
+			const id = "s"
+			init := durableobject.Init{SessionID: id}
+			if tc.task {
+				init.Task = "say hi"
+			}
+			if err := f.p.Object(id).Create(ctx, init); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.p.Idle(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			var failed atomic.Bool
+			tc.fail(f, id, &failed)
+
+			// Act
+			closeErr := f.c.Close(ctx, id)
+			if err := f.p.Idle(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			f.p.FailReads(id, nil)
+			f.p.FailWrites(id, nil)
+			if err := f.p.FireAlarm(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.p.Idle(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			again := f.c.Close(ctx, id)
+			keys := f.p.Keys(id)
+
+			// Assert
+			if !failed.Load() || (closeErr != nil) != tc.task {
+				t.Fatalf("storage failed %v, close %v; want the close stopped, and its caller told only for an ended task", failed.Load(), closeErr)
+			}
+			if again != nil || !slices.Equal(keys, []string{"meta", "status"}) {
+				t.Fatalf("close once storage worked %v, storage %v; want the close done and only who the object was and its status kept", again, keys)
+			}
+		})
+	}
+}
+
+// TestObject_aColdObjectThatCannotReadItsStateFailsItsRequestUntilReadsWork:
+// an object starts again after its platform stopped it, and reads the
+// session's state on its first request. While a part of that state cannot
+// be read, the request fails with the outage's error. Once reads work, the
+// same request gets its answer.
+func TestObject_aColdObjectThatCannotReadItsStateFailsItsRequestUntilReadsWork(t *testing.T) {
+	t.Parallel()
+	status := func(f fixture, ctx context.Context) error {
+		_, err := f.c.Status(ctx, "s")
+		return err
+	}
+	head := func(f fixture, ctx context.Context) error {
+		_, err := f.c.Head(ctx, "s")
+		return err
+	}
+	for name, tc := range map[string]struct {
+		key     string
+		request func(fixture, context.Context) error
+		want    error
+	}{
+		"who the object is": {"meta", status, nil},
+		"the mailbox's head": {"mailboxhead/s", func(f fixture, ctx context.Context) error {
+			return f.c.Prompt(ctx, "s", session.Prompt{Text: "hi"})
+		}, nil},
+		"the mailbox": {"mailbox/s/", func(f fixture, ctx context.Context) error { return f.p.FireAlarm(ctx, "s") }, nil},
+		"the status": {"status", func(f fixture, ctx context.Context) error {
+			_, err := f.c.CreateSession(ctx, session.CreateSession{SessionID: "s"})
+			return err
+		}, session.ErrExists},
+		"the outbox": {"outbox/", func(f fixture, ctx context.Context) error {
+			_, err := f.c.Jobs(ctx, "s")
+			return err
+		}, nil},
+		"the event head": {"eventhead/s", head, nil},
+		"the event head of a subscription": {"eventhead/s", func(f fixture, ctx context.Context) error {
+			sub, err := f.c.Subscribe(ctx, "s", 0)
+			if err == nil {
+				_ = sub.Close()
+			}
+			return err
+		}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange
+			f := newFixture(t, func([]*message.Message) tacklr.LLMResponseChunk {
+				return tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "hi", IsComplete: true}
+			}, nil)
+			ctx := t.Context()
+			if _, err := f.c.CreateSession(ctx, session.CreateSession{SessionID: "s"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.p.Idle(ctx, "s"); err != nil {
+				t.Fatal(err)
+			}
+			f.p.Evict("s")
+			f.p.FailReads("s", func(k string) bool { return k == tc.key })
+
+			// Act
+			down := tc.request(f, ctx)
+			f.p.FailReads("s", nil)
+			up := tc.request(f, ctx)
+			if err := f.p.Idle(ctx, "s"); err != nil {
+				t.Fatal(err)
+			}
+
+			// Assert
+			if down == nil || !strings.Contains(down.Error(), "storage unavailable") {
+				t.Fatalf("a request while %s cannot be read: %v; want the outage's error", name, down)
+			}
+			if !errors.Is(up, tc.want) {
+				t.Fatalf("the request once reads work: %v; want %v", up, tc.want)
+			}
+		})
+	}
+}
+
 // TestSession_aJobThatCannotStartYetStartsOnARetry: while the job's object
-// cannot write, the session's start of it fails; the session sets its
+// cannot write, the session's start of it, with the session's credentials,
+// fails, and the session's jobs report it not found; the session sets its
 // alarm to try again. The session's object stops; once the job's object
 // works, the alarm wakes the next one, which starts the job from what the
-// first one stored, and the job's output is the call's result.
+// first one stored. That object cannot drop the delivered start once, so
+// the next alarm delivers it again, and the job's object, which has the
+// job, takes it as done. The job runs once, and its output is the call's
+// result.
 func TestSession_aJobThatCannotStartYetStartsOnARetry(t *testing.T) {
+	t.Parallel()
 	var parent atomic.Value
+	var exports atomic.Int32
 	var f fixture
 	down := make(chan session.ID, 1)
 	export := tacklr.NewTool(tacklr.ToolConfig{Name: "export", Handler: func(ctx context.Context, cc *tacklr.CallContext) (string, error) {
@@ -777,7 +1160,10 @@ func TestSession_aJobThatCannotStartYetStartsOnARetry(t *testing.T) {
 	}})
 	f = newFixture(t, callThenAnswer("export", `{}`), []*tacklr.Tool{export}, func(cfg *durableobject.Config) {
 		cfg.RetryBackoff = time.Hour // only the alarm tries again
-		cfg.Jobs = map[string]session.JobHandler{"export": func(_ context.Context, task string) (string, error) { return "exported " + task, nil }}
+		cfg.Jobs = map[string]session.JobHandler{"export": func(_ context.Context, task string) (string, error) {
+			exports.Add(1)
+			return "exported " + task, nil
+		}}
 	})
 	ctx := t.Context()
 	id, err := f.c.CreateSession(ctx, session.CreateSession{})
@@ -786,7 +1172,7 @@ func TestSession_aJobThatCannotStartYetStartsOnARetry(t *testing.T) {
 	}
 	parent.Store(id)
 
-	if err := f.c.Prompt(ctx, id, session.Prompt{Text: "export"}); err != nil {
+	if err := f.c.Prompt(ctx, id, session.Prompt{Text: "export", Auth: driveAuth("tok")}); err != nil {
 		t.Fatal(err)
 	}
 	child := <-down
@@ -794,17 +1180,79 @@ func TestSession_aJobThatCannotStartYetStartsOnARetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	retry := f.p.Alarm(id)
+	_, pending := f.c.Jobs(ctx, id)
 	// The letter that starts the job is in storage: an object that took
 	// the session's place delivers it.
 	f.p.Evict(id)
 	f.p.FailWrites(child, nil)
+	var kept atomic.Bool
+	f.p.FailWrites(id, func(ops []durableobject.Op) bool {
+		return len(ops) == 1 && ops[0].Delete && strings.HasPrefix(ops[0].Key, "outbox/") && kept.CompareAndSwap(false, true)
+	})
 	sub := f.subscribe(t, id)
-	if err := f.p.FireAlarm(ctx, id); err != nil {
-		t.Fatal(err)
+	for range 2 {
+		if err := f.p.FireAlarm(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.p.Idle(ctx, id); err != nil {
+			t.Fatal(err)
+		}
 	}
 	evs := untilEnd(t, sub)
 
-	if retry.IsZero() || last(evs).Type != session.EventComplete || toolResult(evs) != "exported q3" {
-		t.Fatalf("retry alarm %v, events %+v; want an alarm set for the start, then the job's output as the call's result", retry, evs)
+	if !errors.Is(pending, session.ErrNotFound) {
+		t.Fatalf("the session's jobs before the job started: %v; want the job not found", pending)
+	}
+	if retry.IsZero() || !kept.Load() || last(evs).Type != session.EventComplete || toolResult(evs) != "exported q3" || exports.Load() != 1 {
+		t.Fatalf("retry alarm %v, start kept %v, events %+v, job runs %d; want an alarm set for the start, then the job run once and its output as the call's result", retry, kept.Load(), evs, exports.Load())
+	}
+}
+
+// TestSubscribe_aSubscriberWhoseLogCannotBeReadGetsTheErrorAndCanReadAgain:
+// when the object cannot read its log for a subscriber, the subscriber's
+// events end with the outage's error. A new subscription, once reads work,
+// reads the turn from the log.
+func TestSubscribe_aSubscriberWhoseLogCannotBeReadGetsTheErrorAndCanReadAgain(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	f := newFixture(t, func([]*message.Message) tacklr.LLMResponseChunk {
+		return tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "hi", IsComplete: true}
+	}, nil)
+	ctx := t.Context()
+	id, err := f.c.CreateSession(ctx, session.CreateSession{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := f.subscribe(t, id)
+	if err := f.c.Prompt(ctx, id, session.Prompt{Text: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	untilEnd(t, live)
+	events := "event/" + url.PathEscape(string(id)) + "/"
+	read := func() session.Subscription {
+		t.Helper()
+		sub, err := f.c.Subscribe(ctx, id, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = sub.Close() })
+		return sub
+	}
+
+	// Act
+	f.p.FailReads(id, func(k string) bool { return k == events })
+	broken := read()
+	for range broken.Events() {
+	}
+	lost := broken.Err()
+	f.p.FailReads(id, nil)
+	evs := untilEnd(t, read())
+
+	// Assert
+	if lost == nil || !strings.Contains(lost.Error(), "storage unavailable") {
+		t.Fatalf("the subscription whose log failed ended with %v; want the outage's error", lost)
+	}
+	if last(evs).Type != session.EventComplete || !slices.Equal(answers(evs), []string{"hi"}) {
+		t.Fatalf("a new subscription read %+v; want the turn's answer and its end", evs)
 	}
 }

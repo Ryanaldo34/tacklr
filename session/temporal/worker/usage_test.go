@@ -40,6 +40,7 @@ func toolResults(msgs []*message.Message) []string {
 // order, even a result that finished after a later call's, and a call to an
 // unknown tool gets a correction in its place.
 func TestSessionWorkflow_aReplysCallsRunAtMostMaxToolCallsAtOnce(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	env := newTestWorkflow(t)
 	var running, peak atomic.Int32
@@ -58,15 +59,32 @@ func TestSessionWorkflow_aReplysCallsRunAtMostMaxToolCallsAtOnce(t *testing.T) {
 		calls = slices.Insert(calls, 2, message.ToolCall{ID: "nope", CallID: "nope", Name: "nope", Arguments: `{}`})
 		ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: calls, IsComplete: true}
 	})
-	// An earlier call runs longer, so it finishes after the call after it.
-	slow := tacklr.NewTool(tacklr.ToolConfig{Name: "slow", Handler: func(_ context.Context, args struct {
+	// The calls run in pairs: the first of a pair waits for the second to
+	// end, so it finishes after the call after it, and the second waits for
+	// the first to start, so both run at once.
+	var started, ended [4]chan struct{}
+	for i := range 4 {
+		started[i], ended[i] = make(chan struct{}), make(chan struct{})
+	}
+	slow := tacklr.NewTool(tacklr.ToolConfig{Name: "slow", Handler: func(ctx context.Context, args struct {
 		N int `json:"n"`
 	}) (string, error) {
 		n := running.Add(1)
 		for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
 		}
-		time.Sleep(time.Duration(4-args.N) * 15 * time.Millisecond)
+		close(started[args.N])
+		var wait chan struct{}
+		if args.N%2 == 0 {
+			wait = ended[args.N+1]
+		} else {
+			wait = started[args.N-1]
+		}
+		select {
+		case <-wait:
+		case <-ctx.Done():
+		}
 		running.Add(-1)
+		close(ended[args.N])
 		return fmt.Sprintf("r%d", args.N), nil
 	}})
 	registerSession(env, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{slow}})
@@ -89,6 +107,7 @@ func TestSessionWorkflow_aReplysCallsRunAtMostMaxToolCallsAtOnce(t *testing.T) {
 // tool with its own timeout runs past the step timeout and its result
 // reaches the model.
 func TestSessionWorkflow_aToolLongerThanTheStepTimeoutRunsToItsOwnTimeout(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	env := newTestWorkflow(t)
 	var results []string
@@ -127,6 +146,7 @@ func TestSessionWorkflow_aToolLongerThanTheStepTimeoutRunsToItsOwnTimeout(t *tes
 // prompts, a close that waits for the turn, and the result or cancel of a
 // running job or blocking specialist.
 func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
+	t.Parallel()
 	// continued is the input the run that ended in env continues as new with.
 	continued := func(t *testing.T, env *testsuite.TestWorkflowEnvironment) protocol.Input {
 		t.Helper()
@@ -150,6 +170,7 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 		{"when idle at the configured history length", 5, func(env *testsuite.TestWorkflowEnvironment) { env.SetCurrentHistoryLength(5) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var seen []string
 			model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 				var users []string
@@ -189,6 +210,7 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 	}
 
 	t.Run("while a task session's finished turn waits on a background job, the job's result lands in the next run, which ends with the task", func(t *testing.T) {
+		t.Parallel()
 		release, let := releaseLater(t)
 		var saw string
 		model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -246,6 +268,7 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 	})
 
 	t.Run("a close that waits for the running turn carries over, and closes the session once the turn ends in the next run", func(t *testing.T) {
+		t.Parallel()
 		model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			if last := lastMsg(msgs); last != nil && last.Role == message.RoleUser && last.Content == "go" {
 				ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true, ToolCalls: []message.ToolCall{{ID: "s1", CallID: "s1", Name: "start", Arguments: `{}`}}}
@@ -311,6 +334,7 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 		{"while a blocking specialist runs, a cancel in the next run stops it", session.Wake{Kind: session.WakeCancel}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var result string
 			model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 				last := lastMsg(msgs)

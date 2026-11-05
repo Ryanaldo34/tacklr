@@ -11,6 +11,7 @@ import (
 // the rows a store holds, a diff puts each row that is new or changed, in
 // order, then deletes each row that is gone, and skips the rest.
 func TestDiff_putsNewAndChangedRowsAndDeletesTheGoneOnes(t *testing.T) {
+	t.Parallel()
 	row := func(kind, key, value string) session.CheckpointEntry {
 		return session.CheckpointEntry{Kind: kind, Key: key, Value: []byte(value)}
 	}

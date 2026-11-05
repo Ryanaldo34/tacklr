@@ -48,6 +48,7 @@ func sealer(t *testing.T) *session.AESGCM {
 // TestPostgresStores_meetTheContract: the Postgres Store, SecretStorage and
 // EventLog meet the contract every session store must meet.
 func TestPostgresStores_meetTheContract(t *testing.T) {
+	t.Parallel()
 	storetest.Store(t, func(t *testing.T) session.Store {
 		db, _, _ := testDB(t)
 		return db.Store()
@@ -69,6 +70,7 @@ func TestPostgresStores_meetTheContract(t *testing.T) {
 // and a row that opens to what is not a bag fail the call, and the owner
 // gets its token back.
 func TestSecrets_sealATokenToItsSession(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	db, pool, schema := testDB(t)
 	aes := sealer(t)
@@ -109,6 +111,7 @@ func TestSecrets_sealATokenToItsSession(t *testing.T) {
 // fails cleanly when the database is gone. A schema that is not an
 // identifier is refused.
 func TestStores_failEveryCallOnAClosedPool(t *testing.T) {
+	t.Parallel()
 	db, pool, _ := testDB(t)
 	_, badSchema := postgres.New(pool, postgres.Options{Schema: "x;drop"})
 	pool.Close()
@@ -199,6 +202,7 @@ func TestEventLog_aListenerThatLosesItsConnectionCatchesUp(t *testing.T) {
 // TestEventLog_aLongLogReplaysInOrder: a log longer than one read replays in
 // order across reads.
 func TestEventLog_aLongLogReplaysInOrder(t *testing.T) {
+	t.Parallel()
 	db, _, _ := testDB(t)
 	log := db.EventLog()
 	t.Cleanup(log.Close)

@@ -437,8 +437,6 @@ func (a *activities) publish(ctx context.Context, stream *workflowstreams.Client
 		}
 		return nil
 	}
-	if a.Fallback != nil {
-		return a.Fallback.Append(pubCtx, sessionID, topic, ev)
-	}
-	return nil
+	// A step without a stream has streams off, and New gave it a fallback.
+	return a.Fallback.Append(pubCtx, sessionID, topic, ev)
 }

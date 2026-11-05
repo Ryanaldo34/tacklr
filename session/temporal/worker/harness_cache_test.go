@@ -77,6 +77,7 @@ func events() chan session.Event {
 // be built, a run that fails, a call body that is gone at commit, and each
 // store query the database fails, fail their step.
 func TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	type step = func(*harnessCache, session.Store, harnessSpec) error
 	boom := errors.New("boom")
@@ -141,6 +142,7 @@ func TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes(t *testing.T) {
 		"a call body the store cannot keep or read back": {store: without("session_calls", false), steps: []step{runCall(tacklr.NewCall(call, 0)), runCall(ran)}},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			store := tc.store(t)
 			var builds atomic.Int32
 			w := testHarness(t, "s", &builds)
@@ -162,6 +164,7 @@ func TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes(t *testing.T) {
 // leave the harness ahead of the store, so the next step builds a new
 // harness, which commits.
 func TestHarnesses_aFailedCommitDropsItsHarness(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	db, pool, schema := postgresDB(t)
 	store := db.Store()
@@ -188,6 +191,7 @@ func TestHarnesses_aFailedCommitDropsItsHarness(t *testing.T) {
 // harness when another worker commits. The next step builds a new harness
 // at the new revision.
 func TestHarnesses_aStaleHarnessAStepStillHoldsIsReplaced(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	store := session.NewMemoryStore()
 	var here, there atomic.Int32
@@ -224,6 +228,7 @@ func TestHarnesses_aStaleHarnessAStepStillHoldsIsReplaced(t *testing.T) {
 // harness limit closes the harness unused longest to build a new one. The
 // next step of that session builds it again.
 func TestHarnesses_pastItsLimitTheHarnessUnusedLongestCloses(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	store := session.NewMemoryStore()
 	var aBuilds, bBuilds atomic.Int32

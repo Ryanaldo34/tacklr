@@ -427,12 +427,12 @@ func (o *Object) Subscribe(ctx context.Context, after session.Seq) (session.Subs
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	deltas := o.deltas.Subscribe(ctx, id)
-	ch, err := o.events.Subscribe(ctx, id, after)
+	t, err := o.events.tail(ctx, id, after)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	return &subscription{ch: session.Merge(ctx, ch, deltas), cancel: cancel}, nil
+	return &subscription{ch: session.Merge(ctx, t.ch, deltas), tail: t, cancel: cancel}, nil
 }
 
 // openID is the id of the object's session unless it is unknown or closed.
@@ -460,13 +460,15 @@ func (o *Object) openLocked() error {
 // subscription is a session.Subscription over the event log's channel.
 type subscription struct {
 	ch     <-chan session.Event
+	tail   *tailing
 	cancel context.CancelFunc
 }
 
 func (s *subscription) Events() <-chan session.Event { return s.ch }
 
-// Err is nil: a log tail ends only when it is closed, or its session is.
-func (s *subscription) Err() error { return nil }
+// Err is why the events ended early: a read of the log that failed. It is
+// nil when the subscriber or the session closed them.
+func (s *subscription) Err() error { return s.tail.err }
 
 func (s *subscription) Close() error {
 	s.cancel()
@@ -525,14 +527,11 @@ func (o *Object) runOnce() (ok bool) {
 			ok = false
 		}
 	}()
+	// Every request that starts a run loaded the object first.
 	o.mu.Lock()
 	o.kick = false
-	err := o.load()
 	has, m := o.has, o.m
 	o.mu.Unlock()
-	if err != nil {
-		fail(err)
-	}
 	if !has || m.Ended {
 		return true
 	}

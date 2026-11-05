@@ -422,12 +422,15 @@ func (w *executor) stepErr(err error) error {
 	if turnCanceled(w.ctx, err) {
 		return context.Canceled
 	}
-	text := failureText(err)
-	if app, ok := errors.AsType[*temporal.ApplicationError](err); ok {
-		switch kind := session.FailKind(app.Type()); kind {
-		case session.FailRefused, session.FailMaxTokens:
-			return kind.WithText(text)
-		}
+	app, ok := errors.AsType[*temporal.ApplicationError](err)
+	if !ok {
+		return errors.New(err.Error())
+	}
+	// Error() appends the cause, which repeats the message.
+	text := cmp.Or(app.Message(), err.Error())
+	switch kind := session.FailKind(app.Type()); kind {
+	case session.FailRefused, session.FailMaxTokens:
+		return kind.WithText(text)
 	}
 	return errors.New(text)
 }
@@ -537,29 +540,9 @@ func (w *executor) takeCancel() bool {
 	return ok
 }
 
-// failureText reads ApplicationError.Message. Error() appends the cause,
-// which repeats the same text.
-func failureText(err error) string {
-	var app *temporal.ApplicationError
-	if errors.As(err, &app) {
-		if msg := app.Message(); msg != "" {
-			return msg
-		}
-	}
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
+// turnCanceled reports whether a step's error is the turn's cancel.
 func turnCanceled(ctx workflow.Context, err error) bool {
-	if err == nil {
-		return false
-	}
-	if ctx.Err() != nil {
-		return true
-	}
-	return temporal.IsCanceledError(err) || errors.Is(err, workflow.ErrCanceled) || errors.Is(err, workflow.ErrSessionFailed)
+	return ctx.Err() != nil || temporal.IsCanceledError(err) || errors.Is(err, workflow.ErrCanceled) || errors.Is(err, workflow.ErrSessionFailed)
 }
 
 var _ loop.Executor = (*executor)(nil)

@@ -35,10 +35,8 @@ type executor struct {
 
 	journal []entry
 	pos     int
-	// seq is the number the next journal entry gets, and entries how many
-	// the journal holds.
-	seq     uint64
-	entries int
+	// seq is the number the next journal entry gets.
+	seq uint64
 	// pending are the mailbox wakes taken since the last entry.
 	pending []uint64
 	// events are the durable events of the step that runs.
@@ -138,7 +136,7 @@ func newExecutor(o *Object, init Init, turn *loop.Turn) *executor {
 			return fmt.Errorf("journal entry %s: %w", raw.Key, err)
 		}
 		e.journal = append(e.journal, en)
-		e.seq, e.entries = seqOf(raw.Key)+1, e.entries+1
+		e.seq = seqOf(raw.Key) + 1
 		for _, n := range en.Taken {
 			taken[n] = true
 		}
@@ -212,7 +210,6 @@ func (e *executor) write(kind string, value any, err error, ops []Op, letters ..
 	e.o.sendLocked()
 	e.o.mu.Unlock()
 	e.seq++
-	e.entries++
 	e.pending = nil
 	return en.Err.err()
 }
@@ -648,12 +645,9 @@ func (e *executor) Cancel(id session.ID) {
 }
 
 // suspend keeps the session's state as its carry and drops the journal and
-// the wakes it took, in one write: the next run starts from the carry. A
-// run that journaled nothing changed nothing: its carry is current.
+// the wakes it took, in one write: the next run starts from the carry. The
+// journal holds at least the suspend, which Next took.
 func (e *executor) suspend() {
-	if e.entries == 0 {
-		return
-	}
 	id := e.init.SessionID
 	var ops []Op
 	err := scanAll(e.o.host, prefix(kindJournal, id), func(raw Entry) error {

@@ -1,8 +1,8 @@
 // Package dotest runs durable object sessions in memory, for tests: a
 // host's tests of its agent on the durable object runtime, and the
 // runtime's own. Platform stops objects, fires their alarms and fails their
-// writes the way a real platform can, so a test sees what a session does
-// when that happens.
+// reads and writes the way a real platform can, so a test sees what a
+// session does when that happens.
 package dotest
 
 import (
@@ -20,8 +20,8 @@ import (
 // the object away.
 var errStopped = errors.New("dotest: object stopped")
 
-// errWrite is a write FailWrites failed.
-var errWrite = errors.New("dotest: storage unavailable")
+// errOutage is a read FailReads failed, or a write FailWrites failed.
+var errOutage = errors.New("dotest: storage unavailable")
 
 // Platform is a durableobject.Platform in memory. Each object's storage
 // outlives the object: after Evict, the next request makes a new object over
@@ -32,20 +32,23 @@ type Platform struct {
 	disks  map[session.ID]*disk
 	live   map[session.ID]*host
 	alarms map[session.ID]time.Time
+	// alarmed closes, and is replaced, whenever an object sets its alarm.
+	alarmed chan struct{}
 	// wire sends every call to an object over the object protocol
 	// (NewWire).
 	wire bool
 }
 
-// disk is one object's storage, and the writes it fails.
+// disk is one object's storage, and the reads and writes it fails.
 type disk struct {
 	*durableobject.MemStorage
-	fail atomic.Pointer[func([]durableobject.Op) bool]
+	failRead  atomic.Pointer[func(key string) bool]
+	failWrite atomic.Pointer[func([]durableobject.Op) bool]
 }
 
 // New returns an empty Platform whose objects run with cfg.
 func New(cfg durableobject.Config) *Platform {
-	return &Platform{cfg: cfg, disks: map[session.ID]*disk{}, live: map[session.ID]*host{}, alarms: map[session.ID]time.Time{}}
+	return &Platform{cfg: cfg, disks: map[session.ID]*disk{}, live: map[session.ID]*host{}, alarms: map[session.ID]time.Time{}, alarmed: make(chan struct{})}
 }
 
 // Object implements durableobject.Platform. It is the id's live object,
@@ -98,6 +101,23 @@ func (p *Platform) Alarm(id session.ID) time.Time {
 	return p.alarms[id]
 }
 
+// WaitAlarm returns id's alarm once its object set it to a time after
+// after, or, with ctx's error, once ctx ends.
+func (p *Platform) WaitAlarm(ctx context.Context, id session.ID, after time.Time) (time.Time, error) {
+	for {
+		p.mu.Lock()
+		at, alarmed := p.alarms[id], p.alarmed
+		p.mu.Unlock()
+		if at.After(after) || ctx.Err() != nil {
+			return at, ctx.Err()
+		}
+		select {
+		case <-alarmed:
+		case <-ctx.Done():
+		}
+	}
+}
+
 // FireAlarm delivers id's alarm, as the platform does when it is due.
 func (p *Platform) FireAlarm(ctx context.Context, id session.ID) error {
 	p.mu.Lock()
@@ -125,7 +145,20 @@ func (p *Platform) Keys(id session.ID) []string {
 // FailWrites makes id's storage fail each write whose ops fail reports,
 // as an outage does; nil makes every write work again.
 func (p *Platform) FailWrites(id session.ID, fail func(ops []durableobject.Op) bool) {
-	p.host(id).disk.fail.Store(&fail)
+	p.host(id).disk.failWrite.Store(&fail)
+}
+
+// FailReads makes id's storage fail each read whose key fail reports, as
+// an outage does: a Get's key, or a Scan's prefix. Nil makes every read
+// work again.
+func (p *Platform) FailReads(id session.ID, fail func(key string) bool) {
+	p.host(id).disk.failRead.Store(&fail)
+}
+
+// fails reports whether a read of key fails (FailReads).
+func (d *disk) fails(key string) bool {
+	fail := d.failRead.Load()
+	return fail != nil && *fail != nil && (*fail)(key)
 }
 
 // host is one object's durableobject.Host: its storage, until it is
@@ -145,12 +178,18 @@ func (h *host) Get(key string) ([]byte, bool, error) {
 	if h.dead.Load() {
 		return nil, false, errStopped
 	}
+	if h.disk.fails(key) {
+		return nil, false, errOutage
+	}
 	return h.disk.Get(key)
 }
 
 func (h *host) Scan(prefix, after string, limit int) ([]durableobject.Entry, error) {
 	if h.dead.Load() {
 		return nil, errStopped
+	}
+	if h.disk.fails(prefix) {
+		return nil, errOutage
 	}
 	return h.disk.Scan(prefix, after, limit)
 }
@@ -159,8 +198,8 @@ func (h *host) Write(ops ...durableobject.Op) error {
 	if h.dead.Load() {
 		return errStopped
 	}
-	if fail := h.disk.fail.Load(); fail != nil && *fail != nil && (*fail)(ops) {
-		return errWrite
+	if fail := h.disk.failWrite.Load(); fail != nil && *fail != nil && (*fail)(ops) {
+		return errOutage
 	}
 	return h.disk.Write(ops...)
 }
@@ -178,5 +217,7 @@ func (h *host) SetAlarm(t time.Time) error {
 	} else {
 		h.p.alarms[h.id] = t
 	}
+	close(h.p.alarmed)
+	h.p.alarmed = make(chan struct{})
 	return nil
 }

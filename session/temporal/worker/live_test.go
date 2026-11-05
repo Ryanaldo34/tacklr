@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,8 +56,25 @@ type liveStack struct {
 	// live serves the worker's live endpoint when cfg.Live has a key: a
 	// restart serves the new worker at a new URL, as a new machine is.
 	live *httptest.Server
-	// current is the running worker, for a model that looks at it.
-	current atomic.Pointer[Worker]
+	// listening closes once a client listens on the running worker's live
+	// endpoint, for a model that waits for it.
+	listening atomic.Pointer[chan struct{}]
+}
+
+// flushSignal is a live response that closes its worker's listening once
+// the endpoint flushes: the client listens from then on.
+type flushSignal struct {
+	http.ResponseWriter
+	once      *sync.Once
+	listening chan struct{}
+}
+
+// FlushError flushes the response (http.ResponseController uses it) and
+// reports why it could not.
+func (f flushSignal) FlushError() error {
+	err := http.NewResponseController(f.ResponseWriter).Flush()
+	f.once.Do(func() { close(f.listening) })
+	return err
 }
 
 func newLiveStack(t *testing.T, agent tacklr.AgentOptions, change ...func(*Config)) *liveStack {
@@ -96,7 +114,11 @@ func (s *liveStack) startWorker(t *testing.T) {
 	cfg := s.cfg
 	var handler atomic.Pointer[http.Handler]
 	if len(cfg.Live.Key) > 0 {
-		s.live = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { (*handler.Load()).ServeHTTP(w, r) }))
+		listening, once := make(chan struct{}), new(sync.Once)
+		s.listening.Store(&listening)
+		s.live = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			(*handler.Load()).ServeHTTP(flushSignal{ResponseWriter: w, once: once, listening: listening}, r)
+		}))
 		t.Cleanup(s.live.Close)
 		cfg.Live.URL = s.live.URL
 	}
@@ -107,7 +129,6 @@ func (s *liveStack) startWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Worker = w
-	s.current.Store(w)
 	t.Cleanup(w.Stop)
 }
 
@@ -193,14 +214,14 @@ func waitContains(t *testing.T, sub session.Subscription, timeout time.Duration,
 // worker that took the session. A request without the session's token is
 // refused, and one without a session is not found.
 func TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	var stacks atomic.Pointer[liveStack]
-	var sid atomic.Value
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		// The reply streams once the client listens on this worker.
-		id, _ := sid.Load().(session.ID)
-		for stacks.Load().current.Load().live.Readers(id) == 0 && ctx.Err() == nil {
-			time.Sleep(10 * time.Millisecond)
+		select {
+		case <-*stacks.Load().listening.Load():
+		case <-ctx.Done():
 		}
 		for _, piece := range []string{"Hel", "lo ", "world"} {
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: piece}
@@ -213,7 +234,6 @@ func TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid.Store(id)
 	turn := func() []session.Event {
 		head, err := stack.Client.Head(ctx, id)
 		if err != nil {
@@ -289,6 +309,7 @@ func TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages(t *testi
 // which mounts the workspace again and reads it. The next prompt goes on
 // after one more restart.
 func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
@@ -387,6 +408,7 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 // run_command there. An empty command gets a correction; a command reads
 // the workspace.
 func TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	ctx := t.Context()
 	dir := t.TempDir()
@@ -448,6 +470,7 @@ func TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace(t *testing.T) {
 // session's records are deleted, a replay still delivers each result
 // event, without the content that went with them.
 func TestLive_historyHoldsNoSecretsOrToolResults(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	token := "tok-history-secret-7f3a"
 	header := "Bearer mcp-secret-9c1e"
@@ -579,12 +602,16 @@ func TestLive_historyHoldsNoSecretsOrToolResults(t *testing.T) {
 // deletes the session's secrets and record, and after it the session has
 // no status or jobs and takes no prompt.
 func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	release, let := releaseLater(t)
+	// running has a value for each job that runs and waits for release.
+	running := make(chan struct{}, 2)
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		last := lastMsg(msgs)
 		switch {
 		case last != nil && last.Content == "child-task":
+			running <- struct{}{}
 			<-release
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "child-done", IsComplete: true}
 		case last != nil && last.Role == message.RoleUser && last.Content == "go":
@@ -602,7 +629,11 @@ func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
 	}})
 	agent := liveAgent(t, model, tacklr.AgentOptions{Tools: []*tacklr.Tool{start}, Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}})
 	stack := newLiveStack(t, agent, func(c *Config) {
-		c.Jobs = map[string]session.JobHandler{"ci": func(context.Context, string) (string, error) { <-release; return "built", nil }}
+		c.Jobs = map[string]session.JobHandler{"ci": func(context.Context, string) (string, error) {
+			running <- struct{}{}
+			<-release
+			return "built", nil
+		}}
 	})
 	t.Cleanup(let) // before the stack stops its worker
 	rt := stack.Client
@@ -623,11 +654,14 @@ func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The turn waits on both jobs; it ends only once they finish.
-	var jobs []session.Status
-	var jobsErr error
-	for deadline := time.Now().Add(60 * time.Second); len(jobs) < 2 && jobsErr == nil && time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		jobs, jobsErr = rt.Jobs(ctx, id)
+	for range 2 {
+		select {
+		case <-running:
+		case <-time.After(60 * time.Second):
+			t.Fatal("the session's jobs did not start")
+		}
 	}
+	jobs, jobsErr := rt.Jobs(ctx, id)
 	head, headErr := rt.Head(ctx, id)
 	badPrompt := rt.Prompt(ctx, id, session.Prompt{Text: "x", State: bad})
 	badResume := rt.Resume(ctx, id, session.Resume{State: bad})
@@ -677,30 +711,38 @@ func unreachable(t *testing.T) client.Client {
 	return c
 }
 
-// TestNew_needsAClientAStoreAndSecrets: New panics without any of them.
+// TestNew_needsAClientAStoreAndSecrets: New panics without any of them, and
+// with a live URL but no key to sign its tokens.
 func TestNew_needsAClientAStoreAndSecrets(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	c, store, secrets := unreachable(t), session.NewMemoryStore(), session.NewMemorySecretStorage()
 	for name, tc := range map[string]struct {
 		c   client.Client
 		cfg Config
 	}{
-		"no client":  {nil, Config{Store: store, Secrets: secrets}},
-		"no store":   {c, Config{Secrets: secrets}},
-		"no secrets": {c, Config{Store: store}},
+		"no client":   {nil, Config{Store: store, Secrets: secrets}},
+		"no store":    {c, Config{Secrets: secrets}},
+		"no secrets":  {c, Config{Store: store}},
+		"no live key": {c, Config{Store: store, Secrets: secrets, Live: Live{URL: "http://worker.test"}}},
 	} {
 		// Act and assert
-		t.Run(name, func(t *testing.T) { mustPanic(t, func() { New(tc.c, tc.cfg) }) })
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			mustPanic(t, func() { New(tc.c, tc.cfg) })
+		})
 	}
 }
 
 // TestWorker_aWorkerForAnUnreachableServerFailsToStart: Start and Run
-// report that the server is not there.
+// report that the server is not there, also for a worker with streams off
+// and its own fallback log.
 func TestWorker_aWorkerForAnUnreachableServerFailsToStart(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	w := New(unreachable(t), Config{
 		Agent: tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192}, TaskQueue: "unreachable",
-		Store: session.NewMemoryStore(), Secrets: session.NewMemorySecretStorage(),
+		Store: session.NewMemoryStore(), Secrets: session.NewMemorySecretStorage(), DisableStreams: true,
 	})
 
 	// Act

@@ -36,13 +36,6 @@ func (l *Live) Publish(id ID, ev Event) {
 	}
 }
 
-// Readers is how many readers listen to id now.
-func (l *Live) Readers(id ID) int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.readers[id])
-}
-
 // Subscribe is id's deltas from now until ctx ends, when the channel
 // closes.
 func (l *Live) Subscribe(ctx context.Context, id ID) <-chan Event {

@@ -37,6 +37,7 @@ import (
 // parks the turn. A resume runs the tool again, and its result reaches the
 // model.
 func TestSessionWorkflow_authExpiredYieldThenResume(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	var calls atomic.Int32
 	cloud := tacklr.NewTool(tacklr.ToolConfig{
@@ -100,6 +101,7 @@ func TestSessionWorkflow_authExpiredYieldThenResume(t *testing.T) {
 // TestSessionWorkflow_hitlCancel: a cancel while the turn is parked on a
 // question fails the turn.
 func TestSessionWorkflow_hitlCancel(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		ch <- tacklr.LLMResponseChunk{
@@ -140,6 +142,7 @@ func TestSessionWorkflow_hitlCancel(t *testing.T) {
 // is parked keeps the park. The model's next request comes after the
 // resume, and it holds the parked call's result, then the steer.
 func TestSessionWorkflow_steerDuringYieldKeepsPark(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	env := newTestWorkflow(t)
 	var requests [][]string
@@ -187,6 +190,7 @@ func TestSessionWorkflow_steerDuringYieldKeepsPark(t *testing.T) {
 // TestSessionWorkflow_badWorkspaceBindingFailsTurn: a workspace binding
 // that cannot open fails the turn.
 func TestSessionWorkflow_badWorkspaceBindingFailsTurn(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	missing := filepath.Join(t.TempDir(), "missing")
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -227,6 +231,7 @@ func TestSessionWorkflow_badWorkspaceBindingFailsTurn(t *testing.T) {
 // of a blocking specialist answers, and its answer reaches the root
 // session through its parent.
 func TestSessionWorkflow_grandchildResultReachesParent(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		last := lastMsg(msgs)
@@ -303,8 +308,10 @@ func TestSessionWorkflow_grandchildResultReachesParent(t *testing.T) {
 // on a question keeps its background job running. Resumed, it finishes;
 // closed while parked, it cancels the job.
 func TestSessionWorkflow_parkedParentLeavesAsyncChildRunning(t *testing.T) {
+	t.Parallel()
 	for _, resume := range []bool{true, false} {
 		t.Run(map[bool]string{true: "resumed, it finishes", false: "closed while parked, its job is cancelled"}[resume], func(t *testing.T) {
+			t.Parallel()
 			env := newTestWorkflow(t)
 			release := make(chan struct{})
 			var once sync.Once
@@ -504,6 +511,7 @@ func releaseLater(t *testing.T) (<-chan struct{}, func()) {
 // TestSessionWorkflow_aSteerTheModelCannotReadFailsTheTurn: a prompt sent
 // while a tool runs, with content the model cannot read, fails the turn.
 func TestSessionWorkflow_aSteerTheModelCannotReadFailsTheTurn(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	release, let := releaseLater(t)
 	model := testkit.TextHTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -533,6 +541,7 @@ func TestSessionWorkflow_aSteerTheModelCannotReadFailsTheTurn(t *testing.T) {
 // TestSessionWorkflow_failedWorkerEndsTheChild: a job whose worker fails
 // ends, and its failure reaches the parent's next reply.
 func TestSessionWorkflow_failedWorkerEndsTheChild(t *testing.T) {
+	t.Parallel()
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		for _, m := range msgs {
 			if m != nil && m.Role == message.RoleUser && strings.Contains(m.Content, "failed:") && strings.Contains(m.Content, "ci broke") {
@@ -605,6 +614,7 @@ func (w *waitAll) arrive() error {
 // calls of one reply that ask for permission park one at a time. Each runs
 // once on its answer, and every result comes back in call order.
 func TestSessionWorkflow_twoPermissionPromptsInOneGroupParkOneAtATime(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	var runs atomic.Int32
 	var results []string
@@ -699,6 +709,7 @@ func TestSessionWorkflow_twoPermissionPromptsInOneGroupParkOneAtATime(t *testing
 // starts a second job. Each job starts once, and the tool lists the job
 // that runs and the job it started.
 func TestSessionWorkflow_aToolSchedulingAJobTwiceStartsItOnceAndListsIt(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	env := newTestWorkflow(t)
 	release, let := releaseLater(t)
@@ -769,6 +780,7 @@ func TestSessionWorkflow_aToolSchedulingAJobTwiceStartsItOnceAndListsIt(t *testi
 // blocking specialists of one reply run at the same time, and their results
 // come back in call order.
 func TestSessionWorkflow_blockingSpecialistsFromOneReplyRunAtOnce(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	both := newWaitAll(2)
 	var results []string
@@ -822,6 +834,7 @@ func TestSessionWorkflow_blockingSpecialistsFromOneReplyRunAtOnce(t *testing.T) 
 // specialist's output is its call's result and is kept as an Episode. A
 // specialist that fails gives its call an error result: its own failure.
 func TestSessionWorkflow_aBlockingSpecialistsOutcomeIsItsCallsResult(t *testing.T) {
+	t.Parallel()
 	const token = "unique-retain-specialist-token"
 	for _, tc := range []struct {
 		name       string
@@ -833,6 +846,7 @@ func TestSessionWorkflow_aBlockingSpecialistsOutcomeIsItsCallsResult(t *testing.
 		{"its failure is an error result", tacklr.LLMResponseChunk{Error: errors.New("child model broke")}, "error", "provider HTTP 400 (invalid_request): child model broke"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			env := newTestWorkflow(t)
 			eng, err := brain.NewEngine(brain.NewMemoryStore())
 			if err != nil {
@@ -898,6 +912,7 @@ func TestSessionWorkflow_aBlockingSpecialistsOutcomeIsItsCallsResult(t *testing.
 // the turn fails with it, for a tool's round, a blocking specialist's
 // round, and a reply without calls.
 func TestSessionWorkflow_aRoundThatCannotFitFailsTheStepThatCommitsIt(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		call message.ToolCall
@@ -908,6 +923,7 @@ func TestSessionWorkflow_aRoundThatCannotFitFailsTheStepThatCommitsIt(t *testing
 		{"a reply without calls", message.ToolCall{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			env := newTestWorkflow(t)
 			model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 				if last := lastMsg(msgs); last != nil && last.Content == "child-task" {
@@ -956,6 +972,7 @@ func TestSessionWorkflow_aRoundThatCannotFitFailsTheStepThatCommitsIt(t *testing
 // summary request fails on the network runs again and the turn completes.
 // Each tool runs once.
 func TestSessionWorkflow_aRetriedCommitRunsEachToolOnce(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	var aRuns, bRuns, summaries atomic.Int32
 	big := strings.Repeat("b", 600)
@@ -1008,6 +1025,7 @@ func TestSessionWorkflow_aRetriedCommitRunsEachToolOnce(t *testing.T) {
 // request for a specialist, an unknown job, an empty task or an empty name,
 // and a cancel of an unknown job, each fail with the reason.
 func TestSessionWorkflow_jobRequestsTheRuntimeCannotServeFail(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	var seen string
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -1049,6 +1067,7 @@ func TestSessionWorkflow_jobRequestsTheRuntimeCannotServeFail(t *testing.T) {
 // cancel_child stops one by id. Closed, the session deletes its saved
 // messages from the brain.
 func TestSessionWorkflow_jobsFromEarlierRepliesAreListedAndCancelled(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	const id = session.ID("sess-listed-jobs")
 	var listed, cancelled string
@@ -1132,6 +1151,7 @@ func TestSessionWorkflow_jobsFromEarlierRepliesAreListedAndCancelled(t *testing.
 // state reaches a tool that parks and resumes, and a tool's own change to
 // that key is not overwritten by a later step.
 func TestSessionWorkflow_hostStateIsAppliedOnceAndSurvivesAPark(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	var results []string
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -1189,6 +1209,7 @@ func TestSessionWorkflow_hostStateIsAppliedOnceAndSurvivesAPark(t *testing.T) {
 // call that completed is not run again, and the round commits both results
 // in call order.
 func TestSessionWorkflow_aStepThatDiesRunsAgainWithoutTheCallsThatCompleted(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	var aRuns, bRuns atomic.Int32
 	var results []string
@@ -1234,6 +1255,7 @@ func TestSessionWorkflow_aStepThatDiesRunsAgainWithoutTheCallsThatCompleted(t *t
 // keeps its result. The next prompt gives
 // the stopped call a cancelled result, commits the round, then the prompt.
 func TestSessionWorkflow_aCancelStopsARoundsToolsAndTheNextPromptCancelsTheirCalls(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	var slowRunning atomic.Bool
 	release := make(chan struct{})
@@ -1297,6 +1319,7 @@ func TestSessionWorkflow_aCancelStopsARoundsToolsAndTheNextPromptCancelsTheirCal
 // no parked call, or a Tool step that keeps failing (a worker that dies on
 // it every time), fails the turn.
 func TestSessionWorkflow_aResumeOrAToolStepThatFailsFailsTheTurn(t *testing.T) {
+	t.Parallel()
 	allow := []byte(`{"optionId":"allow-once"}`)
 	for _, tc := range []struct {
 		name, tool string
@@ -1308,6 +1331,7 @@ func TestSessionWorkflow_aResumeOrAToolStepThatFailsFailsTheTurn(t *testing.T) {
 		{"a Tool step that keeps failing", "dies", nil, "worker died"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			env := newTestWorkflow(t)
 			model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 				ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true,
@@ -1339,6 +1363,7 @@ func TestSessionWorkflow_aResumeOrAToolStepThatFailsFailsTheTurn(t *testing.T) {
 // next reply; a cancel stops the job and fails the turn; the host
 // cancelling the session's workflow stops the job too.
 func TestSessionWorkflow_aTurnWaitingOnABackgroundJob(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		wake session.Wake
@@ -1348,6 +1373,7 @@ func TestSessionWorkflow_aTurnWaitingOnABackgroundJob(t *testing.T) {
 		{"a cancelled workflow stops the job", session.Wake{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			env := newTestWorkflow(t)
 			release, let := releaseLater(t)
 			var steered atomic.Bool
@@ -1391,7 +1417,9 @@ func TestSessionWorkflow_aTurnWaitingOnABackgroundJob(t *testing.T) {
 			})
 			signalAt(env, time.Minute, session.Wake{Kind: session.WakeClose})
 
-			env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-waiting"})
+			// The turn span is found by session id: each case has its own.
+			id := session.ID("sess-waiting-" + tc.wake.Kind)
+			env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: id})
 
 			if tc.wake.Kind == "" {
 				if err := env.GetWorkflowError(); err != nil || childErr == nil {
@@ -1406,8 +1434,8 @@ func TestSessionWorkflow_aTurnWaitingOnABackgroundJob(t *testing.T) {
 			if tc.wake.Kind == session.WakePrompt && (!steered.Load() || st.State != session.Complete) {
 				t.Fatalf("steered %v, status %+v; want the prompt in the next reply and the turn complete", steered.Load(), st)
 			}
-			if tc.wake.Kind == session.WakeCancel && (st.State != session.Failed || childErr == nil || turnStatus(t, "sess-waiting") != telemetry.OutcomeCancelled) {
-				t.Fatalf("status %+v, child %v, span %q; want the turn failed and its span cancelled, and the job stopped", st, childErr, turnStatus(t, "sess-waiting"))
+			if tc.wake.Kind == session.WakeCancel && (st.State != session.Failed || childErr == nil || turnStatus(t, id) != telemetry.OutcomeCancelled) {
+				t.Fatalf("status %+v, child %v, span %q; want the turn failed and its span cancelled, and the job stopped", st, childErr, turnStatus(t, id))
 			}
 		})
 	}
@@ -1418,6 +1446,7 @@ func TestSessionWorkflow_aTurnWaitingOnABackgroundJob(t *testing.T) {
 // tells its parent; resumed by its own id, it finishes and its result is
 // the parent call's result.
 func TestSessionWorkflow_aSpecialistThatParksIsResumedAndItsResultReachesItsCall(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	const parent = session.ID("sess-child-hitl")
 	child := tacklr.ChildID(string(parent), "researcher", "sp1", true)
@@ -1445,7 +1474,14 @@ func TestSessionWorkflow_aSpecialistThatParksIsResumedAndItsResultReachesItsCall
 		Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model, Tools: []*tacklr.Tool{gated}}}})
 	allow, _ := json.Marshal(map[string]string{"optionId": "allow-once"})
 	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
+	// The test environment lists a child before it can answer a query: ask
+	// only once it started.
+	var childStarted atomic.Bool
+	env.SetOnChildWorkflowStartedListener(func(*workflow.Info, workflow.Context, converter.EncodedValues) { childStarted.Store(true) })
 	childParked := func() bool {
+		if !childStarted.Load() {
+			return false
+		}
 		val, err := env.QueryWorkflowByID(child, protocol.QueryStatus)
 		var st session.Status
 		return err == nil && val.Get(&st) == nil && st.Waiting
@@ -1471,6 +1507,7 @@ func TestSessionWorkflow_aSpecialistThatParksIsResumedAndItsResultReachesItsCall
 // for a job worker runs the worker on each prompt's text. A session for a
 // worker that no one registered fails, and its result says not found.
 func TestSessionWorkflow_aWorkerSessionRunsEachPromptAsItsJob(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		worker, result string
 		state          session.State
@@ -1479,6 +1516,7 @@ func TestSessionWorkflow_aWorkerSessionRunsEachPromptAsItsJob(t *testing.T) {
 		{"nightly", "not found: nightly", session.Failed},
 	} {
 		t.Run(tc.worker, func(t *testing.T) {
+			t.Parallel()
 			// Arrange
 			env := newTestWorkflow(t)
 			acts, _ := registerSession(env, tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192})
