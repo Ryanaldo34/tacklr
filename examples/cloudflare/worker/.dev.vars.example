@@ -1,0 +1,8 @@
+# Copy to .dev.vars for wrangler dev; set the same names with
+# `wrangler secret put` for a deploy.
+API_TOKEN=change-me
+# 32 random bytes in base64: openssl rand -base64 32
+SEAL_KEY=
+OPENAI_API_KEY=
+OPENAI_BASE_URL=https://api.openai.com/v1
+MODEL=gpt-5-mini

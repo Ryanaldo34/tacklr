@@ -56,6 +56,17 @@ jobs:
           args: --timeout=5m
           only-new-issues: false
 
+      # The Cloudflare bridge and its example build only for js/wasm.
+      - name: golangci-lint (js/wasm)
+        uses: golangci/golangci-lint-action@v8
+        env:
+          GOOS: js
+          GOARCH: wasm
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout=5m ./session/durableobject/cloudflare ./examples/cloudflare
+          only-new-issues: false
+
   test:
     name: Build, Test & Coverage
     runs-on: ubuntu-latest
@@ -193,3 +204,38 @@ jobs:
           name: tacklr
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+  cloudflare:
+    name: Cloudflare Workers (e2e + size)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+          cache: true
+
+      # wrangler runs on Node; Bun installs it and runs the test.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Vet (js/wasm)
+        run: GOOS=js GOARCH=wasm go vet ./session/durableobject/cloudflare ./examples/cloudflare
+
+      # The example Worker in workerd (wrangler dev) against a scripted
+      # model, then the size gate on its program.
+      - name: End-to-end test and size gate
+        run: |
+          cd examples/cloudflare/worker && bun install --frozen-lockfile && bun test e2e
+          cd ../../.. && ./scripts/wasm-size.sh examples/cloudflare/worker/build/tacklr.wasm

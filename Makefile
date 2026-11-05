@@ -1,5 +1,5 @@
 # Requires Go 1.27 (go.mod).
-.PHONY: test vet lint fmt cover coverage check wasm
+.PHONY: test vet lint fmt cover coverage check wasm vet-wasm cloudflare-e2e
 
 # The harness core builds for WebAssembly (GOOS=js GOARCH=wasm) so a host can
 # run it outside a Linux worker, for example in a Cloudflare Durable Object.
@@ -13,8 +13,22 @@ test:
 vet:
 	go vet ./...
 
+# The Cloudflare bridge and its example are the only packages with a build
+# tag (js && wasm), so the Linux targets skip them.
+WASM_TAGGED = ./session/durableobject/cloudflare ./examples/cloudflare
+
 wasm:
-	GOOS=js GOARCH=wasm go build $(WASM_CORE)
+	GOOS=js GOARCH=wasm go build $(WASM_CORE) $(WASM_TAGGED)
+
+vet-wasm:
+	GOOS=js GOARCH=wasm go vet $(WASM_TAGGED)
+	GOOS=js GOARCH=wasm golangci-lint run $(WASM_TAGGED)
+
+# The example Worker in workerd (wrangler dev) against a scripted model,
+# then the size gate on its program. Needs Bun and Node.
+cloudflare-e2e:
+	cd examples/cloudflare/worker && bun install --frozen-lockfile && bun test e2e
+	./scripts/wasm-size.sh examples/cloudflare/worker/build/tacklr.wasm
 
 # Format all packages (gofmt + goimports if available).
 fmt:
@@ -36,7 +50,7 @@ cover:
 coverage: cover
 
 # Full local gate: format check + lint + vet + race tests + coverage thresholds.
-check: vet wasm lint cover
+check: vet wasm vet-wasm lint cover
 	@unformatted=$$(gofmt -l .); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \
