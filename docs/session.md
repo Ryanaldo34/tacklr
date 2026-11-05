@@ -106,7 +106,9 @@ The worker registers `SessionWorkflow`, `Commit`, `Inference`, `Tool`, `EmitEven
 
 ## Durable objects
 
-Package `session/durableobject` runs one session per durable object: an object with its own ordered storage, alarm and address, as a Cloudflare Durable Object has. The package is plain Go and builds for WebAssembly. A platform implements `Host` for each object (its storage, its alarm, and the other objects) and `Platform` for reaching objects by id, calls the session's `Object` for every request and alarm, and keeps the object alive until `Object.Idle` returns. `NewClient` is the `session.Client` over a `Platform`. The Cloudflare Workers platform is the next package. `dotest.Platform` runs objects in memory for tests: it stops them, fires their alarms and fails chosen writes the way a platform can.
+Package `session/durableobject` runs one session per durable object: an object with its own ordered storage, alarm and address, as a Cloudflare Durable Object has. The package is plain Go and builds for WebAssembly. A platform implements `Host` for each object (its storage, its alarm, and the other objects) and `Platform` for reaching objects by id, calls the session's `Object` for every request and alarm, and keeps the object alive until `Object.Idle` returns. `NewClient` is the `session.Client` over a `Platform`. `dotest.Platform` runs objects in memory for tests: it stops them, fires their alarms and fails chosen writes the way a platform can.
+
+Where objects are remote, they reach each other over the object protocol: `Handler(ref)` serves an object over HTTP (create, wake, status, jobs, head, and an NDJSON event stream), and `Remote(client)` is the `Ref` on the caller's side, whose client's Transport reaches the one object. An error keeps its kind (`session.ErrNotFound`, `ErrExists`, `ErrInvalid`) across the protocol. The protocol has no authentication and carries credentials in clear text, so a platform keeps it inside its own network. `dotest.NewWire` sends every call over it, and its `Evict` breaks the object's open streams.
 
 ```go
 obj := durableobject.NewObject(host, durableobject.Config{Agent: agent, Sealer: sealer, Jobs: jobs})

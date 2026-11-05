@@ -34,6 +34,18 @@ type reply func(msgs []*message.Message) tacklr.LLMResponseChunk
 
 func newFixture(t *testing.T, answer reply, tools []*tacklr.Tool, configure ...func(*durableobject.Config)) fixture {
 	t.Helper()
+	return newFixtureOn(t, dotest.New, answer, tools, configure...)
+}
+
+// newWireFixture is newFixture on a platform where every call to an object
+// crosses the object protocol, as on Cloudflare.
+func newWireFixture(t *testing.T, answer reply, tools []*tacklr.Tool, configure ...func(*durableobject.Config)) fixture {
+	t.Helper()
+	return newFixtureOn(t, dotest.NewWire, answer, tools, configure...)
+}
+
+func newFixtureOn(t *testing.T, platform func(durableobject.Config) *dotest.Platform, answer reply, tools []*tacklr.Tool, configure ...func(*durableobject.Config)) fixture {
+	t.Helper()
 	var infers atomic.Int32
 	model := testkit.HTTPModel(t, func(_ context.Context, msgs []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		infers.Add(1)
@@ -59,7 +71,7 @@ func newFixture(t *testing.T, answer reply, tools []*tacklr.Tool, configure ...f
 	for _, f := range configure {
 		f(&cfg)
 	}
-	p := dotest.New(cfg)
+	p := platform(cfg)
 	return fixture{p: p, c: durableobject.NewClient(p), infers: &infers}
 }
 
@@ -146,7 +158,7 @@ func toolResult(evs []session.Event) string {
 // delta, and a second turn leaves only its own events and outcome.
 func TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents(t *testing.T) {
 	lookup := tacklr.NewTool(tacklr.ToolConfig{Name: "lookup", Timeout: time.Minute, Handler: func(context.Context) (string, error) { return "42", nil }})
-	f := newFixture(t, callThenAnswer("lookup", `{}`), []*tacklr.Tool{lookup})
+	f := newWireFixture(t, callThenAnswer("lookup", `{}`), []*tacklr.Tool{lookup})
 	ctx := t.Context()
 	id, err := f.c.CreateSession(ctx, session.CreateSession{State: map[string]any{"tier": "pro"}})
 	if err != nil {
@@ -269,7 +281,7 @@ func TestSession_aParkedTurnResumesAfterItsObjectStopped(t *testing.T) {
 		}
 		return "chose " + answer.(*tacklr.UserSelectionInterrupt).ConfirmedChoice.Title, nil
 	}})
-	f := newFixture(t, callThenAnswer("confirm", `{}`), []*tacklr.Tool{confirm})
+	f := newWireFixture(t, callThenAnswer("confirm", `{}`), []*tacklr.Tool{confirm})
 	ctx := t.Context()
 	id, err := f.c.CreateSession(ctx, session.CreateSession{})
 	if err != nil {
@@ -281,7 +293,10 @@ func TestSession_aParkedTurnResumesAfterItsObjectStopped(t *testing.T) {
 	}
 	parked := last(untilEnd(t, sub))
 
+	lost := sub
 	f.p.Evict(id)
+	for range lost.Events() {
+	}
 	// A new object answers from storage, without running the session.
 	waiting, _ := f.c.Status(ctx, id)
 	idle := f.p.Idle(ctx, id)
@@ -291,6 +306,9 @@ func TestSession_aParkedTurnResumesAfterItsObjectStopped(t *testing.T) {
 
 	if parked.Type != session.EventInterrupt || !waiting.Waiting || idle != nil {
 		t.Fatalf("parked %+v, status %+v %v; want the turn waiting on the question", parked, waiting, idle)
+	}
+	if lost.Err() == nil {
+		t.Fatal("the stream of the stopped object ended without an error; want it broken")
 	}
 	if err != nil || last(evs).Type != session.EventComplete || toolResult(evs) != "chose Delete" {
 		t.Fatalf("resume %v, events %+v; want the answer as the call's result and the turn ended", err, evs)
@@ -381,7 +399,7 @@ func TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth(t *testing.T) {
 		jobID.Store(session.ID(job.ID))
 		return "", err
 	}})
-	f := newFixture(t, callThenAnswer("export", `{}`), []*tacklr.Tool{export}, func(cfg *durableobject.Config) {
+	f := newWireFixture(t, callThenAnswer("export", `{}`), []*tacklr.Tool{export}, func(cfg *durableobject.Config) {
 		eng, err := brain.NewEngine(brain.NewMemoryStore())
 		if err != nil {
 			t.Fatal(err)
@@ -527,7 +545,7 @@ func TestSession_aModelRequestThatFailsOnTheNetworkRunsAgain(t *testing.T) {
 // specialist and a worker, an id that is taken, and state JSON cannot hold
 // are refused; every call on an unknown session is not found.
 func TestClient_refusesBadAndUnknownSessions(t *testing.T) {
-	f := newFixture(t, callThenAnswer("none", `{}`), nil)
+	f := newWireFixture(t, callThenAnswer("none", `{}`), nil)
 	ctx := t.Context()
 	_, both := f.c.CreateSession(ctx, session.CreateSession{Specialist: "a", Worker: "b"})
 	_, err := f.c.CreateSession(ctx, session.CreateSession{SessionID: "taken"})
@@ -610,7 +628,7 @@ func TestSession_aSpecialistRunsInItsOwnObjectAndAnUnknownKindFails(t *testing.T
 		}
 		return callThenAnswer("spawn_specialist", `{"specialist":"reviewer","task_description_and_context":"check the change","block":true}`)(msgs)
 	}
-	f := newFixture(t, answer, nil, func(cfg *durableobject.Config) {
+	f := newWireFixture(t, answer, nil, func(cfg *durableobject.Config) {
 		cfg.Agent.Specialists = []*tacklr.Specialist{{Name: "reviewer", Description: "Reviews.", Instructions: "Review strictly.", Model: cfg.Agent.Model}}
 	})
 	ctx := t.Context()

@@ -32,6 +32,9 @@ type Platform struct {
 	disks  map[session.ID]*disk
 	live   map[session.ID]*host
 	alarms map[session.ID]time.Time
+	// wire sends every call to an object over the object protocol
+	// (NewWire).
+	wire bool
 }
 
 // disk is one object's storage, and the writes it fails.
@@ -46,8 +49,14 @@ func New(cfg durableobject.Config) *Platform {
 }
 
 // Object implements durableobject.Platform. It is the id's live object,
-// made on first use over the id's storage.
-func (p *Platform) Object(id session.ID) durableobject.Ref { return p.host(id).obj }
+// made on first use over the id's storage; on a NewWire platform, a Ref
+// that reaches it over the object protocol.
+func (p *Platform) Object(id session.ID) durableobject.Ref {
+	if p.wire {
+		return p.remote(id)
+	}
+	return p.host(id).obj
+}
 
 func (p *Platform) host(id session.ID) *host {
 	p.mu.Lock()
@@ -61,6 +70,7 @@ func (p *Platform) host(id session.ID) *host {
 		p.disks[id] = d
 	}
 	h := &host{p: p, id: id, disk: d}
+	h.ctx, h.evict = context.WithCancel(context.Background())
 	h.obj = durableobject.NewObject(h, p.cfg)
 	p.live[id] = h
 	return h
@@ -76,6 +86,7 @@ func (p *Platform) Evict(id session.ID) {
 	p.mu.Unlock()
 	if h != nil {
 		h.dead.Store(true)
+		h.evict()
 		h.obj.Stop()
 	}
 }
@@ -124,7 +135,10 @@ type host struct {
 	id   session.ID
 	disk *disk
 	dead atomic.Bool
-	obj  *durableobject.Object
+	// ctx ends when the object is evicted.
+	ctx   context.Context
+	evict context.CancelFunc
+	obj   *durableobject.Object
 }
 
 func (h *host) Get(key string) ([]byte, bool, error) {
