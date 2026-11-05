@@ -119,9 +119,6 @@ func retryExaConflict(err error) bool {
 }
 
 func mapExaErr(name string, err error) error {
-	if err == nil {
-		return nil
-	}
 	var st *StatusError
 	if errors.As(err, &st) {
 		if st.PublicationDomain() {
@@ -284,9 +281,6 @@ func formatWebSearchResult(query, searchType string, resp *SearchResponse, notes
 	if resp == nil || len(resp.Results) == 0 {
 		b.WriteString("\nNo results found. Try a more specific natural-language query, or fetch a known URL with web_fetch.")
 		return b.String()
-	}
-	if searchType == "" {
-		searchType = "auto"
 	}
 	fmt.Fprintf(&b, "Mode: %s | Results: %d\n", searchType, len(resp.Results))
 	b.WriteString(formatExaResults(resp.Results, 2000))

@@ -565,9 +565,7 @@ func classifyTerminalSSE(evtType, data string) (terminal bool, err error) {
 	}
 
 	if reason != "" {
-		if classified := classifyIncompleteReason(reason); classified != nil {
-			return true, classified
-		}
+		return true, classifyIncompleteReason(reason)
 	}
 
 	apiErr := &APIStatusError{Status: 200, Body: ""}

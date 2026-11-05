@@ -164,10 +164,6 @@ func (c *Exa) postJSON(ctx context.Context, path string, req any, out any) error
 	}
 
 	limited := io.LimitReader(resp.Body, 8<<20) // 8 MiB safety cap
-	if out == nil {
-		_, _ = io.Copy(io.Discard, limited)
-		return nil
-	}
 	if err := json.NewDecoder(limited).Decode(out); err != nil {
 		return fmt.Errorf("exa %s: decode response: %w", op, err)
 	}

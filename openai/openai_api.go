@@ -99,13 +99,10 @@ func classifyAPIStatus(apiErr *APIStatusError, errType string) error {
 	return apiErr
 }
 
-// classifyIncompleteReason maps Responses API incomplete_details.reason (or
-// similar) to a stop-reason sentinel when known.
+// classifyIncompleteReason is the error of an incomplete response with a
+// reason: a stop-reason sentinel when the reason is known.
 func classifyIncompleteReason(reason string) error {
 	r := strings.ToLower(strings.TrimSpace(reason))
-	if r == "" {
-		return nil
-	}
 	if isMaxTokensSignal(r) || r == "max_output_tokens" || r == "max_tokens" {
 		return fmt.Errorf("%w: response incomplete (%s)", session.ErrMaxTokens, reason)
 	}

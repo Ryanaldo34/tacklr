@@ -83,9 +83,6 @@ func (m *MountSession) mount(ctx context.Context, spec MountSpec, p Provider) er
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if p == nil || strings.TrimSpace(spec.Profile) == "" {
-		return ErrInvalidProvider
-	}
 	cleaned, err := CleanPath(spec.Point)
 	if err != nil {
 		return err
@@ -97,9 +94,6 @@ func (m *MountSession) mount(ctx context.Context, spec MountSpec, p Provider) er
 	stored.Point = cleaned
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, exists := m.mounts[cleaned]; exists {
-		return ErrAlreadyMounted
-	}
 	m.mounts[cleaned] = mountEntry{provider: p, spec: stored}
 	return nil
 }
