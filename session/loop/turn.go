@@ -1,7 +1,6 @@
 package loop
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -14,13 +13,6 @@ import (
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
 )
-
-// ToolResult is one Tool step's result: the call's outcome, or the error
-// that stopped the step (a tool's own failure is its outcome).
-type ToolResult struct {
-	Outcome tacklr.CallOutcome
-	Err     error
-}
 
 // Executor is how one runtime runs a session: its steps, its mailbox and
 // its children. Every runtime implements it; Run is the same for all of
@@ -47,7 +39,10 @@ type ToolResult struct {
 // Steps take only what changes per step. The session's identity and MCP
 // servers are the runtime's: it holds them for the session
 // and builds each step's harness from them. Begin and End bracket a turn so
-// the implementation can pin turn-scoped resources.
+// the implementation can pin turn-scoped resources. A Begin of kind
+// session.WakePrompt starts a new turn: the runtime then trims the event
+// log and the call bodies of the turns before it, which committed. A
+// resume or a continue goes on with the turn it parked or suspended.
 //
 // Mailbox. Next is the one read of the mailbox: prompts, resumes,
 // cancels, closes, and job ends, in the order they arrived. With block it
@@ -71,7 +66,7 @@ type Executor interface {
 	End()
 	Commit(base session.Revision, in tacklr.CommitIn) (session.Revision, error)
 	Infer() (tacklr.Reply, error)
-	Tools(runs []tacklr.ToolRun) []ToolResult
+	Tools(calls []tacklr.Call) []tacklr.Call
 	Emit(session.Event)
 	Job(name, task string) (string, error)
 
@@ -116,6 +111,9 @@ type Turn struct {
 	Closed bool
 	// cancelled says a cancel came in while the turn ran.
 	cancelled bool
+	// held are the wakes that wait for the running turn to end (a resume,
+	// a close). They carry over a suspend.
+	held []session.Wake
 }
 
 // Job is one job the session started, by a deterministic id. Call is the
@@ -235,6 +233,8 @@ func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte
 		fail(unknownAnswer(resume, ""))
 		return
 	}
+	// refit is set while the model is asked again after a collapse.
+	refit := false
 	for {
 		if r := t.Round; r != nil {
 			if r.Complete() {
@@ -261,12 +261,12 @@ func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte
 			if len(runs) == 0 {
 				// The round waits on its parked call.
 				t.Yielded = true
-				park := r.Outcomes[r.Parked()].Park
+				park := r.Calls[r.Parked()].Park
 				d.Emit(session.Event{Type: session.EventInterrupt, MessageID: park.InterruptID, Data: park.Data})
 				return
 			}
 			for i := range runs {
-				runs[i].Children = t.jobIDs()
+				runs[i].Jobs = t.jobIDs()
 			}
 			if err := t.record(r, d.Tools(runs), d); err != nil {
 				fail(err)
@@ -299,10 +299,21 @@ func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte
 			continue
 		}
 		reply, err := d.Infer()
+		if errors.Is(err, session.ErrContextLength) && !refit {
+			// The provider refused the window as too long, though its
+			// count or bound was under: it collapses, and the model is
+			// asked again, once.
+			if !commit(tacklr.CommitIn{Collapse: true}) {
+				return
+			}
+			refit = true
+			continue
+		}
 		if err != nil {
 			fail(err)
 			return
 		}
+		refit = false
 		if len(reply.Calls) > 0 {
 			t.Round = tacklr.NewRound(reply)
 			continue
@@ -316,33 +327,31 @@ func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte
 
 // runs is the calls of r to run next, in call order. While a call is
 // parked nothing else runs; once resume answers it, it runs with every call
-// that has no outcome yet (a call whose park another call's park
-// deferred). An answer to no parked call is an error.
-func (t *Turn) runs(r *tacklr.Round, resume map[string][]byte) ([]tacklr.ToolRun, error) {
+// that has not run yet (a call whose park another call's park deferred).
+// An answer to no parked call is an error.
+func (t *Turn) runs(r *tacklr.Round, resume map[string][]byte) ([]tacklr.Call, error) {
 	parked, id := r.Parked(), ""
 	if parked >= 0 {
-		id = r.Outcomes[parked].Park.InterruptID
+		id = r.Calls[parked].Park.InterruptID
 	}
 	if err := unknownAnswer(resume, id); err != nil {
 		return nil, err
 	}
-	var runs []tacklr.ToolRun
-	if parked >= 0 {
-		answer, ok := resume[id]
-		if !ok {
-			// Still parked: nothing runs until the answer comes.
-			return nil, nil
+	var runs []tacklr.Call
+	for i, c := range r.Calls {
+		switch {
+		case i == parked:
+			answer, ok := resume[id]
+			if !ok {
+				// Still parked: nothing runs until the answer comes.
+				return nil, nil
+			}
+			c.Answer = answer
+		case !c.Pending():
+			continue
 		}
-		runs = append(runs, tacklr.ToolRun{Call: r.Reply.Calls[parked], Timeout: r.Reply.Timeout(parked), Prior: &r.Outcomes[parked], Answer: answer})
+		runs = append(runs, c)
 	}
-	for i, o := range r.Outcomes {
-		if o.Call.Key() == "" {
-			runs = append(runs, tacklr.ToolRun{Call: r.Reply.Calls[i], Timeout: r.Reply.Timeout(i)})
-		}
-	}
-	slices.SortStableFunc(runs, func(a, b tacklr.ToolRun) int {
-		return slices.Index(r.Reply.Calls, a.Call) - slices.Index(r.Reply.Calls, b.Call)
-	})
 	return runs, nil
 }
 
@@ -358,74 +367,72 @@ func unknownAnswer(resume map[string][]byte, id string) error {
 
 // waits reports whether a call of r waits on a job.
 func (t *Turn) waits(r *tacklr.Round) bool {
-	return slices.ContainsFunc(r.Outcomes, func(o tacklr.CallOutcome) bool { return !o.Done && o.AwaitID != "" })
+	return slices.ContainsFunc(r.Calls, tacklr.Call.Waits)
 }
 
 // jobRuns gives each call of r whose job ended the job's result, in call
 // order, and drops those jobs.
-func (t *Turn) jobRuns(r *tacklr.Round) []tacklr.ToolRun {
-	var runs []tacklr.ToolRun
-	for i, call := range r.Reply.Calls {
-		k := slices.IndexFunc(t.Jobs, func(j Job) bool { return j.Ended && j.Call == call.Key() })
+func (t *Turn) jobRuns(r *tacklr.Round) []tacklr.Call {
+	var runs []tacklr.Call
+	for _, c := range r.Calls {
+		k := slices.IndexFunc(t.Jobs, func(j Job) bool { return j.Ended && j.Call == c.Key() })
 		if k < 0 {
 			continue
 		}
 		res := t.Jobs[k].Result
-		runs = append(runs, tacklr.ToolRun{Call: call, Timeout: r.Reply.Timeout(i), Prior: &r.Outcomes[i], Child: &res})
+		c.JobEnd = &res
+		runs = append(runs, c)
 		t.Jobs = slices.Delete(t.Jobs, k, k+1)
 	}
 	return runs
 }
 
-// record keeps each result's outcome on its call of r, and starts and
-// cancels the children each kept outcome asks for. A turn parks on one
-// interrupt: a call that parks after the first, in call order, keeps no
-// outcome and runs again after resume. Every result is kept before a step
-// error fails the turn.
-func (t *Turn) record(r *tacklr.Round, results []ToolResult, d Executor) error {
+// record puts each call the step ran back on r, and starts and cancels the
+// jobs each one asks for. A turn parks on one interrupt: a call that parks
+// after the first, in call order, counts for nothing and runs again after
+// resume. Every call is kept before a step error fails the turn.
+func (t *Turn) record(r *tacklr.Round, calls []tacklr.Call, d Executor) error {
 	var errs []error
-	for _, res := range results {
-		if res.Err != nil {
-			errs = append(errs, res.Err)
+	for _, c := range calls {
+		if c.Err != nil {
+			errs = append(errs, c.Err)
 			continue
 		}
-		o := res.Outcome
-		i := slices.IndexFunc(r.Reply.Calls, func(c message.ToolCall) bool { return c.Key() == o.Call.Key() })
-		r.Outcomes[i] = tacklr.CallOutcome{}
-		if o.Park != nil && !o.Done && r.Parked() >= 0 {
+		i := slices.IndexFunc(r.Calls, func(rc tacklr.Call) bool { return rc.Key() == c.Key() })
+		if c.Parked() && r.Parked() >= 0 && r.Parked() != i {
+			r.Calls[i] = tacklr.NewCall(c.Tool, c.Timeout)
 			continue
 		}
-		r.Outcomes[i] = o
-		if err := t.startJobs(o, d); err != nil {
+		r.Calls[i] = c
+		if err := t.startJobs(c, d); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// startJobs cancels and starts the jobs o asks for. A job id comes from its
-// call, so a job the session already runs is not started again; the job o
-// waits on is marked with o's call.
-func (t *Turn) startJobs(o tacklr.CallOutcome, d Executor) error {
-	for _, id := range o.Cancels {
+// startJobs cancels and starts the jobs c asks for; the job c waits on is
+// marked with c's key. Each start is new: a call's run starts only jobs the
+// session does not run (tacklr.CallContext sees them as Call.Jobs).
+func (t *Turn) startJobs(c tacklr.Call, d Executor) error {
+	for _, id := range c.Cancels {
 		if i := slices.IndexFunc(t.Jobs, func(j Job) bool { return j.ID == session.ID(id) }); i >= 0 {
 			d.Cancel(t.Jobs[i].ID)
 			t.Jobs = slices.Delete(t.Jobs, i, i+1)
 		}
 	}
-	for _, s := range o.Starts {
+	for _, s := range c.Starts {
 		call := ""
-		if s.ID == o.AwaitID {
-			call = o.Call.Key()
+		if s.ID == c.Await {
+			call = c.Key()
 		}
-		if i := slices.IndexFunc(t.Jobs, func(j Job) bool { return j.ID == session.ID(s.ID) }); i >= 0 {
-			t.Jobs[i].Call = cmp.Or(t.Jobs[i].Call, call)
-			continue
-		}
+		// The job is the session's while its start runs, so the step that
+		// starts it reports it too.
+		t.Jobs = append(t.Jobs, Job{ID: session.ID(s.ID), Name: s.Name, Call: call})
 		if err := d.Start(s); err != nil {
+			t.Jobs = t.Jobs[:len(t.Jobs)-1]
 			return err
 		}
-		t.Jobs = append(t.Jobs, Job{ID: session.ID(s.ID), Name: s.Name, Call: call})
 	}
 	return nil
 }

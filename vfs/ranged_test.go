@@ -22,7 +22,11 @@ func fetchFrom(data []byte, requests *atomic.Int32) fetchRange {
 	}
 }
 
+// Offset reads inside one read-ahead window cost one fetch, reads at other
+// offsets run at once, a read past the end returns EOF, and Read streams the
+// whole object.
 func TestRemoteFile_offsetReadsShareTheReadAheadWindowAndReadStreamsTheObject(t *testing.T) {
+	t.Parallel()
 	data := make([]byte, 3<<20+7)
 	for i := range data {
 		data[i] = byte(i ^ i>>8 ^ i>>16)
@@ -67,7 +71,9 @@ func TestRemoteFile_offsetReadsShareTheReadAheadWindowAndReadStreamsTheObject(t 
 	}
 }
 
+// A body shorter than its size and a fetch that fails both fail the read.
 func TestRemoteFile_readsFailWhenTheBodyIsShortOrTheFetchFails(t *testing.T) {
+	t.Parallel()
 	var requests atomic.Int32
 	short := newRemoteFile(t.Context(), FileInfo{Size: 10}, fetchFrom([]byte("abcd"), &requests))
 	down := newRemoteFile(t.Context(), FileInfo{Size: 10}, func(context.Context, int64, int64) (io.ReadCloser, error) {

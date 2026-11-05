@@ -31,9 +31,12 @@ type Backend struct {
 	ReadsAfterRemove bool
 }
 
-// Run runs the contract. newBackend returns a fresh backend for each case.
+// Run runs the contract. newBackend returns a fresh backend for each case,
+// and the cases run in parallel, so newBackend must be safe to call from
+// many goroutines.
 func Run(t *testing.T, newBackend func(t *testing.T) Backend) {
 	t.Run("a missing path is not found", func(t *testing.T) {
+		t.Parallel()
 		ctx, b := t.Context(), newBackend(t)
 		missing := path.Join(b.Root, "missing.txt")
 
@@ -46,6 +49,7 @@ func Run(t *testing.T, newBackend func(t *testing.T) Backend) {
 	})
 
 	t.Run("a written file reads back with its size, type, version and listing", func(t *testing.T) {
+		t.Parallel()
 		ctx, b := t.Context(), newBackend(t)
 		name := path.Join(b.Root, "note.txt")
 		mustWrite(t, b, name, []byte("hello contract\n"))
@@ -66,6 +70,7 @@ func Run(t *testing.T, newBackend func(t *testing.T) Backend) {
 	})
 
 	t.Run("a version stays the same until the content changes", func(t *testing.T) {
+		t.Parallel()
 		ctx, b := t.Context(), newBackend(t)
 		name := path.Join(b.Root, "v.txt")
 		version := func() string {
@@ -91,6 +96,7 @@ func Run(t *testing.T, newBackend func(t *testing.T) Backend) {
 	})
 
 	t.Run("a large file reads at offsets past the read-ahead window and streams", func(t *testing.T) {
+		t.Parallel()
 		ctx, b := t.Context(), newBackend(t)
 		name := path.Join(b.Root, "big.bin")
 		want := pattern(5 << 19)
@@ -119,6 +125,7 @@ func Run(t *testing.T, newBackend func(t *testing.T) Backend) {
 	})
 
 	t.Run("a directory lists its children and is no file", func(t *testing.T) {
+		t.Parallel()
 		ctx, b := t.Context(), newBackend(t)
 		dir := path.Join(b.Root, "folder")
 		if err := b.Session.Route(ctx, dir).MkdirAll(ctx); err != nil {
@@ -142,6 +149,7 @@ func Run(t *testing.T, newBackend func(t *testing.T) Backend) {
 	})
 
 	t.Run("a removed file is not found, and a handle opened before reads as the backend promises", func(t *testing.T) {
+		t.Parallel()
 		ctx, b := t.Context(), newBackend(t)
 		name := path.Join(b.Root, "gone.txt")
 		mustWrite(t, b, name, []byte("soon gone"))

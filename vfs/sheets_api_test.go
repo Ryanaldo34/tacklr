@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,13 +12,25 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
+// The Sheets client reads a workbook with its values, formulas, formats,
+// borders, merges and named ranges, skips null entries, refuses a grid
+// that starts before the sheet, and sends value and format writes with
+// the fields that each format sets.
 func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	var batchBody, valuesBody string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/spreadsheets/") {
+			if strings.Contains(r.URL.Path, "/negative") {
+				_ = json.NewEncoder(w).Encode(map[string]any{"sheets": []any{map[string]any{
+					"properties": map[string]any{"sheetId": 1, "title": "Bad"},
+					"data":       []any{map[string]any{"startRow": -1, "rowData": []any{}}},
+				}}})
+				return
+			}
 			if strings.Contains(r.URL.Path, "/missing") {
 				w.WriteHeader(http.StatusNotFound)
 				_ = json.NewEncoder(w).Encode(map[string]any{
@@ -88,7 +101,11 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 											"userEnteredValue": map[string]any{"formulaValue": "A1+1"},
 										},
 										map[string]any{"userEnteredValue": map[string]any{"boolValue": false}, "formattedValue": "FALSE"},
+										nil,
+										map[string]any{"userEnteredValue": map[string]any{}, "formattedValue": "#N/A"},
+										map[string]any{"formattedValue": "plain", "userEnteredFormat": map[string]any{"borders": map[string]any{"top": map[string]any{"style": "NONE"}}}},
 									}},
+									nil,
 								},
 							},
 						},
@@ -134,6 +151,9 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	if _, err := api.Get(ctx, "missing"); err == nil {
 		t.Fatal("Get missing")
 	}
+	if _, err := api.Get(ctx, "negative"); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("Get with a negative start row = %v, want ErrTooLarge", err)
+	}
 
 	snap, err := api.Get(ctx, "sheet1")
 	if err != nil || snap.SpreadsheetID != "sheet1" || len(snap.Sheets) != 2 {
@@ -175,6 +195,9 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	if a3.Input != "=A1+1" {
 		t.Fatalf("Get formula A3 = %+v", a3)
 	}
+	if d3, e3 := snap.Sheets[0].cellAt(3, 4), snap.Sheets[0].cellAt(3, 5); d3.Input != "#N/A" || e3.Input != "plain" || e3.Format.Border != nil {
+		t.Fatalf("Get error value D3 = %+v, borderless E3 = %+v", d3, e3)
+	}
 	if snap.Sheets[1].Title != "Empty" || snap.Sheets[1].Rows != 0 {
 		t.Fatalf("empty sheet = %+v", snap.Sheets[1])
 	}
@@ -204,6 +227,7 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 		{SheetID: 1, StartRow: 2, StartCol: 0, EndRow: 3, EndCol: 1, Format: CellFormat{Border: &CellBorder{Style: "dotted", Edges: "left"}}},
 		{SheetID: 1, StartRow: 2, StartCol: 1, EndRow: 3, EndCol: 2, Format: CellFormat{Border: &CellBorder{Style: "double"}}},
 		{SheetID: 1, StartRow: 2, StartCol: 2, EndRow: 3, EndCol: 3, Format: CellFormat{Border: &CellBorder{Style: "none"}}},
+		{SheetID: 1, StartRow: 3, StartCol: 0, EndRow: 4, EndCol: 1, Format: CellFormat{Fill: "not a color"}},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +266,8 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	if numberFormatType("h:mm") != "TIME" || numberFormatType("m/d/yyyy h:mm") != "DATE_TIME" ||
 		numberFormatType("0.00E+00") != "SCIENTIFIC" || numberFormatType("0%") != "PERCENT" ||
 		numberFormatType("yyyy") != "DATE" || numberFormatType("h:mm a/p") != "TIME" ||
-		numberFormatType("h:mm am/pm") != "DATE_TIME" {
+		numberFormatType("h:mm am/pm") != "DATE_TIME" || numberFormatType("0.00") != "NUMBER" ||
+		numberFormatType("mm") != "DATE" {
 		t.Fatalf("number types: %s %s %s %s %s %s %s",
 			numberFormatType("h:mm"), numberFormatType("m/d/yyyy h:mm"), numberFormatType("0.00E+00"),
 			numberFormatType("0%"), numberFormatType("yyyy"), numberFormatType("h:mm a/p"),

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"iter"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +21,9 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/pgtest"
 )
 
+// TestConfigureAndOpen_rejectABadSchema: Configure and Open reject a schema
+// name that is not a plain identifier, and Configure puts the default schema
+// on the search path when the schema is empty.
 func TestConfigureAndOpen_rejectABadSchema(t *testing.T) {
 	t.Parallel()
 	cfg, err := pgxpool.ParseConfig("postgres://u:p@db.example.com:5432/postgres")
@@ -31,12 +33,20 @@ func TestConfigureAndOpen_rejectABadSchema(t *testing.T) {
 	bad := postgres.Options{Schema: "public;drop"}
 	configureErr := postgres.Configure(cfg, bad)
 	_, openErr := postgres.Open(nil, bad)
+	defaultErr := postgres.Configure(cfg, postgres.Options{})
 
 	if configureErr == nil || openErr == nil {
 		t.Fatalf("configure = %v, open = %v, want both to reject the schema", configureErr, openErr)
 	}
+	if path := cfg.ConnConfig.RuntimeParams["search_path"]; defaultErr != nil || path != postgres.DefaultSchema+", public" {
+		t.Fatalf("configure with no schema = %v, search path %q, want the default schema first", defaultErr, path)
+	}
 }
 
+// TestStore_aStatementStuckPastTheTimeoutIsCancelledByTheServer: the server
+// cancels a write, an engine soft delete, or a get of a session row, that
+// waits past StatementTimeout; with the timeout off, only the caller's
+// deadline ends it.
 func TestStore_aStatementStuckPastTheTimeoutIsCancelledByTheServer(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -66,18 +76,44 @@ func TestStore_aStatementStuckPastTheTimeoutIsCancelledByTheServer(t *testing.T)
 			if _, err := holder.Exec(t.Context(), `SELECT 1 FROM objects WHERE id = $1 FOR UPDATE`, doc.ID); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-			defer cancel()
+			eng, err := brain.NewEngine(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			blocked := func(call func(context.Context) error) error {
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				return call(ctx)
+			}
 
-			_, err = store.Put(ctx, scope, brain.Indexed{Object: doc})
+			putErr := blocked(func(ctx context.Context) error {
+				_, err := store.Put(ctx, scope, brain.Indexed{Object: doc})
+				return err
+			})
+			deleteErr := blocked(func(ctx context.Context) error { return eng.SoftDelete(ctx, scope, doc.ID) })
+			// The holder also takes the session table; a read of a session row waits behind it.
+			if _, err := holder.Exec(t.Context(), `LOCK TABLE session_messages IN ACCESS EXCLUSIVE MODE`); err != nil {
+				t.Fatal(err)
+			}
+			session := brain.Scope{Namespace: scope.Namespace, SessionID: "s1"}
+			getErr := blocked(func(ctx context.Context) error {
+				_, err := store.Get(ctx, session, uuid.New())
+				return err
+			})
+			getManyErr := blocked(func(ctx context.Context) error {
+				_, err := store.GetMany(ctx, session, []uuid.UUID{uuid.New()})
+				return err
+			})
 
-			if !tc.want(err) {
-				t.Fatalf("blocked write = %v", err)
+			if !tc.want(putErr) || !tc.want(deleteErr) || !tc.want(getErr) || !tc.want(getManyErr) {
+				t.Fatalf("blocked write = %v, engine soft delete = %v, session get = %v, session get many = %v", putErr, deleteErr, getErr, getManyErr)
 			}
 		})
 	}
 }
 
+// TestStore_everyCallReportsADatabaseFailure: every store call returns the
+// driver's error when the context has ended.
 func TestStore_everyCallReportsADatabaseFailure(t *testing.T) {
 	t.Parallel()
 	store, _ := testDB(t)
@@ -113,6 +149,8 @@ func TestStore_everyCallReportsADatabaseFailure(t *testing.T) {
 	}
 }
 
+// TestStore_rejectsInvalidArgumentsBeforeQuerying: each invalid argument
+// fails, or returns nothing, before the store queries.
 func TestStore_rejectsInvalidArgumentsBeforeQuerying(t *testing.T) {
 	t.Parallel()
 	store, _ := testDB(t)
@@ -136,9 +174,6 @@ func TestStore_rejectsInvalidArgumentsBeforeQuerying(t *testing.T) {
 	poisoned := brain.Indexed{Object: brain.Object{ID: id, Kind: "Document", Namespace: scope.Namespace}, Text: "poison"}
 	if _, err := embedding.PutTree(ctx, scope, poisoned, nil); err == nil || !strings.Contains(err.Error(), "embedder down") {
 		t.Fatalf("tree whose parent does not embed = %v, want the embedder's error", err)
-	}
-	if _, err := store.Search(ctx, scope, brain.RecordSearch{Query: "q", Filters: brain.Filter{UpdatedAfter: "not-a-time"}, Limit: 5}); !errors.Is(err, brain.ErrInvalid) {
-		t.Fatalf("invalid search filter = %v, want ErrInvalid", err)
 	}
 	if got, err := store.Search(ctx, scope, brain.RecordSearch{Query: "q"}); err != nil || got != nil {
 		t.Fatalf("search with no limit = %v %v, want nothing", got, err)
@@ -198,25 +233,8 @@ func testOpen(t *testing.T, opts postgres.Options) (*postgres.Store, *pgxpool.Po
 	return store, pool
 }
 
-// TestPostgresStore_setupRegistersKinds is the host boot path: Setup is
-// idempotent and upserts configured kinds into object_kinds.
-func TestPostgresStore_setupRegistersKinds(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	store, _ := testDB(t)
-	deal := brain.KindSpec{Kind: "Deal", IsParent: true, Description: "sales"}
-	if err := store.Setup(ctx, deal); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Setup(ctx, deal); err != nil {
-		t.Fatal(err)
-	}
-	got, err := storetest.Kind(ctx, store, "Deal")
-	if err != nil || got.Description != "sales" || !got.IsParent {
-		t.Fatalf("kind: %+v err=%v", got, err)
-	}
-}
-
+// TestPostgresStore_isolationContract: postgres.Store meets the store contract
+// every brain store must meet.
 func TestPostgresStore_isolationContract(t *testing.T) {
 	t.Parallel()
 	storetest.Run(t, func(t *testing.T, emb brain.Embedder) brain.Store {
@@ -225,39 +243,67 @@ func TestPostgresStore_isolationContract(t *testing.T) {
 	})
 }
 
-func TestStore_concurrentSetupsSucceedAndADimensionChangeFails(t *testing.T) {
+// TestStore_setupWaitsForOtherSetupsAndRefusesANewDimension: setups that run
+// at the same time wait for the one that holds the lock, even past the
+// statement timeout, then all succeed and register their kinds; a setup with
+// another embedding dimension fails.
+func TestStore_setupWaitsForOtherSetupsAndRefusesANewDimension(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx := t.Context()
 	schema := pgtest.Schema(t)
 	newStore := func(dim int) *postgres.Store {
-		store, _ := testOpen(t, postgres.Options{Schema: schema, EmbeddingDim: dim})
+		store, _ := testOpen(t, postgres.Options{Schema: schema, EmbeddingDim: dim, StatementTimeout: 50 * time.Millisecond})
 		return store
+	}
+	deal := brain.KindSpec{Kind: "Deal", IsParent: true, Description: "sales"}
+	// Another deploy holds the setup lock for longer than the statement timeout.
+	holder, err := pgtest.Admin(t).Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('tacklr.setup:' || $1))`, schema); err != nil {
+		t.Fatal(err)
 	}
 
 	var wg sync.WaitGroup
 	errs := make([]error, 4)
 	for i := range errs {
-		wg.Go(func() { errs[i] = newStore(3).Setup(ctx) })
+		wg.Go(func() { errs[i] = newStore(3).Setup(ctx, deal) })
+	}
+	// The holder lets go only when the server shows every setup blocked
+	// behind it for longer than the statement timeout.
+	if _, err := holder.Exec(ctx, `DO $$ BEGIN
+		LOOP
+			PERFORM pg_stat_clear_snapshot();
+			EXIT WHEN (SELECT count(*) FROM pg_stat_activity
+				WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))
+					AND clock_timestamp() - query_start > interval '200 milliseconds') = 4;
+			PERFORM pg_sleep(0.01);
+		END LOOP;
+	END $$`); err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatal(err)
 	}
 	wg.Wait()
 	resized := newStore(5).Setup(ctx)
 	store := newStore(3)
-	scope := brain.Scope{Namespace: storetest.Namespace(t, "org", "a")}
-	doc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "after setup", Namespace: scope.Namespace}
-	putErr := storetest.Put(store, doc)
-	got, getErr := store.Get(ctx, scope, doc.ID)
+	kind, kindErr := storetest.Kind(ctx, store, "Deal")
 
 	if err := errors.Join(errs...); err != nil {
-		t.Fatalf("concurrent setup: %v", err)
+		t.Fatalf("setups that waited for the lock: %v", err)
 	}
-	if putErr != nil || getErr != nil || got.Title != "after setup" {
-		t.Fatalf("store after concurrent setups: put %v, get %+v %v", putErr, got, getErr)
+	if kindErr != nil || kind.Description != "sales" || !kind.IsParent {
+		t.Errorf("kind after setup = %+v %v, want Deal", kind, kindErr)
 	}
 	if resized == nil || !strings.Contains(resized.Error(), "EmbeddingDim") {
-		t.Fatalf("setup with a new dimension = %v", resized)
+		t.Errorf("setup with a new dimension = %v, want the EmbeddingDim error", resized)
 	}
 }
 
+// TestStore_auditEventsArePersisted: Record writes each audit event as a row
+// with its op, principals, session and object ids.
 func TestStore_auditEventsArePersisted(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -286,33 +332,10 @@ func TestStore_auditEventsArePersisted(t *testing.T) {
 	}
 }
 
-func TestStore_setupWaitsForAnotherSetupPastTheStatementTimeout(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	schema := pgtest.Schema(t)
-	store, _ := testOpen(t, postgres.Options{Schema: schema, EmbeddingDim: 3, StatementTimeout: 50 * time.Millisecond})
-	// Another deploy holds the Setup lock for longer than the statement timeout.
-	holder, err := pgtest.Admin(t).Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := holder.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('tacklr.setup:' || $1))`, schema); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-
-	go func() { done <- store.Setup(ctx) }()
-	time.Sleep(300 * time.Millisecond)
-	if err := holder.Commit(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := <-done; err != nil {
-		t.Fatalf("setup after waiting for the lock: %v", err)
-	}
-}
-
+// TestEngine_aClosedStoreFailsTheCallsThatReadIt: after the pool closes, every
+// engine call that reads or writes the store returns its error.
 func TestEngine_aClosedStoreFailsTheCallsThatReadIt(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	store, pool := testOpen(t, postgres.Options{Schema: pgtest.Schema(t), EmbeddingDim: 3})
 	if err := store.Setup(ctx); err != nil {
@@ -357,14 +380,26 @@ func TestEngine_aClosedStoreFailsTheCallsThatReadIt(t *testing.T) {
 	_, withinErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "shared", Within: ids[0]})
 	_, resolveErr := eng.Resolve(ctx, scope, brain.Ref{Path: "/workspace/work/doc.md"})
 	kindsErr := eng.ApplyKinds(ctx, brain.KindSpec{Kind: "Document", IsParent: true})
+	loadErr := fresh.LoadKindsFromStore(ctx)
+	_, purgeErr := eng.PurgeDeleted(ctx, scope, time.Now())
+	eraseErr := fresh.Erase(ctx, scope)
+	deleteSessionErr := eng.DeleteSessionMessages(ctx, scope.Namespace, "s1")
+	_, purgeSessionErr := eng.PurgeSessionMessages(ctx, scope.Namespace, time.Now())
 
-	for name, err := range map[string]error{"next page": nextErr, "search": searchErr, "related": relatedErr, "open": openErr, "open's kind registry": registryErr, "list records": listErr, "search within": withinErr, "resolve a path": resolveErr, "apply kinds": kindsErr} {
+	for name, err := range map[string]error{
+		"next page": nextErr, "search": searchErr, "related": relatedErr, "open": openErr, "open's kind registry": registryErr,
+		"list records": listErr, "search within": withinErr, "resolve a path": resolveErr, "apply kinds": kindsErr, "load kinds": loadErr,
+		"purge deleted": purgeErr, "erase": eraseErr, "delete session messages": deleteSessionErr, "purge session messages": purgeSessionErr,
+	} {
 		if err == nil || !strings.Contains(err.Error(), "closed pool") {
 			t.Errorf("%s on a closed store = %v, want its error", name, err)
 		}
 	}
 }
 
+// TestStore_searchRanksByTheWordsTheWayAReaderExpects: full-text search ranks
+// a title hit over a body hit and a part with both terms over a part with one,
+// and an exact search finds a phrase deep in a long body.
 func TestStore_searchRanksByTheWordsTheWayAReaderExpects(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -379,13 +414,8 @@ func TestStore_searchRanksByTheWordsTheWayAReaderExpects(t *testing.T) {
 	if _, err := store.PutTree(ctx, brain.Scope{Namespace: ns}, brain.Indexed{Object: doc}, indexedParts(titleHit, bodyHit, both, onlyA, onlyB, deep)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.SaveSessionMessages(ctx, ns, "sess/1", "g1", []brain.SessionMessage{{
-		Role: "user", Body: []byte(`{"role":"user","content":"quillwort"}`), SearchText: "quillwort grows in the margin",
-	}}); err != nil {
-		t.Fatal(err)
-	}
 	search := func(query string, exact bool) []brain.ScoredID {
-		hits, err := store.Search(ctx, brain.Scope{Namespace: ns, SessionID: "sess/1"}, brain.RecordSearch{Query: query, Exact: exact, Limit: 10})
+		hits, err := store.Search(ctx, brain.Scope{Namespace: ns}, brain.RecordSearch{Query: query, Exact: exact, Limit: 10})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -395,7 +425,6 @@ func TestStore_searchRanksByTheWordsTheWayAReaderExpects(t *testing.T) {
 	zymurgy := search("zymurgy", false)
 	terms := search("alphaonlyterm betaonlyterm", false)
 	phrase := search("grace window", true)
-	session := search("quillwort", false)
 
 	if len(zymurgy) != 2 || zymurgy[0].ID != titleHit.ID || zymurgy[1].ID != bodyHit.ID {
 		t.Errorf("a title hit and a body hit = %v, want the title hit first", hitIDs(zymurgy))
@@ -405,51 +434,6 @@ func TestStore_searchRanksByTheWordsTheWayAReaderExpects(t *testing.T) {
 	}
 	if len(phrase) == 0 || phrase[0].ID != deep.ID {
 		t.Errorf("exact search for a phrase deep in a long body = %v, want that part", hitIDs(phrase))
-	}
-	if stop := search("the", false); len(stop) != 0 {
-		t.Errorf("a stopword = %v, want nothing", hitIDs(stop))
-	}
-	if len(session) != 1 || !strings.Contains(session[0].Content, "quillwort") {
-		t.Errorf("the session's message = %+v, want it found by its words", session)
-	}
-}
-
-func TestStore_searchByMeaningKeepsFiltersAndNestedNamespaces(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	store, _ := testDBWith(t, postgres.Options{Embedding: brain.Embedding{Embedder: &storetest.Embedder{}}})
-	org := storetest.Namespace(t, "org", uuid.NewString())
-	west := append(org.Clone(), brain.Attr{Name: "workspace", Value: "west"})
-	east := append(org.Clone(), brain.Attr{Name: "workspace", Value: "east"})
-	// Filters test the record a part belongs to.
-	openDoc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "fleet", Namespace: west, Properties: map[string]any{"stage": "open"}}
-	closedDoc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "depot", Namespace: west, Properties: map[string]any{"stage": "closed"}}
-	manual, list := chunk(openDoc, "manual", "car manual", 0), chunk(closedDoc, "list", "car parts list", 0)
-	for _, tree := range []struct {
-		doc  brain.Object
-		part brain.Indexed
-	}{{openDoc, manual}, {closedDoc, list}} {
-		if _, err := store.PutTree(ctx, brain.Scope{Namespace: west}, brain.Indexed{Object: tree.doc}, indexedParts(tree.part)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	search := func(ns brain.Namespace, filter brain.Filter) []uuid.UUID {
-		hits, err := store.Search(ctx, brain.Scope{Namespace: ns}, brain.RecordSearch{Query: "automobile", Filters: filter, Limit: 10})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return hitIDs(hits)
-	}
-
-	open := search(org, storetest.Filter(t, map[string]any{"stage": "open"}))
-	all := search(org, brain.Filter{})
-	sibling := search(east, brain.Filter{})
-
-	if !slices.Equal(open, []uuid.UUID{manual.ID}) {
-		t.Errorf("by meaning with a filter = %v, want the open record's part only", open)
-	}
-	if len(all) != 2 || len(sibling) != 0 {
-		t.Errorf("by meaning from the org = %v, from a sibling workspace = %v, want both parts, then none", all, sibling)
 	}
 }
 

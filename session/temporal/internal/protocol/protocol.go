@@ -4,6 +4,9 @@
 package protocol
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"time"
 
@@ -27,7 +30,29 @@ const (
 	QueryStatus = "tacklr_status"
 	// QueryJobs answers the IDs of the session's jobs.
 	QueryJobs = "tacklr_jobs"
+	// QueryLive answers the live URL of the worker that holds the
+	// session's harness, where its deltas stream; "" until it is routed.
+	QueryLive = "tacklr_live"
 )
+
+// Route is the worker that holds a session's harness: its own task queue,
+// and the URL of its live endpoint ("" when it serves none).
+type Route struct {
+	Queue string
+	Live  string
+}
+
+// LivePath is where a worker's live endpoint serves a session's deltas:
+// LivePath followed by the session id.
+const LivePath = "/tacklr/live/"
+
+// LiveToken is the bearer token for id's deltas: hex HMAC-SHA256 of the id
+// under the key clients and workers share.
+func LiveToken(key []byte, id session.ID) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(id))
+	return hex.EncodeToString(mac.Sum(nil))
+}
 
 // Input is the session workflow's start state, not a checkpoint.
 // Credentials live in SecretStorage. State merges into the checkpoint on
@@ -47,8 +72,9 @@ type Input struct {
 	// ActivityAttempts is Temporal MaximumAttempts for a wrapped network
 	// error, a model refusal, or a stale checkpoint. Zero means 3.
 	ActivityAttempts int32
-	// Prompt, when set, runs one turn then completes the workflow (spawn_specialist child).
-	Prompt     string
+	// Task, when set, makes a task session (a child a tool started): its
+	// first prompt is Task, and the workflow completes when that turn ends.
+	Task       string
 	Parent     session.ID
 	Specialist string
 	Worker     string
@@ -68,9 +94,9 @@ type Input struct {
 }
 
 // StreamItem is one event on a session's workflow stream. A tool result's
-// content stays in the session.Store, out of history: Outcome is the call
-// key whose record holds it, and Subscribe puts it back.
+// content stays in the session.Store, out of history: Call is the key of
+// the call whose body holds it, and Subscribe puts it back.
 type StreamItem struct {
 	session.Event
-	Outcome string `json:"outcome,omitempty"`
+	Call string `json:"call,omitempty"`
 }

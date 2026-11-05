@@ -1,7 +1,12 @@
+// Package livesess runs the session runtime on the live stack for tests: a
+// Temporal worker on the shared Temporal server, over the Postgres session
+// stores.
 package livesess
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -62,7 +67,7 @@ func stores(t testing.TB) (session.Store, session.EventLog, session.SecretStorag
 	if err := db.Setup(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	sealer, err := sessionpg.NewAESGCM(make([]byte, 32))
+	sealer, err := session.NewAESGCM(make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,8 +97,15 @@ func Runtime(t testing.TB, agent tacklr.AgentOptions, ws workspace.Config) sessi
 	t.Cleanup(c.Close)
 	tq := "tacklr-" + uuid.NewString()
 	store, log, secrets := stores(t)
-	rt := temporal.Open(c, temporal.Config{TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true})
-	w := worker.New(c, worker.Config{Agent: agent, Workspace: ws, TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true})
+	// As a host does, the worker's live endpoint is served for clients to
+	// dial: the deltas of its model calls stream there, never stored.
+	key := []byte("live-" + tq)
+	var live http.Handler
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { live.ServeHTTP(w, r) }))
+	t.Cleanup(srv.Close)
+	rt := temporal.Open(c, temporal.Config{TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true, Live: temporal.Live{Key: key}})
+	w := worker.New(c, worker.Config{Agent: agent, Workspace: ws, TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true, Live: worker.Live{URL: srv.URL, Key: key}})
+	live = w.LiveHandler()
 	stop := make(chan any)
 	done := make(chan struct{})
 	go func() {
@@ -108,4 +120,16 @@ func Runtime(t testing.TB, agent tacklr.AgentOptions, ws workspace.Config) sessi
 		}
 	})
 	return rt
+}
+
+// Down is a session client whose Temporal connection is closed, as a host
+// whose Temporal cluster is gone: each call to it fails.
+func Down(t testing.TB) session.Client {
+	t.Helper()
+	c, err := temporal.Dial(client.Options{HostPort: temporaldocker.HostPort(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	return temporal.Open(c, temporal.Config{Store: session.NewMemoryStore(), Secrets: session.NewMemorySecretStorage(), DisableStreams: true})
 }

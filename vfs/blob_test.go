@@ -3,16 +3,25 @@ package vfs_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/ryanaldo34/tacklr/internal/faultproxy"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/azureblob"
 )
@@ -23,7 +32,11 @@ const (
 	azuriteAcct  = "devstoreaccount1"
 )
 
+// TestBlob_rejectsBadConfig: Blob does not open without a client, a
+// container, a clean prefix or a live context, and the Azure API does not
+// send a request without a client.
 func TestBlob_rejectsBadConfig(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	if _, err := vfs.Blob(nil, "")(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("nil client")
@@ -61,8 +74,9 @@ func TestBlob_rejectsBadConfig(t *testing.T) {
 
 // TestMountSession_azureBlobAzurite exercises real Blob path I/O against Azurite (no mocks).
 func TestMountSession_azureBlobAzurite(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
-	client, container := startAzurite(ctx, t)
+	client, container := startAzurite(t)
 
 	ms, err := vfs.Tree(
 		vfs.At("data", vfs.Blob(azureblob.API{Client: client}, container)),
@@ -162,40 +176,106 @@ func TestMountSession_azureBlobAzurite(t *testing.T) {
 	}
 }
 
-func startAzurite(ctx context.Context, t *testing.T) (*azblob.Client, string) {
+// TestBlob_serverAnswersReachTheCaller: when Azure Blob fails a request,
+// answers 404 without an error code, lists a page without a segment, or
+// omits a blob's properties, the operation returns what the answer means.
+func TestBlob_serverAnswersReachTheCaller(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	client, container := startAzurite(t)
+	if _, err := client.UploadBuffer(ctx, container, "f.txt", []byte("some text"), nil); err != nil {
+		t.Fatal(err)
+	}
+	proxy := faultproxy.Start(t, azurite(t))
+	ms, err := vfs.Tree(vfs.At("data", vfs.Blob(azureblob.API{Client: azuriteClient(t, proxy.URL(), -1)}, container)))(ctx, "s", vfs.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	route := func(name string) vfs.Route { return ms.Route(ctx, "/workspace/data/"+name) }
+	method := func(m string) func(*http.Request) bool {
+		return func(r *http.Request) bool { return r.Method == m && r.URL.Query().Get("comp") != "list" }
+	}
+	list := func(r *http.Request) bool { return r.URL.Query().Get("comp") == "list" }
+
+	proxy.Set(faultproxy.Rule{Match: list, Fault: faultproxy.Answer(http.StatusInternalServerError, "")})
+	_, listErr := route("").ReadDir(ctx)
+	proxy.Set(faultproxy.Rule{Match: list, Fault: faultproxy.Answer(http.StatusOK, `<?xml version="1.0" encoding="utf-8"?><EnumerationResults ContainerName="`+container+`"></EnumerationResults>`)})
+	noSegment, noSegmentErr := route("").ReadDir(ctx)
+	proxy.Set(faultproxy.Rule{Match: method(http.MethodGet), Fault: faultproxy.Answer(http.StatusNotFound, "")})
+	_, uncodedErr := route("f.txt").ReadText(ctx)
+	proxy.Set(faultproxy.Rule{Match: method(http.MethodHead), Fault: faultproxy.Answer(http.StatusOK, "")})
+	bare, bareErr := route("f.txt").Stat(ctx)
+
+	if listErr == nil || errors.Is(listErr, vfs.ErrNotExist) {
+		t.Errorf("read dir whose list fails = %v, want the server error", listErr)
+	}
+	if noSegmentErr != nil || len(noSegment) != 0 {
+		t.Errorf("read dir of a page without a segment = %+v %v, want an empty directory", noSegment, noSegmentErr)
+	}
+	if !errors.Is(uncodedErr, vfs.ErrNotExist) {
+		t.Errorf("read of a blob the server answers 404 without a code = %v, want ErrNotExist", uncodedErr)
+	}
+	if bareErr != nil || bare.Size != 0 || !bare.ModTime.IsZero() || bare.Version != "" {
+		t.Errorf("stat of a blob without properties = %+v %v, want a file with zero size, time and version", bare, bareErr)
+	}
+}
+
+var (
+	azuriteOnce sync.Once
+	azuriteURL  *url.URL
+	azuriteErr  error
+)
+
+// azurite returns the base URL of the Azurite server this test binary
+// shares, starting it on first use. Ryuk removes it when the binary ends.
+func azurite(t *testing.T) *url.URL {
 	t.Helper()
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        azuriteImage,
-			Cmd:          []string{"azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "10000", "--skipApiVersionCheck"},
-			ExposedPorts: []string{"10000/tcp"},
-			WaitingFor:   wait.ForListeningPort("10000/tcp"),
-		},
-		Started: true,
+	azuriteOnce.Do(func() {
+		ctx := context.Background()
+		ctr, err := testcontainers.Run(ctx, azuriteImage,
+			testcontainers.WithCmd("azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "10000", "--skipApiVersionCheck"),
+			testcontainers.WithExposedPorts("10000/tcp"),
+			testcontainers.WithWaitStrategy(wait.ForListeningPort("10000/tcp")),
+		)
+		if err != nil {
+			azuriteErr = err
+			return
+		}
+		var endpoint string
+		if endpoint, azuriteErr = ctr.PortEndpoint(ctx, "10000/tcp", "http"); azuriteErr == nil {
+			azuriteURL, azuriteErr = url.Parse(endpoint)
+		}
+	})
+	if azuriteErr != nil {
+		t.Fatalf("Azurite: %v", azuriteErr)
+	}
+	return azuriteURL
+}
+
+// azuriteClient is a client of the Azurite account at endpoint, the server
+// or a proxy in front of it, that tries a request up to retries+1 times. A
+// client through a proxy does not retry, so a fault the proxy injects
+// reaches the caller once.
+func azuriteClient(t *testing.T, endpoint string, retries int32) *azblob.Client {
+	t.Helper()
+	conn := fmt.Sprintf("DefaultEndpointsProtocol=http;AccountName=%s;AccountKey=%s;BlobEndpoint=%s/%s;",
+		azuriteAcct, azuriteKey, endpoint, azuriteAcct)
+	client, err := azblob.NewClientFromConnectionString(conn, &azblob.ClientOptions{
+		ClientOptions: azcore.ClientOptions{Retry: policy.RetryOptions{MaxRetries: retries, RetryDelay: 100 * time.Millisecond}},
 	})
 	if err != nil {
-		t.Fatalf("Azurite: %v", err)
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = container.Terminate(context.Background()) })
+	return client
+}
 
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := container.MappedPort(ctx, "10000/tcp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn := fmt.Sprintf(
-		"DefaultEndpointsProtocol=http;AccountName=%s;AccountKey=%s;BlobEndpoint=http://%s:%s/%s;",
-		azuriteAcct, azuriteKey, host, port.Port(), azuriteAcct,
-	)
-	client, err := azblob.NewClientFromConnectionString(conn, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const name = "vfs-test"
-	if _, err := client.CreateContainer(ctx, name, nil); err != nil {
+// startAzurite returns a client of the shared Azurite and a new container
+// on it that no other test uses.
+func startAzurite(t *testing.T) (*azblob.Client, string) {
+	t.Helper()
+	client := azuriteClient(t, azurite(t).String(), 8)
+	name := "t" + strings.ToLower(rand.Text())
+	if _, err := client.CreateContainer(t.Context(), name, nil); err != nil {
 		t.Fatal(err)
 	}
 	return client, name

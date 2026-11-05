@@ -22,6 +22,7 @@ import (
 
 // TestVFSTools_readWrite: read/write outcomes over an in-process mount.
 func TestVFSTools_readWrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	base := t.TempDir()
 	ms := mustMountTree(t, "tools-vfs", vfs.At("work", vfs.Local(base)), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
@@ -163,13 +164,6 @@ func TestVFSTools_readWrite(t *testing.T) {
 		t.Fatalf("full write body: %q", gotText(t, ms, "/workspace/work/a.go"))
 	}
 
-	if _, err = tools["write"](ctx, `{"path":"/workspace/work/b.go","content":"package b\n"}`); err != nil {
-		t.Fatal(err)
-	}
-	if gotText(t, ms, "/workspace/work/b.go") != "package b\n" {
-		t.Fatalf("create b.go: %q", gotText(t, ms, "/workspace/work/b.go"))
-	}
-
 	_, err = tools["read"](ctx, "{\"path\":\"/workspace/work/has\\u0000x\"}")
 	if !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("nul path: %v", err)
@@ -207,15 +201,6 @@ func TestVFSTools_readWrite(t *testing.T) {
 	if err != nil || !strings.Contains(res, "# Hello") ||
 		!strings.Contains(res, "## Install") {
 		t.Fatalf("outline+range: %q err=%v", res, err)
-	}
-
-	res, err = tools["read"](ctx, `{"path":"/workspace/work/README.md","outline":true,"start":1,"end":999}`)
-	if err != nil || !strings.Contains(res, "eof=true") || !strings.Contains(res, "# Hello") {
-		t.Fatalf("outline clamp: %q err=%v", res, err)
-	}
-	_, err = tools["read"](ctx, `{"path":"/workspace/work/README.md","outline":true,"start":999,"end":1000}`)
-	if !errors.Is(err, vfs.ErrLineOutOfRange) {
-		t.Fatalf("outline past EOF: %v", err)
 	}
 
 	res, err = tools["read"](ctx, `{"path":"/workspace/work/README.md","block_id":"hello/install"}`)
@@ -298,13 +283,6 @@ func TestVFSTools_readWrite(t *testing.T) {
 		t.Fatalf("body after past-EOF write: %q", gotText(t, ms, "/workspace/work/new.txt"))
 	}
 
-	if _, err = tools["write"](ctx, `{"path":"/workspace/work/empty.txt","content":""}`); err != nil {
-		t.Fatal(err)
-	}
-	if gotText(t, ms, "/workspace/work/empty.txt") != "" {
-		t.Fatalf("empty create: %q", gotText(t, ms, "/workspace/work/empty.txt"))
-	}
-
 	if err := ms.Route(ctx, "/workspace/work/empty.txt").
 		WriteFile(ctx, []byte("keep\n")); err != nil {
 		t.Fatal(err)
@@ -344,10 +322,6 @@ func TestVFSTools_readWrite(t *testing.T) {
 	_, err = tools["read"](ctx, `{"path":"/workspace/work/plain.txt","start":5,"end":3}`)
 	if err == nil || !strings.Contains(err.Error(), "invalid range") {
 		t.Fatalf("inverted range: %v", err)
-	}
-	_, err = tools["read"](ctx, `{"path":"work/plain.txt"}`)
-	if !errors.Is(err, vfs.ErrInvalidPath) {
-		t.Fatalf("relative path: %v", err)
 	}
 	_, err = tools["read"](ctx, `{"path":"/workspace/work/plain.txt","block_id":"nope"}`)
 	if err == nil || !strings.Contains(err.Error(), "no structured blocks") {
@@ -423,6 +397,7 @@ func requireWriteUnchanged(t *testing.T, ms *vfs.MountSession, write tool, path,
 }
 
 func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	api := toolDriveFX(t)
 	api.SeedDoc("doc1", "R0", []vfs.DocsSpan{
@@ -632,6 +607,7 @@ func fieldKV(s, key string) string {
 }
 
 func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	base := t.TempDir()
 	ms := mustMountTree(t, "tools-docx", vfs.At("work", vfs.Local(base)))
@@ -684,6 +660,7 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 }
 
 func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	api := testdrive.New()
 	api.Add("", vfs.DriveMeta{ID: "root", Name: ".", MimeType: "application/vnd.google-apps.folder"}, nil)

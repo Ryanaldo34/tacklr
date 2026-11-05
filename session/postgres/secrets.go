@@ -2,9 +2,6 @@ package postgres
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,46 +11,6 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 )
 
-// Sealer encrypts what Secrets writes. Seal binds the ciphertext to
-// associated data (the session id), and Open fails unless it gets the same
-// associated data back, so one session's row cannot be read as another's.
-// A host can implement it over its KMS (envelope encryption), which is why
-// it gets the caller's context; AESGCM is one built from a key.
-type Sealer interface {
-	Seal(ctx context.Context, plaintext, associated []byte) ([]byte, error)
-	Open(ctx context.Context, ciphertext, associated []byte) ([]byte, error)
-}
-
-// AESGCM is a Sealer: AES-256-GCM with a random nonce per seal, written
-// before the ciphertext.
-type AESGCM struct{ aead cipher.AEAD }
-
-// NewAESGCM returns an AESGCM Sealer for a 32-byte key.
-func NewAESGCM(key []byte) (*AESGCM, error) {
-	if len(key) != 32 {
-		return nil, fmt.Errorf("postgres: AES-GCM key is %d bytes, want 32", len(key))
-	}
-	block, _ := aes.NewCipher(key)  // a 32-byte key is a valid AES-256 key
-	aead, _ := cipher.NewGCM(block) // AES has the 16-byte block GCM needs
-	return &AESGCM{aead: aead}, nil
-}
-
-// Seal implements Sealer.
-func (a *AESGCM) Seal(_ context.Context, plaintext, associated []byte) ([]byte, error) {
-	nonce := make([]byte, a.aead.NonceSize(), a.aead.NonceSize()+len(plaintext)+a.aead.Overhead())
-	_, _ = rand.Read(nonce) // crypto/rand.Read never fails (Go 1.24+)
-	return a.aead.Seal(nonce, nonce, plaintext, associated), nil
-}
-
-// Open implements Sealer.
-func (a *AESGCM) Open(_ context.Context, ciphertext, associated []byte) ([]byte, error) {
-	n := a.aead.NonceSize()
-	if len(ciphertext) < n {
-		return nil, errors.New("postgres: sealed secrets are too short")
-	}
-	return a.aead.Open(nil, ciphertext[:n], ciphertext[n:], associated)
-}
-
 // Secrets is session.SecretStorage on Postgres for the session-scoped
 // tokens a host passes on CreateSession, Prompt and Resume (an end user's
 // Drive or Graph OAuth tokens, per-session object-store credentials). Each
@@ -62,11 +19,11 @@ func (a *AESGCM) Open(_ context.Context, ciphertext, associated []byte) ([]byte,
 // host passes those to the providers it builds.
 type Secrets struct {
 	db     *DB
-	sealer Sealer
+	sealer session.Sealer
 }
 
 // Secrets returns the session SecretStorage, sealing every bag with sealer.
-func (db *DB) Secrets(sealer Sealer) *Secrets { return &Secrets{db: db, sealer: sealer} }
+func (db *DB) Secrets(sealer session.Sealer) *Secrets { return &Secrets{db: db, sealer: sealer} }
 
 // Put implements session.SecretStorage: a bag with bindings replaces the
 // session's; one without (drop-only) changes nothing.

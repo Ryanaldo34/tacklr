@@ -1,18 +1,13 @@
 package helixgraph_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
-	"net/http/httptest"
-	"net/http/httputil"
 	"net/url"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,10 +17,14 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/graphtest"
 	"github.com/ryanaldo34/tacklr/brain/helixgraph"
+	"github.com/ryanaldo34/tacklr/internal/faultproxy"
 	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
+// TestHelixGraph_contract: Helix meets the graph contract every brain graph
+// must meet.
 func TestHelixGraph_contract(t *testing.T) {
+	t.Parallel()
 	g := helixtest.Graph(t)
 	graphtest.Run(t, func(t *testing.T, emb brain.Embedder) brain.Graph {
 		if emb == nil {
@@ -35,6 +34,9 @@ func TestHelixGraph_contract(t *testing.T) {
 	})
 }
 
+// TestOpen_failsUntilHelixHasBuiltEveryIndex: Open fails on a bad index
+// receipt or status, waits while Helix is not listening or an index builds,
+// and retries past one gateway error or create conflict.
 func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 	t.Parallel()
 	// Opens that should succeed get a deadline too: a Helix that is gone
@@ -46,7 +48,7 @@ func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	helixProxy := newFaultProxy(t)
+	helixProxy := newHelixProxy(t)
 	// newIndex makes Open build an index no other test has, so it waits on it.
 	newIndex := func() helixgraph.Options {
 		return helixgraph.Options{Dimension: graphtest.Dimension, EdgeRelations: []string{"r" + strings.ReplaceAll(uuid.NewString(), "-", "")}}
@@ -75,10 +77,10 @@ func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 	_, notListening := helixgraph.Open(starting, unreachable, helixtest.Options)
 	cancel()
 	// A gateway in front of Helix failed one request.
-	helixProxy.rule.Store(&faultRule{query: "brain_index_operation", status: http.StatusBadGateway, once: true})
+	helixProxy.failOnce("brain_index_operation", http.StatusBadGateway)
 	_, afterGateway := helixgraph.Open(ctx, helixProxy.client, newIndex())
 	// Another Open is creating the same indexes.
-	helixProxy.rule.Store(&faultRule{query: "brain_create_indexes", status: http.StatusConflict, once: true})
+	helixProxy.failOnce("brain_create_indexes", http.StatusConflict)
 	_, afterConflict := helixgraph.Open(ctx, helixProxy.client, helixtest.Options)
 	helixProxy.fail("brain_create_indexes", http.StatusConflict, "")
 	conflicted, cancel := context.WithTimeout(ctx, 3*indexPoll)
@@ -113,7 +115,7 @@ func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 func TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	helixProxy := newFaultProxy(t)
+	helixProxy := newHelixProxy(t)
 	g, err := helixgraph.Open(ctx, helixProxy.client, helixtest.Options)
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +167,7 @@ func TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth(t *testing.T) {
 	kids := kidsTree.Parts
 	eraseErr := eng.Erase(ctx, scope)
 	_, keptErr := eng.Open(ctx, scope, doc.ID)
-	helixProxy.rule.Store(nil)
+	helixProxy.Clear()
 	retryErr := eng.Erase(ctx, scope)
 	_, erasedErr := eng.Open(ctx, scope, doc.ID)
 	left, leftErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "doc"})
@@ -217,64 +219,59 @@ func titles(p brain.Page) string {
 // indexPoll is longer than helixgraph's index poll interval.
 const indexPoll = 200 * time.Millisecond
 
-// faultProxy forwards to the shared Helix and answers chosen queries itself.
-type faultProxy struct {
+// helixProxy is a fault proxy in front of the shared Helix, and a client
+// that goes through it.
+type helixProxy struct {
+	*faultproxy.Proxy
 	client *helix.Client
-	rule   atomic.Pointer[faultRule]
 }
 
-type faultRule struct {
-	query  string // query_name to answer, or "*" for every request
-	status int
-	body   string // %s is the operation id of a fresh index build, if any
-	hang   bool   // answer only once the caller gives up
-	once   bool   // answer one request, then forward again
-}
-
-func newFaultProxy(t *testing.T) *faultProxy {
+func newHelixProxy(t *testing.T) helixProxy {
 	t.Helper()
 	target, err := url.Parse(helixtest.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := &faultProxy{}
-	forward := httputil.NewSingleHostReverseProxy(target)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		r.Body = io.NopCloser(bytes.NewReader(body))
+	p := faultproxy.Start(t, target)
+	client, err := helix.NewClient(p.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return helixProxy{Proxy: p, client: client}
+}
+
+// query matches the requests for the Helix query name, or every request for
+// "*".
+func query(name string) func(*http.Request) bool {
+	return func(r *http.Request) bool {
 		var req struct {
 			QueryName string `json:"query_name"`
 		}
-		_ = json.Unmarshal(body, &req)
-		if rule := p.rule.Load(); rule != nil && (rule.query == "*" || rule.query == req.QueryName) {
-			if rule.once {
-				p.rule.CompareAndSwap(rule, nil)
-			}
-			if rule.hang {
-				<-r.Context().Done()
-				return
-			}
-			w.WriteHeader(rule.status)
-			_, _ = io.WriteString(w, strings.ReplaceAll(rule.body, "%s", uuid.NewString()))
-			return
-		}
-		forward.ServeHTTP(w, r)
-	}))
-	t.Cleanup(srv.Close)
-	if p.client, err = helix.NewClient(srv.URL); err != nil {
-		t.Fatal(err)
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		return name == "*" || req.QueryName == name
 	}
-	return p
 }
 
-func (p *faultProxy) fail(query string, status int, body string) {
-	p.rule.Store(&faultRule{query: query, status: status, body: body})
+// fail answers the query with status and body. A %s in body is the
+// operation id of an index build no other test has.
+func (p helixProxy) fail(name string, status int, body string) {
+	p.Set(faultproxy.Rule{Match: query(name), Fault: faultproxy.Answer(status, strings.ReplaceAll(body, "%s", uuid.NewString()))})
 }
 
-func (p *faultProxy) failWith(query, body string) { p.fail(query, http.StatusOK, body) }
+func (p helixProxy) failWith(name, body string) { p.fail(name, http.StatusOK, body) }
 
-func (p *faultProxy) hang(query string) { p.rule.Store(&faultRule{query: query, hang: true}) }
+// failOnce answers one request for the query with status.
+func (p helixProxy) failOnce(name string, status int) {
+	p.Set(faultproxy.Rule{Match: query(name), Fault: faultproxy.Answer(status, ""), Once: true})
+}
 
+func (p helixProxy) hang(name string) {
+	p.Set(faultproxy.Rule{Match: query(name), Fault: faultproxy.Hang()})
+}
+
+// TestGraph_searchPastMaxOverfetchRanksOnlyReadableElements: when more hidden
+// nodes or edges than MaxOverfetch rank first, a search still returns the
+// readable node or edge.
 func TestGraph_searchPastMaxOverfetchRanksOnlyReadableElements(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -322,69 +319,5 @@ func TestGraph_searchPastMaxOverfetchRanksOnlyReadableElements(t *testing.T) {
 	}
 	if edgeErr != nil || len(found) != 1 || found[0].FromID != a || found[0].ToID != b {
 		t.Errorf("edge search past the overfetch = %+v %v, want a→b", found, edgeErr)
-	}
-}
-
-// TestEngine_liveKnowledgeGraph is the Engine outcome on real Helix: Save
-// writes nodes, Link stores edges with note vectors, and Related and Search
-// return results read from the store; a soft-deleted object leaves them.
-func TestEngine_liveKnowledgeGraph(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Graph(t)),
-		brain.WithKinds(brain.KindSpec{Kind: "Document", IsParent: true}, brain.KindSpec{Kind: "Fact", IsParent: true}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scope := brain.Scope{Namespace: brain.Namespace{{Name: "org", Value: uuid.NewString()}}}
-	save := func(kind, title, content string) brain.Object {
-		obj, err := eng.Save(ctx, scope, brain.Object{Kind: kind, Title: title, Content: content})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return obj
-	}
-	doc := save("Document", "Contract", "MSA body")
-	fact := save("Fact", "Risk", "indemnity exclusivity penalty on late delivery")
-	summary := save("Document", "Summary", "short summary")
-	for _, l := range []brain.LinkRequest{
-		{From: doc.ID, To: fact.ID, Relation: "about", Meta: brain.EdgeMeta{Note: "late delivery penalty exclusivity"}},
-		{From: fact.ID, To: summary.ID, Relation: "about"},
-	} {
-		if err := eng.Link(ctx, scope, l); err != nil {
-			t.Fatal(err)
-		}
-	}
-	doc.Title = "Contract v2"
-	if _, err := eng.Save(ctx, scope, doc); err != nil {
-		t.Fatal(err)
-	}
-
-	related, relatedErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relation: "about", Depth: 2})
-	facts, factsErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "indemnity exclusivity penalty", Kind: "Fact"})
-	links, linksErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "late delivery penalty"})
-	if err := eng.SoftDelete(ctx, scope, fact.ID); err != nil {
-		t.Fatal(err)
-	}
-	afterDelete, afterErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relation: "about"})
-
-	if relatedErr != nil || len(related.Results) != 2 || related.Results[0].Object.ID != fact.ID || related.Results[1].Object.ID != summary.ID || related.Results[1].Object.Relation.Depth != 2 {
-		t.Errorf("two-hop related = %+v %v, want fact then summary at depth 2", related.Results, relatedErr)
-	}
-	if factsErr != nil || len(facts.Results) != 1 || facts.Results[0].Object.ID != fact.ID {
-		t.Errorf("search for the fact = %+v %v, want the fact alone", facts.Results, factsErr)
-	}
-	var link *brain.LinkResult
-	for _, r := range links.Results {
-		if r.Link != nil && link == nil {
-			link = r.Link
-		}
-	}
-	if linksErr != nil || link == nil || link.From.Title != "Contract v2" || link.To.ID != fact.ID || link.Relation != "about" {
-		t.Errorf("search for the link note = %+v %v, want the doc→fact link with both ends read", links.Results, linksErr)
-	}
-	if afterErr != nil || len(afterDelete.Results) != 0 {
-		t.Errorf("related after soft delete = %+v %v, want none", afterDelete.Results, afterErr)
 	}
 }

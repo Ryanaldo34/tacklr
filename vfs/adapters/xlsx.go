@@ -32,10 +32,10 @@ const (
 	ctStyles     = "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"
 )
 
-// XLSX maps workbook.xml / sheetN.xml / sharedStrings.xml / styles.xml to TabularDocument.
+// XLSX is the vfs.SheetNormalizer of Excel workbooks: it maps workbook.xml,
+// sheetN.xml, sharedStrings.xml and styles.xml to sheets. Codecs registers
+// it in a vfs.TabularCodec.
 type XLSX struct{}
-
-func (XLSX) MediaTypes() []string { return []string{XLSXMediaType} }
 
 func (XLSX) DecodeSheets(ctx context.Context, _, _ string, data []byte) ([]vfs.Sheet, []vfs.NamedRange, error) {
 	if err := ctx.Err(); err != nil {
@@ -55,26 +55,7 @@ func (XLSX) EncodeSheets(ctx context.Context, sheets []vfs.Sheet, _ []vfs.NamedR
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return encodeXLSX(sheets)
-}
-
-func (XLSX) Decode(ctx context.Context, virtualPath, mediaType string, data []byte) (vfs.Document, error) {
-	sheets, _, err := (XLSX{}).DecodeSheets(ctx, virtualPath, mediaType, data)
-	if err != nil {
-		return nil, err
-	}
-	if mediaType == "" {
-		mediaType = XLSXMediaType
-	}
-	return vfs.NewTabularDocument(virtualPath, mediaType, sheets, nil)
-}
-
-func (XLSX) Encode(ctx context.Context, doc vfs.Document) ([]byte, error) {
-	g, ok := vfs.AsGrid(doc)
-	if !ok {
-		return nil, fmt.Errorf("xlsx: %w", vfs.ErrNotSupported)
-	}
-	return (XLSX{}).EncodeSheets(ctx, g.Sheets(), g.NamedRanges())
+	return encodeXLSX(sheets), nil
 }
 
 func parseXLSX(data []byte) ([]vfs.Sheet, error) {
@@ -169,14 +150,9 @@ func readXLSXPart(parts map[string]*zip.File, name string, fn func(io.Reader) er
 		return err
 	}
 	defer rc.Close()
-	lr := &io.LimitedReader{R: rc, N: int64(vfs.MaxReadFileBytes) + 1}
-	if err := fn(lr); err != nil {
-		return err
-	}
-	if lr.N == 0 {
-		return fmt.Errorf("%w (max %d bytes)", vfs.ErrTooLarge, vfs.MaxReadFileBytes)
-	}
-	return nil
+	// The zip reader fails a part that is longer than its header size, so
+	// the header check bounds the read.
+	return fn(rc)
 }
 
 type wbSheet struct{ name, sheetID, rid string }
@@ -207,9 +183,6 @@ func parseWorkbook(r io.Reader) ([]wbSheet, error) {
 
 func parseRels(r io.Reader) (map[string]string, error) {
 	out := map[string]string{}
-	if r == nil {
-		return out, nil
-	}
 	dec := xml.NewDecoder(r)
 	for {
 		tok, err := dec.Token()
@@ -373,7 +346,8 @@ func parseStyles(r io.Reader) (xlsxStyles, error) {
 				}
 				if borderID >= 0 && borderID < len(st.borders) && st.borders[borderID].Style != "" {
 					b := st.borders[borderID]
-					if edgeCount(b.Edges) >= 4 {
+					// A styled border has at least one edge; four edges are all.
+					if strings.Count(b.Edges, ",") >= 3 {
 						b.Edges = ""
 					}
 					xf.Border = &b
@@ -412,13 +386,6 @@ func parseStyles(r io.Reader) (xlsxStyles, error) {
 		}
 	}
 	return st, nil
-}
-
-func edgeCount(edges string) int {
-	if edges == "" {
-		return 4
-	}
-	return strings.Count(edges, ",") + 1
 }
 
 func parseSheetXML(r io.Reader, ss []string, st xlsxStyles) ([][]vfs.Cell, error) {
@@ -460,22 +427,16 @@ func parseSheetXML(r io.Reader, ss []string, st xlsxStyles) ([][]vfs.Cell, error
 				if s := attr(t, "s"); s != "" {
 					cur.style, _ = strconv.Atoi(s)
 				}
+			// Character data outside a cell is skipped, and a cell start
+			// resets these, so they need no cell check.
 			case "f":
-				if cur.alive {
-					cur.inF = true
-				}
+				cur.inF = true
 			case "v":
-				if cur.alive {
-					cur.inV = true
-				}
+				cur.inV = true
 			case "is":
-				if cur.alive {
-					cur.inIS = true
-				}
+				cur.inIS = true
 			case "t":
-				if cur.alive && cur.inIS {
-					cur.inT = true
-				}
+				cur.inT = cur.inIS
 			}
 		case xml.EndElement:
 			switch t.Name.Local {
@@ -552,7 +513,8 @@ func parseSheetXML(r io.Reader, ss []string, st xlsxStyles) ([][]vfs.Cell, error
 	if maxR == 0 {
 		return nil, nil
 	}
-	if maxC < 1 || maxC > vfs.MaxSheetCells || maxR > vfs.MaxSheetCells/maxC {
+	// A placed cell has a column, so maxC is at least 1.
+	if maxR > vfs.MaxSheetCells/maxC {
 		return nil, fmt.Errorf("%w (max %d cells)", vfs.ErrTooLarge, vfs.MaxSheetCells)
 	}
 	grid := make([][]vfs.Cell, maxR)
@@ -588,7 +550,7 @@ func formatKey(f vfs.CellFormat) styleKey {
 	return k
 }
 
-func encodeXLSX(sheets []vfs.Sheet) ([]byte, error) {
+func encodeXLSX(sheets []vfs.Sheet) []byte {
 	if len(sheets) == 0 {
 		sheets = []vfs.Sheet{{Title: "Sheet1"}}
 	}
@@ -646,16 +608,7 @@ func encodeXLSX(sheets []vfs.Sheet) ([]byte, error) {
 	}
 
 	names := make([]string, len(sheets))
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	writeBytes := func(name string, body []byte) error {
-		w, err := zw.Create(name)
-		if err != nil {
-			return err
-		}
-		_, err = w.Write(body)
-		return err
-	}
+	zb := newZipBuilder()
 	var sheetBuf bytes.Buffer
 	for i, sh := range sheets {
 		name := sh.Title
@@ -665,9 +618,7 @@ func encodeXLSX(sheets []vfs.Sheet) ([]byte, error) {
 		names[i] = name
 		sheetBuf.Reset()
 		writeSheetXML(&sheetBuf, sh, indexOf, internStr)
-		if err := writeBytes(fmt.Sprintf("xl/worksheets/sheet%d.xml", i+1), sheetBuf.Bytes()); err != nil {
-			return nil, err
-		}
+		zb.add(fmt.Sprintf("xl/worksheets/sheet%d.xml", i+1), sheetBuf.Bytes())
 	}
 
 	var types strings.Builder
@@ -698,32 +649,17 @@ func encodeXLSX(sheets []vfs.Sheet) ([]byte, error) {
 	wb.WriteString(`</sheets></workbook>`)
 	wbRels.WriteString(`</Relationships>`)
 	types.WriteString(`</Types>`)
-	if err := writeBytes("[Content_Types].xml", []byte(types.String())); err != nil {
-		return nil, err
-	}
-	if err := writeBytes("_rels/.rels", []byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="`+nsPkgRel+`"><Relationship Id="rId1" Type="`+relOfficeDoc+`" Target="xl/workbook.xml"/></Relationships>`)); err != nil {
-		return nil, err
-	}
-	if err := writeBytes("xl/workbook.xml", []byte(wb.String())); err != nil {
-		return nil, err
-	}
-	if err := writeBytes("xl/_rels/workbook.xml.rels", []byte(wbRels.String())); err != nil {
-		return nil, err
-	}
+	zb.add("[Content_Types].xml", []byte(types.String()))
+	zb.add("_rels/.rels", []byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="`+nsPkgRel+`"><Relationship Id="rId1" Type="`+relOfficeDoc+`" Target="xl/workbook.xml"/></Relationships>`))
+	zb.add("xl/workbook.xml", []byte(wb.String()))
+	zb.add("xl/_rels/workbook.xml.rels", []byte(wbRels.String()))
 	sheetBuf.Reset()
 	writeShared(&sheetBuf, shared)
-	if err := writeBytes("xl/sharedStrings.xml", sheetBuf.Bytes()); err != nil {
-		return nil, err
-	}
+	zb.add("xl/sharedStrings.xml", sheetBuf.Bytes())
 	sheetBuf.Reset()
 	writeStyles(&sheetBuf, st.fonts, st.fills, st.borders, st.numFmts, st.numIDs, st.xfs)
-	if err := writeBytes("xl/styles.xml", sheetBuf.Bytes()); err != nil {
-		return nil, err
-	}
-	if err := zw.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	zb.add("xl/styles.xml", sheetBuf.Bytes())
+	return zb.bytes()
 }
 
 func writeSheetXML(w *bytes.Buffer, sh vfs.Sheet, indexOf func(vfs.CellFormat) int, internStr func(string) int) {
@@ -731,9 +667,6 @@ func writeSheetXML(w *bytes.Buffer, sh vfs.Sheet, indexOf func(vfs.CellFormat) i
 	w.WriteString(`<worksheet xmlns="` + nsMain + `"><sheetData>`)
 	var num [32]byte
 	for r, row := range sh.Cells {
-		if len(row) == 0 {
-			continue
-		}
 		w.WriteString(`<row r="`)
 		w.Write(strconv.AppendInt(num[:0], int64(r+1), 10))
 		w.WriteString(`">`)
@@ -858,11 +791,10 @@ func writeStyles(w *bytes.Buffer, fonts []vfs.CellFormat, fills []string, border
 	for i, xf := range xfs {
 		numID, fontID, fillID, borderID := 0, 0, 0, 0
 		if i > 0 {
+			// Each xf after the default adds one font, fill and border; the
+			// fills start with none and gray125.
 			fontID = i
 			fillID = i + 1
-			if fillID >= len(fills) {
-				fillID = 0
-			}
 			borderID = i
 			if xf.Number != "" {
 				numID = 164 + numIDsByXf
@@ -911,11 +843,7 @@ func writeBorderEdge(w *bytes.Buffer, name string, br vfs.CellBorder) {
 		w.WriteString(`<` + name + `/>`)
 		return
 	}
-	style := br.Style
-	if style == "" {
-		style = "thin"
-	}
-	w.WriteString(`<` + name + ` style="` + style + `"`)
+	w.WriteString(`<` + name + ` style="` + br.Style + `"`)
 	if br.Color != "" {
 		w.WriteString(`><color rgb="` + vfs.ExcelARGB(br.Color) + `"/></` + name + `>`)
 		return
@@ -924,9 +852,6 @@ func writeBorderEdge(w *bytes.Buffer, name string, br vfs.CellBorder) {
 }
 
 func isNumericInput(s string) bool {
-	if s == "" {
-		return false
-	}
 	_, err := strconv.ParseFloat(s, 64)
 	return err == nil
 }

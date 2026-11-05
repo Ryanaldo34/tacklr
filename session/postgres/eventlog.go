@@ -151,6 +151,16 @@ func (l *EventLog) Head(ctx context.Context, sessionID session.ID) (session.Seq,
 	return session.Seq(seq), nil //nolint:gosec // G115: sequences start at 1 and only grow
 }
 
+// Trim implements session.EventLog. The head row keeps the numbering.
+func (l *EventLog) Trim(ctx context.Context, sessionID session.ID, through session.Seq) error {
+	_, err := l.db.pool.Exec(ctx, l.db.sql(`DELETE FROM {s}.session_events WHERE session_id = $1 AND seq <= $2`),
+		sessionID, int64(through)) //nolint:gosec // G115: seq is well below MaxInt64
+	if err != nil {
+		return fmt.Errorf("trim events %q: %w", sessionID, err)
+	}
+	return nil
+}
+
 // CloseSession implements session.EventLog. It deletes the session's log,
 // so a later session can reuse the id, and ends its tails in every process.
 func (l *EventLog) CloseSession(ctx context.Context, sessionID session.ID) error {

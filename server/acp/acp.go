@@ -119,7 +119,6 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		ThreadID:        jsonString(params, "sessionId"),
 		CWD:             jsonString(params, "cwd"),
 		ConfigID:        jsonString(params, "configId"),
-		ConfigValue:     jsonString(params, "value"),
 		AuthMethodID:    strings.TrimSpace(jsonString(params, "methodId")),
 		ProtocolVersion: jsonInt(params, "protocolVersion"),
 		ClientCapsRaw:   env.Params,
@@ -450,6 +449,10 @@ func presentEvent(event session.Event) presentationEvent {
 		ToolCalls: slices.Clone(event.ToolCalls),
 		Error:     event.Error,
 	}
+	if event.Type == session.EventMessage || event.Type == session.EventReasoning {
+		// A complete message shows only the text its deltas did not.
+		presented.Content = event.Content[event.Streamed:]
+	}
 	if event.Error != nil {
 		presented.ErrorText = event.Error.Error()
 	} else if event.Fail != "" {
@@ -479,9 +482,8 @@ type parsedRequest struct {
 	CWD        string
 	MCPServers []session.MCPServer
 
-	// ACP session/set_config_option
-	ConfigID    string
-	ConfigValue string
+	// ConfigID is the option session/set_config_option names.
+	ConfigID string
 
 	// ProtocolVersion is the client's requested major version (initialize).
 	ProtocolVersion int

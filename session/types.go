@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 
@@ -138,11 +139,18 @@ var (
 )
 
 // EventLog is the session progress stream. Topics are TopicEvents and
-// TopicRetry (a repeated attempt).
+// TopicRetry (a repeated attempt). It holds durable events only, never a
+// Delta, and only the session's current turn: the runtime trims the turns
+// before it when a new turn starts.
 type EventLog interface {
 	Append(ctx context.Context, sessionID ID, topic string, ev Event) error
+	// Subscribe sends the events after after, then each new one. When
+	// after is before the oldest event kept, it starts at that event.
 	Subscribe(ctx context.Context, sessionID ID, after Seq) (<-chan Event, error)
 	Head(ctx context.Context, sessionID ID) (Seq, error)
+	// Trim deletes the events up to and including through. The numbers of
+	// the events that stay, and of later ones, do not change.
+	Trim(ctx context.Context, sessionID ID, through Seq) error
 	CloseSession(ctx context.Context, sessionID ID) error
 }
 
@@ -151,36 +159,37 @@ type EventLog interface {
 type Revision string
 
 // Store keeps each session's checkpoint: what the harness needs to
-// think again after a park or a worker recycle. Tokens, file bytes, MCP env
+// think again after a park or a worker recycle, as rows (CheckpointEntry),
+// so a commit writes only the rows it changed. Tokens, file bytes, MCP env
 // and headers, the session's identity, and child handles are not in it.
 //
 // Save's expected Revision must match the last Load (zero if no row).
 // Mismatch means another writer already saved — reload and retry.
 type Store interface {
-	Save(ctx context.Context, sessionID ID, cp []byte, expected Revision) (Revision, error)
-	Load(ctx context.Context, sessionID ID) ([]byte, Revision, error)
+	// Save applies changes to the checkpoint, all of them or none, when it
+	// is at expected, and returns its new revision.
+	Save(ctx context.Context, sessionID ID, changes []CheckpointChange, expected Revision) (Revision, error)
+	// Load is the checkpoint's rows, in no set order, and its revision.
+	Load(ctx context.Context, sessionID ID) ([]CheckpointEntry, Revision, error)
 	// Revision is the snapshot's current revision, "" when none exists. A
 	// worker reads it to learn whether the committed state it holds is
 	// current, without loading the snapshot.
 	Revision(ctx context.Context, sessionID ID) (Revision, error)
-	// PutOutcome keeps one tool call's outcome under its session and
-	// call key, so the durable runtime's history holds only that it exists.
-	// A Put of a key replaces it: a step that runs again leaves one record.
-	// Records stay until Delete, so a late Subscribe can read every result.
-	PutOutcome(ctx context.Context, sessionID ID, callKey string, o Outcome) error
-	// Outcomes returns the records kept under callKeys; a key with none is
+	// PutCall keeps the body of one tool call (tacklr.CallBody) under its
+	// session and call key, so the durable runtime's history holds only
+	// that the call ran. A Put of a key replaces it: a step that runs again
+	// leaves one. Bodies stay until ClearCalls or Delete, so a Subscribe in
+	// the turn can read every result.
+	PutCall(ctx context.Context, sessionID ID, callKey string, body []byte) error
+	// Calls returns the bodies kept under callKeys; a key with none is
 	// absent from the map.
-	Outcomes(ctx context.Context, sessionID ID, callKeys []string) (map[string]Outcome, error)
-	// Delete removes the session's snapshot and its outcome records.
+	Calls(ctx context.Context, sessionID ID, callKeys []string) (map[string][]byte, error)
+	// ClearCalls removes the session's call bodies. The runtime calls it
+	// when a new turn starts: the turns before it committed their rounds,
+	// so no step reads their calls again.
+	ClearCalls(ctx context.Context, sessionID ID) error
+	// Delete removes the session's snapshot and its call bodies.
 	Delete(ctx context.Context, sessionID ID) error
-}
-
-// Outcome is what the Store keeps for one tool call. Result is the text
-// its tool-result event carried, which a client reads back into the event
-// stream; Record is the harness's own encoding of the call's outcome.
-type Outcome struct {
-	Result string `json:"result,omitempty"`
-	Record []byte `json:"record,omitempty"`
 }
 
 // WithoutSecrets returns a copy with Credential Token and ExpiresAt cleared.
@@ -207,9 +216,13 @@ func cloneAuth(a AuthContext) AuthContext {
 	return out
 }
 
-// ErrModelRefused and ErrMaxTokens are why a turn ended that a client acts
-// on (a refusal, the token limit); its error event names them.
+// ErrModelRefused, ErrMaxTokens and ErrContextLength are why a turn ended
+// that a client acts on (a refusal, the token limit); its error event names
+// them.
 var (
 	ErrModelRefused = errors.New("model refused")
 	ErrMaxTokens    = errors.New("max tokens reached")
+	// ErrContextLength is a request the provider refused because it is over
+	// the model's context window. It is also ErrMaxTokens.
+	ErrContextLength = fmt.Errorf("%w: the request is over the context window", ErrMaxTokens)
 )

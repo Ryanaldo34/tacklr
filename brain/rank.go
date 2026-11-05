@@ -85,13 +85,10 @@ func fuseRanks(lists [][]ScoredID, k int) []ScoredID {
 	return out
 }
 
-// applyTemporal multiplies scores by exp(-λ * age_days) using updated_at.
-// lambda <= 0 leaves scores unchanged.
-// Zero UpdatedAt is left untouched (e.g. Helix search hits only carry $distance rank).
+// applyTemporal multiplies scores by exp(-λ * age_days) using updated_at;
+// lambda is positive. Zero UpdatedAt is left untouched (e.g. Helix search
+// hits only carry $distance rank).
 func applyTemporal(parts []ScoredID, lambda float64, now time.Time) {
-	if lambda <= 0 {
-		return
-	}
 	for i := range parts {
 		parts[i].Score *= ageFactor(lambda, now, parts[i].UpdatedAt)
 	}

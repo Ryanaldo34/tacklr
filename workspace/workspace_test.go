@@ -60,6 +60,7 @@ func writeSkill(t *testing.T, root, dir, name string) {
 // skills unless the agent has its own loader, and an Overflow under
 // OverflowPath.
 func TestConfigBind_addsTheWorkspaceToTheTurn(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeSkill(t, filepath.Join(root, "skills"), "research", "research")
 	ms := mustMountTree(t, "bind", vfs.At("work", vfs.Local(root)))
@@ -94,6 +95,7 @@ func TestConfigBind_addsTheWorkspaceToTheTurn(t *testing.T) {
 // TestConfigBind_refusesAnOverflowPathItCannotWrite: an OverflowPath
 // outside the mounts or on a read-only mount fails the turn.
 func TestConfigBind_refusesAnOverflowPathItCannotWrite(t *testing.T) {
+	t.Parallel()
 	ms := mustMountTree(t, "overflow", vfs.At("work", vfs.Local(t.TempDir())), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
 
 	_, outside := Config{OverflowPath: "/elsewhere"}.Bind(tacklr.AgentOptions{}, ms)
@@ -107,6 +109,7 @@ func TestConfigBind_refusesAnOverflowPathItCannotWrite(t *testing.T) {
 // TestOverflow_keepFailsWhenItCannotWrite: a file where the session's
 // directory goes, or a directory where the result goes, fails Keep.
 func TestOverflow_keepFailsWhenItCannotWrite(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	ms := mustMountTree(t, "overflow-fail", vfs.At("work", vfs.Local(t.TempDir())))
 	o, err := Overflow(ms, "/workspace/work/overflow")
@@ -135,6 +138,7 @@ func TestOverflow_keepFailsWhenItCannotWrite(t *testing.T) {
 // default directory, sorted, skipping files and symlinks; a workspace
 // without the directory has none; a directory that cannot be read fails.
 func TestSkills_loadsSkillDirectoriesFromTheWorkspace(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeSkill(t, root, "beta", "beta")
 	writeSkill(t, root, "alpha", "alpha")

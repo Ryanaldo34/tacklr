@@ -188,12 +188,6 @@ linters:
         linters:
           - revive
 
-      # Drain loops intentionally empty.
-      - text: "empty-block"
-        path: server/protocol\.go
-        linters:
-          - revive
-
       # stdlib constants in tests are optional style.
       - path: _test\.go
         linters:

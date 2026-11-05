@@ -5,7 +5,12 @@ import (
 	"testing"
 )
 
+// TestMemorySheets_seedGetAndBatchUpdates: the in-memory Sheets API refuses
+// a canceled context, makes a default workbook, clones on Get, writes values
+// and formats (a format request with a zero border clears the border), and
+// Seed replaces a workbook.
 func TestMemorySheets_seedGetAndBatchUpdates(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	m := NewMemorySheets()
 
@@ -43,6 +48,8 @@ func TestMemorySheets_seedGetAndBatchUpdates(t *testing.T) {
 		{SheetID: 99, StartRow: 0, StartCol: 0, EndRow: 1, EndCol: 1, Format: CellFormat{Bold: true}},
 		{SheetID: 0, StartRow: 1, StartCol: 1, EndRow: 2, EndCol: 2, Format: CellFormat{Italic: true, Number: "$#,##0.00"}},
 		{SheetID: 0, StartRow: 5, StartCol: 0, EndRow: 6, EndCol: 1, Format: CellFormat{Underline: true}},
+		{SheetID: 0, StartRow: 2, StartCol: 1, EndRow: 3, EndCol: 2, Format: CellFormat{Border: &CellBorder{Style: "thin"}}},
+		{SheetID: 0, StartRow: 2, StartCol: 1, EndRow: 3, EndCol: 2, Format: CellFormat{Border: &CellBorder{}}},
 	}}); err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +68,9 @@ func TestMemorySheets_seedGetAndBatchUpdates(t *testing.T) {
 	b2 := live.Sheets[0].Cells[1][1]
 	if b2.Value != "99" || !b2.Format.Italic || b2.Format.Number != "$#,##0.00" {
 		t.Fatalf("B2 = %+v", b2)
+	}
+	if b3 := live.Sheets[0].Cells[2][1]; b3.Format.Border != nil {
+		t.Fatalf("B3 border after a zero border = %+v", b3.Format.Border)
 	}
 	a3 := live.Sheets[0].Cells[2][0]
 	if a3.Input != "=A1+1" || a3.Value != "" {

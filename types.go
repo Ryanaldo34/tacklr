@@ -29,10 +29,14 @@ var (
 )
 
 var (
-	ErrModelAfterTools      = errors.New("model request failed after tools completed")
-	ErrApiKeyNotSet         = errors.New("api key not set")
-	ErrModelNotSet          = errors.New("model not set")
-	ErrUnknownModel         = errors.New("unknown model")
+	ErrModelAfterTools = errors.New("model request failed after tools completed")
+	ErrApiKeyNotSet    = errors.New("api key not set")
+	ErrModelNotSet     = errors.New("model not set")
+	ErrUnknownModel    = errors.New("unknown model")
+	// ErrCannotCount is a CountTokens error: the provider has no way to
+	// count a request's tokens. The harness then sizes requests from the
+	// input tokens the provider reports for each response.
+	ErrCannotCount          = errors.New("the model cannot count tokens")
 	ErrToolTimeout          = errors.New("tool timed out")
 	ErrToolPermissionDenied = errors.New("tool permission denied")
 )
@@ -69,13 +73,25 @@ type ModelRequest struct {
 	CacheKey string
 }
 
+// encodedSize is the size in bytes of what req sends: its system prompt,
+// its tools as their definitions (ToolsAsJson) and its messages as JSON.
+// A byte-level tokenizer gives every token at least one byte, and the
+// encoding is larger than a message's framing tokens, so it bounds req's
+// input tokens from above.
+func (req ModelRequest) encodedSize() int {
+	return len(req.SystemPrompt) + len(ToolsAsJson(req.Tools)) + messagesSize(req.Messages)
+}
+
 // Model is the model provider interface used by the harness.
 // Model and endpoint settings (the fluent With* builders) live on concrete
 // providers such as *openai.Model; everything per request
 // is in ModelRequest.
 type Model interface {
 	Invoke(ctx context.Context, req ModelRequest) (chan LLMResponseChunk, error)
-	// CountTokens counts what Invoke would send for req.
+	// CountTokens counts what Invoke would send for req, with the provider.
+	// A provider that cannot count returns an error that wraps
+	// ErrCannotCount. Invoke reports a request the provider refused as over
+	// the context window with session.ErrContextLength.
 	CountTokens(ctx context.Context, req ModelRequest) (int, error)
 	MaxContextWindow() (int, error)
 	// ModelTelemetryIdentity names the provider and model for model spans.
@@ -148,8 +164,9 @@ const JobRunning = "running"
 
 // RegisterInterrupt registers a custom interrupt factory for session rehydrate.
 func RegisterInterrupt(factory func() Interrupt) {
-	intr := factory()
-	name := intr.TypeName()
+	name := factory().TypeName()
+	interrupts.Lock()
+	defer interrupts.Unlock()
 	if _, ok := interruptFactories[name]; ok {
 		panic(fmt.Sprintf("interrupt type %q registered twice", name))
 	}

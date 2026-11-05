@@ -23,9 +23,6 @@ type APIStatusError struct {
 }
 
 func (e *APIStatusError) Error() string {
-	if e == nil {
-		return "provider error"
-	}
 	msg := strings.TrimSpace(e.Body)
 	if msg == "" {
 		msg = "no error body"
@@ -38,17 +35,11 @@ func (e *APIStatusError) Error() string {
 
 // ProviderHTTPStatus implements telemetry.ProviderStatus.
 func (e *APIStatusError) ProviderHTTPStatus() int {
-	if e == nil {
-		return 0
-	}
 	return e.Status
 }
 
 // ProviderErrorCode implements telemetry.ProviderStatus.
 func (e *APIStatusError) ProviderErrorCode() string {
-	if e == nil {
-		return ""
-	}
 	return e.Code
 }
 
@@ -90,6 +81,9 @@ func classifyAPIStatus(apiErr *APIStatusError, errType string) error {
 	if isRefusalSignal(lower) {
 		return fmt.Errorf("%w: %w", session.ErrModelRefused, apiErr)
 	}
+	if isContextLengthSignal(lower) {
+		return fmt.Errorf("%w: %w", session.ErrContextLength, apiErr)
+	}
 	if isMaxTokensSignal(lower) {
 		return fmt.Errorf("%w: %w", session.ErrMaxTokens, apiErr)
 	}
@@ -99,17 +93,14 @@ func classifyAPIStatus(apiErr *APIStatusError, errType string) error {
 	return apiErr
 }
 
-// classifyIncompleteReason maps Responses API incomplete_details.reason (or
-// similar) to a stop-reason sentinel when known.
+// classifyIncompleteReason is the error of an incomplete response with a
+// reason: a stop-reason sentinel when the reason is known.
 func classifyIncompleteReason(reason string) error {
 	r := strings.ToLower(strings.TrimSpace(reason))
-	if r == "" {
-		return nil
-	}
-	if isMaxTokensSignal(r) || r == "max_output_tokens" || r == "max_tokens" {
+	if isMaxTokensSignal(r) {
 		return fmt.Errorf("%w: response incomplete (%s)", session.ErrMaxTokens, reason)
 	}
-	if isRefusalSignal(r) || r == "content_filter" {
+	if isRefusalSignal(r) {
 		return fmt.Errorf("%w: response incomplete (%s)", session.ErrModelRefused, reason)
 	}
 	return fmt.Errorf("response incomplete (%s)", reason)
@@ -133,12 +124,18 @@ func isRefusalSignal(lower string) bool {
 		strings.Contains(lower, "invalid_prompt")
 }
 
+// isContextLengthSignal reports a request refused as over the context
+// window.
+func isContextLengthSignal(lower string) bool {
+	return strings.Contains(lower, "maximum context length") ||
+		strings.Contains(lower, "context_length_exceeded") ||
+		strings.Contains(lower, "context length") ||
+		strings.Contains(lower, "context window")
+}
+
 func isMaxTokensSignal(lower string) bool {
 	return strings.Contains(lower, "max_output_tokens") ||
 		strings.Contains(lower, "max_tokens") ||
-		strings.Contains(lower, "maximum context length") ||
-		strings.Contains(lower, "context_length_exceeded") ||
-		strings.Contains(lower, "context length") ||
 		strings.Contains(lower, "token limit") ||
 		(strings.Contains(lower, "finish_reason") && strings.Contains(lower, "length"))
 }

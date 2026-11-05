@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -36,26 +37,35 @@ func (DOCX) EncodeBlocks(ctx context.Context, blocks []vfs.Block) ([]byte, error
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var out bytes.Buffer
-	zw := zip.NewWriter(&out)
-	parts := map[string]string{
-		"[Content_Types].xml": contentTypesXML,
-		"_rels/.rels":         relsXML,
-		"word/document.xml":   docXML(blocks),
-	}
-	for name, body := range parts {
-		w, err := zw.Create(name)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := io.WriteString(w, body); err != nil {
-			return nil, err
-		}
-	}
-	if err := zw.Close(); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
+	zb := newZipBuilder()
+	zb.add("[Content_Types].xml", []byte(contentTypesXML))
+	zb.add("_rels/.rels", []byte(relsXML))
+	zb.add("word/document.xml", []byte(docXML(blocks)))
+	return zb.bytes(), nil
+}
+
+// zipBuilder writes parts to a zip archive in memory. A zip writer on a
+// bytes.Buffer cannot fail: the buffer takes every write and Deflate is
+// always registered. So it has no errors to return.
+type zipBuilder struct {
+	buf bytes.Buffer
+	zw  *zip.Writer
+}
+
+func newZipBuilder() *zipBuilder {
+	zb := &zipBuilder{}
+	zb.zw = zip.NewWriter(&zb.buf)
+	return zb
+}
+
+func (zb *zipBuilder) add(name string, body []byte) {
+	w, _ := zb.zw.Create(name)
+	_, _ = w.Write(body)
+}
+
+func (zb *zipBuilder) bytes() []byte {
+	_ = zb.zw.Close()
+	return zb.buf.Bytes()
 }
 
 func zipPart(data []byte, name string) ([]byte, error) {
@@ -63,25 +73,17 @@ func zipPart(data []byte, name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, file := range zr.File {
-		if file.Name != name {
-			continue
-		}
-		r, err := file.Open()
-		if err != nil {
-			return nil, err
-		}
-		part, readErr := io.ReadAll(r)
-		closeErr := r.Close()
-		if readErr != nil {
-			return nil, readErr
-		}
-		if closeErr != nil {
-			return nil, closeErr
-		}
-		return part, nil
+	i := slices.IndexFunc(zr.File, func(f *zip.File) bool { return f.Name == name })
+	if i < 0 {
+		return nil, fmt.Errorf("missing %s", name)
 	}
-	return nil, fmt.Errorf("missing %s", name)
+	r, err := zr.File[i].Open()
+	if err != nil {
+		return nil, err
+	}
+	// Close of a part reader only repeats a read error.
+	defer r.Close()
+	return io.ReadAll(r)
 }
 
 type docxParagraph struct {
@@ -135,7 +137,8 @@ func parseDOCX(data []byte) ([]vfs.Block, error) {
 					}
 				}
 			case "t":
-				if run == nil || paragraph == nil {
+				// A run exists only in a paragraph.
+				if run == nil {
 					continue
 				}
 				var text string

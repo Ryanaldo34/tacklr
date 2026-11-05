@@ -2,11 +2,10 @@ package acp_test
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/session"
 )
 
@@ -36,159 +36,60 @@ func newTestMCPServer(t *testing.T, toolName string) *httptest.Server {
 	return hs
 }
 
-// toolRecorder captures the namespaced tool names visible to the model on
-// each Invoke call.
-type toolRecorder struct {
-	mu   sync.Mutex
-	seen [][]string
-}
-
-func (tr *toolRecorder) record(tools []*tacklr.Tool) {
-	var names []string
-	for _, tool := range tools {
-		names = append(names, tool.Namespace()+"/"+tool.Name())
-	}
-	tr.mu.Lock()
-	tr.seen = append(tr.seen, names)
-	tr.mu.Unlock()
-}
-
-func (tr *toolRecorder) call(i int) []string {
-	tr.mu.Lock()
-	defer tr.mu.Unlock()
-	if i >= len(tr.seen) {
-		return nil
-	}
-	return tr.seen[i]
-}
-
-func recordingStrategy(t *testing.T, tr *toolRecorder) tacklr.Model {
-	return testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		tr.record(tools)
-		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
-	})
-}
-
-// After discovery, the model can invoke a namespaced MCP tool and the handler
-// result is delivered as a tool result event to the client.
-func TestHandleRPC_sessionMCPServers_toolCallReturnsResult(t *testing.T) {
-	mcpHTTP := newTestMCPServer(t, "greet")
-	var invokeCount int
-	strategy := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		invokeCount++
-		if invokeCount == 1 {
-			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: []message.ToolCall{
-				{ID: "call_mcp", CallID: "call_mcp", Name: "greet", Namespace: "testmcp", Arguments: `{}`},
-			}, IsComplete: true}
-			ch <- tacklr.LLMResponseChunk{IsComplete: true}
-			return
-		}
-		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "mcp done", IsComplete: true}
-	})
-	r := acptest.NewRuntime(t, strategy, tacklr.AgentOptions{})
-
-	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"testmcp","url":"`+mcpHTTP.URL+`","headers":[]}]}}`)
-	sessionID := acptest.SessionID(t, rec1)
-	t.Cleanup(func() { _ = r.Client.Close(context.Background(), session.ID(sessionID)) })
-
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"call greet"}]}}`)
-	frames := acptest.Frames(t, rec2.Body)
-
-	var toolResultText string
-	var sawFinal bool
-	for _, f := range frames {
-		if f["error"] != nil {
-			t.Fatalf("prompt error: %v", f["error"])
-		}
-		if f["method"] != "session/update" {
-			continue
-		}
-		params, _ := f["params"].(map[string]any)
-		update, _ := params["update"].(map[string]any)
-		switch update["sessionUpdate"] {
-		case "tool_call_update":
-			// content may be a list of {type,text}
-			if content, ok := update["content"].([]any); ok {
-				for _, c := range content {
-					m, _ := c.(map[string]any)
-					if m["type"] == "text" {
-						if txt, ok := m["text"].(string); ok {
-							toolResultText += txt
-						}
-					}
-				}
-			}
-			if content, ok := update["content"].(map[string]any); ok {
-				if txt, ok := content["text"].(string); ok {
-					toolResultText += txt
-				}
-			}
-			if raw, ok := update["rawOutput"].(string); ok {
-				toolResultText += raw
-			}
-		case "agent_message_chunk":
-			if content, ok := update["content"].(map[string]any); ok && content["text"] == "mcp done" {
-				sawFinal = true
-			}
-		}
-	}
-	if !strings.Contains(toolResultText, "ok") {
-		// Fallback: scan all frames as text for "ok" tool output.
-		blob, _ := json.Marshal(frames)
-		if !strings.Contains(string(blob), "ok") {
-			t.Fatalf("expected MCP tool result containing ok, frames=%s", blob)
-		}
-	}
-	if !sawFinal {
-		t.Error("expected final agent message after MCP tool result")
-	}
-	if invokeCount != 2 {
-		t.Errorf("invokeCount = %d, want 2", invokeCount)
-	}
-}
-
-// On session/resume the client re-specifies the MCP server list; the new list
-// replaces the stored one for subsequent turns.
+// TestHandleRPC_sessionResume_overridesMCPServers: the MCP servers a
+// session/resume names replace the session's servers, so the model sees
+// the new server's tools in place of the old one's, and a call to one
+// returns the server's result to the client.
 func TestHandleRPC_sessionResume_overridesMCPServers(t *testing.T) {
+	t.Parallel()
 	serverA := newTestMCPServer(t, "tool_a")
 	serverB := newTestMCPServer(t, "tool_b")
-	recorder := &toolRecorder{}
-	r := acptest.NewRuntime(t, recordingStrategy(t, recorder), tacklr.AgentOptions{})
+	var mu sync.Mutex
+	var seen [][]string
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		var mcp []string
+		for _, tool := range tools {
+			if ns := tool.Namespace(); ns == "a" || ns == "b" {
+				mcp = append(mcp, ns+"/"+tool.Name())
+			}
+		}
+		mu.Lock()
+		seen = append(seen, mcp)
+		mu.Unlock()
+		if last := msgs[len(msgs)-1]; last.Role != message.RoleTool && slices.Contains(mcp, "b/tool_b") {
+			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true, ToolCalls: []message.ToolCall{
+				{ID: "call_b", CallID: "call_b", Name: "tool_b", Namespace: "b", Arguments: `{}`},
+			}}
+			return
+		}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
+	})
+	srv := acptest.NewServer(t, acptest.NewRuntime(t, model, tacklr.AgentOptions{}), server.NewMemoryWireStore())
+	sid := acptest.SessionID(t, srv.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"a","url":"`+serverA.URL+`","headers":[]}]}}`))
 
-	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"a","url":"`+serverA.URL+`","headers":[]}]}}`)
-	sessionID := acptest.SessionID(t, rec1)
-	t.Cleanup(func() { _ = r.Client.Close(context.Background(), session.ID(sessionID)) })
-
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"hi"}]}}`)
-	for _, f := range acptest.Frames(t, rec2.Body) {
-		if f["error"] != nil {
-			t.Fatalf("prompt error: %v", f["error"])
+	prompted := stopReason(t, srv.RPC(prompt("2", sid, `[{"type":"text","text":"hi"}]`)))
+	resumed := srv.RPC(`{"jsonrpc":"2.0","id":3,"method":"session/resume","params":{"sessionId":"` + sid + `","cwd":"/tmp","mcpServers":[{"type":"http","name":"b","url":"` + serverB.URL + `","headers":[]}]}}`)
+	var result, end any
+	for _, f := range acptest.Frames(t, resumed.Body) {
+		if params, ok := f["params"].(map[string]any); ok {
+			if update := params["update"].(map[string]any); update["sessionUpdate"] == "tool_call_update" {
+				result = update["rawOutput"]
+			}
+		}
+		if res, ok := f["result"].(map[string]any); ok {
+			end = res["stopReason"]
 		}
 	}
-	if tools := recorder.call(0); !slices.Contains(tools, "a/tool_a") {
-		t.Fatalf("first turn: expected a/tool_a, got %v", tools)
-	}
 
-	rec3 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":3,"method":"session/resume","params":{"sessionId":"`+sessionID+`","cwd":"/tmp","mcpServers":[{"type":"http","name":"b","url":"`+serverB.URL+`","headers":[]}]}}`)
-	for _, f := range acptest.Frames(t, rec3.Body) {
-		if f["error"] != nil {
-			t.Fatalf("resume error: %v", f["error"])
-		}
+	mu.Lock()
+	defer mu.Unlock()
+	if prompted != "end_turn" || end != "end_turn" || len(seen) < 2 {
+		t.Fatalf("prompt %q, resume %v, model calls %v; want two turns", prompted, end, seen)
 	}
-
-	// The resume turn continues the session, so the model was invoked again
-	// with only server B's tools.
-	var sawB bool
-	for i := 1; i < len(recorder.seen); i++ {
-		tools := recorder.call(i)
-		if slices.Contains(tools, "a/tool_a") {
-			t.Errorf("turn %d: server A tools should be gone after resume, got %v", i, tools)
-		}
-		if slices.Contains(tools, "b/tool_b") {
-			sawB = true
-		}
+	if want := map[string]any{"output": "ok"}; !reflect.DeepEqual(result, want) {
+		t.Fatalf("tool_b result = %v, want %v", result, want)
 	}
-	if !sawB {
-		t.Errorf("expected b/tool_b in a post-resume turn, calls: %v", recorder.seen)
+	if !slices.Equal(seen[0], []string{"a/tool_a"}) || !slices.Equal(seen[len(seen)-1], []string{"b/tool_b"}) {
+		t.Fatalf("MCP tools per model call %v; want a/tool_a, then b/tool_b", seen)
 	}
 }

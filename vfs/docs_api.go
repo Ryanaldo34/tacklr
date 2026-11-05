@@ -417,10 +417,9 @@ func mergeListProps(dst map[string]DocsListProps, src map[string]docs.List) {
 	}
 }
 
+// walkBodySpans is the spans of tb's body, which allDocumentTabs never
+// leaves nil.
 func walkBodySpans(tb tabBody) []DocsSpan {
-	if tb.Body == nil {
-		return nil
-	}
 	out := make([]DocsSpan, 0, len(tb.Body.Content))
 	for _, el := range tb.Body.Content {
 		if el == nil {

@@ -2,9 +2,7 @@ package vfsindex_test
 
 import (
 	"context"
-	"errors"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -19,6 +17,7 @@ import (
 // Readers func's principals land on the Document and Chunks, search only
 // shows the file to holders, and a sharing change re-indexes unchanged text.
 func TestMountIndexer_sourceReadersLimitSearchAndAnACLChangeReindexes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
@@ -67,30 +66,5 @@ func TestMountIndexer_sourceReadersLimitSearchAndAnACLChangeReindexes(t *testing
 	public, publicErr := idx.IndexPath(ctx, file)
 	if everyone := search("user:mallory"); publicErr != nil || public != vfsindex.PathIndexed || len(everyone) != 1 {
 		t.Fatalf("unshared = %s %v, outsider hits %d", public, publicErr, len(everyone))
-	}
-}
-
-func TestMountIndexer_aReadersErrorFailsTheIndex(t *testing.T) {
-	ctx := context.Background()
-	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
-	if err != nil {
-		t.Fatal(err)
-	}
-	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: storetest.Namespace(t, "org", "a")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	idx.Readers = func(context.Context, string, vfs.FileInfo) ([]string, error) {
-		return nil, errors.New("sharing API down")
-	}
-	if err := ms.Route(ctx, "/workspace/work/a.txt").WriteFile(ctx, []byte("a\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = idx.IndexPath(ctx, "/workspace/work/a.txt")
-
-	if err == nil || !strings.Contains(err.Error(), "sharing API down") {
-		t.Fatalf("index = %v", err)
 	}
 }

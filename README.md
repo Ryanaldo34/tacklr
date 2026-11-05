@@ -98,7 +98,7 @@ flowchart LR
 
 A session's steps go to the worker that already has it loaded. If that worker stops, any other worker rebuilds the session from Postgres and continues.
 
-A Cloudflare Durable Objects runtime is planned. The core already builds for WebAssembly; the runtime that would hold a session in a Durable Object does not exist yet.
+Package `session/durableobject` runs sessions as durable objects: one object per session, with journal replay over the object's own storage, so a session needs no Temporal. It is plain Go and builds for WebAssembly, and `session/durableobject/cloudflare` runs it on Cloudflare Workers. See [docs/session.md](docs/session.md#durable-objects) and [examples/cloudflare](examples/cloudflare).
 
 ## Getting started
 
@@ -321,11 +321,11 @@ func withReviewer(agent tacklr.AgentOptions) tacklr.AgentOptions {
 }
 ```
 
-For long work that is not an agent, such as a data export, register a `worker.JobHandler` in `worker.Config.Jobs` and start it from a tool with `cc.Schedule`. See [docs/session.md](docs/session.md).
+For long work that is not an agent, such as a data export, register a `session.JobHandler` in the runtime's `Config.Jobs` and start it from a tool with `cc.Schedule`. See [docs/session.md](docs/session.md).
 
 ### Run in production
 
-Split the program from step 2 along the lines of the [Temporal diagram](#on-temporal): hosts call only `temporal.Open`, workers call only `worker.New`, and both use the Postgres stores from `session/postgres`.
+Split the program from step 2 along the lines of the [Temporal diagram](#on-temporal): hosts call only `temporal.Open`, workers call only `worker.New`, and both use the Postgres stores from `session/postgres`. [examples/temporal](examples/temporal) is that split, with an ACP host, a worker with a workspace, and an end-to-end test.
 
 ```go
 // sessionpg is github.com/ryanaldo34/tacklr/session/postgres.
@@ -337,7 +337,7 @@ func stores(ctx context.Context, pool *pgxpool.Pool, key []byte) (session.Store,
 	if err := db.Setup(ctx); err != nil { // creates the tables if they do not exist
 		return nil, nil, err
 	}
-	sealer, err := sessionpg.NewAESGCM(key) // 32 bytes, or your own Sealer over a KMS
+	sealer, err := session.NewAESGCM(key) // 32 bytes, or your own session.Sealer over a KMS
 	if err != nil {
 		return nil, nil, err
 	}
@@ -356,7 +356,7 @@ func stores(ctx context.Context, pool *pgxpool.Pool, key []byte) (session.Store,
 | Session storage | `session.Store`, `session.SecretStorage`, `session.EventLog` | memory, `session/postgres` |
 | Knowledge storage | `brain.Store`, `brain.Graph` | memory, `brain/postgres`, `brain/helixgraph` |
 | The protocol clients speak | `server.Protocol` | ACP (`server/acp`) |
-| Where sessions run | `session.Client` and `loop.Executor` | Temporal (`session/temporal`) |
+| Where sessions run | `session.Client` and `loop.Executor` | Temporal (`session/temporal`), durable objects (`session/durableobject`) |
 
 Custom stores can check themselves against the shared tests in `session/storetest` and `brain/storetest`. Tacklr also ships web search and fetch tools (`web`), MCP servers (`AgentOptions.MCPConfigs` with `mcp.Client`), and skill files the agent can read (`AgentOptions.SkillsLoader`).
 
@@ -365,9 +365,12 @@ Custom stores can check themselves against the shared tests in `session/storetes
 | Doc | Covers |
 |---|---|
 | [docs/session.md](docs/session.md) | Sessions, the Temporal client and worker, questions, specialists and jobs, credentials, tracing |
+| [docs/context.md](docs/context.md) | The context window: what owns it, how a request is sized, collapse, cuts and handoffs |
 | [docs/tools.md](docs/tools.md) | Writing tools, `CallContext`, permissions |
 | [docs/vfs.md](docs/vfs.md) | The workspace, its sources, documents and spreadsheets |
 | [docs/knowledge.md](docs/knowledge.md) | The knowledge store: search, kinds, graph, file indexing |
+| [examples/temporal](examples/temporal) | A production layout on Temporal: an ACP host, a worker, Postgres, an end-to-end test |
+| [examples/cloudflare](examples/cloudflare) | Sessions as Durable Objects on Cloudflare Workers |
 
 ## Contributing
 

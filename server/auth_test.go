@@ -25,6 +25,7 @@ func (f authorizerFunc) Authorize(ctx context.Context, principal server.Principa
 // becomes the authenticator's principal, and a missing service, a failing
 // authenticator, an empty principal or an empty subject each fail.
 func TestService_authenticate(t *testing.T) {
+	t.Parallel()
 	authenticator := func(p server.Principal, err error) *server.Service {
 		return &server.Service{Authenticator: authenticatorFunc(func(context.Context, server.Attempt) (server.Principal, error) { return p, err })}
 	}
@@ -62,6 +63,7 @@ func TestService_authenticate(t *testing.T) {
 // the authorizer, refused without a principal, and a panic for an operation
 // with no action (a programming error).
 func TestService_authorize(t *testing.T) {
+	t.Parallel()
 	alice, err := server.NewPrincipal("alice")
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +93,7 @@ func TestService_authorize(t *testing.T) {
 
 // TestSecret_redactsAndReportsEmpty: a secret never prints its bytes.
 func TestSecret_redactsAndReportsEmpty(t *testing.T) {
+	t.Parallel()
 	secret := server.NewSecret([]byte("credential"))
 
 	if !(server.Secret{}).Empty() || secret.Empty() {

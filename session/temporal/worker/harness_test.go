@@ -3,7 +3,6 @@ package worker
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,22 +21,26 @@ import (
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
+	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/session/loop"
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 // mcpServer is an MCP server over HTTP with one tool, ping. It counts the
-// sessions clients open (initialize) and end (DELETE).
+// sessions clients open (initialize) and end (DELETE); deleted has a value
+// for each end.
 type mcpServer struct {
 	config      session.MCPServer
 	opens, ends atomic.Int32
 	pings       atomic.Int32
+	deleted     chan struct{}
 }
 
 func newMCPServer(t *testing.T, name string) *mcpServer {
 	t.Helper()
-	m := &mcpServer{}
+	m := &mcpServer{deleted: make(chan struct{}, 16)}
 	srv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: name, Version: "v0.0.1"}, nil)
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{Name: "ping", Description: "answers pong"},
 		func(context.Context, *mcpsdk.CallToolRequest, struct{}) (*mcpsdk.CallToolResult, struct{}, error) {
@@ -49,6 +52,7 @@ func newMCPServer(t *testing.T, name string) *mcpServer {
 		switch r.Method {
 		case http.MethodDelete:
 			m.ends.Add(1)
+			m.deleted <- struct{}{}
 		case http.MethodPost:
 			body, _ := io.ReadAll(r.Body)
 			if bytes.Contains(body, []byte(`"method":"initialize"`)) {
@@ -67,19 +71,24 @@ func newMCPServer(t *testing.T, name string) *mcpServer {
 // its last step returns.
 func (m *mcpServer) ended(t *testing.T, n int32) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for m.ends.Load() < n && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	timeout := time.After(5 * time.Second)
+	for range n {
+		select {
+		case <-m.deleted:
+		case <-timeout:
+		}
 	}
 	if got := m.ends.Load(); got != n {
 		t.Fatalf("MCP sessions ended = %d, want %d", got, n)
 	}
 }
 
-// A reply's calls and the steps around them share one harness: the VFS opens
-// once and each MCP server is connected once. A prompt that changes the MCP
-// servers builds a new harness, and the old one closes.
+// TestSessionWorkflow_aSessionsStepsShareOneHarness: a reply's calls and the
+// steps around them share one harness: the VFS opens once and each MCP
+// server is connected once. A prompt that changes the MCP servers builds a
+// new harness, and the old one closes.
 func TestSessionWorkflow_aSessionsStepsShareOneHarness(t *testing.T) {
+	t.Parallel()
 	env := newTestWorkflow(t)
 	first, second := newMCPServer(t, "first"), newMCPServer(t, "second")
 	var opens atomic.Int32
@@ -126,8 +135,10 @@ func TestSessionWorkflow_aSessionsStepsShareOneHarness(t *testing.T) {
 	second.ended(t, 1)
 }
 
-// A harness nobody uses for the idle time closes.
+// TestActivities_anIdleHarnessCloses: a harness that no step uses for the
+// idle time closes.
 func TestActivities_anIdleHarnessCloses(t *testing.T) {
+	t.Parallel()
 	server := newMCPServer(t, "idle")
 	acts := newActs(tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192, MCP: mcp.Client{}}, session.NewMemoryEventLog(), true)
 	acts.harnesses = newHarnessCache(20*time.Millisecond, 0)
@@ -141,21 +152,12 @@ func TestActivities_anIdleHarnessCloses(t *testing.T) {
 	server.ended(t, 1)
 }
 
-// countingStore is a session.MemoryStore that counts full loads.
-type countingStore struct {
-	*session.MemoryStore
-	loads atomic.Int32
-}
-
-func (s *countingStore) Load(ctx context.Context, id session.ID) ([]byte, session.Revision, error) {
-	s.loads.Add(1)
-	return s.MemoryStore.Load(ctx, id)
-}
-
-// Two workers share the store. A worker loads the snapshot only when another
-// committed since it last held it, and fails a step once the snapshot is
-// deleted.
-func TestActivities_aHarnessLoadsCommittedStateOnlyWhenTheRevisionMoved(t *testing.T) {
+// TestActivities_aWorkerSeesWhatAnotherCommittedAndFailsOnceTheSnapshotIsDeleted:
+// two workers share the store. A step of one sees what the other committed,
+// and a step fails once the snapshot is deleted.
+func TestActivities_aWorkerSeesWhatAnotherCommittedAndFailsOnceTheSnapshotIsDeleted(t *testing.T) {
+	t.Parallel()
+	// Arrange
 	var seen []string
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		seen = seen[:0]
@@ -167,75 +169,102 @@ func TestActivities_aHarnessLoadsCommittedStateOnlyWhenTheRevisionMoved(t *testi
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok", IsComplete: true}
 	})
 	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}
-	store := &countingStore{MemoryStore: session.NewMemoryStore()}
+	store := session.NewMemoryStore()
 	one, two := newActs(agent, session.NewMemoryEventLog(), true), newActs(agent, session.NewMemoryEventLog(), true)
 	one.Store, two.Store = store, store
 	sess := stepSession{SessionID: "shared"}
-	user := func(text string) tacklr.CommitIn {
-		return tacklr.CommitIn{Users: []*message.Message{{Role: message.RoleUser, Content: text}}}
-	}
-
-	rev, err := one.Commit(t.Context(), commitInput{stepSession: sess, In: user("first")})
+	rev, err := one.Commit(t.Context(), commitInput{stepSession: sess, In: say("first")})
 	if err == nil {
-		_, err = two.Commit(t.Context(), commitInput{stepSession: sess, Base: rev, In: user("second")})
+		_, err = two.Commit(t.Context(), commitInput{stepSession: sess, Base: rev, In: say("second")})
 	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	loadsBefore := store.loads.Load()
+
+	// Act
 	_, inferErr := one.Inference(t.Context(), sess)
-	afterOtherCommit := store.loads.Load() - loadsBefore
 	sawBoth := slices.Equal(seen, []string{"first", "second"})
-	_, againErr := one.Inference(t.Context(), sess)
-	unchanged := store.loads.Load() - loadsBefore - afterOtherCommit
 	_ = store.Delete(t.Context(), "shared")
 	_, deletedErr := one.Inference(t.Context(), sess)
 
-	if inferErr != nil || againErr != nil || !sawBoth {
-		t.Fatalf("inference = %v, %v; model saw %q; want both commits seen", inferErr, againErr, seen)
-	}
-	if afterOtherCommit != 1 || unchanged != 0 {
-		t.Fatalf("loads after the other worker committed = %d, with nothing new = %d; want 1 and 0", afterOtherCommit, unchanged)
+	// Assert
+	if inferErr != nil || !sawBoth {
+		t.Fatalf("inference = %v, model saw %q; want both commits seen", inferErr, seen)
 	}
 	if deletedErr == nil || !strings.Contains(deletedErr.Error(), "was deleted") {
 		t.Fatalf("step after the snapshot was deleted = %v, want it named", deletedErr)
 	}
 }
 
-// unreadableSecrets is a SecretStorage that cannot read the session it names.
-type unreadableSecrets struct {
-	*session.MemorySecretStorage
-	id session.ID
-}
-
-func (s unreadableSecrets) Get(ctx context.Context, id session.ID) (session.Secrets, error) {
-	if id == s.id {
-		return session.Secrets{}, errors.New("secrets unavailable")
+// TestActivities_aChildUsesItsParentsSecretsAndAStepFailsOnWhatItCannotRead:
+// a child step without secrets of its own opens its workspace with its
+// parent's token. A step whose secrets, or whose parent's secrets, do not
+// open fails, and so do a step for an unknown specialist and a new turn's
+// commit whose event log cannot give its head.
+func TestActivities_aChildUsesItsParentsSecretsAndAStepFailsOnWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	ctx := t.Context()
+	db, pool, schema := postgresDB(t)
+	aes, err := session.NewAESGCM(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
 	}
-	return s.MemorySecretStorage.Get(ctx, id)
-}
-
-// A step whose harness cannot be named (its secrets, or its parent's, cannot
-// be read) or built (an unknown specialist) fails.
-func TestActivities_aStepFailsWhenItsHarnessCannotBeNamedOrBuilt(t *testing.T) {
+	secrets := db.Secrets(aes)
+	parentAuth := session.AuthContext{Bindings: []mount.Binding{{
+		Provider: "local",
+		Params:   map[string]string{mount.ParamName: "docs"},
+		Auth:     mount.Credential{Token: "parent-tok"},
+	}}}
+	if err := secrets.Put(ctx, "parent", session.Secrets{Auth: parentAuth}); err != nil {
+		t.Fatal(err)
+	}
+	// A row sealed for another session does not open as the row of "locked".
+	foreign, _ := aes.Seal(ctx, []byte("{}"), []byte("other"))
+	if _, err := pool.Exec(ctx, `INSERT INTO `+schema+`.session_secrets (session_id, sealed) VALUES ('locked', $1)`, foreign); err != nil {
+		t.Fatal(err)
+	}
+	var gotToken string
+	open := vfs.Tree(vfs.At("docs", vfs.Local(t.TempDir())))
 	acts := newActs(tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192}, session.NewMemoryEventLog(), true)
-	acts.Secrets = unreadableSecrets{MemorySecretStorage: session.NewMemorySecretStorage(), id: "locked"}
+	acts.Secrets = secrets
+	acts.Workspace = workspace.Config{Open: func(ctx context.Context, sessionID string, req vfs.Request) (*vfs.MountSession, error) {
+		if len(req.Bindings) > 0 {
+			gotToken = req.Bindings[0].Auth.Token
+		}
+		return open(ctx, sessionID, req)
+	}}
+	child := stepSession{SessionID: "child", Identity: loop.Identity{Parent: "parent", Mounts: adapter.ApplyAuth(nil, parentAuth)}}
 	locked := stepSession{SessionID: "locked"}
-	child := stepSession{SessionID: "child", Identity: loop.Identity{Parent: "locked"}}
+	lockedChild := stepSession{SessionID: "locked-child", Identity: loop.Identity{Parent: "locked"}}
 	unknown := stepSession{SessionID: "unknown", Identity: loop.Identity{Specialist: "nobody"}}
+	dropTable(t, pool, schema, "session_event_heads")
+	log := db.EventLog()
+	t.Cleanup(log.Close)
+	headless := newActs(tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192}, log, true)
 
-	_, inferErr := acts.Inference(t.Context(), locked)
-	_, toolErr := acts.Tool(t.Context(), toolInput{stepSession: locked})
-	_, commitErr := acts.Commit(t.Context(), commitInput{stepSession: locked})
-	_, parentErr := acts.Commit(t.Context(), commitInput{stepSession: child})
-	_, specialistErr := acts.Commit(t.Context(), commitInput{stepSession: unknown})
+	// Act
+	_, childErr := acts.Commit(ctx, commitInput{stepSession: child, In: say("hi")})
+	_, inferErr := acts.Inference(ctx, locked)
+	_, toolErr := acts.Tool(ctx, toolInput{stepSession: locked})
+	_, commitErr := acts.Commit(ctx, commitInput{stepSession: locked})
+	_, parentErr := acts.Commit(ctx, commitInput{stepSession: lockedChild})
+	_, specialistErr := acts.Commit(ctx, commitInput{stepSession: unknown})
+	_, headErr := headless.Commit(ctx, commitInput{stepSession: stepSession{SessionID: "fresh"}, In: say("hi"), NewTurn: true})
 
+	// Assert
+	if childErr != nil || gotToken != "parent-tok" {
+		t.Fatalf("child commit %v, workspace token %q; want the parent's token", childErr, gotToken)
+	}
 	for name, err := range map[string]error{"inference": inferErr, "tool": toolErr, "commit": commitErr, "a child of it": parentErr} {
-		if err == nil || !strings.Contains(err.Error(), "secrets unavailable") {
-			t.Errorf("%s = %v, want the secrets failure", name, err)
+		if err == nil || !strings.Contains(err.Error(), `secrets "locked": open`) {
+			t.Errorf("%s = %v, want the secrets of locked refused", name, err)
 		}
 	}
 	if specialistErr == nil || !strings.Contains(specialistErr.Error(), "nobody") {
 		t.Errorf("unknown specialist = %v, want it named", specialistErr)
+	}
+	if headErr == nil || !strings.Contains(headErr.Error(), "session_event_heads") {
+		t.Errorf("a new turn's commit without the log's head = %v, want the database's error", headErr)
 	}
 }

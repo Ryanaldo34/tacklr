@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -43,7 +45,7 @@ type S3Object struct {
 type s3Provider struct {
 	api    S3API
 	bucket string
-	prefix string // no leading slash; may be empty; trailing slash normalized off
+	prefix string // no leading or trailing slash; may be empty
 }
 
 var _ documentBackend = s3Provider{}
@@ -57,34 +59,37 @@ func (p s3Provider) Validate(ctx context.Context) error {
 	return validateS3Prefix(p.prefix)
 }
 
+// objectKey is the key of name under the mount prefix. The mount root's key
+// is the prefix itself.
 func (p s3Provider) objectKey(name string) (string, error) {
 	rel, err := cleanRel(name)
 	if err != nil {
 		return "", err
 	}
-	base := strings.Trim(p.prefix, "/")
-	if rel == "" {
-		return base, nil
-	}
-	if base == "" {
-		return rel, nil
-	}
-	return base + "/" + rel, nil
+	return p.keyOf(rel), nil
 }
 
-// dirPrefix returns the list prefix for a directory name (always trailing / when non-empty).
-func (p s3Provider) dirPrefix(name string) (string, error) {
-	key, err := p.objectKey(name)
-	if err != nil {
-		return "", err
+// keyOf is the key of a clean relative name.
+func (p s3Provider) keyOf(rel string) string {
+	switch {
+	case rel == "":
+		return p.prefix
+	case p.prefix == "":
+		return rel
 	}
+	return p.prefix + "/" + rel
+}
+
+// isRoot reports whether key is the mount root.
+func (p s3Provider) isRoot(key string) bool { return key == p.prefix }
+
+// dirPrefix is the list prefix of the directory at key: key with a trailing
+// slash, or empty for the root of a bucket.
+func dirPrefix(key string) string {
 	if key == "" {
-		return "", nil
+		return ""
 	}
-	if !strings.HasSuffix(key, "/") {
-		key += "/"
-	}
-	return key, nil
+	return key + "/"
 }
 
 // Stat implements Provider.
@@ -96,51 +101,49 @@ func (p s3Provider) Stat(ctx context.Context, name string) (FileInfo, error) {
 	if err != nil {
 		return FileInfo{}, err
 	}
+	return p.stat(ctx, key)
+}
+
+// stat is Stat of a key objectKey made.
+func (p s3Provider) stat(ctx context.Context, key string) (FileInfo, error) {
 	// Root of the mount is always a directory.
-	if key == strings.Trim(p.prefix, "/") && (name == "" || name == ".") {
+	if p.isRoot(key) {
 		return FileInfo{Name: ".", Mode: fs.ModeDir | 0o755, IsDir: true, ModTime: time.Now().UTC()}, nil
 	}
 
 	// Try object first.
-	if key != "" {
-		obj, err := p.api.Head(ctx, p.bucket, key)
-		if err == nil {
-			base := path.Base(key)
-			mt := s3KnownType(obj.ContentType)
-			if mt == "" {
-				mt = DetectMediaType(base, nil)
-			}
-			return FileInfo{
-				Name:      base,
-				Size:      obj.Size,
-				Mode:      0o644,
-				ModTime:   obj.ModTime,
-				MediaType: mt,
-				Version:   obj.ETag,
-			}, nil
+	obj, err := p.api.Head(ctx, p.bucket, key)
+	if err == nil {
+		base := path.Base(key)
+		mt := s3KnownType(obj.ContentType)
+		if mt == "" {
+			mt = DetectMediaType(base, nil)
 		}
-		if !errors.Is(err, ErrNotExist) {
-			return FileInfo{}, err
-		}
+		return FileInfo{
+			Name:      base,
+			Size:      obj.Size,
+			Mode:      0o644,
+			ModTime:   obj.ModTime,
+			MediaType: mt,
+			Version:   obj.ETag,
+		}, nil
+	}
+	if !errors.Is(err, ErrNotExist) {
+		return FileInfo{}, err
 	}
 
 	// Directory: marker key or any children under prefix.
-	dirKey := key
-	if dirKey != "" && !strings.HasSuffix(dirKey, "/") {
-		dirKey += "/"
-	}
-	if dirKey != "" {
-		if obj, err := p.api.Head(ctx, p.bucket, dirKey); err == nil {
-			return FileInfo{
-				Name:    path.Base(strings.TrimSuffix(dirKey, "/")),
-				Size:    obj.Size,
-				Mode:    fs.ModeDir | 0o755,
-				ModTime: obj.ModTime,
-				IsDir:   true,
-			}, nil
-		} else if !errors.Is(err, ErrNotExist) {
-			return FileInfo{}, err
-		}
+	dirKey := dirPrefix(key)
+	if obj, err := p.api.Head(ctx, p.bucket, dirKey); err == nil {
+		return FileInfo{
+			Name:    path.Base(key),
+			Size:    obj.Size,
+			Mode:    fs.ModeDir | 0o755,
+			ModTime: obj.ModTime,
+			IsDir:   true,
+		}, nil
+	} else if !errors.Is(err, ErrNotExist) {
+		return FileInfo{}, err
 	}
 	keys, dirs, err := p.api.List(ctx, p.bucket, dirKey)
 	if err != nil {
@@ -149,11 +152,7 @@ func (p s3Provider) Stat(ctx context.Context, name string) (FileInfo, error) {
 	if len(keys) == 0 && len(dirs) == 0 {
 		return FileInfo{}, ErrNotExist
 	}
-	base := "."
-	if key != "" {
-		base = path.Base(strings.TrimSuffix(key, "/"))
-	}
-	return FileInfo{Name: base, Mode: fs.ModeDir | 0o755, IsDir: true, ModTime: time.Now().UTC()}, nil
+	return FileInfo{Name: path.Base(key), Mode: fs.ModeDir | 0o755, IsDir: true, ModTime: time.Now().UTC()}, nil
 }
 
 // PutFile writes a full object with one Put (no intermediate Open buffer).
@@ -165,7 +164,7 @@ func (p s3Provider) PutFile(ctx context.Context, name string, r io.Reader, size 
 	if err != nil {
 		return err
 	}
-	if key == "" {
+	if p.isRoot(key) {
 		return fmt.Errorf("vfs: cannot write mount root as file")
 	}
 	return p.api.Put(ctx, p.bucket, key, r, size)
@@ -176,7 +175,11 @@ func (p s3Provider) OpenDocument(ctx context.Context, name string, reg *ContentR
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	fi, err := p.Stat(ctx, name)
+	key, err := p.objectKey(name)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := p.stat(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -185,13 +188,6 @@ func (p s3Provider) OpenDocument(ctx context.Context, name string, reg *ContentR
 	}
 	if fi.Size > int64(MaxReadFileBytes) {
 		return nil, errFileExceeds(MaxReadFileBytes)
-	}
-	key, err := p.objectKey(name)
-	if err != nil {
-		return nil, err
-	}
-	if key == "" {
-		return nil, fmt.Errorf("vfs: cannot open mount root as file")
 	}
 	body, err := p.api.Get(ctx, p.bucket, key, 0, -1)
 	if err != nil {
@@ -218,21 +214,19 @@ func (p s3Provider) WriteDocument(ctx context.Context, name string, doc Document
 }
 
 // OpenFile implements Provider.
-func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error) {
+func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, _ fs.FileMode) (File, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	_ = perm
 	key, err := p.objectKey(name)
 	if err != nil {
 		return nil, err
 	}
-	if key == "" {
+	if p.isRoot(key) {
 		return nil, fmt.Errorf("vfs: cannot open mount root as file")
 	}
 
 	write := flag&(os.O_WRONLY|os.O_RDWR|os.O_APPEND) != 0 || flag&os.O_CREATE != 0 || flag&os.O_TRUNC != 0
-	read := flag&os.O_WRONLY == 0 // not write-only
 
 	if flag&os.O_CREATE != 0 && flag&os.O_EXCL != 0 {
 		if _, err := p.api.Head(ctx, p.bucket, key); err == nil {
@@ -260,10 +254,7 @@ func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, perm fs
 		return &s3WriteFile{ctx: ctx, p: p, key: key}, nil
 	}
 
-	if !read {
-		return nil, fmt.Errorf("vfs: unsupported open flags")
-	}
-	fi, err := p.Stat(ctx, name)
+	fi, err := p.stat(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -280,18 +271,19 @@ func (p s3Provider) ReadDir(ctx context.Context, name string) ([]DirEntry, error
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	key, err := p.objectKey(name)
+	if err != nil {
+		return nil, err
+	}
 	// Ensure path is a directory (or empty root).
-	st, err := p.Stat(ctx, name)
+	st, err := p.stat(ctx, key)
 	if err != nil {
 		return nil, err
 	}
 	if !st.IsDir {
 		return nil, ErrNotDir
 	}
-	prefix, err := p.dirPrefix(name)
-	if err != nil {
-		return nil, err
-	}
+	prefix := dirPrefix(key)
 	keys, dirs, err := p.api.List(ctx, p.bucket, prefix)
 	if err != nil {
 		return nil, err
@@ -299,21 +291,14 @@ func (p s3Provider) ReadDir(ctx context.Context, name string) ([]DirEntry, error
 	seen := make(map[string]DirEntry, len(keys)+len(dirs))
 	for _, d := range dirs {
 		// d is full key prefix ending in /
-		name := strings.TrimSuffix(d, "/")
-		if prefix != "" {
-			name = strings.TrimPrefix(name, prefix)
-		}
-		name = strings.Trim(name, "/")
+		name := strings.Trim(strings.TrimPrefix(d, prefix), "/")
 		if name == "" || strings.Contains(name, "/") {
 			continue
 		}
 		seen[name] = DirEntry{Name: name, IsDir: true, Type: fs.ModeDir}
 	}
 	for _, k := range keys {
-		if prefix != "" {
-			k = strings.TrimPrefix(k, prefix)
-		}
-		k = strings.Trim(k, "/")
+		k = strings.Trim(strings.TrimPrefix(k, prefix), "/")
 		if k == "" || strings.Contains(k, "/") {
 			continue // only immediate children
 		}
@@ -322,11 +307,7 @@ func (p s3Provider) ReadDir(ctx context.Context, name string) ([]DirEntry, error
 			seen[k] = DirEntry{Name: k, IsDir: false, Type: 0}
 		}
 	}
-	out := make([]DirEntry, 0, len(seen))
-	for _, e := range seen {
-		out = append(out, e)
-	}
-	return out, nil
+	return slices.Collect(maps.Values(seen)), nil
 }
 
 // Remove implements Provider (single object; directory only if empty).
@@ -334,48 +315,39 @@ func (p s3Provider) Remove(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	st, err := p.Stat(ctx, name)
-	if err != nil {
-		return err
-	}
 	key, err := p.objectKey(name)
 	if err != nil {
 		return err
 	}
-	if st.IsDir {
-		prefix, err := p.dirPrefix(name)
-		if err != nil {
-			return err
-		}
-		keys, dirs, err := p.api.List(ctx, p.bucket, prefix)
-		if err != nil {
-			return err
-		}
-		// Allow only the optional directory marker under this prefix.
-		for _, k := range keys {
-			if k != prefix && k != strings.TrimSuffix(prefix, "/") {
-				return fmt.Errorf("vfs: directory not empty")
-			}
-		}
-		if len(dirs) > 0 {
-			return fmt.Errorf("vfs: directory not empty")
-		}
-		// Delete marker if present.
-		if key != "" {
-			_ = p.api.Delete(ctx, p.bucket, key+"/")
-			_ = p.api.Delete(ctx, p.bucket, key)
-		}
-		return nil
+	if p.isRoot(key) {
+		return ErrInvalidPath
 	}
-	return p.api.Delete(ctx, p.bucket, key)
+	st, err := p.stat(ctx, key)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir {
+		return p.api.Delete(ctx, p.bucket, key)
+	}
+	prefix := dirPrefix(key)
+	keys, dirs, err := p.api.List(ctx, p.bucket, prefix)
+	if err != nil {
+		return err
+	}
+	// Allow only the optional directory marker under this prefix.
+	if len(dirs) > 0 || slices.ContainsFunc(keys, func(k string) bool { return k != prefix }) {
+		return fmt.Errorf("vfs: directory not empty")
+	}
+	// Delete the marker if present.
+	_ = p.api.Delete(ctx, p.bucket, prefix)
+	return nil
 }
 
 // MkdirAll implements Provider using zero-byte directory marker objects.
-func (p s3Provider) MkdirAll(ctx context.Context, name string, perm fs.FileMode) error {
+func (p s3Provider) MkdirAll(ctx context.Context, name string, _ fs.FileMode) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_ = perm
 	rel, err := cleanRel(name)
 	if err != nil {
 		return err
@@ -383,18 +355,10 @@ func (p s3Provider) MkdirAll(ctx context.Context, name string, perm fs.FileMode)
 	if rel == "" {
 		return nil
 	}
-	parts := strings.Split(rel, "/")
 	var cur string
-	for _, part := range parts {
-		if cur == "" {
-			cur = part
-		} else {
-			cur = cur + "/" + part
-		}
-		key, err := p.objectKey(cur)
-		if err != nil {
-			return err
-		}
+	for part := range strings.SplitSeq(rel, "/") {
+		cur = path.Join(cur, part)
+		key := p.keyOf(cur)
 		marker := key + "/"
 		// Skip if already exists as object or marker.
 		if _, err := p.api.Head(ctx, p.bucket, marker); err == nil {

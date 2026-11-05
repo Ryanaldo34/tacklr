@@ -16,7 +16,7 @@ The packages split along that line. A host that only talks to sessions imports `
 | **Child** | Nested session job. Agent tools `list_children` / `cancel_child` |
 | **Park** | Session idle waiting for `Resume`. Parent-facing `Status` stays `running`; `Waiting` is true until the interrupt is resolved. Parent park does not stop children |
 | **Cancel** | Abort the in-flight turn and stop child sessions (`Client.Cancel`, original Prompt/Resume context cancel, client stop). The parent session stays open for a later Prompt |
-| **Checkpoint** | Committed harness state inside the snapshot: the window of complete rounds, plan, user state, permission decisions, search cursors. Opaque bytes (`Harness.Checkpoint`) in `session.Store`. Only a Commit step saves it |
+| **Checkpoint** | Committed harness state inside the snapshot: the window of complete rounds, plan, user state, permission decisions, search cursors. Rows (`Harness.Checkpoint`, `session.CheckpointEntry`) in `session.Store`: one per window message, todo, user-state key, permission decision and search rest, plus the provider's count of the last request, the plan and the schema version. A Commit diffs them against the rows it last saved (`session.Diff`) and saves only the changed ones, so an append writes the new messages, not the window. Only a Commit step saves it |
 | **Session messages** | Messages that left the context window (a collapse or a plan handoff), saved in the brain, searchable for this session only. Not the checkpoint. Deleted on Close |
 | **Close** | Destroy the session, stop children, and delete its session messages |
 
@@ -40,6 +40,17 @@ sub, _ := sessions.Subscribe(ctx, id, 0)
 One Temporal workflow per session runs the turn. HITL parks that workflow until `Client.Resume`. The session record lives in `session.Store`.
 
 `Status` and the stream agree on when a turn finished. `session.EventComplete` is published only after the checkpoint is saved and `Status` is already `complete`. `session.EventError` that ends the turn is the same for `failed`. Park publishes `yield`; `Status` stays `running` with `Waiting` true. A later `Prompt` on a completed session starts a new turn: when `Prompt` returns, `Status` is `running` again.
+
+### Events
+
+A subscriber gets two kinds of event:
+
+- **Durable events** are stored in the session's event log: complete messages and reasoning (with their full text), tool calls, tool results, plan updates, and turn ends. A message is stored only when it is complete.
+- **Live events** (`Event.Live`) are deltas (`Event.Delta`: pieces of a message's text as the model streams it) and tool progress updates. They go straight from where the step runs to the subscribers that listen now, and are never stored. `Event.Offset` is where a delta starts in its message's text.
+
+`Subscribe` merges both (`session.Merge`). It sends each message's deltas in order without gaps or repeats, and none after the message's complete event. `server.RunTurn` sets `Event.Streamed` on a complete event to the bytes its reader already got as deltas, so a protocol sends only the rest: a reader that joins in the middle of a message, or misses deltas, still gets the whole text once.
+
+The event log holds one turn. When a new turn starts (a prompt, not a resume), the runtime deletes the events of the turns before it, and the turn's first `Commit` deletes their call bodies (`Store.ClearCalls`) once it committed what they left open. Sequence numbers do not restart, and a `Subscribe` from a trimmed position starts at the oldest event kept. Within a turn there is no limit, so a park or a crash replays the whole turn.
 
 ### Prompt during a live turn
 
@@ -82,17 +93,62 @@ sessions := temporal.Open(c, temporal.Config{Store: store, Secrets: secrets})
 | Activity timeout | `temporal.Config.ActivityTimeout` is StartToCloseTimeout for `Commit`, `Inference` and `Tool`. Zero is 10 minutes. A tool whose `ToolConfig.Timeout` plus one minute is longer gets that instead. `WorkerQueue` is a local activity (one history marker, no task) and `CloseHarness` has 30 seconds. |
 | Heartbeat | `temporal.Config.HeartbeatTimeout`. Zero is 30 seconds. |
 | Activity retries | `temporal.Config.ActivityAttempts` is Temporal MaximumAttempts. Zero is 3. 1 means no retry. Retries back off from one second, doubling, to thirty. An activity retries `tacklr.ErrNetwork` (wrap a dial, read, timeout, or upstream 408/429/5xx at the call), a model refusal, and a stale checkpoint. Any other error stops on the first attempt. |
-| History size | A session continues as new where its turn waits: idle (`Recv`), waiting on background jobs (`Wait`), or waiting on blocking specialists (`Await`). It does so once Temporal suggests it (`GetContinueAsNewSuggested`), or once its history reaches `temporal.Config.ContinueAsNewEvents` events when that is set. The next run gets the session's workflow state (open round, last commit revision, inbox, queued host state, MCP, its worker queue, whether the turn finished or was waiting) and the event stream's log and offsets, so subscribers keep reading. Running children carry over by id: children use `ParentClosePolicy` ABANDON, so continue-as-new does not stop them. A child sends its result to its parent's current run with the `tacklr_child_done` signal (an empty run id names the current run). |
-| Tool results | A `Tool` step keeps the call's `session.Outcome` (its result text, and the record of its result, park or wait) in `Store.PutOutcome` under the session and the call key, and returns a `CallOutcome` with `Stored` set and no record. `Commit` reads the records back (`Outcomes`). The stream's tool-result event carries the call key, not the result; `Client.Subscribe` reads the outcome's result text from the store, so the client never decodes a harness record. The fallback `EventLog` is not history and gets the whole event. A retried `Tool` step puts the same key again, so it leaves one record. History holds each result zero times: four calls of 100 KB each make about 25 KB of history (85 events), the same as four calls of 10 KB. Before, each result was in history three times (the `Tool` result, the stream publish, the `Commit` input). |
+| History size | A session continues as new where its turn waits: idle (`Recv`), waiting on background jobs (`Wait`), or waiting on blocking specialists (`Await`). It does so once Temporal suggests it (`GetContinueAsNewSuggested`), or once its history reaches `temporal.Config.ContinueAsNewEvents` events when that is set. Children continue as new too. The next run gets the turn's `loop.Carry` (open round, last commit revision, inbox, queued host state, MCP, running jobs, the wakes that waited for the running turn, whether the turn finished or was waiting), its worker's route, and the event stream's log and offsets, so subscribers keep reading. `loop` owns the carry, so every runtime keeps the same state across a restart. Running children carry over by id: children use `ParentClosePolicy` ABANDON, so continue-as-new does not stop them. A child sends its result to its parent's current run with the `tacklr_child_done` signal (an empty run id names the current run). |
+| Tool results | A tool call is one `tacklr.Call`: what the model asked, how its last run ended (`Done`, `Park`, `Await`), the jobs it started and stopped, and its `Body` (its result message, park, OnCall layers and state writes), which only the harness reads. A `Tool` step runs the call (`Harness.RunCall`) and keeps its body in `Store.PutCall` under the session and the call key, and the call it returns has no body, so history holds each result zero times: four calls of 100 KB each make about 25 KB of history (85 events), the same as four calls of 10 KB. `Commit` and the call's next run read the body back (`Store.Calls`). The stream's tool-result event carries the call key, not the result; `Client.Subscribe` reads the result text from the stored body (`tacklr.ResultText`). The fallback `EventLog` is not history and gets the whole event. A retried `Tool` step puts the same key again, so it leaves one body. |
 | Large payloads | Model replies are activity results in history, and the reply is the `Commit` input too. Temporal limits one payload to 2 MB by default. Configure Temporal's External Storage on the client you pass to `temporal.Open` and `worker.New` (`client.Options.ExternalStorage`, with the SDK's S3 or GCS driver): payloads over its threshold (256 KiB by default) go to the bucket and history keeps a reference. Workers inherit it from that client. |
-| Progress | Workflow Streams (`events`, `retry`, `close`) |
+| Progress | Durable events: Workflow Streams (`events`, `retry`, `close`), or the `Fallback` log when `DisableStreams` is set, never both. A new turn truncates the stream. Deltas: the worker's live endpoint (below). |
+| Live deltas | The model call runs on a worker, and the client is elsewhere, so the client dials the worker. `worker.Config.Live` names the URL where the host serves `Worker.LiveHandler()` (with its own TLS) and an HMAC key; `temporal.Config.Live` has the same key. The workflow learns its worker's URL when it routes (at its start) and answers it to the `tacklr_live` query. `Subscribe` asks, dials `GET /tacklr/live/{session}` with the session's bearer token, and reads one JSON delta per line; it asks again when the stream ends, which finds the worker that took a rerouted session. Without `Live`, clients get whole messages only. |
 | HITL | Signal `Resume` (never inside an activity) |
-| Calls left after HITL | The open round in workflow state (`loop.Turn.Round`): the parked call runs with its answer, then each call that has no outcome yet |
-| Spawn specialist | Child `SessionWorkflow` (wait for started). `ParentClosePolicy` is ABANDON, so a child outlives a continue-as-new of its parent; the parent cancels its running children by id (`RequestCancelExternalWorkflow`) on Cancel, Close and the end of its run. Tools call `CallContext` job methods; the session starts and cancels jobs from each recorded `Tool` outcome (`Turn.Jobs`). A job reports its result once, by the `tacklr_child_done` signal, which reaches a parent that continued as new. A child that parks is resumed by its own id. |
+| Calls left after HITL | The open round in workflow state (`loop.Turn.Round`): the parked call runs with its answer, then each call that has not run yet |
+| Spawn specialist | Child `SessionWorkflow` (wait for started). `ParentClosePolicy` is ABANDON, so a child outlives a continue-as-new of its parent; the parent cancels its running children by id (`RequestCancelExternalWorkflow`) on Cancel, Close and the end of its run. Tools call `CallContext` job methods; the session starts and cancels the jobs each call's run asks for (`Call.Starts`, `Call.Cancels`, kept in `Turn.Jobs`). A job reports its result once, by the `tacklr_child_done` signal, which reaches a parent that continued as new. A child that parks is resumed by its own id. |
 
-The worker registers `SessionWorkflow`, `Commit`, `Inference`, `Tool`, `EmitEvent`, `RunJob`, `WorkerQueue`, `CloseHarness` and `Forget`. A closed session runs `Forget`, which deletes its saved messages and its jobs' from the brain, then `CloseHarness`. Steps do not publish complete, yield, or turn-ending error. The workflow commits `Status`, then `EmitEvent` publishes the matching stream event. A blocking specialist's `Tool` outcome names the child; the session loop starts it, waits, and runs a `Tool` step for that call with the child's result. It does not park the parent.
+The worker registers `SessionWorkflow`, `Commit`, `Inference`, `Tool`, `EmitEvent`, `RunJob`, `WorkerQueue`, `CloseHarness` and `Forget`. A closed session runs `Forget`, which deletes its saved messages and its jobs' from the brain, then `CloseHarness`. Steps do not publish complete, yield, or turn-ending error. The workflow commits `Status`, then `EmitEvent` publishes the matching stream event. A blocking specialist's call waits on the child (`Call.Await`); the session loop starts it, waits, and runs a `Tool` step for that call with the child's result. It does not park the parent.
+
+## Durable objects
+
+Package `session/durableobject` runs one session per durable object: an object with its own ordered storage, alarm and address, as a Cloudflare Durable Object has. The package is plain Go and builds for WebAssembly. A platform implements `Host` for each object (its storage, its alarm, and the other objects) and `Platform` for reaching objects by id, calls the session's `Object` for every request and alarm, and keeps the object alive until `Object.Idle` returns. `NewClient` is the `session.Client` over a `Platform`. `dotest.Platform` runs objects in memory for tests: it stops them, fires their alarms and fails chosen writes the way a platform can.
+
+Where objects are remote, they reach each other over the object protocol: `Handler(ref)` serves an object over HTTP (create, wake, status, jobs, head, and an NDJSON event stream), and `Remote(client)` is the `Ref` on the caller's side, whose client's Transport reaches the one object. An error keeps its kind (`session.ErrNotFound`, `ErrExists`, `ErrInvalid`) across the protocol. The protocol has no authentication and carries credentials in clear text, so a platform keeps it inside its own network. `dotest.NewWire` sends every call over it, and its `Evict` breaks the object's open streams.
+
+### Cloudflare Workers
+
+Package `session/durableobject/cloudflare` (built with `GOOS=js GOARCH=wasm`) runs each session as a SQLite-backed Durable Object. The host's `main` calls `cloudflare.Serve` with its `App`: the Durable Object binding, the `durableobject.Config` built from the Worker's env, and the Worker's own routes over a `session.Client` of the objects. `shim.js`, in the package directory, is the JavaScript half: the host's Worker entry imports it with Go's `wasm_exec.js` and the compiled program, and exports its `Session` class. `examples/cloudflare` is a complete Worker with an end-to-end test.
+
+| Concern | On Workers |
+|---------|------------|
+| Program | One Go program per isolate serves every object in it. `durableobject.Registry` routes requests by object id, makes a new `Object` when the platform starts a new instance of one, and keeps at most `App.MaxIdleObjects` idle objects in memory (zero: 64); a dropped object starts again from its storage. |
+| Storage | One SQLite table per object (`tacklr_kv`). A value is split into 1 MiB parts, because a row holds at most 2 MB; a `Write` is one `transactionSync`. |
+| Between objects | The object protocol through each object's stub (`fetch`), inside Cloudflare's network. The Worker's own routes are the only way in. |
+| Alarm | The platform's one alarm per object. The alarm handler waits until the object runs nothing (`Object.Idle`), which keeps the object alive while the step it restarted runs (up to 15 minutes). |
+| Eviction | A step in flight keeps the object alive while it waits on the network. An object evicted anyway loses only its memory: the watchdog alarm, or the next request, replays its journal from SQLite. |
+| Size | The example's program is about 16 MB (4 MB gzipped); Workers allow 64 MiB. CI fails it over 24 MiB. |
+
+```go
+obj := durableobject.NewObject(host, durableobject.Config{Agent: agent, Sealer: sealer, Jobs: jobs})
+sessions := durableobject.NewClient(platform)
+```
+
+| Tacklr concept | Durable objects |
+|----------------|-----------------|
+| Agent session | One object, which holds the session's storage |
+| State | In memory while the object lives: the session's meta, mailbox, status, outbox and store heads. The object reads storage once when it starts and writes every change to storage before it changes memory. |
+| Harness loop | `loop.Run` over the object's `loop.Executor`, on a goroutine of the object. The goroutine ends whenever the session has nothing to do; the next wake starts it again. |
+| Steps | Calls of the object: `Commit`, `Infer` (one model request), `Tools` (one goroutine per call, at most `Config.MaxToolCalls` at once; zero: 32), `Job` (a named `session.JobHandler`) |
+| Durability | A journal in the object's storage. Each executor call writes once: its journal entry, the mailbox wakes it took, its durable events, what it stored (a commit's changed checkpoint rows) and its letters to other objects land together or not at all. An object that stopped (evicted, redeployed) runs `loop.Run` again on its next request or alarm, and each call returns its entry until the journal ends; the first call past the end acts. |
+| Journal size | One turn. When the session would wait, it suspends instead: its state goes to its carry (`loop.Carry`), and the journal and the wakes it took are deleted in one write. |
+| Restart mid-step | A step sets the object's alarm `Config.Watchdog` ahead (zero: one minute), and sets it again while it runs. An object that stops mid-step is restarted by the alarm, and the unfinished step runs again (a tool with side effects uses its call id as the idempotency key). |
+| Step retries | A step that fails on the network (`tacklr.ErrNetwork`), on a refusal or on a stale checkpoint runs again, up to `Config.StepAttempts` runs (zero: 3), backing off from `Config.RetryBackoff` (zero: one second), doubling, to thirty seconds. |
+| Tool results | A call writes its body (by call key), its result event and itself in one write when its run ends, so a step that runs again runs only the calls that did not end. |
+| Progress | Durable events: the object's event log, each event once. Deltas and tool updates: from the object's memory to its subscribers, never stored. |
+| Status | `Status` and `Jobs` answer from the session's last write, without running the session. |
+| Credentials | `Prompt`, `Resume` and a child's start carry them to the object, which seals them with `Config.Sealer` into its storage. The mailbox, the journal and the outbox hold them only sealed or not at all. |
+| Children | A child is its own object. Its start, a cancel, a close and its end are letters: written with the step that sends them, then delivered in order until each is done, again on the alarm after a failure. A child starts with its parent's credentials, sealed for it. Once the parent took a child's end, it closes the child, whose object deletes what it saved. |
+| Close | Callers see the session as gone at once. The object then stops its running jobs, closes the children it still has, deletes its messages from the brain and deletes its storage. Closing again is not an error. |
+| Workspace | None: a durable object has no FUSE and no shell. |
 
 ## Child sessions
+
+A child that a tool starts (a specialist or a named job) is a task session (`loop.Identity.Task`): its runtime puts its task first in its mailbox, as its first prompt, and the session ends when that turn ends and is not parked. Its end reaches the parent as a job wake (`loop.JobEnd`). It is otherwise a session like any other, so it suspends and continues the same way.
 
 A child is a nested session, not a host-owned supervisor. Specialist ids are `{parent}/w/{specialist}/{call}`. Named worker ids are `{parent}/j/{name}/{call}`. Both are child sessions: `Client.Jobs` lists them with their status, `Status` reports one, Cancel/Close recurse. Specialists run the same wait loop with that specialist's model, tools, and instructions. Workers run `worker.Config.Jobs[name]` instead of a model (Temporal: `RunJob` activity with the same retry policy as Inference/Tool). Tokens come from `SecretStorage` (child id, then parent id). Each specialist turn opens its own VFS on the child id. It does not reuse the parent’s live `MountSession`.
 
@@ -142,14 +198,7 @@ A reply with calls opens a round. It stays out of the window, in the checkpoint,
 
 When the last call has a result, the round commits. The model is called only when no round is open. When a `block=false` job later completes, the drain appends a separate `RoleUser` job result (not another `RoleTool` for that `call_id`).
 
-A commit fits the round into `MaxWindowSize`:
-
-1. A round with a plan install or handoff goes in as it is; the effect then replaces the window.
-2. Under 85% of `MaxWindowSize`, the round is appended.
-3. Over it, the window **collapses**: everything after the first user message and the plan document (an earlier summary too) is saved as session messages, then replaced by one summary of the window as it was. The new round is not in the summary request; it is appended after the summary. With a Brain the summary says that `search` finds the earlier messages and `open` reads one. The window is then small, so the next rounds append without another model call: a session pays for a summary only when the window fills again.
-4. A round still over `MaxWindowSize` alone has its largest tool results cut. With an `AgentOptions.Overflow` (the workspace's `workspace.Config.OverflowPath`: a directory on a writable mount, for example an object-storage mount), each one's full text is first written to `<OverflowPath>/<session>/<call id>.txt`. The cut result ends with a note: how much was kept, and the path to `read` with `start` and `end`, or that the full text was not kept.
-
-A commit that fails (a token count, the session-message save, the summary request, a round that cannot fit, or the overflow write) fails the step and saves nothing.
+A commit fits the round into `MaxWindowSize`: it appends the round, collapses the window into a summary, or cuts the round's largest results. The size of each request comes from the provider. See [context.md](context.md).
 
 ### Steps
 
@@ -160,10 +209,10 @@ Each non-deterministic action is one step, so a session replays safely: the runt
 | Step | Does | Writes the snapshot |
 |------|------|---------------------|
 | `Infer` | One model request on the committed window. Returns the reply. | No |
-| `Tool` | One tool call. Input: the call, and from its last outcome the answer to its park or its child's result. Returns the call's outcome: its result, a park, or a wait on a child, the children it starts or cancels, and the shared-state writes it made (user state, plan changes, permission decisions, search cursors). | No |
+| `Tool` | One tool call (`tacklr.Call`), with the input of its run: the answer to its park, or its child's result. Returns the call as the run left it: its result, a park, or a wait on a child, the children it starts or cancels, and in its body the shared-state writes it made (user state, plan changes, permission decisions, search cursors). | No |
 | `Commit` | Host state, a complete round (each call's writes in call order, then its messages, then collapse or trim), and user messages. | Yes, the only one |
 
-The open round lives in workflow state (`loop.Turn.Round`): the reply and each call's last outcome. The loop runs every call without an outcome at once (`Executor.Tools`: one `Tool` activity each on Temporal; goroutines in a simple runtime), keeps the outcomes in call order, starts the jobs they ask for (a job id comes from its call, so a job is started once), waits for blocking jobs' ends and runs their calls again with the results, and commits the round once each call has its result. Plan changes are replayed at Commit (`planOp`), so plan changes of calls that ran at once all land.
+The open round lives in workflow state (`loop.Turn.Round`): the reply and its calls. The loop runs every call that has not run at once (`Executor.Tools`: one `Tool` activity each on Temporal; goroutines in a simple runtime), puts the calls back in call order, starts the jobs they ask for (a job id comes from its call, so a job is started once), waits for blocking jobs' ends and runs their calls again with the results, and commits the round once each call has its result. Plan changes are replayed at Commit (`planOp`), so plan changes of calls that ran at once all land.
 
 A runtime may run a step more than once before it records it (a worker dies before the step reports). `Infer` and `Tool` change nothing a later step reads, so that is safe; a tool with external side effects uses its call id (`CallContext.CurrentToolCallID`) as the idempotency key. `Commit` is idempotent: its `base` is the revision the last Commit returned, and a Commit that finds the snapshot past it already saved and applies nothing again. A cancel does not stop a Commit. Steps carry only what changes per step; the session's identity and MCP servers are the runtime's, which builds each step's harness from them. A cancel reaches a running step on its next heartbeat reply (`worker.Config.HeartbeatThrottle` bounds how long that takes, 2 seconds by default). Tracing is the host's to set up; Tacklr changes no process-wide tracing state. To trace sessions, install Temporal's replay-safe tracer provider and add Temporal's OpenTelemetry plugin to the client you dial:
 
@@ -183,7 +232,7 @@ Committed state is the store's. A step reads the snapshot's revision (`Store.Rev
 
 The routing that sends a session's steps to the worker holding its harness is the runtime's (Temporal: a task queue per worker, see above). Without it a step still works: the worker it lands on builds the harness.
 
-A turn parks on one interrupt at a time. When several calls of a reply park, the first in call order parks the turn; the others keep no outcome and run after resume. A resume runs the parked call with its answer, then the calls without an outcome. A prompt that moves past an open round (a turn that failed) gives each call without a result a cancelled result and commits the round before the prompt.
+A turn parks on one interrupt at a time. When several calls of a reply park, the first in call order parks the turn; the others count for nothing and run after resume. A resume runs the parked call with its answer, then the calls that have not run. A prompt that moves past an open round (a turn that failed) gives each call without a result a cancelled result and commits the round before the prompt.
 
 Azure/OpenAI Responses requires each `function_call` to be followed by a `function_call_output` with the same `call_id`. Rounds make that hold by construction.
 
@@ -210,12 +259,12 @@ Recipes are on the session's `Identity` (`Identity.Mounts`), which the runtime h
 ```go
 db, err := sessionpg.New(pool, sessionpg.Options{}) // schema "tacklr"; tables are schema-qualified
 if err := db.Setup(ctx); err != nil { /* ... */ }    // idempotent; run on each deploy
-sealer, err := sessionpg.NewAESGCM(key)               // 32 bytes; or a Sealer over the host's KMS
+sealer, err := session.NewAESGCM(key)                 // 32 bytes; or a session.Sealer over the host's KMS
 store, secrets, events := db.Store(), db.Secrets(sealer), db.EventLog()
 defer events.Close()
 ```
 
-- **Store:** one row per session checkpoint. `Save` compares and bumps the revision in one statement, so of two saves from one revision exactly one wins. Outcomes are keyed by session and call key; `Outcomes` reads every key in one query; `Delete` removes the checkpoint and its outcomes together.
+- **Store:** one row per checkpoint row (`session_checkpoint_rows`) and one per session holding its revision. `Save` compares and bumps the revision and applies the changes in one transaction, so of two saves from one revision exactly one wins and the loser's changes are not applied. Call bodies are keyed by session and call key; `Calls` reads every key in one query; `Delete` removes the checkpoint and its calls together.
 - **SecretStorage:** each session's bag is sealed before it is written, with the session id as associated data, so the row holds no plaintext token and one session's row does not open as another's.
 - **EventLog:** a counter row numbers each session's events in the statement that writes them, so sequences have no gaps. The statement also `NOTIFY`s the session id (never the event: a payload is at most 8000 bytes). One listening connection per `EventLog` wakes its subscribers, which read what they have not seen; after a reconnect it wakes them all, so nothing appended meanwhile is missed. `CloseSession` deletes the log and ends its subscribers in every process.
 
@@ -256,8 +305,8 @@ Three stores. Do not add a fourth. Do not copy a field from one into another exc
 
 | Plane | Lifetime | Owns | Never |
 |-------|----------|------|-------|
-| **session.Store** | One session | The checkpoint (opaque bytes): window of complete rounds, plan, `userState`, permission decisions, search rests; each tool call's `Outcome` (`PutOutcome`/`Outcomes`), deleted with the session | Tokens, file bytes, MCP env/headers, identity (specialist, parent, mounts), child workflow futures, host config (search namespace, principals, `AllowTools`) |
-| **Wait loop** | In-process `sessionProc` / Temporal workflow replay | `Identity` (specialist, parent, mount recipes), MCP Durable topology, child futures, the open round (each call's last outcome), the last Commit's snapshot revision, Prompt/job inbox (steer + auto-collected jobs), host state not yet committed, secret-free `ApplyAuth` on the current signal, `Status` | Window, plan, tokens, file bytes, `userState`. Inbox is not `session.Store`. |
+| **session.Store** | One session | The checkpoint (rows only the harness reads): window of complete rounds, plan, `userState`, permission decisions, search rests; each tool call's body (`PutCall`/`Calls`), cleared when the next turn starts and deleted with the session | Tokens, file bytes, MCP env/headers, identity (specialist, parent, mounts), child workflow futures, host config (search namespace, principals, `AllowTools`) |
+| **Wait loop** | In-process `sessionProc` / Temporal workflow replay | `Identity` (specialist, parent, mount recipes), MCP Durable topology, child futures, the open round (the reply and its calls), the last Commit's snapshot revision, Prompt/job inbox (steer + auto-collected jobs), host state not yet committed, secret-free `ApplyAuth` on the current signal, `Status` | Window, plan, tokens, file bytes, `userState`. Inbox is not `session.Store`. |
 | **SecretStorage** | Session, deleted on Close | VFS credentials | Snapshot rows, Temporal payloads |
 
 `Prompt.State` / `Resume.State` / `CreateSession.State` are sent once, to the next step, which writes them into the checkpoint's `userState`. The wait loop holds them only until then, so a tool's later `StateSet` of the same key is not overwritten.
@@ -266,18 +315,18 @@ Three stores. Do not add a fourth. Do not copy a field from one into another exc
 
 Session messages live in the brain table `session_messages`, not in `session.Store`. A collapse or a plan handoff writes the exact messages that leave the window there, so this session can search them later. They are not the checkpoint.
 
-## Map to Azure / Lambda (later)
+## Map to other runtimes
 
-| Tacklr | Temporal (now) | Azure DF (later) | Lambda (later) |
-|--------|----------------|------------------|----------------|
-| `session.Client` | `temporal.Client` + `worker.New` | Same | Same |
-| Session workflow | Workflow | Orchestration | Durable execution |
-| Inference / tool | Activity | Activity | Invoke + heartbeat |
-| Child / specialist | Child workflow | Sub-orchestration | Nested execution |
-| HITL | Signal Resume | WaitForExternalEvent | waitForEvent |
-| Progress | Workflow Streams | Event Hubs / queue | SQS / stream |
-| Auth | SecretStorage + secret-free signal | orchestration input / event | invocation payload |
-| Session record | `session.Store` | Same | Same |
+| Tacklr | Temporal (now) | Durable objects (now) | Azure DF (later) | Lambda (later) |
+|--------|----------------|-----------------------|------------------|----------------|
+| `session.Client` | `temporal.Client` + `worker.New` | `durableobject.Client` + `NewObject` | Same | Same |
+| Session workflow | Workflow | One object | Orchestration | Durable execution |
+| Inference / tool | Activity | Journaled call | Activity | Invoke + heartbeat |
+| Child / specialist | Child workflow | Child object | Sub-orchestration | Nested execution |
+| HITL | Signal Resume | Mailbox wake | WaitForExternalEvent | waitForEvent |
+| Progress | Workflow Streams | Object event log | Event Hubs / queue | SQS / stream |
+| Auth | SecretStorage + secret-free signal | Sealed in the object | orchestration input / event | invocation payload |
+| Session record | `session.Store` | The object's storage | Same | Same |
 
 Do not put Temporal `workflow.Context` on `session.Client`.
 

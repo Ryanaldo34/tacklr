@@ -141,44 +141,65 @@ func RunTurn(
 		return nil
 	}
 
+	streamed := map[string]int{}
 	for {
+		var ev session.Event
+		ok := true
 		select {
 		case <-ctx.Done():
+		case ev, ok = <-sub.Events():
+		}
+		// The caller left: the subscription can end for the same reason,
+		// so the context decides first.
+		if ctx.Err() != nil {
 			_ = env.Client.Cancel(context.Background(), id)
 			return end(true)
-		case ev, ok := <-sub.Events():
-			if !ok {
-				if ctx.Err() != nil {
-					return end(true)
-				}
-				if err := sub.Err(); err != nil {
-					return fmt.Errorf("server: turn stream: %w", err)
-				}
-				return errors.New("server: turn stream ended without a result")
+		}
+		if !ok {
+			if err := sub.Err(); err != nil {
+				return fmt.Errorf("server: turn stream: %w", err)
 			}
-			ctrl := proto.OnEvent(ctx, env, threadID, ev, reqID)
-			if err := writeFrames(ctrl.Frames); err != nil {
-				_ = env.Client.Cancel(context.Background(), id)
+			return errors.New("server: turn stream ended without a result")
+		}
+		ctrl := proto.OnEvent(ctx, env, threadID, noteStreamed(streamed, ev), reqID)
+		if err := writeFrames(ctrl.Frames); err != nil {
+			_ = env.Client.Cancel(context.Background(), id)
+			return err
+		}
+		if ctrl.Err != nil {
+			_ = env.Client.Cancel(context.Background(), id)
+			return ctrl.Err
+		}
+		if len(ctrl.Resume) > 0 {
+			if err := env.Client.Resume(ctx, id, session.Resume{
+				Responses: ctrl.Resume,
+				Auth:      prompt.Prompt.Auth,
+			}); err != nil {
 				return err
 			}
-			if ctrl.Err != nil {
-				_ = env.Client.Cancel(context.Background(), id)
-				return ctrl.Err
-			}
-			if len(ctrl.Resume) > 0 {
-				if err := env.Client.Resume(ctx, id, session.Resume{
-					Responses: ctrl.Resume,
-					Auth:      prompt.Prompt.Auth,
-				}); err != nil {
-					return err
-				}
-				continue
-			}
-			if ctrl.Finished {
-				return end(false)
-			}
+			continue
+		}
+		if ctrl.Finished {
+			return end(false)
 		}
 	}
+}
+
+// noteStreamed counts the text of each message the turn streamed as
+// deltas, and sets a complete event's Streamed to what its reader already
+// has. Subscribe sends a message's deltas in order without gaps.
+func noteStreamed(streamed map[string]int, ev session.Event) session.Event {
+	if ev.Type != session.EventMessage && ev.Type != session.EventReasoning {
+		return ev
+	}
+	k := string(ev.Type) + ":" + ev.MessageID
+	if ev.Delta {
+		streamed[k] += len(ev.Content)
+		return ev
+	}
+	ev.Streamed = min(streamed[k], len(ev.Content))
+	delete(streamed, k)
+	return ev
 }
 
 // PromptOrResume is one protocol turn against Runtime.

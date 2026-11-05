@@ -32,7 +32,6 @@ type Harness struct {
 	mcpConfigs            []session.MCPServer
 	mcpCredentialResolver session.MCPCredentialResolver
 	instructions          string
-	maxWindowSize         int
 	session               *sessionManager
 	specialists           map[string]*Specialist
 	// jobs are the Runtime job workers tools may Schedule.
@@ -45,26 +44,25 @@ type Harness struct {
 	// Nil: it is not kept.
 	overflow   Overflow
 	mcpCleanup func()
-	context    *modelContextManager
+	// window is the context window; the harness is its host.
+	window     *window
 	toolRunner *toolRunner
 	// modelSeq counts model requests, for model span sequence numbers.
 	modelSeq int
-	// usage is the provider's input token count for the last model request
-	// of this harness, so a commit far below the window skips CountTokens.
-	usage requestUsage
 }
 
 // commitRound appends one complete round to the window. A round with a
 // window effect goes in as it is, and the effect then replaces the window.
-// Any other round is fitted.
-func (a *Harness) commitRound(ctx context.Context, round []*message.Message, effect ToolResultEffect) error {
+// Any other round is fitted; counted is the provider's count of the
+// request its reply answered.
+func (a *Harness) commitRound(ctx context.Context, round []*message.Message, effect ToolResultEffect, counted int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if effect == EffectNone {
-		return a.fit(ctx, round)
+		return a.window.Fit(ctx, round, counted)
 	}
-	a.context.Add(round...)
+	a.window.Add(round...)
 	return a.applyEffect(ctx, effect)
 }
 
@@ -231,7 +229,7 @@ func (a *Harness) applyEffect(ctx context.Context, effect ToolResultEffect) erro
 		return a.handoff(ctx)
 	}
 	_, span := telemetry.StartPlanInstallSpan(ctx, a.sessionId)
-	err := a.context.InstallPlanDocument(a.session.Plan.Document())
+	err := a.window.InstallPlan(a.session.Plan.Document())
 	span.End(err)
 	return err
 }
@@ -242,12 +240,13 @@ func (a *Harness) keepsHistory() bool {
 	return a.brain != nil && strings.TrimSpace(a.sessionId) != ""
 }
 
-// saveSessionMessages saves messages that leave the window (a collapse or
-// a handoff) as this session's messages, so search finds them and open
-// reads one exactly. A store error stops the collapse or handoff.
-func (a *Harness) saveSessionMessages(ctx context.Context, window []*message.Message) error {
+// archive saves messages that leave the window (a collapse or a handoff)
+// as this session's messages, so search finds them and open reads one
+// exactly. It reports whether the session keeps them. A store error stops
+// the collapse or handoff.
+func (a *Harness) archive(ctx context.Context, window []*message.Message) (bool, error) {
 	if !a.keepsHistory() || len(window) == 0 {
-		return nil
+		return a.keepsHistory(), nil
 	}
 	msgs := make([]brain.SessionMessage, 0, len(window))
 	hash := sha256.New()
@@ -264,9 +263,18 @@ func (a *Harness) saveSessionMessages(ctx context.Context, window []*message.Mes
 	}
 	host, _ := a.session.Search.Namespace()
 	if _, err := a.brain.SaveSessionMessages(ctx, host, a.sessionId, hex.EncodeToString(hash.Sum(nil)), msgs); err != nil {
-		return fmt.Errorf("save session messages: %w", err)
+		return false, fmt.Errorf("save session messages: %w", err)
 	}
-	return nil
+	return true, nil
+}
+
+// keep stores a cut result's full text in Overflow, and returns its path;
+// "" when the harness has no Overflow.
+func (a *Harness) keep(ctx context.Context, callID, text string) (string, error) {
+	if a.overflow == nil {
+		return "", nil
+	}
+	return a.overflow.Keep(ctx, a.sessionId, callID, text)
 }
 
 func messageSearchText(m *message.Message) string {
@@ -314,13 +322,23 @@ func (a *Harness) findTool(name, namespace string) *Tool {
 // message cancelled before it had one.
 const CancelledToolResultContent = "cancelled: user interrupted the agent"
 
-// streamChunk maps a model chunk to a harness session.Event.
-// Function-call Category and Title are set on a copy; Name stays programmatic
-// so execution and model history keep using the real tool name.
-// Ignores session.EventComplete (usage only; the wait loop ends the turn).
-func (a *Harness) streamChunk(chunk LLMResponseChunk, out chan<- session.Event) {
+// streamChunk maps a model chunk to a harness session.Event: a piece of a
+// message's text is a delta at its offset in what asm streamed, and a
+// completed message carries its full text. Call it before asm takes the
+// chunk. Function-call Category and Title are set on a copy; Name stays
+// programmatic so execution and model history keep using the real tool
+// name. Ignores session.EventComplete (usage only; the wait loop ends the
+// turn).
+func (a *Harness) streamChunk(chunk LLMResponseChunk, asm *streamAssembler, out chan<- session.Event) {
 	if chunk.Type == "" || chunk.Type == session.EventComplete {
 		return
+	}
+	ev := session.Event{Type: chunk.Type, TurnID: chunk.TurnId, MessageID: chunk.MessageId, Error: chunk.Err(), Content: chunk.Content}
+	switch {
+	case isDelta(chunk):
+		ev.Delta, ev.Offset = true, len(asm.Streamed(chunk))
+	case chunk.IsComplete && isText(chunk.Type):
+		ev.Content = asm.CompleteContent(chunk)
 	}
 	toolCalls := chunk.ToolCalls
 	if chunk.Type == session.EventFunctionCall && len(chunk.ToolCalls) > 0 {
@@ -329,14 +347,8 @@ func (a *Harness) streamChunk(chunk LLMResponseChunk, out chan<- session.Event) 
 			toolCalls[i] = a.withToolPresentation(toolCalls[i])
 		}
 	}
-	out <- session.Event{
-		Type:      chunk.Type,
-		TurnID:    chunk.TurnId,
-		MessageID: chunk.MessageId,
-		Error:     chunk.Err(),
-		ToolCalls: toolCalls,
-		Content:   chunk.Content,
-	}
+	ev.ToolCalls = toolCalls
+	out <- ev
 }
 
 // withToolPresentation fills Category and Title for client-facing tool events.

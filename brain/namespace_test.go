@@ -1,55 +1,19 @@
-package brain
+package brain_test
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
-func TestNamespace_coversHierarchicalRLS(t *testing.T) {
-	obj := mustNS(t, "org", "acme", "workspace", "west", "project", "alpha")
-	org := mustNS(t, "org", "acme")
-	ws := mustNS(t, "org", "acme", "workspace", "west")
-	exact := mustNS(t, "org", "acme", "workspace", "west", "project", "alpha")
-	otherOrg := mustNS(t, "org", "other")
-	otherWS := mustNS(t, "org", "acme", "workspace", "east")
-	wsOnly := mustNS(t, "workspace", "west")
-
-	var open Namespace
-	if open.Covers(obj) {
-		t.Fatal("empty scope must cover nothing")
-	}
-	if !org.Covers(obj) || !ws.Covers(obj) || !exact.Covers(obj) {
-		t.Fatal("prefix attrs must cover")
-	}
-	if otherOrg.Covers(obj) || otherWS.Covers(obj) {
-		t.Fatal("wrong attr value must not cover")
-	}
-	// The first attr is the tenant: a scope without the object's tenant
-	// covers nothing, even when its other attrs match.
-	if wsOnly.Covers(obj) || mustNS(t, "workspace", "west", "org", "acme").Covers(obj) {
-		t.Fatal("a scope on another tenant must not cover")
-	}
-	if org.Covers(mustNS(t, "org", "acme2")) {
-		t.Fatal("acme must not cover acme2")
-	}
-	if exact.Covers(org) {
-		t.Fatal("more-specific scope must not cover a coarser object")
-	}
-
-	got, err := org.Bind(mustNS(t, "workspace", "west"))
-	if err != nil || !got.Equal(ws) {
-		t.Fatalf("bind extra: %v %v", got, err)
-	}
-	got, err = org.Bind(nil)
-	if err != nil || !got.Equal(org) {
-		t.Fatalf("bind empty call: %v %v", got, err)
-	}
-	if _, err := org.Bind(mustNS(t, "org", "other")); err == nil {
-		t.Fatal("bind must reject a conflicting ceiling attr")
-	}
-}
-
+// TestParseNamespace_rejectsInvalid: a namespace with no attrs, a name or
+// value that is empty or holds a dot, a repeated name, or a name with a
+// space is rejected.
 func TestParseNamespace_rejectsInvalid(t *testing.T) {
+	t.Parallel()
 	cases := [][]string{
 		{},
 		{"org"},
@@ -60,41 +24,68 @@ func TestParseNamespace_rejectsInvalid(t *testing.T) {
 		{"org", "acme", "org", "other"},
 	}
 	for _, kv := range cases {
-		if _, err := ParseNamespace(kv...); err == nil {
-			t.Fatalf("accepted %v", kv)
+		if _, err := brain.ParseNamespace(kv...); err == nil {
+			t.Errorf("parse %v succeeded, want an error", kv)
 		}
 	}
-	spaced := Namespace{{Name: " org", Value: "acme"}}
-	if err := spaced.Validate(); err == nil {
-		t.Fatal("leading space")
+	if err := (brain.Namespace{{Name: " org", Value: "acme"}}).Validate(); err == nil {
+		t.Error("a name with a leading space is valid, want an error")
 	}
 }
 
-func TestNamespace_jsonSQLRoundTrip(t *testing.T) {
-	ns := mustNS(t, "org", "acme", "workspace", "west")
+// TestNamespace_roundTripsThroughJSONAndSQL: a namespace comes back equal from
+// JSON and from a SQL value; an empty or NULL column scans as empty, and a
+// column of another type fails.
+func TestNamespace_roundTripsThroughJSONAndSQL(t *testing.T) {
+	t.Parallel()
+	ns := storetest.Namespace(t, "org", "acme", "workspace", "west")
 	raw, err := json.Marshal(ns)
 	if err != nil {
 		t.Fatal(err)
-	}
-	var got Namespace
-	if err := json.Unmarshal(raw, &got); err != nil || !got.Equal(ns) {
-		t.Fatalf("json %s: %v %v", raw, got, err)
 	}
 	v, err := ns.Value()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var scanned Namespace
-	if err := scanned.Scan(v); err != nil || !scanned.Equal(ns) {
-		t.Fatalf("scan: %v %v", scanned, err)
+
+	var fromJSON, scanned, empty, null, wrong brain.Namespace
+	jsonErr := json.Unmarshal(raw, &fromJSON)
+	scanErr := scanned.Scan(v)
+	emptyErr := empty.Scan([]byte("[]"))
+	nullErr := null.Scan(nil)
+	wrongErr := wrong.Scan(42)
+
+	if jsonErr != nil || !fromJSON.Equal(ns) || scanErr != nil || !scanned.Equal(ns) {
+		t.Errorf("json %s = %v %v, scan = %v %v, want %v", raw, fromJSON, jsonErr, scanned, scanErr, ns)
 	}
-	if err := scanned.Scan([]byte("[]")); err != nil || !scanned.Empty() {
-		t.Fatalf("empty scan: %v %v", scanned, err)
+	if emptyErr != nil || !empty.Empty() || nullErr != nil || !null.Empty() {
+		t.Errorf("scan [] = %v %v, scan NULL = %v %v, want empty", empty, emptyErr, null, nullErr)
 	}
-	if err := scanned.Scan(nil); err != nil {
-		t.Fatal(err)
+	if wrongErr == nil {
+		t.Error("scan an int succeeded, want an error")
 	}
-	if err := scanned.Scan(42); err == nil {
-		t.Fatal("bad type")
+}
+
+// TestNamespace_bindNarrowsTheHostCeiling: a call namespace adds attrs to the
+// host ceiling or repeats them; an empty call keeps the ceiling; a call that
+// changes a ceiling attr, an invalid call or an invalid ceiling fails.
+func TestNamespace_bindNarrowsTheHostCeiling(t *testing.T) {
+	t.Parallel()
+	org := storetest.Namespace(t, "org", "acme")
+
+	narrowed, narrowErr := org.Bind(storetest.Namespace(t, "org", "acme", "workspace", "west"))
+	kept, keptErr := org.Bind(nil)
+	_, otherErr := org.Bind(storetest.Namespace(t, "org", "other"))
+	_, badCallErr := org.Bind(brain.Namespace{{Name: "workspace"}})
+	_, badCeilingErr := brain.Namespace{}.Bind(org)
+
+	if narrowErr != nil || !narrowed.Equal(storetest.Namespace(t, "org", "acme", "workspace", "west")) {
+		t.Errorf("bind a workspace = %v %v, want the org's workspace", narrowed, narrowErr)
+	}
+	if keptErr != nil || !kept.Equal(org) {
+		t.Errorf("bind nothing = %v %v, want the ceiling", kept, keptErr)
+	}
+	if !errors.Is(otherErr, brain.ErrInvalid) || badCallErr == nil || badCeilingErr == nil {
+		t.Errorf("bind another org = %v, an invalid call = %v, under no ceiling = %v, want errors", otherErr, badCallErr, badCeilingErr)
 	}
 }

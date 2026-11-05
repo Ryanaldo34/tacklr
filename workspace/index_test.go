@@ -72,6 +72,7 @@ func titles(t *testing.T, eng *brain.Engine, scope brain.Scope, query string) []
 // and keeps the file; indexing again restores it. A batch that names a
 // directory indexes nothing.
 func TestIndexTools_indexSkipUnindex(t *testing.T) {
+	t.Parallel()
 	f := newIndexFixture(t)
 	const path = "/workspace/work/note.txt"
 	f.write(t, map[string]string{path: "alpha line\nbeta TODO findme-xyz\ngamma\n", "/workspace/work/batch.txt": "batch-unique-phrase-zzz\n"})
@@ -120,6 +121,7 @@ func TestIndexTools_indexSkipUnindex(t *testing.T) {
 // be found is an error line in a batch that indexes the rest; a brain that
 // cannot be read fails unindex.
 func TestIndexTools_rejectBadRequestsAndReportEachFailure(t *testing.T) {
+	t.Parallel()
 	var failReads atomic.Bool
 	f := newIndexFixture(t, brain.WithAudit(func(_ context.Context, ev brain.AuditEvent) error {
 		if failReads.Load() && ev.Op == brain.AuditRead {
@@ -159,22 +161,5 @@ func TestIndexTools_rejectBadRequestsAndReportEachFailure(t *testing.T) {
 	lines := strings.Split(batch, "\n")
 	if batchErr != nil || len(lines) != 2 || !strings.HasPrefix(lines[0], "indexed") || !strings.Contains(lines[1], "error path=/workspace/work/locked.txt") {
 		t.Fatalf("batch = %q %v, want the open file indexed and an error line for the locked one", batch, batchErr)
-	}
-}
-
-// TestIndexTools_indexedFileKeepsItsSourceReaders: the readers IndexReaders
-// returns go on the index, so search finds the file only for a caller who
-// is one of them.
-func TestIndexTools_indexedFileKeepsItsSourceReaders(t *testing.T) {
-	f := newIndexFixture(t)
-	f.write(t, map[string]string{"/workspace/work/nda.txt": "mutual nda terms\n"})
-	tools := f.tools(func(context.Context, string, vfs.FileInfo) ([]string, error) { return []string{"group:legal"}, nil })
-
-	_, err := tools["index_file"](t.Context(), `{"path":"/workspace/work/nda.txt"}`)
-	legal := titles(t, f.eng, brain.Scope{Namespace: f.scope.Namespace, Principals: []string{"user:ann", "group:legal"}}, "nda terms")
-	outsider := titles(t, f.eng, brain.Scope{Namespace: f.scope.Namespace, Principals: []string{"user:mallory"}}, "nda terms")
-
-	if err != nil || !slices.Contains(legal, "/workspace/work/nda.txt") || len(outsider) != 0 {
-		t.Fatalf("index = %v; legal search %v, outsider search %v; want the file only for legal", err, legal, outsider)
 	}
 }

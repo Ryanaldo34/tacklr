@@ -34,16 +34,21 @@ func NewWireStore(pool *pgxpool.Pool, protocolKey string) *WireStore {
 	return &WireStore{pool: pool, protocol: protocolKey}
 }
 
-// Setup creates public.protocol_wire_session (idempotent).
+// Setup creates public.protocol_wire_session (idempotent). Concurrent runs
+// (hosts that start together) wait for each other on an advisory lock.
 func (s *WireStore) Setup(ctx context.Context) error {
+	// One implicit transaction (the simple protocol) holds the lock until
+	// it ends: two concurrent CREATE ... IF NOT EXISTS of one table can
+	// otherwise both try to create it.
 	const q = `
+		SELECT pg_advisory_xact_lock(hashtext('tacklr.wire_setup'));
 		CREATE TABLE IF NOT EXISTS public.protocol_wire_session (
 			session_id   text PRIMARY KEY,
 			protocol     text NOT NULL DEFAULT 'acp',
 			payload      jsonb NOT NULL,
 			updated_at   timestamptz NOT NULL DEFAULT now()
 		)`
-	_, err := s.pool.Exec(ctx, q)
+	_, err := s.pool.Exec(ctx, q, pgx.QueryExecModeSimpleProtocol)
 	if err != nil {
 		return fmt.Errorf("wire setup: %w", err)
 	}

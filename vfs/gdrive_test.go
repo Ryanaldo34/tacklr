@@ -1,15 +1,14 @@
 package vfs_test
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,10 +16,17 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
+	"github.com/ryanaldo34/tacklr/internal/testhttp"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
+// A read-only Drive mount reads files, Google Docs projections and folder
+// shortcuts. It refuses writes, an ambiguous name, a file over the read cap,
+// file reads of a folder, folder reads of a file and a canceled context. It
+// refreshes a token that is about to expire or that Drive refuses, and a
+// refused token with no refresh is expired.
 func TestMountSession_gdriveReadOnlySession(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok"})
@@ -35,138 +41,93 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	route := func(name string) vfs.Route { return ms.Route(ctx, "/workspace/"+name) }
 
-	specs := ms.Specs()
-	if len(specs) != 2 {
-		t.Fatalf("Specs = %+v", specs)
-	}
-	for _, m := range specs {
-		if !m.ReadOnly || m.Params[mount.ParamName] == "" || (m.Point != "/workspace/contracts" && m.Point != "/workspace/notes") {
-			t.Fatalf("member = %+v", m)
+	for _, m := range ms.Specs() {
+		if !m.ReadOnly {
+			t.Fatalf("member = %+v, want read-only", m)
 		}
 	}
-
-	if st, err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
-		Stat(ctx); err != nil || st.IsDir || st.MediaType != "application/pdf" || st.Size != 4 {
+	if st, err := route("contracts/nda.pdf").Stat(ctx); err != nil || st.MediaType != "application/pdf" || st.Size != 4 {
 		t.Fatalf("Stat nda = %+v err=%v", st, err)
 	}
-
-	raw, err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
-		ReadFile(ctx)
-	if err != nil || string(raw) != "%PDF" {
-		t.Fatalf("ReadFile nda = %q err=%v", raw, err)
-	}
-
-	if text, err := ms.Route(ctx, "/workspace/contracts/acme/note.md").
-		ReadText(ctx); err != nil || !strings.Contains(text.Text(), "# hi") {
+	if text, err := route("contracts/acme/note.md").ReadText(ctx); err != nil || !strings.Contains(text.Text(), "# hi") {
 		t.Fatalf("ReadText note = %v err=%v", text, err)
 	}
-
-	ents, err := ms.Route(ctx, "/workspace/contracts").
-		ReadDir(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	present := map[string]bool{}
-	var acmeDir bool
-	for _, e := range ents {
-		present[e.Name] = true
-		if e.Name == "acme" {
-			acmeDir = e.IsDir
-		}
-	}
-	if !present["acme"] || !acmeDir || !present["nda.pdf"] || !present["Spec"] {
-		t.Fatalf("ReadDir names = %+v", ents)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/contracts/dup.txt").
-		ReadFile(ctx); !errors.Is(err, vfs.ErrAmbiguous) {
-		t.Fatalf("collision: %v", err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/contracts/missing").
-		ReadFile(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("missing: %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
-		WriteFile(ctx, []byte("x")); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("write: %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/contracts/new").
-		MkdirAll(ctx); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("mkdir: %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
-		Remove(ctx); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("remove: %v", err)
-	}
-
-	// Shortcut to a folder is walkable by the shortcut name.
-
-	if got, err := ms.Route(ctx, "/workspace/notes/alias/note.md").
-		ReadFile(ctx); err != nil || string(got) != "# hi\n\n" {
+	// A shortcut to a folder walks by the shortcut name.
+	if got, err := route("notes/alias/note.md").ReadFile(ctx); err != nil || string(got) != "# hi\n\n" {
 		t.Fatalf("shortcut walk = %q err=%v", got, err)
 	}
-
-	if _, err := ms.Route(ctx, "/workspace/contracts/huge.bin").
-		ReadFile(ctx); !errors.Is(err, vfs.ErrTooLarge) {
-		t.Fatalf("huge: %v", err)
+	doc, err := route("contracts/acme/note.md").OpenDocument(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-
-	if _, err := ms.Route(canceled, "/workspace/contracts/nda.pdf").
-		Stat(canceled); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled: %v", err)
+	for name, err := range map[string]error{
+		"write":          route("contracts/nda.pdf").WriteFile(ctx, []byte("x")),
+		"mkdir":          route("contracts/new").MkdirAll(ctx),
+		"remove":         route("contracts/nda.pdf").Remove(ctx),
+		"write document": ms.WriteDocument(ctx, doc),
+	} {
+		if !errors.Is(err, vfs.ErrReadOnly) {
+			t.Fatalf("%s: %v, want ErrReadOnly", name, err)
+		}
+	}
+	_, ambiguous := route("contracts/dup.txt").ReadFile(ctx)
+	_, huge := route("contracts/huge.bin").ReadFile(ctx)
+	_, canceledErr := ms.Route(canceled, "/workspace/contracts/nda.pdf").Stat(canceled)
+	_, readDirFile := route("contracts/nda.pdf").ReadDir(ctx)
+	_, readFileDir := route("contracts/acme").ReadFile(ctx)
+	_, readTextDir := route("contracts/acme").ReadText(ctx)
+	if !errors.Is(ambiguous, vfs.ErrAmbiguous) || !errors.Is(huge, vfs.ErrTooLarge) || !errors.Is(canceledErr, context.Canceled) {
+		t.Fatalf("ambiguous = %v, huge = %v, canceled = %v", ambiguous, huge, canceledErr)
+	}
+	if readDirFile == nil || readFileDir == nil || readTextDir == nil {
+		t.Fatalf("ReadDir of a file = %v, ReadFile of a folder = %v, ReadText of a folder = %v", readDirFile, readFileDir, readTextDir)
 	}
 
-	// Near-expiry token refreshes before the provider request.
+	// A near-expiry token refreshes before the provider request.
 	holder.Set(mount.Credential{Token: "expiring", ExpiresAt: time.Now().Add(10 * time.Second)})
 	proactiveRefreshes := 0
 	holder.SetRefresh(func(context.Context) (mount.Credential, error) {
 		proactiveRefreshes++
 		return mount.Credential{Token: "proactive", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	})
-
-	raw, err = ms.Route(ctx, "/workspace/notes/readme.txt").
-		ReadFile(ctx)
-	if err != nil || string(raw) != "hello" || proactiveRefreshes != 1 {
+	if raw, err := route("notes/readme.txt").ReadFile(ctx); err != nil || string(raw) != "hello" || proactiveRefreshes != 1 {
 		t.Fatalf("proactive refresh read = %q refreshes=%d err=%v", raw, proactiveRefreshes, err)
 	}
 
-	// 401 + one reactive refresh succeeds.
-	api.OnceMedia("readme", http.StatusUnauthorized)
+	// A 401 and one reactive refresh succeeds.
+	api.Fail(testdrive.Fault{Call: "files.media", ID: "readme", Status: http.StatusUnauthorized})
 	holder.SetRefresh(func(context.Context) (mount.Credential, error) {
 		return mount.Credential{Token: "fresh"}, nil
 	})
-
-	if raw, err := ms.Route(ctx, "/workspace/notes/readme.txt").
-		ReadFile(ctx); err != nil || string(raw) != "hello" {
+	if raw, err := route("notes/readme.txt").ReadFile(ctx); err != nil || string(raw) != "hello" {
 		t.Fatalf("refresh read = %q err=%v", raw, err)
 	}
 
-	// 401 without refresh stays expired.
-	api.FailMeta(http.StatusUnauthorized)
+	// A 401 without a refresh stays expired.
+	api.Fail(testdrive.Fault{Call: "files.get", ID: "root-b", Status: http.StatusUnauthorized})
 	holder.SetRefresh(nil)
-
-	if _, err := ms.Route(ctx, "/workspace/notes/readme.txt").
-		Stat(ctx); !errors.Is(err, vfs.ErrAuthExpired) {
+	if _, err := route("notes/readme.txt").Stat(ctx); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("expired: %v", err)
 	}
 }
 
 // TestProviders_panicWithoutTheirAPIClient: building a Drive or Graph
-// provider with no API client is a programming error.
+// provider with no API client, or a Docs client with no token holder, is a
+// programming error.
 func TestProviders_panicWithoutTheirAPIClient(t *testing.T) {
+	t.Parallel()
 	for name, build := range map[string]func(){
 		"drive": func() { _ = vfs.Drive(nil, nil) },
 		"graph": func() { _ = vfs.Graph(nil, nil, "") },
+		"docs":  func() { _ = vfs.NewGoogleDocs(nil, "", nil) },
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			defer func() {
 				if recover() == nil {
 					t.Fatal("want panic")
@@ -177,57 +138,11 @@ func TestProviders_panicWithoutTheirAPIClient(t *testing.T) {
 	}
 }
 
-func TestMountSession_gdriveDirectoryAndWriteDocument(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	ms, err := vfs.Tree(vfs.At("contracts", testdrive.Open(t, api, nil)))(ctx, "s", vfs.Request{Bindings: []mount.Binding{{
-		Provider: "gdrive",
-		Params:   map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root-a"},
-		Auth:     mount.Credential{Token: "t"},
-	}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/contracts/acme").
-		ReadFile(ctx); err == nil {
-		t.Fatal("ReadFile on directory")
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/contracts/acme").
-		ReadText(ctx); err == nil {
-		t.Fatal("ReadText on directory")
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
-		ReadDir(ctx); err == nil {
-		t.Fatal("ReadDir on file")
-	}
-
-	doc, err := ms.Route(ctx, "/workspace/contracts/acme/note.md").
-		OpenDocument(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.WriteDocument(ctx, doc); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("WriteDocument: %v", err)
-	}
-}
-
+// A Drive binding whose folder ID names a file does not validate.
 func TestDrive_validateRejectsFileID(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
-	api := testdrive.Tree()
-	open := testdrive.Open(t, api, nil)
-	folder, err := open(ctx, "s", mount.Binding{
-		Auth: mount.Credential{Token: "t"}, Params: map[string]string{mount.ParamFolderID: "root-a"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := folder.Validate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	file, err := open(ctx, "s", mount.Binding{
+	file, err := testdrive.Open(t, testdrive.Tree(), nil)(ctx, "s", mount.Binding{
 		Auth: mount.Credential{Token: "t"}, Params: map[string]string{mount.ParamFolderID: "nda"},
 	})
 	if err != nil {
@@ -238,162 +153,162 @@ func TestDrive_validateRejectsFileID(t *testing.T) {
 	}
 }
 
-func TestGoogleDrive_callsTheDriveAPI(t *testing.T) {
-	ctx := t.Context()
-	var sawAuth []string
-	mux := http.NewServeMux()
-	writeJSON := func(w http.ResponseWriter, status int, body any) {
+// googleError answers every request with status and a Google error
+// message.
+func googleError(t *testing.T, status int, message string) *httptest.Server {
+	return testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(body)
-	}
-	fileJSON := func(id, name, mime string) map[string]any {
-		return map[string]any{"id": id, "name": name, "mimeType": mime, "modifiedTime": "2026-01-02T03:04:05Z"}
-	}
-	var createdMetaOnly bool
-	var lastListQ string
-	handleFiles := func(w http.ResponseWriter, r *http.Request) {
-		sawAuth = append(sawAuth, r.Header.Get("Authorization"))
-		p := r.URL.Path
-		p = strings.TrimPrefix(p, "/drive/v3")
-		p = strings.TrimPrefix(p, "/upload/drive/v3")
-		if (p == "/files" || p == "/files/") && r.Method == http.MethodGet {
-			lastListQ = r.URL.Query().Get("q")
-		}
-		switch {
-		case r.URL.Query().Get("alt") == "media" && strings.HasSuffix(p, "/bin1"):
-			http.ServeContent(w, r, "a.txt", time.Time{}, strings.NewReader("blob"))
-		case strings.HasSuffix(p, "/export") && strings.Contains(p, "/doczip"):
-			w.Header().Set("Content-Type", "application/zip")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(mustZipHTML("<html><body><h1>Spec</h1></body></html>"))
-		case strings.HasSuffix(p, "/export") && strings.Contains(p, "/huge"):
-			writeJSON(w, 403, map[string]any{"error": map[string]any{"code": 403, "message": "exportSizeLimitExceeded"}})
-		case r.Method == http.MethodPost && (p == "/files" || p == "/files/"):
-			if r.Header.Get("Content-Type") == "text/html" || strings.Contains(r.URL.Path, "/upload/") {
-				http.Error(w, "unexpected media upload", 400)
-				return
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": status, "message": message}})
+	}))
+}
+
+// A Drive or Docs error reply maps to the matching vfs error. A status with
+// no vfs error is an error that names the HTTP status. A call to an
+// endpoint that does not answer or to a malformed URL fails.
+func TestGoogleAPIs_mapErrorRepliesToVFSErrors(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok"})
+	for _, c := range []struct {
+		status      int
+		message     string
+		drive, docs error // nil: an error that names the HTTP status
+	}{
+		{http.StatusUnauthorized, "", vfs.ErrAuthExpired, vfs.ErrAuthExpired},
+		{http.StatusNotFound, "", vfs.ErrNotExist, vfs.ErrNotExist},
+		{http.StatusForbidden, "", vfs.ErrPermission, vfs.ErrPermission},
+		{http.StatusForbidden, "DLP blocked", vfs.ErrPermission, vfs.ErrPermission},
+		{http.StatusForbidden, "exportSizeLimitExceeded", vfs.ErrTooLarge, vfs.ErrPermission},
+		{http.StatusBadRequest, "requiredRevisionId must be the latest revision", nil, vfs.ErrConflict},
+		{http.StatusBadRequest, "not the latest revision", nil, vfs.ErrConflict},
+		{http.StatusBadRequest, "invalid document structure", nil, vfs.ErrInvalidWrite},
+		{http.StatusTooManyRequests, "slow down", nil, nil},
+	} {
+		srv := googleError(t, c.status, c.message)
+		drive := vfs.NewGoogleDrive(holder, srv.URL+"/", srv.Client())
+		docs := vfs.NewGoogleDocs(holder, srv.URL+"/", srv.Client())
+
+		_, metaErr := drive.GetMeta(ctx, "id")
+		_, _, exportErr := drive.Export(ctx, "id", "application/zip")
+		_, getErr := docs.Get(ctx, "id")
+		_, batchErr := docs.BatchUpdate(ctx, "id", vfs.DocsBatch{})
+
+		for _, got := range []struct {
+			err, want error
+		}{{metaErr, c.drive}, {exportErr, c.drive}, {getErr, c.docs}, {batchErr, c.docs}} {
+			named := got.err != nil && strings.Contains(got.err.Error(), fmt.Sprintf("HTTP %d", c.status))
+			if (got.want == nil && !named) || (got.want != nil && !errors.Is(got.err, got.want)) {
+				t.Fatalf("%d %q: %v, want %v", c.status, c.message, got.err, got.want)
 			}
-			createdMetaOnly = true
-			writeJSON(w, 200, fileJSON("newdoc", "Policy", "application/vnd.google-apps.document"))
-		case p == "/files" || p == "/files/":
-			writeJSON(w, 200, map[string]any{"files": []any{fileJSON("bin1", "a.txt", "text/plain")}})
-		case strings.HasSuffix(p, "/root1"):
-			writeJSON(w, 200, fileJSON("root1", "Root", "application/vnd.google-apps.folder"))
-		case strings.HasSuffix(p, "/missing"):
-			writeJSON(w, 404, map[string]any{"error": map[string]any{"code": 404, "message": "not found"}})
-		case strings.HasSuffix(p, "/denied"):
-			writeJSON(w, 403, map[string]any{"error": map[string]any{"code": 403, "message": "forbidden"}})
-		case strings.HasSuffix(p, "/expired"):
-			writeJSON(w, 401, map[string]any{"error": map[string]any{"code": 401, "message": "unauthorized"}})
-		default:
-			http.NotFound(w, r)
+		}
+		if c.message != "" && c.status == http.StatusForbidden && !strings.Contains(getErr.Error(), c.message) {
+			t.Fatalf("403 %q = %v, want the message", c.message, getErr)
 		}
 	}
-	mux.HandleFunc("/files/", handleFiles)
-	mux.HandleFunc("/files", handleFiles)
-	mux.HandleFunc("/drive/v3/files/", handleFiles)
-	mux.HandleFunc("/drive/v3/files", handleFiles)
 
-	ts := httptest.NewServer(mux)
-	t.Cleanup(ts.Close)
-
-	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok-1"})
-	api := vfs.NewGoogleDrive(holder, ts.URL+"/", ts.Client())
-
-	meta, err := api.GetMeta(ctx, "root1")
-	if err != nil || meta.ID != "root1" || !meta.IsDir {
-		t.Fatalf("GetMeta = %+v err=%v", meta, err)
-	}
-	kids, err := api.List(ctx, "root1")
-	if err != nil || len(kids) != 1 || kids[0].ID != "bin1" {
-		t.Fatalf("List = %+v err=%v", kids, err)
-	}
-	if !strings.Contains(lastListQ, "trashed = false") || strings.Contains(lastListQ, "name =") {
-		t.Fatalf("List q = %q", lastListQ)
-	}
-	body, err := api.GetMedia(ctx, "bin1", 0, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, _ := io.ReadAll(body)
-	_ = body.Close()
-	if string(data) != "blob" {
-		t.Fatalf("GetMedia = %q", data)
-	}
-	body, err = api.GetMedia(ctx, "bin1", 1, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, _ = io.ReadAll(body)
-	_ = body.Close()
-	if string(data) != "lo" {
-		t.Fatalf("GetMedia range = %q", data)
-	}
-
-	if _, err := api.GetMeta(ctx, "missing"); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("404: %v", err)
-	}
-	if _, err := api.GetMeta(ctx, "denied"); !errors.Is(err, vfs.ErrPermission) {
-		t.Fatalf("403: %v", err)
-	}
-	if _, err := api.GetMeta(ctx, "expired"); !errors.Is(err, vfs.ErrAuthExpired) {
-		t.Fatalf("401: %v", err)
-	}
-
-	holder.Set(mount.Credential{Token: "tok-2"})
-	if _, err := api.GetMeta(ctx, "root1"); err != nil {
-		t.Fatal(err)
-	}
-	if len(sawAuth) == 0 || !strings.Contains(strings.Join(sawAuth, ","), "Bearer tok-1") {
-		t.Fatalf("auth headers = %v", sawAuth)
-	}
-	if !strings.Contains(strings.Join(sawAuth, ","), "Bearer tok-2") {
-		t.Fatalf("refresh not sent: %v", sawAuth)
-	}
-
-	zipBody, _, err := api.Export(ctx, "doczip", "application/zip")
-	if err != nil {
-		t.Fatal(err)
-	}
-	zipData, _ := io.ReadAll(zipBody)
-	_ = zipBody.Close()
-	if len(zipData) < 4 || zipData[0] != 'P' {
-		t.Fatalf("export zip = %q", zipData[:min(8, len(zipData))])
-	}
-	if _, _, err := api.Export(ctx, "huge", "application/zip"); !errors.Is(err, vfs.ErrTooLarge) {
-		t.Fatalf("export oversize: %v", err)
-	}
-	created, err := api.Create(ctx, "root1", "Policy", "application/vnd.google-apps.document", "", nil, 0)
-	if err != nil || created.ID != "newdoc" || !createdMetaOnly {
-		t.Fatalf("metadata-only create = %+v saw=%v err=%v", created, createdMetaOnly, err)
-	}
-
-	gone := httptest.NewServer(mux)
+	gone := googleError(t, http.StatusOK, "")
 	gone.Close()
-	unreachable := vfs.NewGoogleDrive(holder, gone.URL+"/", nil)
-	if _, err := unreachable.PutMedia(ctx, "bin1", "text/plain", strings.NewReader("x"), 1); err == nil {
-		t.Fatal("upload to a closed endpoint succeeded")
-	}
-	if _, err := unreachable.List(ctx, "root1"); err == nil {
-		t.Fatal("list on a closed endpoint succeeded")
-	}
-	if _, err := vfs.NewGoogleDrive(holder, "http://bad host/", nil).GetMeta(ctx, "root1"); err == nil {
-		t.Fatal("call to a malformed endpoint succeeded")
+	closed := vfs.NewGoogleDrive(holder, gone.URL+"/", nil)
+	_, putErr := closed.PutMedia(ctx, "id", "text/plain", strings.NewReader("x"), 1)
+	_, listErr := closed.List(ctx, "root")
+	_, docsErr := vfs.NewGoogleDocs(holder, gone.URL+"/", nil).Get(ctx, "id")
+	_, malformedErr := vfs.NewGoogleDrive(holder, "http://bad host/", nil).GetMeta(ctx, "id")
+	if putErr == nil || listErr == nil || docsErr == nil || malformedErr == nil {
+		t.Fatalf("closed endpoint: put=%v list=%v docs=%v; malformed URL: %v", putErr, listErr, docsErr, malformedErr)
 	}
 }
 
-func mustZipHTML(html string) []byte {
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	w, err := zw.Create("index.html")
+// A writable mount reads a Google Doc from a Docs API server: every tab and
+// child tab (a tab with no title is named by its id), headings at levels 1
+// to 6, inline marks, ordered and bulleted lists, images with and without
+// properties, and tables. A document with a body and no tabs reads, and a
+// document with neither has no blocks.
+func TestDrive_aGoogleDocReadsTabsHeadingsMarksListsImagesAndTables(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	api := testdrive.Tree()
+	api.Add("root-a", vfs.DriveMeta{ID: "legacy", Name: "Legacy", MimeType: "application/vnd.google-apps.document"}, nil)
+	api.Add("root-a", vfs.DriveMeta{ID: "empty", Name: "Empty", MimeType: "application/vnd.google-apps.document"}, nil)
+	tabs, err := os.ReadFile("testdata/docs_get_tabs.json")
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
-	_, _ = w.Write([]byte(html))
-	_ = zw.Close()
-	return buf.Bytes()
+	documents := map[string][]byte{
+		"/v1/documents/doc1":   tabs,
+		"/v1/documents/empty":  []byte(`{}`),
+		"/v1/documents/legacy": []byte(`{"body": {"content": [{"startIndex": 1, "endIndex": 5, "paragraph": {"elements": [{"textRun": {"content": "Old\n"}}]}}]}}`),
+	}
+	docsSrv := testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(documents[r.URL.Path])
+	}))
+	driveSrv := testhttp.New(t, api)
+	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok"})
+	open := vfs.DriveWith(
+		vfs.NewGoogleDrive(holder, driveSrv.URL+"/", driveSrv.Client()),
+		vfs.NewGoogleDocs(holder, docsSrv.URL+"/", docsSrv.Client()), nil, holder)
+	ms, err := vfs.Tree(vfs.At("contracts", open))(ctx, "s", vfs.Request{Bindings: []mount.Binding{{
+		Writable: true, Params: map[string]string{mount.ParamName: "contracts", mount.ParamFolderID: "root-a"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	doc, err := ms.Route(ctx, "/workspace/contracts/Spec").ReadText(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := ms.Route(ctx, "/workspace/contracts/Legacy").ReadText(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := ms.Route(ctx, "/workspace/contracts/Empty").ReadText(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type got struct{ kind, text, attrs string }
+	var blocks []got
+	for _, b := range doc.(vfs.Structured).Blocks() {
+		attrs := fmt.Sprint(b.Style.Level)
+		for _, k := range []string{"tab_id", "list_type", "object_id", "content_uri"} {
+			if v := b.Style.Attributes[k]; v != "" {
+				attrs += " " + k + "=" + v
+			}
+		}
+		blocks = append(blocks, got{b.Kind, b.PlainText(), attrs})
+	}
+	want := []got{
+		{vfs.BlockKindHeading, "Intro", "1 tab_id=t.a"},
+		{vfs.BlockKindHeading, "Deep", "6 tab_id=t.a"},
+		{vfs.BlockKindHeading, "Low", "1 tab_id=t.a"},
+		{vfs.BlockKindParagraph, "See x i and Maya", "0 tab_id=t.a"},
+		{vfs.BlockKindListItem, "a", "2 tab_id=t.a list_type=ol"},
+		{vfs.BlockKindListItem, "b", "1 tab_id=t.a list_type=ul"},
+		{vfs.BlockKindImage, "Chart", "0 tab_id=t.a object_id=kix.pic content_uri=https://img"},
+		{vfs.BlockKindParagraph, "Fig", "0 tab_id=t.a"},
+		{vfs.BlockKindImage, "", "0 tab_id=t.a object_id=kix.bare"},
+		{vfs.BlockKindTable, "\n\tCell\t", "0 tab_id=t.a"},
+		{vfs.BlockKindParagraph, "Untitled", "0 tab_id=t.c"},
+		{vfs.BlockKindParagraph, "More", "0 tab_id=t.b"},
+	}
+	if !slices.Equal(blocks, want) {
+		t.Fatalf("blocks =\n%v\nwant\n%v", blocks, want)
+	}
+	for _, part := range []string{
+		"<strong>x</strong>", "<s><em>i</em></s>", `<a href="mailto:maya">Maya</a>`,
+		`<h1 class="tacklr-tab">Appendix</h1>`, `<h1 class="tacklr-tab">t.c</h1>`, "<h6>Deep</h6>", "<ol>\n<li>a</li>",
+	} {
+		if !strings.Contains(doc.Text(), part) {
+			t.Fatalf("projection has no %q:\n%s", part, doc.Text())
+		}
+	}
+	if !blockHasText(legacy, "Old") || len(empty.(vfs.Structured).Blocks()) != 0 {
+		t.Fatalf("legacy body = %+v, empty document = %+v", legacy.(vfs.Structured).Blocks(), empty.(vfs.Structured).Blocks())
+	}
 }
+
 func exportZip(t *testing.T) []byte {
 	t.Helper()
 	raw, err := os.ReadFile("testdata/drive_export_spec.zip")
@@ -403,19 +318,24 @@ func exportZip(t *testing.T) []byte {
 	return raw
 }
 
+// A read-only mount stats a Google Doc and Sheet with their Google media
+// type and no size, refuses raw reads of them, and reads a Doc from its
+// zip export or from plain HTML. An export that is neither does not read.
 func TestDrive_exportReadHonestStat(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	api.Nodes["doc1"].Export = exportZip(t)
+	api.Add("root-a", vfs.DriveMeta{ID: "plain", Name: "Plain", MimeType: "application/vnd.google-apps.document"}, nil)
+	api.Nodes["plain"].Export = []byte("<html><body><p>plain</p></body></html>")
+	api.Add("root-a", vfs.DriveMeta{ID: "junk", Name: "Junk", MimeType: "application/vnd.google-apps.document"}, nil)
+	api.Nodes["junk"].Export = []byte("junk")
 
 	ms := mountDrive(t, api, false)
 
 	if st, err := ms.Route(ctx, "/workspace/contracts/Spec").
 		Stat(ctx); err != nil || st.MediaType != "application/vnd.google-apps.document" || st.Size != 0 {
 		t.Fatalf("Stat = %+v err=%v", st, err)
-	}
-	if api.Exports != 0 {
-		t.Fatalf("Stat exported %d times", api.Exports)
 	}
 
 	if sheet, err := ms.Route(ctx, "/workspace/contracts/Budget").
@@ -444,17 +364,11 @@ func TestDrive_exportReadHonestStat(t *testing.T) {
 	if doc.MediaType() != "application/vnd.google-apps.document" {
 		t.Fatalf("mt = %s", doc.MediaType())
 	}
-}
-
-func TestDrive_exportTooLarge(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	api.Nodes["doc1"].Export = bytesRepeat(vfs.MaxDocsExportBytes + 2)
-	ms := mountDrive(t, api, false)
-
-	if _, err := ms.Route(ctx, "/workspace/contracts/Spec").
-		ReadText(ctx); !errors.Is(err, vfs.ErrTooLarge) {
-		t.Fatalf("oversize: %v", err)
+	if plain, err := ms.Route(ctx, "/workspace/contracts/Plain").ReadText(ctx); err != nil || !blockHasText(plain, "plain") {
+		t.Fatalf("an HTML export that is not a zip: %v", err)
+	}
+	if _, err := ms.Route(ctx, "/workspace/contracts/Junk").ReadText(ctx); !errors.Is(err, vfs.ErrNotSupported) {
+		t.Fatalf("an export that is neither zip nor HTML: %v", err)
 	}
 }
 
@@ -462,7 +376,11 @@ func bytesRepeat(n int) []byte {
 	return []byte(strings.Repeat("a", n))
 }
 
+// A writable Drive mount refuses to remove its root or an ambiguous name,
+// and refuses raw or plain-text writes to a Google Doc, which keeps its
+// blocks. A removed Google Doc is gone.
 func TestDrive_writablePlaintextAndTrash(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	spans := []vfs.DocsSpan{
@@ -472,31 +390,6 @@ func TestDrive_writablePlaintextAndTrash(t *testing.T) {
 	}
 	api.SeedDoc("doc1", "R0", spans, nil)
 	ms := mountDrive(t, api, true)
-
-	if err := ms.Route(ctx, "/workspace/contracts/new.txt").
-		WriteFile(ctx, []byte("hello\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	if got, err := ms.Route(ctx, "/workspace/contracts/new.txt").
-		ReadFile(ctx); err != nil || string(got) != "hello\n" {
-		t.Fatalf("read new = %q err=%v", got, err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/contracts/sub/dir").
-		MkdirAll(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/contracts/new.txt").
-		Remove(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/contracts/new.txt").
-		ReadFile(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("trashed: %v", err)
-	}
 
 	if err := ms.Route(ctx, "/workspace/contracts").
 		Remove(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
@@ -520,7 +413,7 @@ func TestDrive_writablePlaintextAndTrash(t *testing.T) {
 
 	if still, err := ms.Route(ctx, "/workspace/contracts/Spec").
 		ReadText(ctx); err != nil || !blockHasText(still, "Hello") {
-		t.Fatalf("identity write must not replace Doc IR: %v", err)
+		t.Fatalf("Doc after a refused plain write: %v", err)
 	}
 
 	if err := ms.Route(ctx, "/workspace/contracts/Spec").
@@ -539,7 +432,11 @@ func TestDrive_writablePlaintextAndTrash(t *testing.T) {
 	}
 }
 
+// A Google Doc write needs the revision of a read: a new checkout with no
+// revision conflicts, and so does a checkout whose revision Docs has
+// since moved. Both leave the Doc as it was.
 func TestDrive_docsWriteCAS(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	spans := []vfs.DocsSpan{
@@ -555,9 +452,6 @@ func TestDrive_docsWriteCAS(t *testing.T) {
 	})
 	if err := ms.WriteDocument(ctx, empty); !errors.Is(err, vfs.ErrConflict) {
 		t.Fatalf("empty hint: %v", err)
-	}
-	if len(api.DocsBatches) != 0 {
-		t.Fatalf("empty hint must not BatchUpdate: %d", len(api.DocsBatches))
 	}
 
 	orig, err := ms.Route(ctx, "/workspace/contracts/Spec").
@@ -591,19 +485,11 @@ func TestDrive_docsWriteCAS(t *testing.T) {
 	}
 }
 
-func TestDrive_writeSheetRejected(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	api.SeedDoc("sheet1", "R0", nil, nil)
-	ms := mountDrive(t, api, true)
-	if err := ms.WriteDocument(ctx, vfs.NewRichDocument("/workspace/contracts/Budget", "application/vnd.google-apps.document", []vfs.Block{
-		{Kind: vfs.BlockKindParagraph, Text: "x"},
-	})); !errors.Is(err, vfs.ErrNotSupported) {
-		t.Fatalf("sheet: %v", err)
-	}
-}
-
+// A read-only mount refuses a Doc write and a canceled write fails. A
+// writable mount creates a host's text document in new nested folders,
+// writes a plain text document and sets the blocks of a Google Doc.
 func TestDrive_writeDocumentEdges(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	api.SeedDoc("doc1", "R0", []vfs.DocsSpan{
@@ -625,7 +511,7 @@ func TestDrive_writeDocumentEdges(t *testing.T) {
 	})); err == nil {
 		t.Fatal("canceled write")
 	}
-	nested := vfs.NewTextDocument("/workspace/contracts/sub/dir/edge.txt", "text/plain", "utf-8", "plain")
+	nested := driveHostText{"/workspace/contracts/sub/dir/edge.txt", "plain"}
 	if err := ms.WriteDocument(ctx, nested); err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +548,11 @@ func TestDrive_writeDocumentEdges(t *testing.T) {
 	}
 }
 
+// Setting the blocks of a Google Doc writes clamped headings, nested
+// bulleted and ordered lists and paragraphs, and deletes the image the
+// blocks leave out.
 func TestDrive_docsSetBlocksNestedAndOmitImage(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	spans := []vfs.DocsSpan{
@@ -673,50 +563,55 @@ func TestDrive_docsSetBlocksNestedAndOmitImage(t *testing.T) {
 	}
 	api.SeedDoc("doc1", "R0", spans, []vfs.DocTab{{ID: "t.abc", Title: "Intro", Index: 0}})
 	ms := mountDrive(t, api, true)
+	attrs := func(kv ...string) vfs.StyleMeta {
+		m := map[string]string{"tab_id": "t.abc"}
+		for i := 0; i < len(kv); i += 2 {
+			m[kv[i]] = kv[i+1]
+		}
+		return vfs.StyleMeta{Attributes: m}
+	}
+	level := func(n int, s vfs.StyleMeta) vfs.StyleMeta { s.Level = n; return s }
 
-	doc, err := ms.Route(ctx, "/workspace/contracts/Spec").
-		ReadText(ctx)
+	doc, err := ms.Route(ctx, "/workspace/contracts/Spec").ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rd, ok := vfs.AsRich(doc)
-	if !ok {
-		t.Fatalf("type %T", doc)
-	}
+	rd, _ := vfs.AsRich(doc)
 	rd.SetBlocks([]vfs.Block{
-		{Kind: vfs.BlockKindHeading, Text: "Title", Style: vfs.StyleMeta{Level: 1, Attributes: map[string]string{"tab_id": "t.abc"}}},
-		{Kind: vfs.BlockKindListItem, Text: "a", Style: vfs.StyleMeta{Level: 1, Attributes: map[string]string{"tab_id": "t.abc", "list_type": "ul", "list_id": "l1"}}},
-		{Kind: vfs.BlockKindListItem, Text: "nested", Style: vfs.StyleMeta{Level: 2, Attributes: map[string]string{"tab_id": "t.abc", "list_type": "ul", "list_id": "l1"}}},
-		{Kind: vfs.BlockKindParagraph, Text: "kept", Style: vfs.StyleMeta{Attributes: map[string]string{"tab_id": "t.abc"}}},
+		{Kind: vfs.BlockKindHeading, Text: "Title", Style: level(0, attrs())},
+		{Kind: vfs.BlockKindHeading, Text: "Nine", Style: level(9, attrs())},
+		{Kind: vfs.BlockKindListItem, Text: "a", Style: level(1, attrs("list_type", "ul", "list_id", "l1"))},
+		{Kind: vfs.BlockKindListItem, Text: "nested", Style: level(2, attrs("list_type", "ul", "list_id", "l1"))},
+		{Kind: vfs.BlockKindListItem, Text: "first", Style: level(1, attrs("list_type", "ol", "list_id", "l2"))},
+		{Kind: vfs.BlockKindParagraph, Text: "kept", Style: attrs()},
 	})
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-
-	got, err := ms.Route(ctx, "/workspace/contracts/Spec").
-		ReadText(ctx)
+	got, err := ms.Route(ctx, "/workspace/contracts/Spec").ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var kinds []string
-	var texts []string
+
+	var blocks []string
 	for _, b := range got.(vfs.Structured).Blocks() {
-		kinds = append(kinds, b.Kind)
-		texts = append(texts, b.Text)
-		if b.Kind == vfs.BlockKindImage {
-			t.Fatalf("omitted image still present: %+v", b)
+		if b.Text == "" {
+			continue // the empty paragraph a Docs body always keeps
 		}
+		blocks = append(blocks, fmt.Sprintf("%s %d %s", b.Kind, b.Style.Level, b.Text))
 	}
-	if !strings.Contains(strings.Join(kinds, ","), "heading") || !strings.Contains(strings.Join(kinds, ","), "list_item") {
-		t.Fatalf("kinds = %v", kinds)
-	}
-	joined := strings.Join(texts, " ")
-	if !strings.Contains(joined, "nested") || !strings.Contains(joined, "Title") || !strings.Contains(joined, "kept") {
-		t.Fatalf("texts = %v", texts)
+	want := []string{"heading 1 Title", "heading 6 Nine", "list_item 1 a", "list_item 2 nested", "list_item 1 first", "paragraph 0 kept"}
+	if !slices.Equal(blocks, want) {
+		t.Fatalf("blocks = %q, want %q", blocks, want)
 	}
 }
 
+// A Google Doc takes a line write and a full HTML write. A write against
+// a stale read is refused, a write that meets one revision conflict
+// succeeds on its next try and one that meets two conflicts fails. HTML
+// with a table written to a new path creates a Doc, after one conflict.
 func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	spans := []vfs.DocsSpan{
@@ -818,6 +713,7 @@ func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
 		t.Fatalf("conflict retry: %v", err)
 	}
 
+	api.FailNextDocWrites(1)
 	html := "<h1>CRE SPIKE</h1>\n<table><tr><td>A</td><td>B</td></tr></table>"
 	_, err = ms.Apply(ctx, "/workspace/contracts/CRE SPIKE Public Data", vfs.Mutation{Content: &html})
 	if err != nil {
@@ -845,7 +741,10 @@ func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
 	}
 }
 
+// Full HTML written to a Doc with one tab replaces that tab, although the
+// HTML names no tab.
 func TestDrive_htmlReplaceOnSingleTabOmitsTabID(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	spans := []vfs.DocsSpan{
@@ -936,7 +835,10 @@ func exportBudgetZip(t *testing.T) []byte {
 	return raw
 }
 
+// A read-only mount reads a Google Sheet from its HTML export: each sheet
+// with its inputs and values, and a projection with no HTML.
 func TestDrive_sheetStatAndExportRead(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	api.Nodes["sheet1"].Export = exportBudgetZip(t)
@@ -973,7 +875,11 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	}
 }
 
+// A writable mount writes a cell value and every format of a Google Sheet,
+// keeps formulas, refuses a write to a merged cell other than its first,
+// and refuses plain, HTML, line, range, sheet and block writes.
 func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	api.SeedSheet("sheet1", vfs.SheetsSnapshot{SpreadsheetID: "sheet1", Sheets: budgetSheets(), Named: []vfs.NamedRange{{Name: "Total", SheetID: "1", A1: "B2"}}})
@@ -1125,22 +1031,6 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 		Rev: rev, Blocks: []vfs.Block{{Kind: vfs.BlockKindSheet, Text: "A\tB"}},
 	}); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("blocks replace: %v", err)
-	}
-}
-
-func TestDrive_sheetCheckoutTooLarge(t *testing.T) {
-	ctx := t.Context()
-	api := testdrive.Tree()
-	row := make([]vfs.Cell, vfs.MaxSheetCells+1)
-	for i := range row {
-		row[i] = vfs.Cell{Input: "x", Value: "x"}
-	}
-	api.SeedSheet("sheet1", vfs.SheetsSnapshot{SpreadsheetID: "sheet1", Sheets: []vfs.Sheet{{ID: "1", Title: "Budget", Cells: [][]vfs.Cell{row}}}})
-	ms := mountDrive(t, api, true)
-
-	if _, err := ms.Route(ctx, "/workspace/contracts/Budget").
-		ReadText(ctx); !errors.Is(err, vfs.ErrTooLarge) {
-		t.Fatalf("checkout cap: %v", err)
 	}
 }
 

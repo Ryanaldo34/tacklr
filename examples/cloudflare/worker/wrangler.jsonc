@@ -1,0 +1,13 @@
+{
+  "name": "tacklr-example",
+  "main": "src/index.js",
+  "compatibility_date": "2025-09-01",
+  // Go's js/wasm runtime reads process; nodejs_compat provides it.
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "SESSIONS", "class_name": "Session" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Session"] }],
+  // A request may use up to five minutes of CPU (Workers Paid).
+  "limits": { "cpu_ms": 300000 }
+}

@@ -1,5 +1,5 @@
 // Package postgres keeps sessions durable in Postgres: the session Store
-// (checkpoints and tool-call outcomes), SecretStorage (the users' delegated
+// (checkpoints and tool-call bodies), SecretStorage (the users' delegated
 // tokens, sealed before they are written) and the EventLog.
 //
 // The host owns the connection pool and passes it in; the three share it,
@@ -54,7 +54,8 @@ func New(pool *pgxpool.Pool, opts Options) (*DB, error) {
 func (db *DB) sql(query string) string { return strings.ReplaceAll(query, "{s}", db.schema) }
 
 // Setup creates the schema and the session tables. Every statement is
-// idempotent, so run it on each deploy.
+// idempotent, so run it on each deploy; concurrent runs (hosts and workers
+// that start together) wait for each other on an advisory lock.
 func (db *DB) Setup(ctx context.Context) error {
 	_, err := db.pool.Exec(ctx, db.sql(setupScript), pgx.QueryExecModeSimpleProtocol)
 	if err != nil {
@@ -63,21 +64,31 @@ func (db *DB) Setup(ctx context.Context) error {
 	return nil
 }
 
+// setupScript runs as one implicit transaction (the simple protocol), which
+// holds the lock until it ends: two concurrent CREATE ... IF NOT EXISTS of
+// one table can otherwise both try to create it.
 const setupScript = `
+SELECT pg_advisory_xact_lock(hashtext('tacklr.session_setup:' || '{s}'));
 CREATE SCHEMA IF NOT EXISTS {s};
 
 CREATE TABLE IF NOT EXISTS {s}.session_checkpoints (
 	session_id text PRIMARY KEY,
 	revision   bigint NOT NULL,
-	checkpoint bytea NOT NULL,
 	updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS {s}.session_outcomes (
+CREATE TABLE IF NOT EXISTS {s}.session_checkpoint_rows (
+	session_id text NOT NULL,
+	kind       text NOT NULL,
+	key        text NOT NULL,
+	value      bytea NOT NULL,
+	PRIMARY KEY (session_id, kind, key)
+);
+
+CREATE TABLE IF NOT EXISTS {s}.session_calls (
 	session_id text NOT NULL,
 	call_key   text NOT NULL,
-	result     text NOT NULL,
-	record     bytea,
+	body       bytea NOT NULL,
 	PRIMARY KEY (session_id, call_key)
 );
 

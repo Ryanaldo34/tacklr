@@ -2,160 +2,58 @@ package vfsindex_test
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
-
-	"github.com/ryanaldo34/tacklr/brain/storetest"
-	"github.com/ryanaldo34/tacklr/vfs/mount"
 
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-// memFiles is a byte-only provider (no document path) whose Version follows
-// content and a touch counter. Reads return 256 bytes at a time; midRead
-// runs once, after the first 1 KiB of a read.
-type memFiles struct {
-	mu      sync.Mutex
-	files   map[string]string
-	touches int
-	opens   int
-	midRead func()
-	openErr error // OpenFile fails
-	readErr error // Read fails after the first 1 KiB
-	noRead  bool  // OpenFile returns a handle without Read
-	// unversioned makes Stat report no Version, as a backend that cannot tell.
-	unversioned bool
+// hookEmbedder is a host embedder that runs hook once, the first time it
+// embeds a text that contains trigger. An empty trigger fires on the first
+// call.
+type hookEmbedder struct {
+	storetest.Embedder
+	trigger string
+	hook    func()
+	fired   atomic.Bool
 }
 
-func (m *memFiles) open(context.Context, string, mount.Binding) (vfs.Provider, error) { return m, nil }
-
-func (m *memFiles) put(name, body string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.files[name] = body
+func (e *hookEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if e.hook != nil && slices.ContainsFunc(texts, func(s string) bool { return strings.Contains(s, e.trigger) }) && e.fired.CompareAndSwap(false, true) {
+		e.hook()
+	}
+	return e.Embedder.Embed(ctx, texts)
 }
 
-func (m *memFiles) touch() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.touches++
-}
-
-func (m *memFiles) openCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.opens
-}
-
-func (*memFiles) Validate(context.Context) error { return nil }
-
-func (m *memFiles) Stat(_ context.Context, name string) (vfs.FileInfo, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if name == "" {
-		return vfs.FileInfo{Name: ".", IsDir: true}, nil
-	}
-	body, ok := m.files[name]
-	if !ok {
-		return vfs.FileInfo{}, vfs.ErrNotExist
-	}
-	sum := sha256.Sum256([]byte(body))
-	fi := vfs.FileInfo{Name: name, Size: int64(len(body)), MediaType: vfs.DetectMediaType(name, nil)}
-	if !m.unversioned {
-		fi.Version = fmt.Sprintf("%s-%d", hex.EncodeToString(sum[:8]), m.touches)
-	}
-	return fi, nil
-}
-
-func (m *memFiles) OpenFile(ctx context.Context, name string, _ int, _ fs.FileMode) (vfs.File, error) {
-	st, err := m.Stat(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.opens++
-	switch {
-	case m.openErr != nil:
-		return nil, m.openErr
-	case m.noRead:
-		return statOnly{st}, nil
-	}
-	return &slowFile{data: m.files[name], fi: st, m: m}, nil
-}
-
-// statOnly is an open file that cannot be read.
-type statOnly struct{ fi vfs.FileInfo }
-
-func (statOnly) Close() error                  { return nil }
-func (f statOnly) Stat() (vfs.FileInfo, error) { return f.fi, nil }
-
-func (m *memFiles) ReadDir(context.Context, string) ([]vfs.DirEntry, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]vfs.DirEntry, 0, len(m.files))
-	for n := range m.files {
-		out = append(out, vfs.DirEntry{Name: n})
-	}
-	return out, nil
-}
-
-func (*memFiles) Remove(context.Context, string) error                { return vfs.ErrNotSupported }
-func (*memFiles) MkdirAll(context.Context, string, fs.FileMode) error { return vfs.ErrNotSupported }
-
-type slowFile struct {
-	data string
-	off  int
-	fi   vfs.FileInfo
-	m    *memFiles
-}
-
-func (f *slowFile) Close() error                { return nil }
-func (f *slowFile) Stat() (vfs.FileInfo, error) { return f.fi, nil }
-func (f *slowFile) Read(p []byte) (int, error) {
-	if f.off >= len(f.data) {
-		return 0, io.EOF
-	}
-	if f.off > 1<<10 && f.m.readErr != nil {
-		return 0, f.m.readErr
-	}
-	n := copy(p, f.data[f.off:min(f.off+256, len(f.data))])
-	f.off += n
-	if f.off > 1<<10 && f.m.midRead != nil {
-		hook := f.m.midRead
-		f.m.midRead = nil
-		hook()
-	}
-	return n, nil
-}
-
-// memHarness indexes a memFiles mount into a fresh engine.
-type memHarness struct {
+// harness indexes the local mount /workspace/work into a fresh engine.
+type harness struct {
+	dir   string
+	ms    *vfs.MountSession
 	idx   *vfsindex.MountIndexer
 	eng   *brain.Engine
 	store *brain.MemoryStore
-	emb   *storetest.Embedder
+	emb   *hookEmbedder
 }
 
-// memIndexer mounts files at /workspace/raw and indexes into a fresh engine.
-func memIndexer(t *testing.T, files *memFiles) memHarness {
+func newHarness(t *testing.T, opts ...brain.EngineOption) harness {
 	t.Helper()
-	ms := treeLocal(t, vfs.At("raw", files.open))
-	emb := &storetest.Embedder{}
-	store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb}))
-	eng, err := brain.NewEngine(store)
+	dir := t.TempDir()
+	ms := treeLocal(t, vfs.At("work", vfs.Local(dir)))
+	emb := &hookEmbedder{}
+	// One text a batch: chunks embed while the file is still read.
+	store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb, BatchSize: 1}))
+	eng, err := brain.NewEngine(store, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +61,21 @@ func memIndexer(t *testing.T, files *memFiles) memHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return memHarness{idx: idx, eng: eng, store: store, emb: emb}
+	return harness{dir: dir, ms: ms, idx: idx, eng: eng, store: store, emb: emb}
+}
+
+// write stores body at /workspace/work/name.
+func (h harness) write(t *testing.T, name, body string) {
+	t.Helper()
+	if err := h.ms.Route(t.Context(), "/workspace/work/"+name).WriteFile(t.Context(), []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// stored is the indexed text of vpath's chunks in order.
+func (h harness) stored(vpath string) string {
+	tree, _ := h.store.GetTree(context.Background(), h.idx.Scope, h.idx.DocumentID(vpath), 0)
+	return joinStored(tree.Parts)
 }
 
 func numberedLines(n int) string {
@@ -175,24 +87,24 @@ func numberedLines(n int) string {
 }
 
 func TestMountIndexer_anEditReembedsOnlyTheChunksAroundIt(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
+	h := newHarness(t)
+	const vpath = "/workspace/work/big.txt"
 	body := numberedLines(400)
-	files := &memFiles{files: map[string]string{"big.txt": body}}
-	h := memIndexer(t, files)
-	idx, eng, store, emb := h.idx, h.eng, h.store, h.emb
-	const vpath = "/workspace/raw/big.txt"
-	if _, err := idx.IndexPath(ctx, vpath); err != nil {
+	h.write(t, "big.txt", body)
+	if _, err := h.idx.IndexPath(ctx, vpath); err != nil {
 		t.Fatal(err)
 	}
-	first := emb.Take()
+	first := h.emb.Take()
 	edited := "inserted-needle line at the top\n" + body
-	files.put("big.txt", edited)
+	h.write(t, "big.txt", edited)
 
-	_, err := idx.IndexPath(ctx, vpath)
-	second := emb.Take()
-	kidsTree, _ := store.GetTree(ctx, idx.Scope, idx.DocumentID(vpath), 0)
-	kids := kidsTree.Parts
-	page, _ := eng.Search(ctx, idx.Scope, brain.SearchRequest{Query: "inserted-needle"})
+	_, err := h.idx.IndexPath(ctx, vpath)
+	second := h.emb.Take()
+	kids, _ := h.store.GetTree(ctx, h.idx.Scope, h.idx.DocumentID(vpath), 0)
+	page, _ := h.eng.Search(ctx, h.idx.Scope, brain.SearchRequest{Query: "inserted-needle"})
+	hits := slices.Collect(page.Results.Objects())
 
 	if err != nil || first < 8 {
 		t.Fatalf("index = %v, first run embedded %d texts, want one per chunk", err, first)
@@ -201,98 +113,51 @@ func TestMountIndexer_anEditReembedsOnlyTheChunksAroundIt(t *testing.T) {
 	if second > 3 {
 		t.Errorf("edit embedded %d texts of %d, want at most 3", second, first)
 	}
-	if got := joinStored(kids); got != strings.TrimSuffix(edited, "\n") {
+	if joinStored(kids.Parts) != strings.TrimSuffix(edited, "\n") {
 		t.Errorf("chunks no longer cover the file in order")
 	}
-	if end := kids[len(kids)-1].Properties[vfsindex.PropEndLine]; end != float64(401) {
+	if end := kids.Parts[len(kids.Parts)-1].Properties[vfsindex.PropEndLine]; end != float64(401) {
 		t.Errorf("last chunk ends at line %v, want 401 after the insert", end)
 	}
-	if len(slices.Collect(page.Results.Objects())) == 0 || slices.Collect(page.Results.Objects())[0].ID != idx.DocumentID(vpath) {
-		t.Errorf("search for the inserted line = %v", slices.Collect(page.Results.Objects()))
-	}
-}
-
-func TestMountIndexer_anUnchangedVersionSkipsTheFileUnreadAndANewVersionOfTheSameTextEmbedsOnlyTheParent(t *testing.T) {
-	ctx := t.Context()
-	files := &memFiles{files: map[string]string{"a.txt": numberedLines(100)}}
-	h := memIndexer(t, files)
-	idx, emb := h.idx, h.emb
-	const vpath = "/workspace/raw/a.txt"
-	if _, err := idx.IndexPath(ctx, vpath); err != nil {
-		t.Fatal(err)
-	}
-	opens := files.openCount()
-	emb.Take()
-
-	same, sameErr := idx.IndexPath(ctx, vpath)
-	reads := files.openCount() - opens
-	files.touch()
-	touched, touchErr := idx.IndexPath(ctx, vpath)
-
-	if sameErr != nil || same != vfsindex.PathSkipped || reads != 0 {
-		t.Errorf("same version = %q %v after %d opens, want skipped unread", same, sameErr, reads)
-	}
-	if touchErr != nil || touched != vfsindex.PathIndexed || emb.Take() != 1 {
-		t.Errorf("new version, same text = %q %v, want indexed with only the parent embedded", touched, touchErr)
-	}
-}
-
-func TestMountIndexer_aBackendWithoutVersionsOrDocumentsRereadsButRewritesNothing(t *testing.T) {
-	ctx := t.Context()
-	// Markdown on a byte-only backend: no document path, so it streams.
-	files := &memFiles{unversioned: true, files: map[string]string{"notes.md": "# Notes\n\nunversioned-token body\n"}}
-	h := memIndexer(t, files)
-	const vpath = "/workspace/raw/notes.md"
-	if _, err := h.idx.IndexPath(ctx, vpath); err != nil {
-		t.Fatal(err)
-	}
-	h.emb.Take()
-
-	again, err := h.idx.IndexPath(ctx, vpath)
-	embedded := h.emb.Take()
-	page, _ := h.eng.Search(ctx, h.idx.Scope, brain.SearchRequest{Query: "unversioned-token"})
-
-	if err != nil || again != vfsindex.PathIndexed || embedded != 1 {
-		t.Errorf("re-index without a version = %q %v, embedded %d texts, want indexed with only the parent embedded", again, err, embedded)
-	}
-	if len(slices.Collect(page.Results.Objects())) != 1 {
-		t.Errorf("search = %v, want the notes", slices.Collect(page.Results.Objects()))
+	if len(hits) == 0 || hits[0].ID != h.idx.DocumentID(vpath) {
+		t.Errorf("search for the inserted line = %v", hits)
 	}
 }
 
 func TestMountIndexer_aReindexThatAnotherIndexerCommitsFirstIsRetried(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
-	files := &memFiles{files: map[string]string{"a.txt": numberedLines(100)}}
-	h := memIndexer(t, files)
-	idx, store := h.idx, h.store
-	const vpath = "/workspace/raw/a.txt"
+	h := newHarness(t)
+	const vpath = "/workspace/work/a.txt"
+	h.write(t, "a.txt", numberedLines(100))
 	latest := "rewritten while it was read\n" + numberedLines(50)
-	// Partway through the first read, the file changes and another index commits.
-	files.midRead = func() {
-		files.put("a.txt", latest)
-		if _, err := idx.IndexPath(ctx, vpath); err != nil {
+	// While the first index embeds its chunks, the file changes and another
+	// index commits.
+	h.emb.trigger = "records"
+	h.emb.hook = func() {
+		h.write(t, "a.txt", latest)
+		if _, err := h.idx.IndexPath(ctx, vpath); err != nil {
 			t.Errorf("inner index: %v", err)
 		}
 	}
 
-	_, err := idx.IndexPath(ctx, vpath)
-	kidsTree, _ := store.GetTree(ctx, idx.Scope, idx.DocumentID(vpath), 0)
-	kids := kidsTree.Parts
+	_, err := h.idx.IndexPath(ctx, vpath)
 
 	if err != nil {
 		t.Fatalf("index after another indexer committed first = %v, want a retry", err)
 	}
-	if got := joinStored(kids); got != strings.TrimSuffix(latest, "\n") {
+	if h.stored(vpath) != strings.TrimSuffix(latest, "\n") {
 		t.Errorf("chunks after the retry do not hold the latest text")
 	}
 }
 
 func TestMountIndexer_chunkSizesOutOfOrderFailTheIndex(t *testing.T) {
-	files := &memFiles{files: map[string]string{"a.txt": "text\n"}}
-	idx := memIndexer(t, files).idx
-	idx.Chunking = vfsindex.ChunkSizes{Min: 64, Avg: 32}
+	t.Parallel()
+	h := newHarness(t)
+	h.write(t, "a.txt", "text\n")
+	h.idx.Chunking = vfsindex.ChunkSizes{Min: 64, Avg: 32}
 
-	_, err := idx.IndexPath(t.Context(), "/workspace/raw/a.txt")
+	_, err := h.idx.IndexPath(t.Context(), "/workspace/work/a.txt")
 
 	if err == nil || !strings.Contains(err.Error(), "Min < Avg <= Max") {
 		t.Fatalf("index with Min > Avg = %v", err)
@@ -300,67 +165,68 @@ func TestMountIndexer_chunkSizesOutOfOrderFailTheIndex(t *testing.T) {
 }
 
 func TestMountIndexer_aFileThatCannotBeReadOrChunkedFailsTheIndexAndKeepsThePreviousOne(t *testing.T) {
-	const vpath = "/workspace/raw/a.txt"
+	t.Parallel()
+	const vpath = "/workspace/work/a.txt"
 	for name, tc := range map[string]struct {
-		arrange func(context.CancelFunc, *memFiles, memHarness)
+		arrange func(*testing.T, context.CancelFunc, harness)
 		want    string
 	}{
-		"the file fails to open": {func(_ context.CancelFunc, m *memFiles, _ memHarness) { m.openErr = errors.New("gateway timeout") }, "gateway timeout"},
-		"the file has no reader": {func(_ context.CancelFunc, m *memFiles, _ memHarness) { m.noRead = true }, "not readable"},
-		"a read fails midway":    {func(_ context.CancelFunc, m *memFiles, _ memHarness) { m.readErr = errors.New("connection reset") }, "connection reset"},
-		"the caller cancels":     {func(cancel context.CancelFunc, m *memFiles, _ memHarness) { m.midRead = cancel }, "context canceled"},
-		"the chunk kind is unknown": {func(_ context.CancelFunc, _ *memFiles, h memHarness) {
+		"the file cannot be opened": {func(t *testing.T, _ context.CancelFunc, h harness) {
+			if err := os.Chmod(filepath.Join(h.dir, "a.txt"), 0); err != nil {
+				t.Fatal(err)
+			}
+		}, vfs.ErrPermission.Error()},
+		// The parent embeds first, so the read finds the context ended.
+		"the caller cancels before the read": {func(_ *testing.T, cancel context.CancelFunc, h harness) { h.emb.hook = cancel }, "context canceled"},
+		"the caller cancels while chunks embed": {func(_ *testing.T, cancel context.CancelFunc, h harness) {
+			h.emb.trigger, h.emb.hook = "records", cancel
+		}, "context canceled"},
+		"the chunk kind is unknown": {func(t *testing.T, _ context.CancelFunc, h harness) {
 			if err := h.eng.ApplyKinds(t.Context(), vfsindex.MountIndexKinds()...); err != nil {
 				t.Fatal(err)
 			}
 			h.idx.ChunkKind = "Unregistered"
 		}, "Unregistered"},
 	} {
-		ctx, cancel := context.WithCancel(t.Context())
-		files := &memFiles{files: map[string]string{"a.txt": numberedLines(100)}}
-		h := memIndexer(t, files)
-		if _, err := h.idx.IndexPath(ctx, vpath); err != nil {
-			t.Fatal(err)
-		}
-		files.put("a.txt", numberedLines(3000))
-		tc.arrange(cancel, files, h)
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			h := newHarness(t)
+			h.write(t, "a.txt", numberedLines(100))
+			if _, err := h.idx.IndexPath(ctx, vpath); err != nil {
+				t.Fatal(err)
+			}
+			h.write(t, "a.txt", numberedLines(3000))
+			tc.arrange(t, cancel, h)
 
-		_, err := h.idx.IndexPath(ctx, vpath)
-		kidsTree, _ := h.store.GetTree(t.Context(), h.idx.Scope, h.idx.DocumentID(vpath), 0)
-		kids := kidsTree.Parts
-		cancel()
+			_, err := h.idx.IndexPath(ctx, vpath)
 
-		if err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("%s: index = %v, want %q", name, err, tc.want)
-		}
-		if got := joinStored(kids); got != strings.TrimSuffix(numberedLines(100), "\n") {
-			t.Errorf("%s: the previous chunks were replaced", name)
-		}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("index = %v, want %q", err, tc.want)
+			}
+			if h.stored(vpath) != strings.TrimSuffix(numberedLines(100), "\n") {
+				t.Errorf("the previous chunks were replaced")
+			}
+		})
 	}
 }
 
 func TestMountIndexer_anAuditFailureOnTheVersionCheckFailsTheIndex(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
-	ms := treeLocal(t, vfs.At("raw", (&memFiles{files: map[string]string{"a.txt": "text\n"}}).open))
-	audit := func(_ context.Context, ev brain.AuditEvent) error {
+	h := newHarness(t, brain.WithAudit(func(_ context.Context, ev brain.AuditEvent) error {
 		if ev.Op == brain.AuditRead {
 			return errors.New("audit sink down")
 		}
 		return nil
-	}
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithAudit(audit))
-	if err != nil {
-		t.Fatal(err)
-	}
-	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: storetest.Namespace(t, "id", uuid.NewString())})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := idx.IndexPath(ctx, "/workspace/raw/a.txt"); err != nil {
+	}))
+	h.write(t, "a.txt", "text\n")
+	if _, err := h.idx.IndexPath(ctx, "/workspace/work/a.txt"); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = idx.IndexPath(ctx, "/workspace/raw/a.txt")
+	_, err := h.idx.IndexPath(ctx, "/workspace/work/a.txt")
 
 	if err == nil || !strings.Contains(err.Error(), "audit sink down") {
 		t.Fatalf("re-index with a failing audit sink = %v", err)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -30,10 +31,8 @@ func run(ctx context.Context, dir, command string) (string, error) {
 	cmd := jailCommand(ctx, dir, command)
 	cmd.Env = shellEnv()
 	cmd.Stdin = bytes.NewReader(nil)
+	// exec calls Cancel only after the command started, so Process is set.
 	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 
@@ -42,8 +41,19 @@ func run(ctx context.Context, dir, command string) (string, error) {
 	stderr := budget.writer()
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+	// The jail's setup reports a failure on its own pipe (fd 3), which the
+	// agent's command does not get, so a command cannot pass for a setup
+	// failure.
+	setup, report, err := os.Pipe()
+	if err != nil {
+		return "", err
+	}
+	defer setup.Close()
+	cmd.ExtraFiles = []*os.File{report}
 
-	err := cmd.Run()
+	err = cmd.Run()
+	_ = report.Close()
+	setupFailure, _ := io.ReadAll(setup)
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
@@ -51,8 +61,8 @@ func run(ctx context.Context, dir, command string) (string, error) {
 	if err != nil {
 		var exitError *exec.ExitError
 		if errors.As(err, &exitError) {
-			if exitError.ExitCode() == jailSetupExit && strings.Contains(stderr.buf.String(), jailFailMarker) {
-				panic("run_command: session jail requires Linux user namespaces: " + strings.TrimSpace(stderr.buf.String()))
+			if exitError.ExitCode() == jailSetupExit && strings.Contains(string(setupFailure), jailFailMarker) {
+				panic("run_command: the session jail could not be built: " + strings.TrimSpace(stderr.buf.String()))
 			}
 			exit = exitError.ExitCode()
 		} else {
@@ -120,8 +130,9 @@ func (w *budgetWriter) Write(value []byte) (int, error) {
 
 // Bootstrap runs in a fresh user+mount+pid namespace (SysProcAttr). Bind
 // dir at /session and host /bin /lib /usr /dev so /bin/sh still runs, then
-// exec chroot so pid 1 is inside the jail. Exit 125 with jailFailMarker if the
-// jail cannot be built. The agent command's exit status is preserved.
+// exec chroot so pid 1 is inside the jail. Exit 125 with jailFailMarker on
+// fd 3 if the jail cannot be built; the agent command runs with fd 3 closed.
+// The agent command's exit status is preserved.
 //
 // /bin, /lib, /lib64 and /usr are remounted read-only: a worker running as
 // root would otherwise let the agent replace host programs (git, sh) that the
@@ -131,7 +142,7 @@ func (w *budgetWriter) Write(value []byte) (int, error) {
 // locked submounts (a host with a mount under /usr, such as /usr/lib/modules).
 const jailScript = `
 set -e
-die() { echo ` + jailFailMarker + ` >&2; exit 125; }
+die() { echo ` + jailFailMarker + ` >&3; exit 125; }
 ro() { mount -o remount,bind,ro "$1" || die; }
 host=$1
 cmd=$2
@@ -147,7 +158,7 @@ if [ -d /dev ]; then mount --rbind /dev "$jail/dev" || die; fi
 PATH=/bin:/usr/bin:/sbin:/usr/sbin
 chroot_bin=$(command -v chroot) || die
 export PATH=/bin:/usr/bin
-exec "$chroot_bin" "$jail" /bin/sh -c 'cd /session && eval "$1"' run_command "$cmd" || die
+exec "$chroot_bin" "$jail" /bin/sh -c 'cd /session && eval "$1"' run_command "$cmd" 3>&- || die
 `
 
 var jailOnce sync.Once

@@ -51,6 +51,7 @@ func FuzzNamespaceKey(f *testing.F) {
 	f.Add("a", "x", "b", "y", "a", "x.y", "", "")
 	f.Add("org", "acme", "", "", "org", "acme", "team", "x")
 	f.Add("a=b", "c", "", "", "a", "b=c", "", "")
+	f.Add("a", "x", "b", "y", "c", "x", "d", "y") // the same values under other names
 	f.Fuzz(func(t *testing.T, n1, v1, n2, v2, n3, v3, n4, v4 string) {
 		parse := func(nv ...string) (brain.Namespace, bool) {
 			if nv[2] == "" && nv[3] == "" {

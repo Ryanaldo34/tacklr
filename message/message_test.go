@@ -1,75 +1,54 @@
 package message_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/message"
 )
 
+// TestToolCall_KeyAndWireID: Key prefers the provider item id and WireID
+// prefers the call id; each falls back to the other id.
 func TestToolCall_KeyAndWireID(t *testing.T) {
-	if (message.ToolCall{ID: "i", CallID: "c"}).Key() != "i" {
-		t.Fatal("Key prefers ID")
-	}
-	if (message.ToolCall{CallID: "c"}).Key() != "c" {
-		t.Fatal("Key falls back to CallID")
-	}
-	if (message.ToolCall{ID: "i", CallID: "c"}).WireID() != "c" {
-		t.Fatal("WireID prefers CallID")
-	}
-	if (message.ToolCall{ID: "i"}).WireID() != "i" {
-		t.Fatal("WireID falls back to ID")
+	t.Parallel()
+	both := message.ToolCall{ID: "i", CallID: "c"}
+	idOnly := message.ToolCall{ID: "i"}
+	callOnly := message.ToolCall{CallID: "c"}
+
+	got := []string{both.Key(), callOnly.Key(), both.WireID(), idOnly.WireID()}
+
+	if want := []string{"i", "c", "c", "i"}; !slices.Equal(got, want) {
+		t.Fatalf("Key, Key, WireID, WireID = %q, want %q", got, want)
 	}
 }
 
-// TestMIMEHelpers_andMessageMIMETypes covers NormalizeMIME/DataURL/MIMEFromDataURL
-// and Message.MIMETypes first-seen binary collection.
-func TestMIMEHelpers_andMessageMIMETypes(t *testing.T) {
-	if message.NormalizeMIME(" Image/PNG; charset=binary ") != "image/png" {
-		t.Fatal("NormalizeMIME")
-	}
-	if !message.IsTextMIME("") || !message.IsTextMIME("text/plain") || message.IsTextMIME("image/png") {
-		t.Fatal("IsTextMIME")
-	}
-	if message.MIMEFromDataURL("https://x") != "" {
-		t.Fatal("non-data URL")
-	}
-	if message.MIMEFromDataURL("data:image/jpeg;base64,AAAA") != "image/jpeg" {
-		t.Fatal("MIMEFromDataURL")
-	}
-	if message.DataURL("image/png", "data:image/png;base64,XX") != "data:image/png;base64,XX" {
-		t.Fatal("DataURL passthrough")
-	}
-	if message.DataURL("", "abc") != "data:application/octet-stream;base64,abc" {
-		t.Fatal("DataURL default mime")
-	}
-	if message.DataURL("image/png", "abc") != "data:image/png;base64,abc" {
-		t.Fatal("DataURL build")
-	}
-
-	var nilMsg *message.Message
-	if nilMsg.MIMETypes() != nil {
-		t.Fatal("nil message")
-	}
-	if (&message.Message{}).MIMETypes() != nil {
-		t.Fatal("empty parts")
-	}
+// TestMessage_MIMETypesListsEachBinaryTypeOnce: a message lists the
+// normalized MIME type of each image and file part once, in first-seen
+// order, from the file data or else the image's data URL. Text parts, text
+// files and an image URL that is not a data URL add nothing. DataURL builds
+// the URL that MIMETypes reads back.
+func TestMessage_MIMETypesListsEachBinaryTypeOnce(t *testing.T) {
+	t.Parallel()
 	m := &message.Message{ContentParts: []message.ContentPart{
 		{Type: message.ContentTypeInputText, Text: "hi"},
+		{Type: message.ContentTypeInputImage, FileData: &message.FileData{MIMEType: " Image/PNG; charset=binary "}},
 		{Type: message.ContentTypeInputImage, FileData: &message.FileData{MIMEType: "image/png"}},
-		{Type: message.ContentTypeInputImage, FileData: &message.FileData{MIMEType: "image/png"}}, // dedupe
-		{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: "data:image/webp;base64,x"}},
+		{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: message.DataURL(" Image/WEBP ", "x")}},
+		{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: "https://example.test/a.gif"}},
+		{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: message.DataURL("", message.DataURL("image/gif", "y"))}},
 		{Type: message.ContentTypeInputFile, FileData: &message.FileData{MIMEType: "application/pdf"}},
-		{Type: message.ContentTypeInputFile, FileData: &message.FileData{MIMEType: "text/plain"}}, // ignored
+		{Type: message.ContentTypeInputFile, FileData: &message.FileData{MIMEType: "text/plain"}},
+		{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: message.DataURL("", "z")}},
 	}}
+
 	got := m.MIMETypes()
-	if len(got) != 3 || got[0] != "image/png" || got[1] != "image/webp" || got[2] != "application/pdf" {
-		t.Fatalf("MIMETypes = %v", got)
+	var none *message.Message
+
+	want := []string{"image/png", "image/webp", "image/gif", "application/pdf", "application/octet-stream"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("MIMETypes = %q, want %q", got, want)
 	}
-	// Image without FileData MIME uses data URL parse.
-	m2 := &message.Message{ContentParts: []message.ContentPart{
-		{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: "data:image/gif;base64,y"}},
-	}}
-	if g := m2.MIMETypes(); len(g) != 1 || g[0] != "image/gif" {
-		t.Fatalf("data-url only = %v", g)
+	if none.MIMETypes() != nil || (&message.Message{Content: "text"}).MIMETypes() != nil {
+		t.Fatal("a nil message or one without parts listed MIME types")
 	}
 }

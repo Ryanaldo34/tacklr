@@ -2,7 +2,7 @@ package server
 
 import (
 	"context"
-	"errors"
+	"net"
 	"net/http"
 	"time"
 
@@ -73,30 +73,40 @@ func (s *Server) HTTPMux() *http.ServeMux {
 	return mux
 }
 
-// ServeHTTP starts an HTTP server mounting all protocol routes.
+// ServeHTTP listens on addr and serves all protocol routes there (Serve).
+// A server with no network policy does not listen.
 func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 	if !s.networkPolicyConfigured {
 		return ErrNetworkSecurityPolicyRequired
 	}
-	hs := &http.Server{Addr: addr, Handler: s.HTTPMux(), ReadHeaderTimeout: 10 * time.Second}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return s.Serve(ctx, ln)
+}
+
+// Serve serves all protocol routes on ln until ctx ends, then shuts the
+// server down and returns ctx's error. It closes ln.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	if !s.networkPolicyConfigured {
+		_ = ln.Close()
+		return ErrNetworkSecurityPolicyRequired
+	}
+	hs := &http.Server{Handler: s.HTTPMux(), ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- hs.ListenAndServe()
+		errCh <- hs.Serve(ln)
 	}()
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultHTTPShutdown)
 		defer cancel()
 		_ = hs.Shutdown(shutdownCtx)
-		err := <-errCh
-		if err == nil || errors.Is(err, http.ErrServerClosed) {
-			return ctx.Err()
-		}
-		return err
+		<-errCh
+		return ctx.Err()
 	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
+		// Only Shutdown closes hs, so ln failed to accept.
 		return err
 	}
 }

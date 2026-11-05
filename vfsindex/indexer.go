@@ -411,25 +411,18 @@ func lineStarts(text string) []int {
 	return starts
 }
 
-// lineSpan returns body lines [start, end) as a substring of body (1-based half-open).
+// lineSpan returns body lines [start, end) as a substring of body (1-based
+// half-open). blockParts clamps start to [1, len(starts)] and end to
+// [start, len(starts)+1], so only an empty span needs a guard.
 func lineSpan(body string, starts []int, start, end int) string {
-	if start < 1 || end <= start {
+	if end == start {
 		return ""
 	}
-	lo := start - 1
-	if lo >= len(starts) {
-		return ""
+	if end > len(starts) {
+		return body[starts[start-1]:]
 	}
-	startByte := starts[lo]
-	hi := end - 1
-	if hi >= len(starts) {
-		return body[startByte:]
-	}
-	endByte := starts[hi] - 1 // drop the '\n' that ends the last included line
-	if endByte < startByte {
-		return ""
-	}
-	return body[startByte:endByte]
+	// Drop the '\n' that ends the last included line.
+	return body[starts[start-1] : starts[end-1]-1]
 }
 
 func (x *MountIndexer) removeIndex(ctx context.Context, vpath string) error {

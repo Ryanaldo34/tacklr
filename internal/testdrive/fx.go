@@ -10,15 +10,12 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ryanaldo34/tacklr/internal/google/docs"
 
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 
@@ -27,11 +24,6 @@ import (
 )
 
 const folderMIME = "application/vnd.google-apps.folder"
-
-var (
-	parentQ = regexp.MustCompile(`'([^']+)' in parents`)
-	nameQ   = regexp.MustCompile(`name = '([^']+)'`)
-)
 
 // Node is one Drive file or folder in the fixture.
 type Node struct {
@@ -43,28 +35,49 @@ type Node struct {
 
 // FX is an in-memory Drive tree that speaks Drive v3, Docs, and Sheets HTTP.
 type FX struct {
-	mu        sync.Mutex
-	Nodes     map[string]*Node
-	Exports   int
-	onceMedia map[string]int
-	failMeta  int
-	seq       int
+	mu      sync.Mutex
+	Nodes   map[string]*Node
+	Exports int
+	faults  []*Fault
+	seq     int
 
-	docs            map[string]*docState
-	DocsBatches     []*docs.BatchUpdateDocumentRequest
-	docConflictLeft int
-	docBatchFail    bool
-	books           *vfs.MemorySheets
+	docs  map[string]*vfs.DocsSnapshot
+	books *vfs.MemorySheets
+	mux   *http.ServeMux
+}
+
+// Fault is one planned failure of a call to the fixture.
+type Fault struct {
+	// Call is the API method that fails: files.get, files.media,
+	// files.list, files.export, files.create, files.update, documents.get,
+	// documents.batchUpdate, spreadsheets.get, spreadsheets.batchUpdate or
+	// spreadsheets.values.batchUpdate.
+	Call string
+	// ID is the file, document or spreadsheet the call names (the folder
+	// for files.list). An empty ID matches every call.
+	ID string
+	// Skip is the number of matching calls that pass before the fault.
+	Skip int
+	// Status is the HTTP status of the Google error reply.
+	Status int
+	// Message is the message of the Google error reply.
+	Message string
+	// Cut answers 200 and then drops the connection in the body. It is
+	// for drops: a request that gets no reply at all is sent again by
+	// net/http, so the call does not fail.
+	Cut bool
+	// Then runs when the fault occurs, before the reply.
+	Then func()
 }
 
 // New returns an empty fixture.
 func New() *FX {
 	d := &FX{
-		Nodes:     make(map[string]*Node),
-		onceMedia: make(map[string]int),
-		docs:      make(map[string]*docState),
-		books:     vfs.NewMemorySheets(),
+		Nodes: make(map[string]*Node),
+		docs:  make(map[string]*vfs.DocsSnapshot),
+		books: vfs.NewMemorySheets(),
 	}
+	d.mux = d.routes()
 	return d
 }
 
@@ -86,9 +99,18 @@ func Tree() *FX {
 		ID: "sc-folder", Name: "alias", MimeType: "application/vnd.google-apps.shortcut",
 		TargetID: "sub", TargetMime: folderMIME,
 	}, nil)
-	d.Add("root-a", vfs.DriveMeta{ID: "huge", Name: "huge.bin", MimeType: "application/octet-stream", Size: int64(vfs.MaxReadFileBytes) + 1}, make([]byte, vfs.MaxReadFileBytes+1))
+	d.Add("root-a", vfs.DriveMeta{ID: "huge", Name: "huge.bin", MimeType: "application/octet-stream", Size: int64(vfs.MaxReadFileBytes) + 1}, nil)
+	d.Nodes["huge"].Body, d.Nodes["huge"].Meta.MD5 = hugeBody()
 	return d
 }
+
+// hugeBody is the bytes of huge.bin, one byte over the read cap, and
+// their checksum. Every Tree shares them and no handler changes them in
+// place.
+var hugeBody = sync.OnceValues(func() ([]byte, string) {
+	body := make([]byte, vfs.MaxReadFileBytes+1)
+	return body, checksum("application/octet-stream", body)
+})
 
 // Add inserts a node.
 func (d *FX) Add(parent string, meta vfs.DriveMeta, body []byte) {
@@ -97,7 +119,7 @@ func (d *FX) Add(parent string, meta vfs.DriveMeta, body []byte) {
 	if meta.ModTime.IsZero() {
 		meta.ModTime = time.Now().UTC()
 	}
-	if meta.Version == "" && !meta.IsDir && meta.MimeType != folderMIME {
+	if meta.Version == "" && meta.MimeType != folderMIME {
 		meta.Version = "1"
 	}
 	meta.IsDir = meta.MimeType == folderMIME
@@ -114,18 +136,12 @@ func checksum(mimeType string, body []byte) string {
 	return fmt.Sprintf("%x", md5.Sum(body)) //nolint:gosec // G401: Drive's checksum is md5
 }
 
-// OnceMedia makes the next media GET for id return HTTP status.
-func (d *FX) OnceMedia(id string, status int) {
+// Fail plans f. The faults that match one call occur in the order they
+// were planned.
+func (d *FX) Fail(f Fault) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.onceMedia[id] = status
-}
-
-// FailMeta makes every metadata GET return HTTP status.
-func (d *FX) FailMeta(status int) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.failMeta = status
+	d.faults = append(d.faults, &f)
 }
 
 // Open builds Drive, Docs, and Sheets clients against this fixture over httptest.
@@ -139,69 +155,110 @@ func Open(t testing.TB, fx *FX, holder *vfs.TokenHolder) vfs.Open {
 	return vfs.DriveWith(vfs.NewGoogleDrive(holder, base, hc), vfs.NewGoogleDocs(holder, base, hc), vfs.NewGoogleSheets(holder, base, hc), holder)
 }
 
+// ServeHTTP answers the Drive v3, Docs v1 and Sheets v4 calls of the vfs
+// clients. A request with no bearer token gets 401.
 func (d *FX) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
-		http.Error(w, `{"error":{"code":401,"message":"unauthorized"}}`, http.StatusUnauthorized)
+	if strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer")) == "" {
+		writeDriveErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	p := r.URL.Path
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if strings.Contains(p, "/documents") {
-		d.serveDocs(w, r)
-		return
-	}
-	if strings.Contains(p, "/spreadsheets") {
-		d.serveSheets(w, r)
-		return
-	}
-	p = strings.TrimPrefix(p, "/drive/v3")
-	p = strings.TrimPrefix(p, "/upload/drive/v3")
-
-	switch {
-	case r.Method == http.MethodGet && (p == "/files" || p == "/files/"):
-		d.serveList(w, r)
-	case r.Method == http.MethodPost && (p == "/files" || p == "/files/"):
-		d.serveCreate(w, r)
-	case strings.HasSuffix(p, "/export"):
-		id := strings.TrimSuffix(strings.TrimPrefix(p, "/files/"), "/export")
-		d.serveExport(w, id)
-	case strings.HasPrefix(p, "/files/"):
-		id := strings.TrimPrefix(p, "/files/")
-		id = strings.TrimSuffix(id, "/")
-		if r.URL.Query().Get("alt") == "media" {
-			d.serveMedia(w, r, id)
-			return
-		}
-		switch r.Method {
-		case http.MethodGet:
-			d.serveMeta(w, id)
-		case http.MethodPatch:
-			d.servePatch(w, r, id)
-		default:
-			http.NotFound(w, r)
-		}
-	default:
-		http.NotFound(w, r)
-	}
+	d.mux.ServeHTTP(w, r)
 }
 
-func (d *FX) serveList(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query().Get("q")
-	parent := ""
-	if m := parentQ.FindStringSubmatch(q); len(m) == 2 {
-		parent = m[1]
+// routes maps each API method to its handler. Every handler runs with d.mu
+// held, after the planned fault of its call.
+func (d *FX) routes() *http.ServeMux {
+	mux := http.NewServeMux()
+	handle := func(pattern, call string, id func(*http.Request) string, h func(http.ResponseWriter, *http.Request, string)) {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			name, target := call, id(r)
+			if r.URL.Query().Get("alt") == "media" {
+				name = "files.media"
+			}
+			if d.fault(w, name, target) {
+				return
+			}
+			h(w, r, target)
+		})
 	}
-	name := ""
-	if m := nameQ.FindStringSubmatch(q); len(m) == 2 {
-		name = m[1]
+	file := func(r *http.Request) string { return r.PathValue("id") }
+	rpc := func(r *http.Request) string { id, _, _ := strings.Cut(r.PathValue("rpc"), ":"); return id }
+	parent := func(r *http.Request) string { return listQuery(r).parent }
+	none := func(*http.Request) string { return "" }
+
+	handle("GET /drive/v3/files", "files.list", parent, d.serveList)
+	handle("POST /drive/v3/files", "files.create", none, d.serveCreate)
+	handle("POST /upload/drive/v3/files", "files.create", none, d.serveCreate)
+	handle("GET /drive/v3/files/{id}", "files.get", file, d.withNode(d.serveGet))
+	handle("GET /drive/v3/files/{id}/export", "files.export", file, d.withNode(d.serveExport))
+	handle("PATCH /drive/v3/files/{id}", "files.update", file, d.withNode(d.servePatch))
+	handle("PATCH /upload/drive/v3/files/{id}", "files.update", file, d.withNode(d.servePatch))
+	handle("GET /v1/documents/{id}", "documents.get", file, d.serveDocsGet)
+	handle("POST /v1/documents/{rpc}", "documents.batchUpdate", rpc, d.serveDocsBatch)
+	handle("GET /v4/spreadsheets/{id}", "spreadsheets.get", file, d.serveSheetsGet)
+	handle("POST /v4/spreadsheets/{id}/values:batchUpdate", "spreadsheets.values.batchUpdate", file, d.serveSheetsValues)
+	handle("POST /v4/spreadsheets/{rpc}", "spreadsheets.batchUpdate", rpc, d.serveSheetsBatch)
+	return mux
+}
+
+// fault answers the first planned fault of call on id and reports whether
+// one occurred.
+func (d *FX) fault(w http.ResponseWriter, call, id string) bool {
+	i := slices.IndexFunc(d.faults, func(f *Fault) bool {
+		return f.Call == call && (f.ID == "" || f.ID == id)
+	})
+	if i < 0 {
+		return false
 	}
-	if parent != "" {
-		if _, ok := d.Nodes[parent]; !ok {
+	f := d.faults[i]
+	if f.Skip > 0 {
+		f.Skip--
+		return false
+	}
+	d.faults = slices.Delete(d.faults, i, i+1)
+	if f.Then != nil {
+		f.Then()
+	}
+	if !f.Cut {
+		writeDriveErr(w, f.Status, f.Message)
+		return true
+	}
+	w.Header().Set("Content-Length", "1024")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("{"))
+	_ = http.NewResponseController(w).Flush()
+	panic(http.ErrAbortHandler)
+}
+
+// withNode answers 404 for an ID that names no node, and else calls h
+// with the node.
+func (d *FX) withNode(h func(http.ResponseWriter, *http.Request, *Node)) func(http.ResponseWriter, *http.Request, string) {
+	return func(w http.ResponseWriter, r *http.Request, id string) {
+		n, ok := d.Nodes[id]
+		if !ok {
 			writeDriveErr(w, http.StatusNotFound, "not found")
 			return
 		}
+		h(w, r, n)
 	}
+}
+
+// fileQuery is the folder and the name of a files.list q, which the vfs
+// client writes as "'<folder>' in parents[ and name = '<name>'] and ...".
+type fileQuery struct{ parent, name string }
+
+func listQuery(r *http.Request) fileQuery {
+	q := r.URL.Query().Get("q")
+	parent, _, _ := strings.Cut(strings.TrimPrefix(q, "'"), "'")
+	_, name, _ := strings.Cut(q, "name = '")
+	name, _, _ = strings.Cut(name, "'")
+	return fileQuery{parent: parent, name: name}
+}
+
+func (d *FX) serveList(w http.ResponseWriter, r *http.Request, parent string) {
+	name := listQuery(r).name
 	var nodes []*Node
 	for _, n := range d.Nodes {
 		if n.Parent == parent && (name == "" || n.Meta.Name == name) {
@@ -224,52 +281,27 @@ func (d *FX) serveList(w http.ResponseWriter, r *http.Request) {
 	writeDriveJSON(w, http.StatusOK, page)
 }
 
-func (d *FX) serveMeta(w http.ResponseWriter, id string) {
-	if d.failMeta != 0 {
-		writeDriveErr(w, d.failMeta, "unauthorized")
-		return
-	}
-	n, ok := d.Nodes[id]
-	if !ok {
-		writeDriveErr(w, http.StatusNotFound, "not found")
-		return
-	}
-	writeDriveJSON(w, http.StatusOK, fileJSON(n))
-}
-
-func (d *FX) serveMedia(w http.ResponseWriter, r *http.Request, id string) {
-	if status, ok := d.onceMedia[id]; ok {
-		delete(d.onceMedia, id)
-		writeDriveErr(w, status, "unauthorized")
-		return
-	}
-	n, ok := d.Nodes[id]
-	if !ok {
-		writeDriveErr(w, http.StatusNotFound, "not found")
+// serveGet answers files.get: the metadata, or the bytes for alt=media.
+func (d *FX) serveGet(w http.ResponseWriter, r *http.Request, n *Node) {
+	if r.URL.Query().Get("alt") != "media" {
+		writeDriveJSON(w, http.StatusOK, fileJSON(n))
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(n.Body))
 }
 
-func (d *FX) serveExport(w http.ResponseWriter, id string) {
-	n, ok := d.Nodes[id]
-	if !ok {
-		writeDriveErr(w, http.StatusNotFound, "not found")
-		return
-	}
+func (d *FX) serveExport(w http.ResponseWriter, _ *http.Request, n *Node) {
 	d.Exports++
-	body := n.Export
-	if len(body) == 0 {
-		body = n.Body
-	}
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.Header().Set("Content-Length", strconv.Itoa(len(n.Export)))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(body)
+	_, _ = w.Write(n.Export)
 }
 
-func (d *FX) serveCreate(w http.ResponseWriter, r *http.Request) {
+// serveCreate answers files.create. A new Google Doc or Sheet starts empty
+// in the Docs and Sheets state.
+func (d *FX) serveCreate(w http.ResponseWriter, r *http.Request, _ string) {
 	meta, media := readDriveUpload(r)
 	name, _ := meta["name"].(string)
 	mimeType, _ := meta["mimeType"].(string)
@@ -289,33 +321,21 @@ func (d *FX) serveCreate(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	d.Nodes[id] = n
-	switch mimeType {
-	case "application/vnd.google-apps.document":
-		d.seedDocLocked(id, "R0", []vfs.DocsSpan{{StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"}}, nil)
-	case "application/vnd.google-apps.spreadsheet":
-		d.books.Seed(id, vfs.SheetsSnapshot{SpreadsheetID: id, Sheets: []vfs.Sheet{{ID: "0", Title: "Sheet1"}}})
-	}
 	writeDriveJSON(w, http.StatusOK, fileJSON(n))
 }
 
-func (d *FX) servePatch(w http.ResponseWriter, r *http.Request, id string) {
-	n, ok := d.Nodes[id]
-	if !ok {
-		writeDriveErr(w, http.StatusNotFound, "not found")
-		return
-	}
+// servePatch answers files.update: a trash, or new bytes.
+func (d *FX) servePatch(w http.ResponseWriter, r *http.Request, n *Node) {
 	meta, media := readDriveUpload(r)
 	if trashed, _ := meta["trashed"].(bool); trashed {
-		delete(d.Nodes, id)
+		delete(d.Nodes, n.Meta.ID)
 		writeDriveJSON(w, http.StatusOK, fileJSON(n))
 		return
 	}
-	if len(media) > 0 {
-		n.Body = media
-		n.Meta.Size = int64(len(media))
-		n.Meta.ModTime = time.Now().UTC()
-		n.Meta.MD5 = checksum(n.Meta.MimeType, media)
-	}
+	n.Body = media
+	n.Meta.Size = int64(len(media))
+	n.Meta.ModTime = time.Now().UTC()
+	n.Meta.MD5 = checksum(n.Meta.MimeType, media)
 	writeDriveJSON(w, http.StatusOK, fileJSON(n))
 }
 
@@ -351,31 +371,26 @@ func writeDriveErr(w http.ResponseWriter, status int, msg string) {
 	writeDriveJSON(w, status, map[string]any{"error": map[string]any{"code": status, "message": msg}})
 }
 
+// readDriveUpload is the JSON metadata and the media of a multipart upload,
+// or the JSON metadata of a plain request.
 func readDriveUpload(r *http.Request) (meta map[string]any, media []byte) {
 	meta = map[string]any{}
-	ct := r.Header.Get("Content-Type")
-	mediaType, params, err := mime.ParseMediaType(ct)
-	if err == nil && strings.HasPrefix(mediaType, "multipart/") {
-		mr := multipart.NewReader(r.Body, params["boundary"])
-		for {
-			part, err := mr.NextPart()
-			if err != nil {
-				break
-			}
-			body, _ := io.ReadAll(part)
-			pct := part.Header.Get("Content-Type")
-			if strings.Contains(pct, "json") || strings.HasPrefix(pct, "application/json") {
-				_ = json.Unmarshal(body, &meta)
-			} else {
-				media = body
-			}
-		}
-		return meta, media
-	}
-	body, _ := io.ReadAll(r.Body)
-	if strings.Contains(ct, "json") || json.Valid(body) {
-		_ = json.Unmarshal(body, &meta)
+	mediaType, params, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if !strings.HasPrefix(mediaType, "multipart/") {
+		_ = json.NewDecoder(r.Body).Decode(&meta)
 		return meta, nil
 	}
-	return meta, body
+	mr := multipart.NewReader(r.Body, params["boundary"])
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			return meta, media
+		}
+		body, _ := io.ReadAll(part)
+		if strings.Contains(part.Header.Get("Content-Type"), "json") {
+			_ = json.Unmarshal(body, &meta)
+		} else {
+			media = body
+		}
+	}
 }

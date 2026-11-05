@@ -67,6 +67,8 @@ open := vfs.Tree(
 ms, err := open(ctx, "sess-1", vfs.Request{})
 ```
 
+`vfs.Local(dir)` gives every session the same directory. `vfs.SessionLocal(dir)` gives each session a directory of its own under `dir`, so no session sees another's files; a specialist or a job gets its own too. A client binding can ask for the same with the `session_scoped=true` parameter.
+
 User-owned Drive/Graph members are constructed from this turn’s bind (injected client, not a hidden SDK):
 
 ```go

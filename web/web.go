@@ -119,9 +119,6 @@ func retryExaConflict(err error) bool {
 }
 
 func mapExaErr(name string, err error) error {
-	if err == nil {
-		return nil
-	}
 	var st *StatusError
 	if errors.As(err, &st) {
 		if st.PublicationDomain() {
@@ -285,9 +282,6 @@ func formatWebSearchResult(query, searchType string, resp *SearchResponse, notes
 		b.WriteString("\nNo results found. Try a more specific natural-language query, or fetch a known URL with web_fetch.")
 		return b.String()
 	}
-	if searchType == "" {
-		searchType = "auto"
-	}
 	fmt.Fprintf(&b, "Mode: %s | Results: %d\n", searchType, len(resp.Results))
 	b.WriteString(formatExaResults(resp.Results, 2000))
 
@@ -342,20 +336,15 @@ func formatExaResults(results []SearchResult, textCap int) string {
 }
 
 func formatSynthesisContent(raw json.RawMessage) string {
-	// Prefer pretty JSON object/array; otherwise unquote string.
-	var asAny any
-	if err := json.Unmarshal(raw, &asAny); err == nil {
-		switch v := asAny.(type) {
-		case string:
-			return truncateRunes(v, 4000)
-		default:
-			pretty, err := json.MarshalIndent(v, "", "  ")
-			if err == nil {
-				return truncateRunes(string(pretty), 4000)
-			}
-		}
+	// raw is one JSON value of Exa's decoded answer, so it decodes and
+	// encodes again. A string is unquoted; anything else is pretty JSON.
+	var v any
+	_ = json.Unmarshal(raw, &v)
+	if s, ok := v.(string); ok {
+		return truncateRunes(s, 4000)
 	}
-	return truncateRunes(string(raw), 4000)
+	pretty, _ := json.MarshalIndent(v, "", "  ")
+	return truncateRunes(string(pretty), 4000)
 }
 
 func truncateRunes(s string, maxLen int) string {

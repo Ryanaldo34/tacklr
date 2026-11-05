@@ -6,186 +6,135 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/ryanaldo34/tacklr"
 )
 
-// TestUserSelection_fullLifecycle covers serialize, validate, return, and error string.
-func TestUserSelection_fullLifecycle(t *testing.T) {
-	usi := &tacklr.UserSelectionInterrupt{
-		Options: []tacklr.UserChoice{
-			{Title: "A", Description: "first", IsRecommended: true},
-			{Title: "B", Description: "second"},
-		},
-	}
-	if usi.TypeName() != "user_selection_choice" {
-		t.Fatal(usi.TypeName())
-	}
-	raw, err := usi.Serialize()
-	if err != nil || len(raw) == 0 {
-		t.Fatalf("serialize: %v %s", err, raw)
-	}
-	if usi.Error() == "" {
-		t.Fatal("error string")
-	}
+// TestUserSelection_returnsTheChosenOption: a user selection serializes its
+// question and options, takes an in-range selectionIdx as the chosen
+// option, and refuses an answer that is not JSON, has no selectionIdx, has
+// one of the wrong type, or one out of range.
+func TestUserSelection_returnsTheChosenOption(t *testing.T) {
+	t.Parallel()
+	usi := &tacklr.UserSelectionInterrupt{Question: "which?", Options: []tacklr.UserChoice{{Title: "A", IsRecommended: true}, {Title: "B"}}}
 
-	if err := usi.Return([]byte(`not-json`)); err == nil || !errors.Is(err, tacklr.ErrInvalidPayload) {
-		t.Fatalf("invalid json: %v", err)
+	wire, err := usi.Serialize()
+	invalid := []error{
+		usi.Return([]byte(`not-json`)),
+		usi.Return([]byte(`{}`)),
+		usi.Return([]byte(`{"selectionIdx":"x"}`)),
+		usi.Return([]byte(`{"selectionIdx":99}`)),
+		usi.Return([]byte(`{"selectionIdx":-1}`)),
 	}
-	if err := usi.Return([]byte(`{}`)); err == nil || !errors.Is(err, tacklr.ErrInvalidPayload) || !strings.Contains(err.Error(), "selectionIdx") {
-		t.Fatalf("missing field: %v", err)
-	}
-	if err := usi.Return([]byte(`{"selectionIdx":99}`)); err == nil {
-		t.Fatal("out of range validate")
-	}
-	if err := usi.Return([]byte(`{"selectionIdx":"x"}`)); err == nil {
-		t.Fatal("selectionIdx wrong type")
-	}
-	if err := usi.Return([]byte(`{"selectionIdx":0}`)); err != nil {
-		t.Fatal(err)
-	}
+	chosen := usi.Return([]byte(`{"selectionIdx":1}`))
 
-	if err := usi.Return([]byte(`{"selectionIdx":-1}`)); err == nil {
-		t.Fatal("return out of range")
+	if want := `{"question":"which?","options":[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}],"ConfirmedChoice":null}`; err != nil || string(wire) != want {
+		t.Fatalf("serialize = %s %v, want %s", wire, err, want)
 	}
-	if err := usi.Return([]byte(`{"selectionIdx":1}`)); err != nil {
-		t.Fatal(err)
+	for i, err := range invalid[:3] {
+		if !errors.Is(err, tacklr.ErrInvalidPayload) {
+			t.Errorf("answer %d = %v, want ErrInvalidPayload", i, err)
+		}
 	}
-	if usi.ConfirmedChoice == nil || usi.ConfirmedChoice.Title != "B" {
-		t.Fatalf("choice = %+v", usi.ConfirmedChoice)
+	if !strings.Contains(invalid[1].Error(), "selectionIdx") || invalid[3] == nil || invalid[4] == nil {
+		t.Fatalf("answers = %v, want the missing field named and each out-of-range index refused", invalid)
+	}
+	if chosen != nil || usi.ConfirmedChoice.Title != "B" || !strings.Contains(usi.Error(), `"title":"B"`) {
+		t.Fatalf("choose = %v giving %+v, error text %s; want B", chosen, usi.ConfirmedChoice, usi.Error())
 	}
 }
 
-// TestToolPermission_allKinds covers init, validate, allow/reject, and unknown option.
-func TestToolPermission_allKinds(t *testing.T) {
-	p := &tacklr.ToolPermissionInterrupt{}
-	if p.SelectedKind != "" {
-		t.Fatal("zero value has no selected kind")
-	}
-	if p.TypeName() != "tool_permission" {
-		t.Fatal(p.TypeName())
-	}
-	if _, err := p.Serialize(); err != nil {
-		t.Fatal(err)
-	}
-	if p.Error() == "" {
-		t.Fatal("error string")
-	}
-
-	p.Options = tacklr.DefaultPermissionOptions()
-
-	if err := p.Return([]byte(`x`)); err == nil {
-		t.Fatal("bad json")
-	}
-	if err := p.Return([]byte(`{}`)); err == nil {
-		t.Fatal("missing optionId")
-	}
-	if err := p.Return([]byte(`{"optionId":"nope"}`)); err == nil {
-		t.Fatal("unknown option validate")
-	}
-	if err := p.Return([]byte(`{"optionId":1}`)); err == nil {
-		t.Fatal("optionId wrong type")
-	}
-	if err := p.Return([]byte(`{"optionId":"allow-once"}`)); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := p.Return([]byte(`{"optionId":"missing"}`)); err == nil {
-		t.Fatal("unknown option return")
-	}
-
-	cases := []struct {
-		id      string
-		allowed bool
-		kind    string
+// TestToolPermission_resolvesEachKindOfAnswer: a permission prompt
+// serializes only what the client shows, resolves each default option to
+// its kind (allowed or not), and refuses an answer that is not JSON, has no
+// or a wrongly typed optionId, names an unknown option, or an option of an
+// unknown kind.
+func TestToolPermission_resolvesEachKindOfAnswer(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		id, kind string
+		allowed  bool
 	}{
-		{"allow-once", true, tacklr.PermissionAllowOnce},
-		{"allow-always", true, tacklr.PermissionAllowAlways},
-		{"reject-once", false, tacklr.PermissionRejectOnce},
-		{"reject-always", false, tacklr.PermissionRejectAlways},
-	}
-	for _, tc := range cases {
-		p2 := &tacklr.ToolPermissionInterrupt{Options: tacklr.DefaultPermissionOptions()}
+		{"allow-once", tacklr.PermissionAllowOnce, true},
+		{"allow-always", tacklr.PermissionAllowAlways, true},
+		{"reject-once", tacklr.PermissionRejectOnce, false},
+		{"reject-always", tacklr.PermissionRejectAlways, false},
+	} {
+		p := &tacklr.ToolPermissionInterrupt{ToolName: "gate", Options: tacklr.DefaultPermissionOptions()}
 		payload, _ := json.Marshal(map[string]string{"optionId": tc.id})
-		if err := p2.Return(payload); err != nil {
-			t.Fatal(err)
+		if err := p.Return(payload); err != nil || p.Allowed != tc.allowed || p.SelectedKind != tc.kind || p.SelectedOptionID != tc.id {
+			t.Fatalf("%s = %v: allowed=%v kind=%s id=%s", tc.id, err, p.Allowed, p.SelectedKind, p.SelectedOptionID)
 		}
-		if p2.Allowed != tc.allowed || p2.SelectedKind != tc.kind || p2.SelectedOptionID != tc.id {
-			t.Fatalf("%s: allowed=%v kind=%s id=%s", tc.id, p2.Allowed, p2.SelectedKind, p2.SelectedOptionID)
+		if wire, _ := p.Serialize(); !strings.HasPrefix(string(wire), `{"toolName":"gate","options":[{"optionId":"allow-once"`) || !strings.HasSuffix(string(wire), `"kind":"reject_always"}]}`) {
+			t.Fatalf("serialize = %s, want the tool and its options only", wire)
 		}
 	}
+	p := &tacklr.ToolPermissionInterrupt{Options: tacklr.DefaultPermissionOptions()}
+	odd := &tacklr.ToolPermissionInterrupt{Options: []tacklr.PermissionOption{{OptionID: "weird", Name: "W", Kind: "nope"}}}
 
-	// Unknown kind on a custom option.
-	p3 := &tacklr.ToolPermissionInterrupt{
-		Options: []tacklr.PermissionOption{{OptionID: "weird", Name: "W", Kind: "nope"}},
+	invalid := []error{
+		p.Return([]byte(`x`)),
+		p.Return([]byte(`{}`)),
+		p.Return([]byte(`{"optionId":1}`)),
+		p.Return([]byte(`{"optionId":"nope"}`)),
 	}
-	if err := p3.Return([]byte(`{"optionId":"weird"}`)); err == nil {
-		t.Fatal("unknown kind")
+	unknownKind := odd.Return([]byte(`{"optionId":"weird"}`))
+
+	for i, err := range invalid {
+		if !errors.Is(err, tacklr.ErrInvalidPayload) {
+			t.Errorf("answer %d = %v, want ErrInvalidPayload", i, err)
+		}
+	}
+	if unknownKind == nil || !strings.Contains(unknownKind.Error(), `unknown permission kind "nope"`) || !strings.Contains(p.Error(), `"options"`) {
+		t.Fatalf("an option of an unknown kind = %v, want it refused", unknownKind)
 	}
 }
 
-// TestRegister_newAndDuplicate covers the registry: builtins are found, an
-// unknown type is not, a permission's answer stays off the client payload,
-// and a type registers once.
-func TestRegister_newAndDuplicate(t *testing.T) {
-	if _, ok := tacklr.NewInterrupt("user_selection_choice"); !ok {
-		t.Fatal("builtin selection")
-	}
-	if _, ok := tacklr.NewInterrupt("tool_permission"); !ok {
-		t.Fatal("builtin permission")
-	}
-	if _, ok := tacklr.NewInterrupt("missing_type"); ok {
-		t.Fatal("unknown type")
-	}
+// hostInterrupt is an interrupt type a host registers.
+type hostInterrupt struct{ name string }
 
-	perm := &tacklr.ToolPermissionInterrupt{Options: tacklr.DefaultPermissionOptions()}
-	if err := perm.Return([]byte(`{"optionId":"allow-once"}`)); err != nil {
-		t.Fatal(err)
-	}
-	wire, err := perm.Serialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(wire), "allowed") || strings.Contains(string(wire), "selectedOption") {
-		t.Fatalf("serialize leaked resolution: %s", wire)
-	}
+func (h hostInterrupt) TypeName() string           { return h.name }
+func (h hostInterrupt) Serialize() ([]byte, error) { return []byte(`{}`), nil }
+func (h hostInterrupt) Return([]byte) error        { return nil }
+func (h hostInterrupt) Error() string              { return h.name }
 
-	// Double-register panics.
+// TestRegisterInterrupt_makesATypeReadableOnce: the built-in types and a
+// host's registered type are found by name, an unknown type is not, and a
+// type registers once.
+func TestRegisterInterrupt_makesATypeReadableOnce(t *testing.T) {
+	// Each run registers a type of its own: the registry is the process's.
+	host := "host_" + uuid.NewString()
+	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return hostInterrupt{name: host} })
+	var found []string
+	for _, name := range []string{"user_selection_choice", "tool_permission", tacklr.TypeAuthExpired, host} {
+		if intr, ok := tacklr.NewInterrupt(name); ok {
+			found = append(found, intr.TypeName())
+		}
+	}
+	_, unknown := tacklr.NewInterrupt("missing_type")
+
+	if strings.Join(found, ",") != "user_selection_choice,tool_permission,auth_expired,"+host || unknown {
+		t.Fatalf("found %v (unknown found %v), want each registered type", found, unknown)
+	}
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("want panic on double register")
+			t.Fatal("a second registration of a type was accepted")
 		}
 	}()
-	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return fakeInterrupt{name: "dup_once"} })
-	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return fakeInterrupt{name: "dup_once"} })
+	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return hostInterrupt{name: host} })
 }
 
-type fakeInterrupt struct{ name string }
+// TestAuthExpired_namesTheToolAndResumesOnAnyAnswer: an expired credential
+// names its tool when it has one and resumes on any answer.
+func TestAuthExpired_namesTheToolAndResumesOnAnyAnswer(t *testing.T) {
+	t.Parallel()
+	empty, named := &tacklr.AuthExpired{}, &tacklr.AuthExpired{Tool: "read"}
 
-func (f fakeInterrupt) TypeName() string           { return f.name }
-func (f fakeInterrupt) Serialize() ([]byte, error) { return []byte(`{}`), nil }
-func (f fakeInterrupt) Return([]byte) error        { return nil }
-func (f fakeInterrupt) Error() string              { return f.name }
+	resumed := empty.Return([]byte(`{}`))
+	wire, err := named.Serialize()
 
-func TestAuthExpired_typeNameAndResume(t *testing.T) {
-	empty := &tacklr.AuthExpired{}
-	if empty.TypeName() != tacklr.TypeAuthExpired {
-		t.Fatalf("type: %s", empty.TypeName())
-	}
-	if empty.Error() != "credentials expired" {
-		t.Fatalf("error: %s", empty.Error())
-	}
-	if err := empty.Return([]byte(`{}`)); err != nil {
-		t.Fatal(err)
-	}
-	named := &tacklr.AuthExpired{Tool: "read"}
-	if named.Error() != "read: credentials expired" {
-		t.Fatalf("named: %s", named.Error())
-	}
-	got, ok := tacklr.NewInterrupt(tacklr.TypeAuthExpired)
-	if !ok {
-		t.Fatal("auth_expired not registered")
-	}
-	if got.TypeName() != tacklr.TypeAuthExpired {
-		t.Fatalf("new: %s", got.TypeName())
+	if empty.TypeName() != tacklr.TypeAuthExpired || empty.Error() != "credentials expired" || named.Error() != "read: credentials expired" || resumed != nil || err != nil || string(wire) != `{"tool":"read"}` {
+		t.Fatalf("auth expired = %q, %q, resume %v, wire %s", empty.Error(), named.Error(), resumed, wire)
 	}
 }

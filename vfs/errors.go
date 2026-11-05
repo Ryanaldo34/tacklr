@@ -5,19 +5,17 @@ import "errors"
 // Sentinel errors for mount-table and path I/O outcomes.
 // Prefer bare sentinels or a single plain "vfs: …" message — never wrap sentinels in sentinels.
 var (
-	ErrInvalidPath     = errors.New("vfs: invalid path")
-	ErrAlreadyMounted  = errors.New("vfs: already mounted")
-	ErrNotMounted      = errors.New("vfs: not mounted")
-	ErrInvalidProvider = errors.New("vfs: invalid provider")
-	ErrNotSupported    = errors.New("vfs: not supported")
-	ErrReadOnly        = errors.New("vfs: read-only mount")
-	ErrNotExist        = errors.New("vfs: not found")
-	ErrNotDir          = errors.New("vfs: not a directory")
-	ErrIsDir           = errors.New("vfs: is a directory")
-	ErrExist           = errors.New("vfs: already exists")
-	ErrAuthExpired     = errors.New("vfs: auth expired")
-	ErrAmbiguous       = errors.New("vfs: ambiguous path")
-	ErrPermission      = errors.New("vfs: permission denied")
+	ErrInvalidPath  = errors.New("vfs: invalid path")
+	ErrNotMounted   = errors.New("vfs: not mounted")
+	ErrNotSupported = errors.New("vfs: not supported")
+	ErrReadOnly     = errors.New("vfs: read-only mount")
+	ErrNotExist     = errors.New("vfs: not found")
+	ErrNotDir       = errors.New("vfs: not a directory")
+	ErrIsDir        = errors.New("vfs: is a directory")
+	ErrExist        = errors.New("vfs: already exists")
+	ErrAuthExpired  = errors.New("vfs: auth expired")
+	ErrAmbiguous    = errors.New("vfs: ambiguous path")
+	ErrPermission   = errors.New("vfs: permission denied")
 
 	// Content IR
 	ErrNoCodec = errors.New("vfs: no codec for media type")

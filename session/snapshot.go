@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"sync"
@@ -10,19 +11,19 @@ import (
 
 // MemoryStore is an in-memory Store.
 type MemoryStore struct {
-	mu       sync.Mutex
-	records  map[ID]snapRecord
-	outcomes map[ID]map[string]Outcome
+	mu      sync.Mutex
+	records map[ID]snapRecord
+	calls   map[ID]map[string][]byte
 }
 
 type snapRecord struct {
-	cp  []byte
-	gen uint64
+	rows map[CheckpointRow][]byte
+	gen  uint64
 }
 
 // NewMemoryStore returns an empty Store.
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{records: make(map[ID]snapRecord), outcomes: make(map[ID]map[string]Outcome)}
+	return &MemoryStore{records: make(map[ID]snapRecord), calls: make(map[ID]map[string][]byte)}
 }
 
 func revisionOf(gen uint64) Revision {
@@ -31,7 +32,7 @@ func revisionOf(gen uint64) Revision {
 
 // Save implements Store. expected must equal the revision
 // from the last Load (zero if the row does not exist).
-func (s *MemoryStore) Save(_ context.Context, sessionID ID, cp []byte, expected Revision) (Revision, error) {
+func (s *MemoryStore) Save(_ context.Context, sessionID ID, changes []CheckpointChange, expected Revision) (Revision, error) {
 	if sessionID == "" {
 		return "", fmt.Errorf("snapshot: session id is required")
 	}
@@ -45,21 +46,36 @@ func (s *MemoryStore) Save(_ context.Context, sessionID ID, cp []byte, expected 
 	if expected != current {
 		return "", ErrStaleCheckpoint
 	}
+	rows := maps.Clone(cur.rows)
+	if rows == nil {
+		rows = map[CheckpointRow][]byte{}
+	}
+	for _, c := range changes {
+		if c.Delete {
+			delete(rows, CheckpointRow{c.Kind, c.Key})
+			continue
+		}
+		rows[CheckpointRow{c.Kind, c.Key}] = slices.Clone(c.Value)
+	}
 	cur.gen++
-	cur.cp = slices.Clone(cp)
+	cur.rows = rows
 	s.records[sessionID] = cur
 	return revisionOf(cur.gen), nil
 }
 
 // Load implements Store.
-func (s *MemoryStore) Load(_ context.Context, sessionID ID) ([]byte, Revision, error) {
+func (s *MemoryStore) Load(_ context.Context, sessionID ID) ([]CheckpointEntry, Revision, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, ok := s.records[sessionID]
 	if !ok {
 		return nil, "", fmt.Errorf("load snapshot %q: %w", sessionID, ErrNotFound)
 	}
-	return cur.cp, revisionOf(cur.gen), nil
+	entries := make([]CheckpointEntry, 0, len(cur.rows))
+	for row, v := range cur.rows {
+		entries = append(entries, CheckpointEntry{Kind: row.Kind, Key: row.Key, Value: slices.Clone(v)})
+	}
+	return entries, revisionOf(cur.gen), nil
 }
 
 // Revision implements Store.
@@ -73,29 +89,36 @@ func (s *MemoryStore) Revision(_ context.Context, sessionID ID) (Revision, error
 	return revisionOf(cur.gen), nil
 }
 
-// PutOutcome implements Store.
-func (s *MemoryStore) PutOutcome(_ context.Context, sessionID ID, callKey string, o Outcome) error {
+// PutCall implements Store.
+func (s *MemoryStore) PutCall(_ context.Context, sessionID ID, callKey string, body []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.outcomes[sessionID] == nil {
-		s.outcomes[sessionID] = map[string]Outcome{}
+	if s.calls[sessionID] == nil {
+		s.calls[sessionID] = map[string][]byte{}
 	}
-	o.Record = slices.Clone(o.Record)
-	s.outcomes[sessionID][callKey] = o
+	s.calls[sessionID][callKey] = slices.Clone(body)
 	return nil
 }
 
-// Outcomes implements Store.
-func (s *MemoryStore) Outcomes(_ context.Context, sessionID ID, callKeys []string) (map[string]Outcome, error) {
+// Calls implements Store.
+func (s *MemoryStore) Calls(_ context.Context, sessionID ID, callKeys []string) (map[string][]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make(map[string]Outcome, len(callKeys))
+	out := make(map[string][]byte, len(callKeys))
 	for _, key := range callKeys {
-		if rec, ok := s.outcomes[sessionID][key]; ok {
-			out[key] = rec
+		if body, ok := s.calls[sessionID][key]; ok {
+			out[key] = slices.Clone(body)
 		}
 	}
 	return out, nil
+}
+
+// ClearCalls implements Store.
+func (s *MemoryStore) ClearCalls(_ context.Context, sessionID ID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.calls, sessionID)
+	return nil
 }
 
 // Delete implements Store.
@@ -103,7 +126,7 @@ func (s *MemoryStore) Delete(_ context.Context, sessionID ID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.records, sessionID)
-	delete(s.outcomes, sessionID)
+	delete(s.calls, sessionID)
 	return nil
 }
 

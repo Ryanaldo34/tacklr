@@ -6,7 +6,6 @@ package worker
 
 import (
 	"cmp"
-	"context"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,10 +18,6 @@ import (
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
 	"github.com/ryanaldo34/tacklr/workspace"
 )
-
-// JobHandler runs a named background job. A worker registers handlers by
-// name on Config.Jobs; a tool's Schedule starts one.
-type JobHandler func(ctx context.Context, task string) (string, error)
 
 // The defaults of a session's step policy, which its client sends in the
 // workflow input; zero there means these.
@@ -67,11 +62,17 @@ type Config struct {
 	// Secrets holds work-item credentials for the steps. It is required.
 	// Tokens never enter event history.
 	Secrets session.SecretStorage
-	// Fallback is the EventLog the steps write every event to. Zero is an
-	// in-memory log, which reaches no client.
+	// Fallback is the EventLog the steps write the durable events to when
+	// DisableStreams is set. Zero is an in-memory log, which reaches no
+	// client.
 	Fallback session.EventLog
-	// DisableStreams sends events only to Fallback, not Workflow Streams.
+	// DisableStreams sends the durable events to Fallback instead of
+	// Workflow Streams.
 	DisableStreams bool
+	// Live is where this worker serves the deltas of the sessions whose
+	// harnesses it holds. A zero Live serves none: clients get whole
+	// messages only.
+	Live Live
 	// Workspace is the agent's /workspace: the tree each turn mounts, and
 	// the tools, skills and overflow the agent gets from it. A zero
 	// Workspace is no workspace.
@@ -83,7 +84,7 @@ type Config struct {
 	FuseRoot string
 	// Jobs are named background workers Schedule can start. A specialist
 	// of the same name takes precedence.
-	Jobs map[string]JobHandler
+	Jobs map[string]session.JobHandler
 	// HarnessIdle is how long the worker keeps a session's harness after
 	// its last step. Zero is 10 minutes.
 	HarnessIdle time.Duration
@@ -100,9 +101,22 @@ type Config struct {
 	HeartbeatThrottle time.Duration
 }
 
+// Live is a worker's live endpoint: where clients stream the deltas of the
+// sessions whose model calls run on it. Deltas are never stored, so a
+// client dials the worker that makes them.
+type Live struct {
+	// URL is how clients reach the handler Worker.LiveHandler returns,
+	// which the host serves (with its own TLS).
+	URL string
+	// Key is the HMAC key clients and workers share (temporal.Config.Live).
+	// It is required with URL.
+	Key []byte
+}
+
 // New returns a Temporal worker that registers the session workflow and
-// the turn activities against cfg. It panics without c, Store or Secrets.
-func New(c client.Client, cfg Config) sdkworker.Worker {
+// the turn activities against cfg. It panics without c, Store or Secrets,
+// or with a Live URL and no key.
+func New(c client.Client, cfg Config) *Worker {
 	switch {
 	case c == nil:
 		panic("worker: Client is required")
@@ -110,9 +124,11 @@ func New(c client.Client, cfg Config) sdkworker.Worker {
 		panic("worker: Store is required")
 	case cfg.Secrets == nil:
 		panic("worker: Secrets is required")
+	case cfg.Live.URL != "" && len(cfg.Live.Key) == 0:
+		panic("worker: Live.Key is required with Live.URL")
 	}
 	fallback := cfg.Fallback
-	if fallback == nil {
+	if fallback == nil && cfg.DisableStreams {
 		fallback = session.NewMemoryEventLog()
 	}
 	taskQueue := cmp.Or(cfg.TaskQueue, protocol.TaskQueue)
@@ -127,6 +143,8 @@ func New(c client.Client, cfg Config) sdkworker.Worker {
 		Jobs:           cfg.Jobs,
 		harnesses:      newHarnessCache(cmp.Or(cfg.HarnessIdle, defaultHarnessIdle), cmp.Or(cfg.MaxHarnesses, defaultMaxHarnesses)),
 		queue:          taskQueue + "/" + uuid.NewString(),
+		live:           session.NewLive(),
+		liveURL:        cfg.Live.URL,
 	}
 	opts := sdkworker.Options{
 		MaxConcurrentActivityExecutionSize: cfg.MaxConcurrentActivityExecutionSize,
@@ -137,19 +155,21 @@ func New(c client.Client, cfg Config) sdkworker.Worker {
 	shared.RegisterActivity(acts)
 	own := sdkworker.New(c, acts.queue, opts)
 	own.RegisterActivity(acts)
-	return &stickyWorker{Worker: shared, own: own, harnesses: acts.harnesses}
+	return &Worker{Worker: shared, own: own, harnesses: acts.harnesses, live: acts.live, liveKey: cfg.Live.Key}
 }
 
-// stickyWorker polls the shared task queue and this worker's own queue,
-// where the steps of the sessions whose harnesses it holds arrive. Stopping it
+// Worker polls the shared task queue and this worker's own queue, where
+// the steps of the sessions whose harnesses it holds arrive. Stopping it
 // closes those harnesses.
-type stickyWorker struct {
+type Worker struct {
 	sdkworker.Worker
 	own       sdkworker.Worker
 	harnesses *harnessCache
+	live      *session.Live
+	liveKey   []byte
 }
 
-func (w *stickyWorker) Start() error {
+func (w *Worker) Start() error {
 	if err := w.own.Start(); err != nil {
 		return err
 	}
@@ -160,7 +180,7 @@ func (w *stickyWorker) Start() error {
 	return nil
 }
 
-func (w *stickyWorker) Run(interruptCh <-chan any) error {
+func (w *Worker) Run(interruptCh <-chan any) error {
 	if err := w.own.Start(); err != nil {
 		return err
 	}
@@ -168,12 +188,12 @@ func (w *stickyWorker) Run(interruptCh <-chan any) error {
 	return w.Worker.Run(interruptCh)
 }
 
-func (w *stickyWorker) Stop() {
+func (w *Worker) Stop() {
 	w.Worker.Stop()
 	w.stopOwn()
 }
 
-func (w *stickyWorker) stopOwn() {
+func (w *Worker) stopOwn() {
 	w.own.Stop()
 	w.harnesses.CloseAll()
 }

@@ -45,11 +45,11 @@ func activityError(ctx context.Context, err error) error {
 	}
 	// A failure a client acts on crosses the boundary typed with its kind,
 	// which the workflow maps back to the sentinel (executor.stepErr).
-	if errors.Is(err, session.ErrModelRefused) {
-		return temporal.NewApplicationErrorWithCause(err.Error(), string(session.FailRefused), err)
-	}
-	if errors.Is(err, session.ErrMaxTokens) {
-		return temporal.NewNonRetryableApplicationError(err.Error(), string(session.FailMaxTokens), err)
+	switch kind := session.KindOf(err); kind {
+	case session.FailRefused:
+		return temporal.NewApplicationErrorWithCause(err.Error(), string(kind), err)
+	case session.FailMaxTokens, session.FailContextLength:
+		return temporal.NewNonRetryableApplicationError(err.Error(), string(kind), err)
 	}
 	if errors.Is(err, tacklr.ErrNetwork) || errors.Is(err, session.ErrStaleCheckpoint) {
 		return err
@@ -68,9 +68,13 @@ type activities struct {
 	Fallback       session.EventLog
 	DisableStreams bool
 	Secrets        session.SecretStorage
-	Jobs           map[string]JobHandler
+	Jobs           map[string]session.JobHandler
 	harnesses      *harnessCache
 	queue          string
+	// live sends the deltas of this worker's model calls to the clients
+	// on its live endpoint, at liveURL.
+	live    *session.Live
+	liveURL string
 }
 
 // stepSession is the session an activity builds its harness for. The
@@ -84,7 +88,7 @@ type stepSession struct {
 // toolInput is one Tool activity: one run of one call.
 type toolInput struct {
 	stepSession
-	Run tacklr.ToolRun
+	Call tacklr.Call
 }
 
 // commitInput is one Commit activity. Base is the revision the previous
@@ -93,6 +97,9 @@ type commitInput struct {
 	stepSession
 	Base session.Revision
 	In   tacklr.CommitIn
+	// NewTurn says this is a new turn's first Commit: once it saved, the
+	// turns before it are committed, and what they left goes.
+	NewTurn bool `json:",omitempty"`
 }
 
 type runJobInput struct {
@@ -148,20 +155,21 @@ func (a *activities) Inference(ctx context.Context, in stepSession) (tacklr.Repl
 	return reply, activityError(ctx, err)
 }
 
-// Tool runs one tool call. Its outcome is this activity's result, which
-// Commit applies once the round is complete; the call's result itself is
-// kept in the session.Store, so history holds it nowhere. The tool-result
-// event goes on the stream once the result is stored, as a reference
-// Subscribe resolves.
-func (a *activities) Tool(ctx context.Context, in toolInput) (tacklr.CallOutcome, error) {
+// Tool runs one tool call. The call as its run left it is this activity's
+// result, which Commit applies once the round is complete; the call's body
+// (its result, park and writes) is kept in the session.Store, so history
+// holds it nowhere. The tool-result event goes on the stream once the body
+// is stored, as a reference Subscribe resolves.
+func (a *activities) Tool(ctx context.Context, in toolInput) (tacklr.Call, error) {
+	c := in.Call
 	ctx, stream, end, err := a.begin(ctx, in.SessionID, "tool")
 	defer end()
 	if err != nil {
-		return tacklr.CallOutcome{}, err
+		return c, err
 	}
 	w, err := a.harness(ctx, in.stepSession)
 	if err != nil {
-		return tacklr.CallOutcome{}, activityError(ctx, err)
+		return c, activityError(ctx, err)
 	}
 	emit := a.emitter(ctx, stream, in.SessionID)
 	var results []session.Event
@@ -172,17 +180,16 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (tacklr.CallOutcome
 		}
 		emit(ev)
 	})
-	var o tacklr.CallOutcome
 	err = a.harnesses.Read(ctx, a.Store, w, func(h *tacklr.Harness) error {
-		o, err = runTool(ctx, a.Store, in.SessionID, h, in.Run, out)
+		c, err = adapter.RunCall(ctx, a.Store, in.SessionID, h, in.Call, out)
 		return err
 	})
 	stop()
+	ref := ""
+	if err == nil {
+		ref = c.Key()
+	}
 	for _, ev := range results {
-		ref := ""
-		if o.Stored {
-			ref = o.Call.Key()
-		}
 		_ = a.publish(ctx, stream, in.SessionID, session.TopicEvents, ev, ref, true)
 	}
 	if err == nil {
@@ -191,9 +198,9 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (tacklr.CallOutcome
 		err = ctx.Err()
 	}
 	if err != nil {
-		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Run.Call.Name, "error", err)
+		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", c.Tool.Name, "error", err)
 	}
-	return o, activityError(ctx, err)
+	return c, activityError(ctx, err)
 }
 
 // Commit is the only activity that saves the snapshot.
@@ -207,14 +214,35 @@ func (a *activities) Commit(ctx context.Context, in commitInput) (session.Revisi
 	if err != nil {
 		return "", activityError(ctx, err)
 	}
+	var head session.Seq
+	if in.NewTurn && a.Fallback != nil {
+		if head, err = a.Fallback.Head(ctx, in.SessionID); err != nil {
+			return "", activityError(ctx, err)
+		}
+	}
 	out, stop := tacklr.PipeEvents(a.emitter(ctx, stream, in.SessionID))
-	defer stop()
 	rev, err := a.harnesses.Commit(ctx, a.Store, w, in.Base, in.In, out)
+	stop()
 	telemetry.RecordCheckpointAttempt(ctx, err)
 	if err != nil {
 		slog.ErrorContext(ctx, "commit failed", "area", telemetry.AreaRuntime, "error", err)
+		return rev, activityError(ctx, err)
+	}
+	if in.NewTurn {
+		err = a.endTurns(ctx, in.SessionID, head)
 	}
 	return rev, activityError(ctx, err)
+}
+
+// endTurns drops what the turns before a new one left: their call bodies
+// and, when the steps write to it, the fallback log's events
+// through head. A retry of the Commit drops them again.
+func (a *activities) endTurns(ctx context.Context, id session.ID, head session.Seq) error {
+	err := a.Store.ClearCalls(ctx, id)
+	if a.Fallback != nil {
+		err = errors.Join(err, a.Fallback.Trim(ctx, id, head))
+	}
+	return err
 }
 
 func (a *activities) RunJob(ctx context.Context, in runJobInput) (string, error) {
@@ -253,7 +281,7 @@ func (a *activities) harness(ctx context.Context, in stepSession) (harnessSpec, 
 	return harnessSpec{ID: in.SessionID, Key: hex.EncodeToString(sum[:]), Build: func(ctx context.Context) (*tacklr.Harness, *fuse.Server, error) {
 		spec := a.Agent
 		if in.Identity.Specialist != "" {
-			over, err := overlaySpecialist(spec, in.Identity.Specialist)
+			over, err := adapter.OverlaySpecialist(spec, in.Identity.Specialist)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -263,10 +291,11 @@ func (a *activities) harness(ctx context.Context, in stepSession) (harnessSpec, 
 	}}, nil
 }
 
-// WorkerQueue is this worker's own task queue. The workflow asks a worker
-// on the shared queue, then sends the session's steps to the answer.
-func (a *activities) WorkerQueue(context.Context) (string, error) {
-	return a.queue, nil
+// WorkerQueue is this worker's route: its own task queue and live URL. The
+// workflow asks a worker on the shared queue, then sends the session's
+// steps to the answer, and clients dial its live URL.
+func (a *activities) WorkerQueue(context.Context) (protocol.Route, error) {
+	return protocol.Route{Queue: a.queue, Live: a.liveURL}, nil
 }
 
 // Forget deletes what the harnesses of a closed session and of its jobs
@@ -318,6 +347,15 @@ func (a *activities) emitter(ctx context.Context, stream *workflowstreams.Client
 			return
 		}
 		if ctx.Err() != nil {
+			return
+		}
+		if ev.Live() {
+			// Live only: a message's complete event carries its text, and a
+			// tool's result its body. A worker with no live endpoint
+			// sends none.
+			if a.live != nil {
+				a.live.Publish(sessionID, ev)
+			}
 			return
 		}
 		force := first
@@ -380,29 +418,25 @@ func publishContext(ctx context.Context) context.Context {
 	return context.WithoutCancel(ctx)
 }
 
-// publish sends ev on the stream and to the fallback log. With outcome
-// set, the stream carries ev without its content; the fallback log, which
-// is not history, gets it whole.
-func (a *activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID session.ID, topic string, ev session.Event, outcome string, force bool) error {
+// publish sends a durable event on the stream, or to the fallback log when
+// the step has no stream. With call set, the stream carries ev without
+// its content; the fallback log, which is not history, gets it whole.
+func (a *activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID session.ID, topic string, ev session.Event, call string, force bool) error {
 	if ev.Error != nil && ev.Fail == "" {
 		ev.Fail = ev.Error.Error()
 	}
 	pubCtx := publishContext(ctx)
-	var streamErr error
 	if stream != nil {
-		item := protocol.StreamItem{Event: ev, Outcome: outcome}
-		if outcome != "" {
+		item := protocol.StreamItem{Event: ev, Call: call}
+		if call != "" {
 			item.Content = ""
 		}
 		stream.Topic(topic).Publish(item, force)
 		if force {
-			streamErr = stream.Flush(pubCtx)
+			return stream.Flush(pubCtx)
 		}
+		return nil
 	}
-	if a.Fallback != nil {
-		if err := a.Fallback.Append(pubCtx, sessionID, topic, ev); err != nil {
-			return err
-		}
-	}
-	return streamErr
+	// A step without a stream has streams off, and New gave it a fallback.
+	return a.Fallback.Append(pubCtx, sessionID, topic, ev)
 }

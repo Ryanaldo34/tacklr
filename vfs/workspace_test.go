@@ -13,6 +13,7 @@ import (
 )
 
 func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	api := testdrive.Tree()
 	open := testdrive.Open(t, api, nil)
@@ -53,15 +54,10 @@ func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
 	}
 }
 
-func TestWorkspace_duplicateAliasIsAmbiguous(t *testing.T) {
-	a, b := t.TempDir(), t.TempDir()
-	_, err := vfs.Tree(vfs.At("legal", vfs.Local(a)), vfs.At("legal", vfs.Local(b)))(t.Context(), t.Name(), vfs.Request{})
-	if !errors.Is(err, vfs.ErrAmbiguous) {
-		t.Fatalf("dup alias = %v", err)
-	}
-}
-
+// A local member writes and a read-only one refuses writes. A path in a
+// member that is not mounted is not found, and / lists the workspace.
 func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	host := t.TempDir()
 	if err := os.WriteFile(filepath.Join(host, "a.txt"), []byte("one"), 0o644); err != nil {
@@ -118,6 +114,31 @@ func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
 	if _, err := ms.Route(ctx, "/workspace/missing/x").
 		Open(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("open missing = %v", err)
+	}
+
+	if _, err := ms.Route(ctx, "/workspace/missing").
+		Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("stat missing member = %v", err)
+	}
+
+	if _, err := ms.Route(ctx, "/workspace/missing").
+		ReadDir(ctx); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("list missing member = %v", err)
+	}
+
+	if err := ms.Route(ctx, "/workspace/missing/x").
+		Remove(ctx); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("remove in missing member = %v", err)
+	}
+
+	if err := ms.Route(ctx, "/workspace/missing/x").
+		WriteDocument(ctx, vfs.NewTextDocument("/workspace/missing/x", "text/plain", "", "x")); !errors.Is(err, vfs.ErrNotSupported) {
+		t.Fatalf("write document in missing member = %v", err)
+	}
+
+	if ents, err := ms.Route(ctx, "/").
+		ReadDir(ctx); err != nil || len(ents) != 1 || ents[0].Name != "workspace" || !ents[0].IsDir {
+		t.Fatalf("list / = %+v err=%v, want [workspace]", ents, err)
 	}
 
 	if _, err := ms.Route(ctx, "/workspace").

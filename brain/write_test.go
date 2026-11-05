@@ -2,7 +2,9 @@ package brain_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,8 +16,11 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
-// TestPut_catalogEnforced: each case is a distinct ValidateObject return path; success path writes parent+part.
+// TestPut_catalogEnforced: under a catalog, Save rejects an object that breaks
+// its kind (each case is one return path), and saves a record and its part
+// that keep it. Examples do not close a field the way an enum does.
 func TestPut_catalogEnforced(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{
@@ -24,6 +29,8 @@ func TestPut_catalogEnforced(t *testing.T) {
 				{Name: "stage", Type: brain.FieldTypeString, Required: true},
 				{Name: "amount", Type: brain.FieldTypeNumber},
 				{Name: "when", Type: brain.FieldTypeDateTime},
+				{Name: "tier", Type: brain.FieldTypeString, Enum: []string{"gold", "silver"}},
+				{Name: "note", Type: brain.FieldTypeString, Examples: []string{"hello"}},
 			},
 		},
 		brain.KindSpec{Kind: "Chunk", IsPart: true},
@@ -48,9 +55,14 @@ func TestPut_catalogEnforced(t *testing.T) {
 		{"part without parent", brain.Object{Kind: "Chunk"}, "requires parent_id"},
 		{"bad datetime", brain.Object{Kind: "Document", Properties: map[string]any{"stage": "open", "when": "nope"}}, "RFC3339"},
 		{"zero datetime", brain.Object{Kind: "Document", Properties: map[string]any{"stage": "open", "when": time.Time{}}}, "zero time"},
+		{"value outside the enum", brain.Object{Kind: "Document", Properties: map[string]any{"stage": "open", "tier": "Yellowish"}}, "enum"},
+		{"no kind", brain.Object{Kind: " "}, "kind is required"},
+		{"invalid namespace", brain.Object{Kind: "Document", Namespace: brain.Namespace{{Name: "", Value: "x"}}}, "name"},
+		{"nil parent id", brain.Object{Kind: "Chunk", ParentID: &uuid.Nil}, "nil UUID"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := eng.Save(ctx, scope, tc.obj)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("got %v, want containing %q", err, tc.wantErr)
@@ -64,6 +76,9 @@ func TestPut_catalogEnforced(t *testing.T) {
 			"stage":    "open",
 			"amount":   10,
 			"when":     time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
+			"tier":     "gold",
+			"note":     "not one of the examples",
+			"when2":    nil,
 			"slug":     "memo",
 			"vfs_path": "/workspace/work/memo.md",
 		},
@@ -80,152 +95,82 @@ func TestPut_catalogEnforced(t *testing.T) {
 	}
 }
 
-// TestPut_embedderError: configured embedder failure fails the Put.
-func TestPut_embedderError(t *testing.T) {
-	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: failEmbedder{}})))
+// TestSave_failsWhenTheEmbedderFails: a Save whose text the store cannot
+// embed returns the embedder's error.
+func TestSave_failsWhenTheEmbedderFails(t *testing.T) {
+	t.Parallel()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: &storetest.Embedder{}})))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := storetest.Namespace(t, "id", uuid.NewString())
-	_, err = eng.Save(ctx, brain.Scope{Namespace: ns}, brain.Object{
-		Kind: "Note", Title: "x", Content: "body",
-	})
-	if err == nil || !strings.Contains(err.Error(), "embed") {
-		t.Fatalf("want embed error, got %v", err)
+
+	_, err = eng.Save(t.Context(), brain.Scope{Namespace: tenant(t)}, brain.Object{Kind: "Note", Title: "x", Content: "poison"})
+
+	if err == nil || !strings.Contains(err.Error(), "embedder down") {
+		t.Fatalf("save = %v, want the embedder's error", err)
 	}
 }
 
-// TestPut_skipIndexKeepsPropertyOffEntityText: SkipIndex fields stay on the
-// object and remain filterable, but they are not in embed or graph search text.
-func TestPut_skipIndexKeepsPropertyOffEntityText(t *testing.T) {
+// TestSave_indexesTheHostsTextOverTheIndexedFields: a record is embedded and
+// put in the graph as the host's index text over its title, summary, indexed
+// properties in key order (each Go number type as its number) and content; a
+// SkipIndex field, a blank or missing value and the store's own properties
+// stay out of the text.
+func TestSave_indexesTheHostsTextOverTheIndexedFields(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	var gotEmbed string
-	emb := captureEmbedder{fn: func(text string) []float32 {
-		gotEmbed = text
-		return []float32{1, 0}
-	}}
-	store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb}))
+	ctx := t.Context()
+	var embedded []string
+	emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
+		embedded = append(embedded, texts...)
+		return repeatVector([]float32{1, 0}, len(texts)), nil
+	})
 	g := helixtest.Graph(t)
-	eng, err := brain.NewEngine(store, brain.WithIndex(g), brain.WithKinds(
-		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
+	eng, err := brain.NewEngine(brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb})), brain.WithIndex(g),
+		brain.WithKinds(brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
 			{Name: "stage", Type: brain.FieldTypeString},
+			{Name: "amount", Type: brain.FieldTypeNumber},
+			{Name: "hot", Type: brain.FieldTypeBoolean},
 			{Name: "message_id", Type: brain.FieldTypeString, SkipIndex: true},
-		}},
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ns := storetest.Namespace(t, "id", uuid.NewString())
-	scope := brain.Scope{Namespace: ns}
-	const msgID = "msg-skip-index-token"
-	deal, err := eng.Save(ctx, scope, brain.Object{
-		Kind: "Deal", Title: "Acme renewal",
-		Properties: map[string]any{"stage": "open", "message_id": msgID},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(gotEmbed, msgID) {
-		t.Fatalf("skip-index field in embed text: %q", gotEmbed)
-	}
-	if !strings.Contains(gotEmbed, "stage: open") {
-		t.Fatalf("indexed field missing from embed: %q", gotEmbed)
-	}
-	got, err := eng.Get(ctx, scope, deal.ID)
-	if err != nil || got.Properties["message_id"] != msgID {
-		t.Fatalf("the stored object still has the property: %+v err=%v", got, err)
-	}
-	miss, err := g.FindObjects(ctx, brain.ObjectSearch{Namespace: ns, Query: msgID, Limit: 5})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(miss) != 0 {
-		t.Fatalf("graph search text must not contain skip-index value: %+v", miss)
-	}
-	hit, err := g.FindObjects(ctx, brain.ObjectSearch{Namespace: ns, Query: "Acme renewal", Limit: 5})
-	if err != nil || len(hit) != 1 || hit[0].ID != deal.ID {
-		t.Fatalf("graph search title: %+v err=%v", hit, err)
-	}
-}
-
-func TestPut_enumRejectsUnknownString(t *testing.T) {
-	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
-		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
-			{Name: "stage", Type: brain.FieldTypeString, Enum: []string{"open", "closed"}},
-			{Name: "note", Type: brain.FieldTypeString, Examples: []string{"hello"}},
-		}},
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ns := storetest.Namespace(t, "id", uuid.NewString())
-	scope := brain.Scope{Namespace: ns}
-	_, err = eng.Save(ctx, scope, brain.Object{
-		Kind: "Deal", Title: "x", Properties: map[string]any{"stage": "Yellowish"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "enum") {
-		t.Fatalf("want enum error, got %v", err)
-	}
-	if _, err := eng.Save(ctx, scope, brain.Object{
-		Kind: "Deal", Title: "x", Properties: map[string]any{"stage": "open", "note": "Yellowish"},
-	}); err != nil {
-		t.Fatalf("examples are not closed: %v", err)
-	}
-}
-
-func TestPut_indexTextFuncShapesEmbedAndGraph(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	var gotEmbed string
-	emb := captureEmbedder{fn: func(text string) []float32 {
-		gotEmbed = text
-		return []float32{1, 0}
-	}}
-	store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb}))
-	g := helixtest.Graph(t)
-	eng, err := brain.NewEngine(store, brain.WithIndex(g),
-		brain.WithIndexText(func(obj brain.Object, defaultText string) string {
+			{Name: "share", Type: brain.FieldTypeNumber},
+			{Name: "rank", Type: brain.FieldTypeNumber},
+			{Name: "views", Type: brain.FieldTypeNumber},
+			{Name: "seats", Type: brain.FieldTypeNumber},
+			{Name: "owner", Type: brain.FieldTypeString},
+			{Name: "lost", Type: brain.FieldTypeString},
+		}}),
+		brain.WithIndexText(func(_ brain.Object, defaultText string) string {
 			return "related: neighbor record\n" + defaultText
 		}),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := storetest.Namespace(t, "id", uuid.NewString())
-	scope := brain.Scope{Namespace: ns}
-	obj, err := eng.Save(ctx, scope, brain.Object{
-		Kind: "Note", Title: "invoice", Content: "amount due Friday",
+	scope := brain.Scope{Namespace: tenant(t)}
+
+	deal, err := eng.Save(ctx, scope, brain.Object{
+		Kind: "Deal", Title: "Acme renewal", Summary: "enterprise opportunity", Content: "the renewal terms",
+		Properties: map[string]any{
+			"stage": "open", "amount": 120000.0, "hot": true, "message_id": "msg-1", brain.PropSlug: "acme",
+			"share": float32(0.5), "rank": int32(3), "views": int64(4000), "seats": json.Number("12"), "owner": "  ", "lost": nil,
+		},
 	})
-	if err != nil {
-		t.Fatal(err)
+	hits, findErr := g.FindObjects(ctx, brain.ObjectSearch{Namespace: scope.Namespace, Query: "neighbor record", Limit: 5})
+
+	want := "related: neighbor record\nAcme renewal\nenterprise opportunity\namount: 120000\nhot: true\nrank: 3\nseats: 12\nshare: 0.5\nstage: open\nviews: 4000\nthe renewal terms"
+	if err != nil || !slices.Equal(embedded, []string{want}) {
+		t.Errorf("embedded %q %v, want %q", embedded, err, want)
 	}
-	if obj.Content != "amount due Friday" {
-		t.Fatalf("content must stay on the object: %q", obj.Content)
+	if deal.Content != "the renewal terms" || deal.Properties["message_id"] != "msg-1" {
+		t.Errorf("saved = %+v, want the content and every property kept", deal)
 	}
-	if !strings.Contains(gotEmbed, "related: neighbor record") || !strings.Contains(gotEmbed, "invoice") {
-		t.Fatalf("embed text: %q", gotEmbed)
-	}
-	hit, err := g.FindObjects(ctx, brain.ObjectSearch{Namespace: ns, Query: "neighbor record", Limit: 5})
-	if err != nil || len(hit) != 1 || hit[0].ID != obj.ID {
-		t.Fatalf("graph search extra text: %+v err=%v", hit, err)
+	if findErr != nil || len(hits) != 1 || hits[0].ID != deal.ID {
+		t.Errorf("graph search for the host's text = %+v %v, want the deal", hits, findErr)
 	}
 }
 
-type captureEmbedder struct {
-	fn func(string) []float32
-}
-
-func (c captureEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	out := make([][]float32, len(texts))
-	for i, t := range texts {
-		out[i] = c.fn(t)
-	}
-	return out, nil
-}
-
+// TestLink_needsTwoVisibleRecordsARelationAndAGraph: a link needs two visible
+// records, a relation that is not containment, a live context and a graph; a
+// soft-deleted object cannot be saved, and another tenant cannot soft delete.
 func TestLink_needsTwoVisibleRecordsARelationAndAGraph(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -277,33 +222,3 @@ func TestLink_needsTwoVisibleRecordsARelationAndAGraph(t *testing.T) {
 		t.Errorf("soft delete from another tenant = %v, want ErrNotFound", err)
 	}
 }
-
-func TestPutTree_rejectsPartParent(t *testing.T) {
-	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
-		brain.KindSpec{Kind: "Document", IsParent: true},
-		brain.KindSpec{Kind: "Chunk", IsPart: true},
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ns := storetest.Namespace(t, "id", uuid.NewString())
-	scope := brain.Scope{Namespace: ns}
-	parent, err := eng.Save(ctx, scope, brain.Object{Kind: "Document", Title: "Memo"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pos := 0
-	part, err := eng.Save(ctx, scope, brain.Object{
-		Kind: "Chunk", Title: "c", ParentID: &parent.ID, Position: &pos,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = eng.PutTree(ctx, scope, part, nil)
-	if err == nil || !strings.Contains(err.Error(), "first-class") {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func (captureEmbedder) Model() string { return "test-model" }

@@ -3,9 +3,7 @@ package postgres_test
 import (
 	"bytes"
 	"context"
-	"errors"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -38,16 +36,48 @@ func testDB(t *testing.T) (*postgres.DB, *pgxpool.Pool, string) {
 	return db, pool, schema
 }
 
-func sealer(t *testing.T) *postgres.AESGCM {
+func sealer(t *testing.T) *session.AESGCM {
 	t.Helper()
-	s, err := postgres.NewAESGCM(bytes.Repeat([]byte{7}, 32))
+	s, err := session.NewAESGCM(bytes.Repeat([]byte{7}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s
 }
 
+// TestSetup_deploysThatStartTogetherAllSetUp: hosts and workers that start
+// at once each run Setup on a new schema, and each one succeeds.
+func TestSetup_deploysThatStartTogetherAllSetUp(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	pool, err := pgxpool.New(t.Context(), pgtest.Conn(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	db, err := postgres.New(pool, postgres.Options{Schema: pgtest.Schema(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	errs := make(chan error, 8)
+
+	// Act
+	for range cap(errs) {
+		go func() { errs <- db.Setup(t.Context()) }()
+	}
+
+	// Assert
+	for range cap(errs) {
+		if err := <-errs; err != nil {
+			t.Fatalf("a concurrent setup = %v, want each to succeed", err)
+		}
+	}
+}
+
+// TestPostgresStores_meetTheContract: the Postgres Store, SecretStorage and
+// EventLog meet the contract every session store must meet.
 func TestPostgresStores_meetTheContract(t *testing.T) {
+	t.Parallel()
 	storetest.Store(t, func(t *testing.T) session.Store {
 		db, _, _ := testDB(t)
 		return db.Store()
@@ -64,11 +94,16 @@ func TestPostgresStores_meetTheContract(t *testing.T) {
 	})
 }
 
-// A user's token is sealed to its session: the row holds no plaintext, and
-// the same row read as another session's does not open.
+// TestSecrets_sealATokenToItsSession: a user's token is sealed to its
+// session. The row opens for that session only. A row of another session
+// and a row that opens to what is not a bag fail the call, and the owner
+// gets its token back.
 func TestSecrets_sealATokenToItsSession(t *testing.T) {
+	t.Parallel()
+	// Arrange
 	db, pool, schema := testDB(t)
-	secrets := db.Secrets(sealer(t))
+	aes := sealer(t)
+	secrets := db.Secrets(aes)
 	ctx := t.Context()
 	bag := session.Secrets{Auth: session.AuthContext{Bindings: []mount.Binding{{
 		Provider: mount.ProviderGoogleDrive, Auth: mount.Credential{Token: "user-refresh-token"},
@@ -81,59 +116,31 @@ func TestSecrets_sealATokenToItsSession(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT sealed FROM `+table+` WHERE session_id = 'alice'`).Scan(&sealed); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO `+table+` (session_id, sealed) VALUES ('mallory', $1)`, sealed); err != nil {
+	garbled, _ := aes.Seal(ctx, []byte("not json"), []byte("bob"))
+	if _, err := pool.Exec(ctx, `INSERT INTO `+table+` (session_id, sealed) VALUES ('mallory', $1), ('bob', $2)`, sealed, garbled); err != nil {
 		t.Fatal(err)
 	}
+
+	// Act
+	opened, openErr := aes.Open(ctx, sealed, []byte("alice"))
 	_, swapped := secrets.Get(ctx, "mallory")
+	_, decodeErr := secrets.Get(ctx, "bob")
 	own, ownErr := secrets.Get(ctx, "alice")
 
-	if bytes.Contains(sealed, []byte("user-refresh-token")) {
-		t.Fatal("the database row holds the token in plaintext")
+	// Assert
+	if openErr != nil || !bytes.Contains(opened, []byte("user-refresh-token")) {
+		t.Fatalf("the row opened for its session = %q, %v; want the sealed bag", opened, openErr)
 	}
-	if swapped == nil || ownErr != nil || own.Auth.Bindings[0].Auth.Token != "user-refresh-token" {
-		t.Fatalf("another session's row %v, own %+v %v; want it refused and the owner's token back", swapped, own, ownErr)
-	}
-}
-
-func TestAESGCM_needsA32ByteKeyAndAWholeCiphertext(t *testing.T) {
-	_, short := postgres.NewAESGCM([]byte("too short"))
-	_, truncated := sealer(t).Open(t.Context(), []byte("x"), []byte("s"))
-
-	if short == nil || truncated == nil {
-		t.Fatalf("short key %v, truncated ciphertext %v; want both refused", short, truncated)
+	if swapped == nil || decodeErr == nil || ownErr != nil || own.Auth.Bindings[0].Auth.Token != "user-refresh-token" {
+		t.Fatalf("another session's row %v, a row that is not a bag %v, own %+v %v; want both refused and the owner's token back", swapped, decodeErr, own, ownErr)
 	}
 }
 
-// failingSealer is a host KMS that is down, or returns what is not a bag.
-type failingSealer struct{ plain []byte }
-
-func (f failingSealer) Seal(_ context.Context, plaintext, _ []byte) ([]byte, error) {
-	if f.plain != nil {
-		return plaintext, nil
-	}
-	return nil, errors.New("kms unavailable")
-}
-
-func (f failingSealer) Open(context.Context, []byte, []byte) ([]byte, error) { return f.plain, nil }
-
-func TestSecrets_aSealerThatFailsFailsTheCall(t *testing.T) {
-	db, _, _ := testDB(t)
-	ctx := t.Context()
-	bag := session.Secrets{Auth: session.AuthContext{Bindings: []mount.Binding{{Provider: "gdrive", Auth: mount.Credential{Token: "t"}}}}}
-	sealErr := db.Secrets(failingSealer{}).Put(ctx, "s", bag)
-	garbled := db.Secrets(failingSealer{plain: []byte("not json")})
-	if err := garbled.Put(ctx, "s", bag); err != nil {
-		t.Fatal(err)
-	}
-	_, decodeErr := garbled.Get(ctx, "s")
-
-	if sealErr == nil || !strings.Contains(sealErr.Error(), "kms unavailable") || decodeErr == nil {
-		t.Fatalf("seal %v, decode %v; want both to fail the call", sealErr, decodeErr)
-	}
-}
-
-// Every call names its session and fails cleanly when the database is gone.
+// TestStores_failEveryCallOnAClosedPool: every call names its session and
+// fails cleanly when the database is gone. A schema that is not an
+// identifier is refused.
 func TestStores_failEveryCallOnAClosedPool(t *testing.T) {
+	t.Parallel()
 	db, pool, _ := testDB(t)
 	_, badSchema := postgres.New(pool, postgres.Options{Schema: "x;drop"})
 	pool.Close()
@@ -141,18 +148,19 @@ func TestStores_failEveryCallOnAClosedPool(t *testing.T) {
 	store, secrets, log := db.Store(), db.Secrets(sealer(t)), db.EventLog()
 	defer log.Close()
 	bag := session.Secrets{Auth: session.AuthContext{Bindings: []mount.Binding{{Provider: "gdrive", Auth: mount.Credential{Token: "t"}}}}}
-	_, saveErr := store.Save(ctx, "s", []byte("cp"), "")
+	_, saveErr := store.Save(ctx, "s", nil, "")
 	_, _, loadErr := store.Load(ctx, "s")
 	_, revErr := store.Revision(ctx, "s")
-	_, outcomesErr := store.Outcomes(ctx, "s", []string{"k"})
+	_, callsErr := store.Calls(ctx, "s", []string{"k"})
 	_, getErr := secrets.Get(ctx, "s")
 	_, headErr := log.Head(ctx, "s")
 	errs := map[string]error{
 		"setup": db.Setup(ctx), "save": saveErr, "load": loadErr, "revision": revErr,
-		"put outcome": store.PutOutcome(ctx, "s", "k", session.Outcome{}), "outcomes": outcomesErr,
+		"put call": store.PutCall(ctx, "s", "k", nil), "calls": callsErr,
 		"delete": store.Delete(ctx, "s"), "put secrets": secrets.Put(ctx, "s", bag), "get secrets": getErr,
 		"delete secrets": secrets.Delete(ctx, "s"), "append": log.Append(ctx, "s", session.TopicEvents, session.Event{}),
 		"head": headErr, "close session": log.CloseSession(ctx, "s"),
+		"clear calls": store.ClearCalls(ctx, "s"), "trim": log.Trim(ctx, "s", 1),
 	}
 	sub, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
@@ -173,7 +181,7 @@ func TestStores_failEveryCallOnAClosedPool(t *testing.T) {
 	}
 }
 
-// The listener reconnects after its connection dies and wakes its tails, so
+// TestEventLog_aListenerThatLosesItsConnectionCatchesUp: the listener reconnects after its connection dies and wakes its tails, so
 // an event appended while it was not listening still arrives; Close ends
 // every tail, and a Subscribe after Close ends at once.
 func TestEventLog_aListenerThatLosesItsConnectionCatchesUp(t *testing.T) {
@@ -220,8 +228,10 @@ func TestEventLog_aListenerThatLosesItsConnectionCatchesUp(t *testing.T) {
 	}
 }
 
-// A log longer than one read replays in order across reads.
+// TestEventLog_aLongLogReplaysInOrder: a log longer than one read replays in
+// order across reads.
 func TestEventLog_aLongLogReplaysInOrder(t *testing.T) {
+	t.Parallel()
 	db, _, _ := testDB(t)
 	log := db.EventLog()
 	t.Cleanup(log.Close)

@@ -2,7 +2,6 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -36,7 +35,13 @@ func toolResults(msgs []*message.Message) []string {
 	return out
 }
 
+// TestSessionWorkflow_aReplysCallsRunAtMostMaxToolCallsAtOnce: a reply's
+// calls run at most MaxToolCalls at once. Each result comes back in call
+// order, even a result that finished after a later call's, and a call to an
+// unknown tool gets a correction in its place.
 func TestSessionWorkflow_aReplysCallsRunAtMostMaxToolCallsAtOnce(t *testing.T) {
+	t.Parallel()
+	// Arrange
 	env := newTestWorkflow(t)
 	var running, peak atomic.Int32
 	var results []string
@@ -51,33 +56,59 @@ func TestSessionWorkflow_aReplysCallsRunAtMostMaxToolCallsAtOnce(t *testing.T) {
 			id := fmt.Sprintf("c%d", i)
 			calls = append(calls, message.ToolCall{ID: id, CallID: id, Name: "slow", Arguments: fmt.Sprintf(`{"n":%d}`, i)})
 		}
+		calls = slices.Insert(calls, 2, message.ToolCall{ID: "nope", CallID: "nope", Name: "nope", Arguments: `{}`})
 		ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, ToolCalls: calls, IsComplete: true}
 	})
-	slow := tacklr.NewTool(tacklr.ToolConfig{Name: "slow", Handler: func(_ context.Context, args struct {
+	// The calls run in pairs: the first of a pair waits for the second to
+	// end, so it finishes after the call after it, and the second waits for
+	// the first to start, so both run at once.
+	var started, ended [4]chan struct{}
+	for i := range 4 {
+		started[i], ended[i] = make(chan struct{}), make(chan struct{})
+	}
+	slow := tacklr.NewTool(tacklr.ToolConfig{Name: "slow", Handler: func(ctx context.Context, args struct {
 		N int `json:"n"`
 	}) (string, error) {
 		n := running.Add(1)
 		for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
 		}
-		time.Sleep(20 * time.Millisecond)
+		close(started[args.N])
+		var wait chan struct{}
+		if args.N%2 == 0 {
+			wait = ended[args.N+1]
+		} else {
+			wait = started[args.N-1]
+		}
+		select {
+		case <-wait:
+		case <-ctx.Done():
+		}
 		running.Add(-1)
+		close(ended[args.N])
 		return fmt.Sprintf("r%d", args.N), nil
 	}})
 	registerSession(env, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{slow}})
 	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
 	signalAt(env, time.Minute, session.Wake{Kind: session.WakeClose})
 
+	// Act
 	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-fanout", MaxToolCalls: 2})
 
+	// Assert
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	if peak.Load() != 2 || !slices.Equal(results, []string{"r0", "r1", "r2", "r3"}) {
-		t.Fatalf("peak %d calls at once with results %v, want 2 at once and every result in call order", peak.Load(), results)
+	if peak.Load() != 2 || len(results) != 5 || !slices.Equal(slices.Delete(slices.Clone(results), 2, 3), []string{"r0", "r1", "r2", "r3"}) || !strings.Contains(results[2], "not a registered tool") {
+		t.Fatalf("peak %d calls at once with results %q, want 2 at once and every result in call order, the unknown tool's correction third", peak.Load(), results)
 	}
 }
 
+// TestSessionWorkflow_aToolLongerThanTheStepTimeoutRunsToItsOwnTimeout: a
+// tool with its own timeout runs past the step timeout and its result
+// reaches the model.
 func TestSessionWorkflow_aToolLongerThanTheStepTimeoutRunsToItsOwnTimeout(t *testing.T) {
+	t.Parallel()
+	// Arrange
 	env := newTestWorkflow(t)
 	var results []string
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -97,8 +128,10 @@ func TestSessionWorkflow_aToolLongerThanTheStepTimeoutRunsToItsOwnTimeout(t *tes
 	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
 	signalAt(env, time.Minute, session.Wake{Kind: session.WakeClose})
 
+	// Act
 	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-long-tool", ActivityTimeout: 100 * time.Millisecond, ActivityAttempts: 1})
 
+	// Assert
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -107,24 +140,26 @@ func TestSessionWorkflow_aToolLongerThanTheStepTimeoutRunsToItsOwnTimeout(t *tes
 	}
 }
 
+// TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState: a session
+// whose history is long continues as new at an idle point, or while its
+// turn waits on a job, and the next run goes on from its state: committed
+// prompts, a close that waits for the turn, and the result or cancel of a
+// running job or blocking specialist.
 func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
+	t.Parallel()
 	// continued is the input the run that ended in env continues as new with.
-	continued := func(t *testing.T, env *testsuite.TestWorkflowEnvironment) (protocol.Input, carried) {
+	continued := func(t *testing.T, env *testsuite.TestWorkflowEnvironment) protocol.Input {
 		t.Helper()
-		var can *workflow.ContinueAsNewError
-		if err := env.GetWorkflowError(); !errors.As(err, &can) {
-			t.Fatalf("run ended with %v, want it to continue as new", err)
+		can, ok := errors.AsType[*workflow.ContinueAsNewError](env.GetWorkflowError())
+		if !ok {
+			t.Fatalf("run ended with %v, want it to continue as new", env.GetWorkflowError())
 		}
 		var next protocol.Input
 		if err := converter.GetDefaultDataConverter().FromPayloads(can.Input, &next); err != nil {
 			t.Fatal(err)
 		}
 		next.ContinueAsNewEvents = 0
-		var carry carried
-		if err := json.Unmarshal(next.Carry, &carry); err != nil {
-			t.Fatal(err)
-		}
-		return next, carry
+		return next
 	}
 	for _, tc := range []struct {
 		name   string
@@ -135,6 +170,7 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 		{"when idle at the configured history length", 5, func(env *testsuite.TestWorkflowEnvironment) { env.SetCurrentHistoryLength(5) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var seen []string
 			model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 				var users []string
@@ -157,7 +193,7 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 
 			first.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-can", ContinueAsNewEvents: tc.events})
 
-			next, carry := continued(t, first)
+			next := continued(t, first)
 			second := newTestWorkflow(t)
 			second.RegisterActivity(acts)
 			signalAt(second, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "second"}})
@@ -167,13 +203,14 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 			if err := second.GetWorkflowError(); err != nil {
 				t.Fatal(err)
 			}
-			if carry.Rev == "" || strings.Join(seen, ",") != "first,second" {
-				t.Fatalf("the continued run saw %v from carry %+v, want the first prompt kept and the second committed on it", seen, carry)
+			if strings.Join(seen, ",") != "first,second" {
+				t.Fatalf("the continued run saw %v, want the first prompt kept and the second committed on it", seen)
 			}
 		})
 	}
 
-	t.Run("while a finished turn waits on a background job, the job's result lands in the next run", func(t *testing.T) {
+	t.Run("while a task session's finished turn waits on a background job, the job's result lands in the next run, which ends with the task", func(t *testing.T) {
+		t.Parallel()
 		release, let := releaseLater(t)
 		var saw string
 		model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -194,7 +231,7 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 		}})
 		first := newTestWorkflow(t)
 		acts, _ := registerSession(first, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{start}})
-		acts.Jobs = map[string]JobHandler{"ci": func(context.Context, string) (string, error) { <-release; return "first-run", nil }}
+		acts.Jobs = map[string]session.JobHandler{"ci": func(context.Context, string) (string, error) { <-release; return "first-run", nil }}
 		started, commits := false, 0
 		first.SetOnChildWorkflowStartedListener(func(*workflow.Info, workflow.Context, converter.EncodedValues) {
 			started = true
@@ -210,25 +247,76 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 				}
 			}
 		})
-		signalAt(first, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
+		first.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-can-job", Task: "go"})
 
-		first.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-can-job"})
-
-		next, carry := continued(t, first)
+		next := continued(t, first)
 		second := newTestWorkflow(t)
 		second.RegisterActivity(acts)
-		job := carry.Jobs
+		job := session.ID(tacklr.ChildID("sess-can-job", "ci", "s1", false))
 		second.RegisterDelayedCallback(func() {
-			second.SignalWorkflow(signalChildDone, childDone{ID: job[0].ID, Result: "bg-done"})
+			second.SignalWorkflow(signalChildDone, session.JobEnd{ID: job, Result: session.JobResult{Output: "bg-done"}})
 		}, time.Millisecond)
-		signalAt(second, time.Minute, session.Wake{Kind: session.WakeClose})
 		second.ExecuteWorkflow(protocol.Workflow, next)
 
-		if err := second.GetWorkflowError(); err != nil {
+		var result string
+		if err := second.GetWorkflowResult(&result); err != nil {
 			t.Fatal(err)
 		}
-		if len(job) != 1 || !carry.Finished || !carry.Suspended || !strings.Contains(saw, "bg-done") {
-			t.Fatalf("carry %+v, model saw %q; want the finished turn waiting on its job, and the job's result in the next run", next.Carry, saw)
+		if !strings.Contains(saw, "bg-done") || result != "done" {
+			t.Fatalf("model saw %q, result %q; want the job's result in the next run, and the task's answer", saw, result)
+		}
+	})
+
+	t.Run("a close that waits for the running turn carries over, and closes the session once the turn ends in the next run", func(t *testing.T) {
+		t.Parallel()
+		model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if last := lastMsg(msgs); last != nil && last.Role == message.RoleUser && last.Content == "go" {
+				ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true, ToolCalls: []message.ToolCall{{ID: "s1", CallID: "s1", Name: "start", Arguments: `{}`}}}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
+		})
+		start := tacklr.NewTool(tacklr.ToolConfig{Name: "start", Handler: func(ctx context.Context, cc *tacklr.CallContext) (string, error) {
+			job, err := cc.Schedule(ctx, tacklr.JobRequest{Name: "ci", Task: "build"})
+			return job.ID, err
+		}})
+		first := newTestWorkflow(t)
+		acts, _ := registerSession(first, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{start}})
+		release, let := releaseLater(t)
+		acts.Jobs = map[string]session.JobHandler{"ci": func(context.Context, string) (string, error) { <-release; return "built", nil }}
+		started, commits := false, 0
+		first.SetOnChildWorkflowStartedListener(func(*workflow.Info, workflow.Context, converter.EncodedValues) {
+			started = true
+			first.SetContinueAsNewSuggested(true)
+		})
+		// A close comes while the turn runs, so it waits for the turn, which
+		// then waits on its job and continues as new; the job's result comes
+		// in the next run.
+		first.SetOnActivityCompletedListener(func(info *activity.Info, _ converter.EncodedValue, _ error) {
+			if started && info.ActivityType.Name == "Commit" {
+				switch commits++; commits {
+				case 1:
+					first.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeClose})
+				case 2:
+					let()
+				}
+			}
+		})
+		signalAt(first, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
+
+		first.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-can-held"})
+
+		next := continued(t, first)
+		second := newTestWorkflow(t)
+		second.RegisterActivity(acts)
+		job := session.ID(tacklr.ChildID("sess-can-held", "ci", "s1", false))
+		second.RegisterDelayedCallback(func() {
+			second.SignalWorkflow(signalChildDone, session.JobEnd{ID: job, Result: session.JobResult{Output: "built"}})
+		}, time.Millisecond)
+		second.ExecuteWorkflow(protocol.Workflow, next)
+
+		if !second.IsWorkflowCompleted() || second.GetWorkflowError() != nil {
+			t.Fatalf("next run completed %v with %v; want the session closed once its turn ended", second.IsWorkflowCompleted(), second.GetWorkflowError())
 		}
 	})
 
@@ -246,6 +334,7 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 		{"while a blocking specialist runs, a cancel in the next run stops it", session.Wake{Kind: session.WakeCancel}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var result string
 			model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 				last := lastMsg(msgs)
@@ -274,7 +363,7 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 
 			first.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: parent})
 
-			next, carry := continued(t, first)
+			next := continued(t, first)
 			second := newTestWorkflow(t)
 			second.RegisterActivity(acts)
 			var cancelled []string
@@ -284,7 +373,7 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 			})
 			second.RegisterDelayedCallback(func() {
 				if tc.done {
-					second.SignalWorkflow(signalChildDone, childDone{ID: session.ID(child), Result: "found"})
+					second.SignalWorkflow(signalChildDone, session.JobEnd{ID: session.ID(child), Result: session.JobResult{Output: "found"}})
 					return
 				}
 				second.SignalWorkflow(protocol.SignalWake, tc.then)
@@ -294,9 +383,6 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 
 			if err := second.GetWorkflowError(); err != nil {
 				t.Fatal(err)
-			}
-			if len(carry.Jobs) != 1 || string(carry.Jobs[0].ID) != child || !carry.Suspended {
-				t.Fatalf("carry %+v, want the running specialist and the suspended turn", carry)
 			}
 			if tc.done && result != "found" {
 				t.Fatalf("the call's result in the next run = %q, want the specialist's", result)

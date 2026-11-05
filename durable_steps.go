@@ -1,6 +1,7 @@
 package tacklr
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,40 +34,45 @@ func (a *Harness) Commit(ctx context.Context, in CommitIn, out chan session.Even
 		if bad := UnsupportedMIMEs(a.model, user.MIMETypes()); len(bad) > 0 {
 			return fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
 		}
-		if err := a.commitRound(ctx, []*message.Message{user}, EffectNone); err != nil {
+		if err := a.commitRound(ctx, []*message.Message{user}, EffectNone, 0); err != nil {
 			return err
 		}
+	}
+	if in.Collapse {
+		return a.window.Refit(ctx)
 	}
 	return nil
 }
 
-// commitReplyRound commits a reply and its calls' results.
+// commitReplyRound commits a reply and its calls' results, applying each
+// call's writes in call order. A call without its result is cancelled.
 func (a *Harness) commitReplyRound(ctx context.Context, r *Round, out chan session.Event) error {
 	msgs := slices.Clone(r.Reply.Messages)
 	effect := EffectNone
-	for i, call := range r.Reply.Calls {
-		o := r.Outcomes[i]
-		rec, err := record(&o)
-		if err != nil {
-			return err
+	for _, c := range r.Calls {
+		if c.Done && c.Body == nil {
+			return fmt.Errorf("tool call %s has a result but no body: %w", c.Key(), session.ErrNotFound)
 		}
-		a.session.apply(rec.Writes)
-		a.emitPlanUpdate(out)
-		result := rec.Result
-		if !o.Done {
-			result, _ = a.toolResultMessage(call, CancelledToolResultContent, "error")
+		result := (*message.Message)(nil)
+		if b := c.Body; b != nil {
+			a.session.apply(b.writes)
+			a.emitPlanUpdate(out)
+			result = b.result
+			effect = max(effect, b.effect) // installing a plan wins over a handoff
+		}
+		if !c.Done {
+			result, _ = a.toolResultMessage(c.Tool, CancelledToolResultContent, "error")
 		}
 		msgs = append(msgs, result)
-		effect = max(effect, rec.Effect) // installing a plan wins over a handoff
 	}
-	return a.commitRound(ctx, msgs, effect)
+	return a.commitRound(ctx, msgs, effect, r.Reply.InputTokens)
 }
 
 // Infer is the Infer step: one model request on the committed window. It
 // changes no session state: the reply commits as a round once its calls
 // have their results.
 func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, error) {
-	afterTools := a.afterTools()
+	afterTools := a.window.afterTools()
 	turnCtx := ctx
 	if afterTools {
 		turnCtx = telemetry.ContextWithAfterTools(ctx)
@@ -83,6 +89,7 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 	asm := newStreamAssembler()
 	var reply []*message.Message
 	var toolCalls []message.ToolCall
+	inputTokens := 0
 	for {
 		var chunk LLMResponseChunk
 		var ok bool
@@ -97,15 +104,11 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 		if afterTools && chunk.Err() != nil {
 			chunk = tagModelAfterToolsError(chunk)
 		}
-		a.streamChunk(chunk, out)
+		a.streamChunk(chunk, asm, out)
 		if err := chunk.Err(); err != nil {
 			return Reply{}, err
 		}
-		if chunk.InputTokens > 0 {
-			// The provider counted this request: the window as it is now,
-			// the tools and the system prompt.
-			a.usage = requestUsage{tokens: chunk.InputTokens, messages: len(a.context.Messages())}
-		}
+		inputTokens = cmp.Or(chunk.InputTokens, inputTokens)
 		asm.AddDelta(chunk)
 		if chunk.IsComplete {
 			toolCalls = append(toolCalls, chunk.ToolCalls...)
@@ -115,7 +118,7 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 			}
 		}
 	}
-	r := Reply{Messages: reply, Calls: toolCalls}
+	r := Reply{Messages: reply, Calls: toolCalls, InputTokens: inputTokens}
 	for i, tc := range toolCalls {
 		if tool := a.findTool(tc.Name, tc.Namespace); tool != nil && tool.timeout > 0 {
 			if r.Timeouts == nil {
@@ -136,93 +139,57 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 	return r, nil
 }
 
-// afterTools reports whether the model is answering tool results: the
-// window's last committed round is a tool round.
-func (a *Harness) afterTools() bool {
-	window := a.context.Messages()
-	return len(window) > 0 && window[len(window)-1].Role == message.RoleTool
-}
-
-// toolRun is one executed call. A call that neither parked nor awaits a
-// child has a result.
-type toolRun struct {
-	interrupted   bool
-	interruptData []byte
-	content       string // the model-visible result
-	status        string // "success" or "error"
-	// effect is the window effect the call's outcome asked for.
-	effect ToolResultEffect
-	err    error // a failure that is not the model's to correct; logged
-}
-
-// RunTool is the Tool step: it runs one call of the open round from its
-// prior outcome. A child's result becomes the call's result; an answer
-// resumes its park; otherwise the call runs. It changes no session state:
-// the outcome carries the call's writes for Commit.
-func (a *Harness) RunTool(ctx context.Context, run ToolRun, out chan session.Event) (CallOutcome, error) {
-	o := CallOutcome{Call: run.Call}
-	prior, err := record(run.Prior)
-	if err != nil {
-		return o, err
+// RunCall is the Tool step: it runs c once, from what its earlier runs did
+// (its Body), and returns it changed. A job's result becomes the call's
+// result; an answer resumes its park; otherwise its tool runs. It changes
+// no session state: the call's body carries its writes for Commit.
+func (a *Harness) RunCall(ctx context.Context, c Call, out chan session.Event) (Call, error) {
+	answer, jobEnd, running, maxJobs := c.Answer, c.JobEnd, c.Jobs, c.MaxJobs
+	c.Answer, c.JobEnd, c.Jobs, c.MaxJobs = nil, nil, nil, 0
+	c.Park, c.Await, c.Starts, c.Cancels = nil, "", nil, nil
+	if c.Body == nil {
+		c.Body = &CallBody{}
 	}
-	rec := callRecord{Layers: prior.Layers, Writes: prior.Writes}
-	if c := run.Child; c != nil {
+	if jobEnd != nil {
 		status := "success"
-		if c.Failed {
+		if jobEnd.Failed {
 			status = "error"
 		} else {
-			a.keepSpecialistResult(ctx, c.Output)
+			a.keepSpecialistResult(ctx, jobEnd.Output)
 		}
-		rec.Result = a.emitToolResult(out, run.Call, c.Output, status)
-		return o.with(rec, true), nil
+		a.finishCall(&c, out, jobEnd.Output, status, EffectNone)
+		return c, nil
 	}
-	cc := newCallContext(out, a, run, roundCall{Call: run.Call, Park: prior.Park, Layers: prior.Layers}, prior.Writes)
-	if run.Answer != nil {
-		if err := cc.resume(run.Answer); err != nil {
-			return o, fmt.Errorf("return from interrupt %q: %w", run.Call.Key(), err)
+	cc := newCallContext(out, a, c, running, maxJobs)
+	if answer != nil {
+		if err := cc.resume(answer); err != nil {
+			return c, fmt.Errorf("return from interrupt %q: %w", c.Key(), err)
 		}
 	}
-	r := a.executeToolCall(ctx, cc)
-	rec.Layers, rec.Writes = cc.call.Layers, cc.writes
-	o.Starts, o.Cancels = cc.starts, cc.cancels
-	switch {
-	case r.interrupted:
-		rec.Park = cc.call.Park
-		o.Park = &Park{InterruptID: run.Call.Key(), Data: r.interruptData}
-		return o.with(rec, false), nil
-	case cc.await != "":
-		o.AwaitID = cc.await
-		return o.with(rec, false), nil
-	}
-	if r.err != nil {
-		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", run.Call.Name, "error", r.err)
-	}
-	rec.Result, rec.Effect = a.emitToolResult(out, run.Call, r.content, r.status), r.effect
-	return o.with(rec, true), nil
+	a.executeToolCall(ctx, cc, out)
+	return cc.call, nil
 }
 
-// with is o carrying rec, Done when the call has its result. A record
-// always encodes: its writes are JSON already and its park a registered
-// interrupt.
-func (o CallOutcome) with(rec callRecord, done bool) CallOutcome {
-	o.Done = done
-	o.Record, _ = json.Marshal(rec)
-	return o
+// finishCall gives c its result: the tool-result message, which it emits,
+// and the window effect it asks for.
+func (a *Harness) finishCall(c *Call, out chan session.Event, content, status string, effect ToolResultEffect) {
+	c.Body.result, c.Body.effect = a.emitToolResult(out, c.Tool, content, status), effect
+	c.Done = true
 }
 
-// executeToolCall runs rt's call through the interceptor chain. It may park
-// or wait on a child.
-func (a *Harness) executeToolCall(ctx context.Context, cc *CallContext) toolRun {
-	tc := cc.call.Call
-	tcKey := tc.Key()
-	var run toolRun
+// executeToolCall runs cc's call through the interceptor chain and records
+// how the run ended on the call: its result, its park, or the job it waits
+// on.
+func (a *Harness) executeToolCall(ctx context.Context, cc *CallContext, out chan session.Event) {
+	c := &cc.call
+	tc := c.Tool
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
 		toolErr := Correctionf(ErrNotFound, "%s: not found. That is not a registered tool. Use a name from the available tools", tc.Name)
 		toolSpan.Finish("error", toolErr)
-		run.content, run.status = toolErr.Error(), "error"
-		return run
+		a.finishCall(c, out, toolErr.Error(), "error", EffectNone)
+		return
 	}
 	outcome, err := a.toolRunner.Run(toolCtx, ToolInvocation{
 		Tool:        tool,
@@ -233,10 +200,11 @@ func (a *Harness) executeToolCall(ctx context.Context, cc *CallContext) toolRun 
 	if err != nil && !errors.As(err, &parked) && errors.Is(err, ErrAuthExpired) {
 		err = cc.park(&AuthExpired{Tool: tc.Name})
 	}
-	if errors.As(err, &parked) {
+	switch {
+	case errors.As(err, &parked):
 		serialized, _ := parked.Serialize()
 		data, _ := json.Marshal(map[string]any{
-			"interruptId": tcKey,
+			"interruptId": c.Key(),
 			"type":        parked.TypeName(),
 			"data":        json.RawMessage(serialized),
 		})
@@ -244,23 +212,19 @@ func (a *Harness) executeToolCall(ctx context.Context, cc *CallContext) toolRun 
 			toolCtx, telemetry.AgentIDFromContext(ctx), parked.TypeName(),
 		)
 		toolSpan.Finish("interrupt", nil)
-		run.interrupted, run.interruptData = true, data
-		return run
-	}
-	if err != nil {
+		c.Park = &Park{InterruptID: c.Key(), Data: data}
+	case err != nil:
 		toolSpan.Finish("error", err)
-		run.content, run.status = err.Error(), "error"
 		if !errors.Is(err, ErrCorrection) && !errors.Is(err, context.Canceled) {
-			run.err = err
+			slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", tc.Name, "error", err)
 		}
-		return run
+		a.finishCall(c, out, err.Error(), "error", EffectNone)
+	case c.Await != "":
+		toolSpan.Finish("success", nil)
+	default:
+		toolSpan.Finish("success", nil)
+		a.finishCall(c, out, outcome.Output, "success", outcome.Effect)
 	}
-	toolSpan.Finish("success", nil)
-	if cc.await != "" {
-		return run
-	}
-	run.content, run.status, run.effect = outcome.Output, "success", outcome.Effect
-	return run
 }
 
 // tagModelAfterToolsError marks an error chunk as a model failure after

@@ -1,84 +1,66 @@
-package vfs
+package vfs_test
 
 import (
 	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
+// A rich document stores inline marks in their canonical form, merges
+// given runs (empty ones dropped, equal marks joined), and its tables keep
+// their cell marks as text.
 func TestNormalizeInline_setsCanonicalText(t *testing.T) {
-	b := Block{Kind: BlockKindParagraph, Text: "Hello *world*"}
-	normalizeInline(&b)
-	if b.Text != "Hello _world_" || len(b.Runs) != 2 {
-		t.Fatalf("block = %+v", b)
+	t.Parallel()
+	doc := vfs.NewRichDocument("/Spec", googleDocMIME, []vfs.Block{
+		{Kind: vfs.BlockKindParagraph, Text: "Hello *world*"},
+		{Kind: vfs.BlockKindTable, Text: "A\t**B**"},
+		{Kind: vfs.BlockKindImage, Text: "alt"},
+		{Kind: vfs.BlockKindParagraph, Runs: []vfs.Run{{Text: ""}, {Text: "a"}, {Text: "b"}}},
+	})
+
+	para, table, image, runs := doc.Blocks()[0], doc.Blocks()[1], doc.Blocks()[2], doc.Blocks()[3]
+
+	if para.Text != "Hello _world_" || len(para.Runs) != 2 || para.PlainText() != "Hello world" {
+		t.Fatalf("paragraph = %+v, plain %q", para, para.PlainText())
 	}
-	if b.PlainText() != "Hello world" {
-		t.Fatalf("plain = %q", b.PlainText())
+	if !strings.Contains(table.Text, "**B**") || table.PlainText() != table.Text {
+		t.Fatalf("table = %+v", table)
+	}
+	if image.PlainText() != "alt" {
+		t.Fatalf("image = %+v", image)
+	}
+	if runs.Text != "ab" || len(runs.Runs) != 1 {
+		t.Fatalf("merged runs = %+v", runs)
 	}
 }
 
+// Unclosed links and marks stay literal (escaped when formatted), nested
+// and escaped brackets stay in the label, and adjacent runs with the same
+// marks merge.
 func TestParseInline_unclosedAndEscapes(t *testing.T) {
-	if got := FormatInline(ParseInline("[nope")); got != `\[nope` {
-		t.Fatalf("unclosed link = %q", got)
+	t.Parallel()
+	for in, want := range map[string]string{
+		"[nope":       `\[nope`,
+		"[x](nope":    `\[x\](nope`,
+		"**a****b**":  "**ab**",
+		"**a**_b_":    "**a**_b_",
+		`**a\*b**`:    `**a\*b**`,
+		"[x]":         `\[x\]`,
+		"a [b](u) c":  "a [b](u) c",
+		"~~s~~ plain": "~~s~~ plain",
+	} {
+		if got := vfs.FormatInline(vfs.ParseInline(in)); got != want {
+			t.Fatalf("FormatInline(ParseInline(%q)) = %q, want %q", in, got, want)
+		}
 	}
-	if got := FormatInline(ParseInline("[x](nope")); got != `\[x\](nope` {
-		t.Fatalf("unclosed href = %q", got)
-	}
-	if got := PlainInline("a * b"); got != "a * b" {
-		t.Fatalf("lone star = %q", got)
-	}
-	img := Block{Kind: BlockKindImage, Text: "alt"}
-	if img.PlainText() != "alt" || img.inlineRuns() != nil {
-		t.Fatalf("image = %+v", img)
-	}
-	tbl := Block{Kind: BlockKindTable, Text: "A\t**B**"}
-	normalizeInline(&tbl)
-	if !strings.Contains(tbl.Text, "**B**") || tbl.PlainText() != tbl.Text {
-		t.Fatalf("table = %+v", tbl)
-	}
-	if marksEqual(map[string]string{"bold": "true"}, map[string]string{"italic": "true"}) {
-		t.Fatal("marks should differ")
-	}
-	if mergeRuns([]Run{{Text: ""}, {Text: "a"}, {Text: "b"}})[0].Text != "ab" {
-		t.Fatal("merge empty+same")
-	}
-	if _, _, _, ok := parseLink("x", 0); ok {
-		t.Fatal("not a link")
-	}
-	if got := PlainInline("[a [b]](u)"); got != "a [b]" {
-		t.Fatalf("nested = %q", got)
-	}
-	if got := PlainInline(`[a\]b](u)`); got != `a\]b` && got != `a]b` {
-		t.Fatalf("escaped = %q", got)
-	}
-	if got := FormatInline(ParseInline("[x]")); !strings.Contains(got, "x") {
-		t.Fatalf("no href = %q", got)
-	}
-	if got := FormatInline(ParseInline(`**a\*b**`)); !strings.Contains(got, "a") {
-		t.Fatalf("escaped close = %q", got)
-	}
-}
-
-func TestDocsCodec_htmlInlineMarks(t *testing.T) {
-	raw := []byte(`<html><body><p>See <strong>x</strong> and <a href="https://e">y</a></p></body></html>`)
-	blocks, err := decodeDocsHTML(raw)
-	if err != nil || len(blocks) != 1 {
-		t.Fatalf("blocks=%v err=%v", blocks, err)
-	}
-	if blocks[0].Text != "See **x** and [y](https://e)" {
-		t.Fatalf("text=%q", blocks[0].Text)
-	}
-	sink, err := decodeDocsHTML([]byte(`<html><head><style>x</style><script>y</script></head><body>
-<h2></h2><div></div>
-<figure data-object-id="kix.z"><img alt="pic" src="https://e"></figure>
-<img alt="bare">
-<ol><li>A<ul><li>B</li></ul></li></ol>
-<table><tr><th>H</th></tr></table>
-</body></html>`))
-	if err != nil || len(sink) < 3 {
-		t.Fatalf("sink=%d err=%v", len(sink), err)
-	}
-	more, err := decodeDocsHTML([]byte(`<html><body><h1 class="tacklr-tab">Skip</h1><p>a<br>b <em>i</em> <s>s</s></p></body></html>`))
-	if err != nil || len(more) != 1 || !strings.Contains(more[0].Text, "_i_") || !strings.Contains(more[0].Text, "~~s~~") {
-		t.Fatalf("more=%+v err=%v", more, err)
+	for in, want := range map[string]string{
+		"a * b":      "a * b",
+		"[a [b]](u)": "a [b]",
+		`[a\]b](u)`:  "a]b",
+	} {
+		if got := vfs.PlainInline(in); got != want {
+			t.Fatalf("PlainInline(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

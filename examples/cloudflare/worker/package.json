@@ -1,0 +1,14 @@
+{
+  "name": "tacklr-cloudflare-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "./build.sh",
+    "dev": "./build.sh && wrangler dev",
+    "deploy": "./build.sh && wrangler deploy",
+    "e2e": "bun test e2e"
+  },
+  "devDependencies": {
+    "wrangler": "4.157.0"
+  }
+}

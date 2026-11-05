@@ -57,8 +57,6 @@ func (p *permissions) snapshot() map[string]permissionDecision {
 func (p *permissions) restore(decisions map[string]permissionDecision) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// RestoreCheckpoint always passes a map, so the clone is never nil.
 	p.decisions = maps.Clone(decisions)
-	if p.decisions == nil {
-		p.decisions = map[string]permissionDecision{}
-	}
 }

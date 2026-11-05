@@ -74,12 +74,6 @@ func (t *Tool) QualifiedName() string {
 	return t.namespace + "__" + t.name
 }
 
-// Category is the coarse streaming category for client presentation.
-func (t *Tool) Category() message.ToolCategory { return t.category }
-
-// Access is the permission bitmask for this tool.
-func (t *Tool) Access() ToolAccess { return t.access }
-
 type ToolConfig struct {
 	Name        string
 	Description string
@@ -137,8 +131,9 @@ func NewTool(cfg ToolConfig) *Tool {
 		panic(fmt.Sprintf("tool %q: handler has too many parameters (%d)", cfg.Name, numIn))
 	}
 
+	hasCtx := numIn > 0 && fnType.In(0).Implements(ctxType)
 	idx := 0
-	if numIn > 0 && fnType.In(0).Implements(ctxType) {
+	if hasCtx {
 		idx = 1
 	}
 
@@ -208,8 +203,9 @@ func NewTool(cfg ToolConfig) *Tool {
 	handlerValue := reflect.ValueOf(cfg.Handler)
 	t.handlerFunc = func(ctx context.Context, args map[string]any, cc *CallContext) (ToolOutcome, error) {
 		var callArgs []reflect.Value
-
-		callArgs = append(callArgs, reflect.ValueOf(ctx))
+		if hasCtx {
+			callArgs = append(callArgs, reflect.ValueOf(ctx))
+		}
 
 		if argsType != nil {
 			argPtr := reflect.New(argsType)
@@ -547,12 +543,7 @@ type correctionError struct {
 	cause error
 }
 
-func (e *correctionError) Error() string {
-	if e == nil || e.msg == "" {
-		return ErrCorrection.Error()
-	}
-	return e.msg
-}
+func (e *correctionError) Error() string { return e.msg }
 
 func (e *correctionError) Unwrap() error { return e.cause }
 

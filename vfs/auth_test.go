@@ -15,9 +15,11 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
+// A session binds two points of one provider with one shared token holder.
+// Bindings never show the token, a refresh rotates the shared holder, and
+// the token stays until the last point is unbound.
 func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
-	ctx := t.Context()
-	_ = ctx
+	t.Parallel()
 	auth := vfs.NewSessionAuth()
 	tok := "secret-access-token-xyz"
 	if err := auth.Bind("sess-1", mount.Binding{
@@ -117,27 +119,49 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 	}
 }
 
+// waitCtx is a context that reports when a caller first waits on Done, so a
+// test can end it while that caller waits.
+type waitCtx struct {
+	context.Context
+	once    sync.Once
+	waiting chan struct{}
+}
+
+func (c *waitCtx) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
+// Callers that find a token near expiry share one refresh and all get the
+// fresh token, also a caller that waits for the refresh another caller
+// runs. A caller that waits stops when its own context ends.
 func TestTokenHolder_proactiveRefreshCoalescesConcurrentCallers(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	holder := vfs.NewTokenHolder(mount.Credential{
 		Token:     "expiring",
 		ExpiresAt: time.Now().Add(10 * time.Second),
 	})
-	release := make(chan struct{})
+	started, release := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
 	holder.SetRefresh(func(context.Context) (mount.Credential, error) {
-		calls.Add(1)
+		if calls.Add(1) == 1 {
+			close(started)
+		}
 		<-release
 		return mount.Credential{
 			Token:     "fresh",
 			ExpiresAt: time.Now().Add(time.Hour),
 		}, nil
 	})
+	inner, cancel := context.WithCancel(t.Context())
+	waiter := &waitCtx{Context: inner, waiting: make(chan struct{})}
+	sharer := &waitCtx{Context: t.Context(), waiting: make(chan struct{})}
 
 	// Act
 	const readers = 8
 	var wg sync.WaitGroup
-	errs := make(chan error, readers)
+	errs := make(chan error, readers+1)
 	for range readers {
 		wg.Add(1)
 		go func() {
@@ -145,9 +169,14 @@ func TestTokenHolder_proactiveRefreshCoalescesConcurrentCallers(t *testing.T) {
 			errs <- holder.EnsureValid(t.Context())
 		}()
 	}
-	for calls.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	<-started
+	waited := make(chan error, 1)
+	go func() { waited <- holder.RefreshIfCurrent(waiter, "expiring") }()
+	<-waiter.waiting
+	cancel()
+	waitErr := <-waited
+	wg.Go(func() { errs <- holder.EnsureValid(sharer) })
+	<-sharer.waiting
 	close(release)
 	wg.Wait()
 	close(errs)
@@ -158,6 +187,9 @@ func TestTokenHolder_proactiveRefreshCoalescesConcurrentCallers(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if !errors.Is(waitErr, context.Canceled) {
+		t.Fatalf("a waiter whose context ends = %v, want context.Canceled", waitErr)
+	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("refresh calls = %d", got)
 	}
@@ -166,7 +198,10 @@ func TestTokenHolder_proactiveRefreshCoalescesConcurrentCallers(t *testing.T) {
 	}
 }
 
+// Bind refuses an empty session, token or provider and a point that is not
+// one free alias.
 func TestSessionAuth_bindRejects(t *testing.T) {
+	t.Parallel()
 	auth := vfs.NewSessionAuth()
 	tok := mount.Credential{Token: "t"}
 	cases := []struct {
@@ -192,7 +227,12 @@ func TestSessionAuth_bindRejects(t *testing.T) {
 	}
 }
 
+// RefreshOnce installs the token the refresh returns and fails when there
+// is no refresh, the refresh fails or returns no token, or the context ends.
+// A refresh for a token that is no longer current keeps the current one.
+// A nil holder has no token.
 func TestTokenHolder_refreshOnce(t *testing.T) {
+	t.Parallel()
 	h := vfs.NewTokenHolder(mount.Credential{Token: "old"})
 	if err := h.RefreshOnce(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("no refresh func: %v", err)
@@ -207,6 +247,9 @@ func TestTokenHolder_refreshOnce(t *testing.T) {
 	}
 	if h.Current().Token != "new" || n != 1 {
 		t.Fatalf("token=%q n=%d", h.Current().Token, n)
+	}
+	if err := h.RefreshIfCurrent(t.Context(), "old"); err != nil || h.Current().Token != "new" {
+		t.Fatalf("refresh of a replaced token: token=%q err=%v", h.Current().Token, err)
 	}
 
 	h.SetRefresh(func(context.Context) (mount.Credential, error) {
@@ -226,6 +269,9 @@ func TestTokenHolder_refreshOnce(t *testing.T) {
 	if err := h.RefreshOnce(canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled refresh: %v", err)
 	}
+	if err := h.EnsureValid(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled EnsureValid: %v", err)
+	}
 	h.SetRefresh(func(context.Context) (mount.Credential, error) {
 		return mount.Credential{Token: "   "}, nil
 	})
@@ -242,9 +288,17 @@ func TestTokenHolder_refreshOnce(t *testing.T) {
 	if err := nilH.RefreshOnce(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("nil holder refresh: %v", err)
 	}
+	if err := nilH.EnsureValid(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
+		t.Fatalf("nil holder EnsureValid: %v", err)
+	}
 }
 
+// A second bind of one point replaces it and keeps the shared holder, and
+// UnbindProvider drops every point of the provider. Refresh, Unbind and
+// UnbindProvider fail for a session, provider or point that is not bound,
+// and a nil SessionAuth has nothing.
 func TestSessionAuth_replaceAndUnbindProvider(t *testing.T) {
+	t.Parallel()
 	auth := vfs.NewSessionAuth()
 	first := mount.Binding{
 		Provider: "gdrive", Point: "/contracts",
@@ -265,6 +319,15 @@ func TestSessionAuth_replaceAndUnbindProvider(t *testing.T) {
 	}
 	if tok, _ := auth.Credential("s", "gdrive"); tok.Token != "t2" {
 		t.Fatalf("shared holder after replace = %q", tok.Token)
+	}
+	if err := auth.Refresh("s", "msgraph", mount.Credential{Token: "x"}); err == nil || !strings.Contains(err.Error(), "msgraph") {
+		t.Fatalf("refresh of a provider the session has not bound: %v", err)
+	}
+	if err := auth.Unbind("s", "/nope"); !errors.Is(err, vfs.ErrNotMounted) {
+		t.Fatalf("unbind of a point the session has not bound: %v", err)
+	}
+	if got := auth.Bindings("unknown"); got != nil {
+		t.Fatalf("bindings of an unknown session = %+v", got)
 	}
 	if err := auth.Bind("s", mount.Binding{
 		Provider: "gdrive", Point: "/notes", Auth: mount.Credential{Token: "t2"},

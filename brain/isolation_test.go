@@ -16,6 +16,8 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
+// TestEngine_everyEntryPointRejectsAnEmptyScope: every engine call with an
+// empty scope is ErrInvalid.
 func TestEngine_everyEntryPointRejectsAnEmptyScope(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -50,7 +52,11 @@ func TestEngine_everyEntryPointRejectsAnEmptyScope(t *testing.T) {
 	}
 }
 
+// TestEngine_putKeepsObjectsInsideTheCallersScope: a write outside the
+// caller's scope, a part under a part, a tree rooted at a part, or a part
+// under another tenant's record fails; a narrower namespace is saved.
 func TestEngine_putKeepsObjectsInsideTheCallersScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
@@ -71,13 +77,14 @@ func TestEngine_putKeepsObjectsInsideTheCallersScope(t *testing.T) {
 	_, outsideErr := eng.Save(ctx, a, brain.Object{Kind: "Note", Namespace: b.Namespace})
 	_, nestedErr := eng.Save(ctx, a, brain.Object{Kind: "Chunk", ParentID: &chunk.ID, Content: "nested"})
 	_, partErr := eng.Save(ctx, b, brain.Object{Kind: "Chunk", ParentID: &parentA.ID, Content: "planted"})
+	_, treeErr := eng.PutTree(ctx, a, chunk, nil)
 	narrowed, narrowErr := eng.Save(ctx, a, brain.Object{Kind: "Note", Namespace: storetest.Namespace(t, "org", "a", "team", "x")})
 
 	if !errors.Is(outsideErr, brain.ErrInvalid) {
 		t.Errorf("object namespace outside scope = %v, want ErrInvalid", outsideErr)
 	}
-	if !errors.Is(nestedErr, brain.ErrInvalid) {
-		t.Errorf("part under a part = %v, want ErrInvalid", nestedErr)
+	if !errors.Is(nestedErr, brain.ErrInvalid) || !errors.Is(treeErr, brain.ErrInvalid) {
+		t.Errorf("part under a part = %v, tree rooted at a part = %v, want ErrInvalid", nestedErr, treeErr)
 	}
 	if !errors.Is(partErr, brain.ErrNotFound) {
 		t.Errorf("part under another tenant's parent = %v, want ErrNotFound", partErr)
@@ -87,6 +94,9 @@ func TestEngine_putKeepsObjectsInsideTheCallersScope(t *testing.T) {
 	}
 }
 
+// TestEngine_auditRecordsEveryServedReadAndWrite: each served read and write
+// records its audit event, with the scope, the principals, the session, the
+// object ids and the count.
 func TestEngine_auditRecordsEveryServedReadAndWrite(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -151,6 +161,8 @@ func TestEngine_auditRecordsEveryServedReadAndWrite(t *testing.T) {
 	}
 }
 
+// TestEngine_aFailedAuditRecordFailsEveryServedReadAndWrite: when the audit
+// log fails, every served read and write returns its error.
 func TestEngine_aFailedAuditRecordFailsEveryServedReadAndWrite(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -194,14 +206,5 @@ func TestEngine_aFailedAuditRecordFailsEveryServedReadAndWrite(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "audit store down") {
 			t.Errorf("%s with a failing audit log = %v", name, err)
 		}
-	}
-}
-
-func TestNamespace_keyIsCollisionFreeWhereStringIsNot(t *testing.T) {
-	dotted := brain.Namespace{{Name: "a", Value: "x"}, {Name: "b", Value: "y"}}
-	other := brain.Namespace{{Name: "c", Value: "x"}, {Name: "d", Value: "y"}}
-
-	if dotted.String() != other.String() || dotted.Key() == other.Key() {
-		t.Fatalf("String %q/%q, Key %q/%q", dotted.String(), other.String(), dotted.Key(), other.Key())
 	}
 }

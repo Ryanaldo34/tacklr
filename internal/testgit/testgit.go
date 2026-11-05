@@ -42,15 +42,16 @@ type Server struct {
 }
 
 // Start seeds files (path → content) as one commit on Base and serves it. It
-// skips the test when the git CLI is not installed.
+// fails the test when the git CLI is not installed.
 func Start(t testing.TB, files map[string]string) *Server {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
 		t.Fatal("git CLI not installed")
 	}
 	s := &Server{Token: "test-token", root: t.TempDir()}
 	s.seed(t, files)
-	s.startHTTP(t)
+	s.startHTTP(t, gitPath)
 	s.startSSH(t)
 	return s
 }
@@ -89,15 +90,7 @@ func Run(t testing.TB, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// Show returns name at rev in the served repository.
-func (s *Server) Show(t testing.TB, rev, name string) string {
-	t.Helper()
-	return Run(t, s.bare(), "show", rev+":"+name)
-}
-
-func (s *Server) startHTTP(t testing.TB) {
-	gitPath, err := exec.LookPath("git")
-	must(t, err)
+func (s *Server) startHTTP(t testing.TB, gitPath string) {
 	backend := &cgi.Handler{
 		Path: gitPath,
 		Args: []string{"http-backend"},
@@ -162,11 +155,8 @@ func (s *Server) serveSSH(conn net.Conn, cfg *ssh.ServerConfig) {
 	}
 	defer sc.Close()
 	go ssh.DiscardRequests(reqs)
+	// git opens session channels only.
 	for nc := range chans {
-		if nc.ChannelType() != "session" {
-			_ = nc.Reject(ssh.UnknownChannelType, "session only")
-			continue
-		}
 		ch, creqs, err := nc.Accept()
 		if err != nil {
 			return
@@ -194,7 +184,12 @@ func (s *Server) serveSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 		_ = req.Reply(true, nil)
 		repo := filepath.Join(s.root, filepath.Base(strings.Trim(arg, "'\"/")))
 		cmd := exec.Command("git", strings.TrimPrefix(svc, "git-"), repo) //nolint:gosec // G204: svc is one of two fixed services; repo is under the test root
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = ch, ch, ch.Stderr()
+		cmd.Stdout, cmd.Stderr = ch, ch.Stderr()
+		// A pipe, not cmd.Stdin: Wait waits for a cmd.Stdin copy to end, and
+		// a client waits for output after a failed git, so neither would
+		// end. Wait closes this pipe, and ch.Close ends the copy.
+		stdin, _ := cmd.StdinPipe() // fails only when Stdin is set or cmd has started
+		go func() { _, _ = io.Copy(stdin, ch) }()
 		status := uint32(0)
 		if err := cmd.Run(); err != nil {
 			status = 1

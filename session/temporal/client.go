@@ -8,7 +8,6 @@ package temporal
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -21,7 +20,9 @@ import (
 	"go.temporal.io/sdk/contrib/workflowstreams"
 	"go.temporal.io/sdk/converter"
 
+	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
+	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
 )
 
@@ -33,6 +34,7 @@ type Client struct {
 	secrets        session.SecretStorage
 	fallback       session.EventLog
 	disableStreams bool
+	live           Live
 	// policy is the execution policy every session this client starts
 	// carries in its workflow input.
 	policy protocol.Input
@@ -60,6 +62,10 @@ type Config struct {
 	Fallback session.EventLog
 	// DisableStreams uses the fallback EventLog instead of Workflow Streams.
 	DisableStreams bool
+	// Live is how Subscribe reaches the live endpoint of the worker that
+	// holds a session's harness, for its deltas. A zero Live gets whole
+	// messages only.
+	Live Live
 	// WorkerQueueTimeout is how long a step waits to start on the worker
 	// that holds its session's harness. A step that did not start in time
 	// (that worker is gone) goes to another worker, which builds the harness
@@ -111,6 +117,7 @@ func Open(c client.Client, cfg Config) *Client {
 		secrets:        cfg.Secrets,
 		fallback:       fallback,
 		disableStreams: cfg.DisableStreams,
+		live:           cfg.Live,
 		policy: protocol.Input{
 			WorkerQueueTimeout:  cfg.WorkerQueueTimeout,
 			ActivityTimeout:     cfg.ActivityTimeout,
@@ -134,7 +141,7 @@ func (r *Client) CreateSession(ctx context.Context, req session.CreateSession) (
 	if id == "" {
 		id = session.ID(uuid.NewString())
 	}
-	seed, err := encodeState(req.State)
+	seed, err := adapter.EncodeState(req.State)
 	if err != nil {
 		return "", err
 	}
@@ -154,28 +161,6 @@ func (r *Client) CreateSession(ctx context.Context, req session.CreateSession) (
 		return "", err
 	}
 	return id, nil
-}
-
-// encodeState JSON-roundtrips host session state so checkpoint types are
-// stable (numbers become float64) and values JSON cannot hold fail now.
-func encodeState(state map[string]any) (map[string]any, error) {
-	if len(state) == 0 {
-		return nil, nil
-	}
-	out := make(map[string]any, len(state))
-	for key, value := range state {
-		if key == "" {
-			return nil, fmt.Errorf("%w: session state key must not be empty", session.ErrInvalid)
-		}
-		raw, err := json.Marshal(value)
-		if err != nil {
-			return nil, fmt.Errorf("%w: session state %q: %w", session.ErrInvalid, key, err)
-		}
-		var decoded any
-		_ = json.Unmarshal(raw, &decoded)
-		out[key] = decoded
-	}
-	return out, nil
 }
 
 func (r *Client) markClosed(id session.ID) {
@@ -211,7 +196,7 @@ func missing(err error) error {
 
 // Prompt implements session.Client.
 func (r *Client) Prompt(ctx context.Context, sessionID session.ID, msg session.Prompt) error {
-	encoded, err := encodeState(msg.State)
+	encoded, err := adapter.EncodeState(msg.State)
 	if err != nil {
 		return err
 	}
@@ -229,7 +214,7 @@ func (r *Client) Prompt(ctx context.Context, sessionID session.ID, msg session.P
 
 // Resume implements session.Client.
 func (r *Client) Resume(ctx context.Context, sessionID session.ID, resume session.Resume) error {
-	encoded, err := encodeState(resume.State)
+	encoded, err := adapter.EncodeState(resume.State)
 	if err != nil {
 		return err
 	}
@@ -299,16 +284,19 @@ func (r *Client) Head(ctx context.Context, sessionID session.ID) (session.Seq, e
 	return r.fallback.Head(ctx, sessionID)
 }
 
-// Subscribe implements session.Client.
+// Subscribe implements session.Client: the session's durable events, from
+// its stream or the fallback log, with its deltas from the live endpoint
+// of the worker that holds its harness between them.
 func (r *Client) Subscribe(ctx context.Context, sessionID session.ID, after session.Seq) (session.Subscription, error) {
 	subCtx, cancel := context.WithCancel(ctx)
+	s := &sub{cancel: cancel}
+	ch := make(chan session.Event, 64)
 	if r.disableStreams {
 		src, err := r.fallback.Subscribe(subCtx, sessionID, after)
 		if err != nil {
 			cancel()
 			return nil, err
 		}
-		ch := make(chan session.Event)
 		go func() {
 			defer close(ch)
 			for ev := range src {
@@ -317,17 +305,20 @@ func (r *Client) Subscribe(ctx context.Context, sessionID session.ID, after sess
 				}
 			}
 		}()
-		return &sub{ch: ch, cancel: cancel}, nil
+	} else {
+		c := workflowstreams.NewClient(r.client, string(sessionID), workflowstreams.Options{})
+		dc := converter.GetDefaultDataConverter()
+		go func() {
+			defer close(ch)
+			defer func() { _ = c.Close(subCtx) }()
+			s.err = r.stream(subCtx, c, dc, sessionID, after, ch)
+		}()
 	}
-	c := workflowstreams.NewClient(r.client, string(sessionID), workflowstreams.Options{})
-	ch := make(chan session.Event, 64)
-	s := &sub{ch: ch, cancel: cancel}
-	dc := converter.GetDefaultDataConverter()
-	go func() {
-		defer close(ch)
-		defer func() { _ = c.Close(subCtx) }()
-		s.err = r.stream(subCtx, c, dc, sessionID, after, ch)
-	}()
+	var deltas <-chan session.Event
+	if len(r.live.Key) > 0 {
+		deltas = r.deltas(subCtx, sessionID)
+	}
+	s.ch = session.Merge(subCtx, ch, deltas)
 	return s, nil
 }
 
@@ -361,18 +352,22 @@ func (r *Client) stream(ctx context.Context, c *workflowstreams.Client, dc conve
 }
 
 // resolve is the event an item stands for: a tool result's content is read
-// back from the Store's outcome of its call.
+// back from its call's body in the Store. A call whose body is gone (its
+// turn ended, or its session was deleted) took its content with it.
 func (r *Client) resolve(ctx context.Context, id session.ID, it protocol.StreamItem) (session.Event, error) {
-	if it.Outcome == "" {
+	if it.Call == "" {
 		return it.Event, nil
 	}
-	outcomes, err := r.store.Outcomes(ctx, id, []string{it.Outcome})
+	bodies, err := r.store.Calls(ctx, id, []string{it.Call})
 	if err != nil {
 		return it.Event, err
 	}
 	ev := it.Event
-	// A session that was deleted took its results with it.
-	ev.Content = outcomes[it.Outcome].Result
+	if raw, ok := bodies[it.Call]; ok {
+		if ev.Content, err = tacklr.ResultText(raw); err != nil {
+			return ev, fmt.Errorf("tool call %s: %w", it.Call, err)
+		}
+	}
 	return ev, nil
 }
 

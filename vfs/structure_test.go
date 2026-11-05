@@ -9,6 +9,7 @@ import (
 
 // TestTextDocument_markdownBlocks projects ATX outline as Structured blocks.
 func TestTextDocument_markdownBlocks(t *testing.T) {
+	t.Parallel()
 	const md = `Preamble here.
 
 # Title
@@ -101,6 +102,7 @@ func blockIDs(blocks []vfs.Block) []string {
 // TestTextDocument_markdownStructureEdges: empty/non-md, ATX quirks, fences,
 // empty titles → section, root-level id collision, FindBlock/ReplaceSpan edges.
 func TestTextDocument_markdownStructureEdges(t *testing.T) {
+	t.Parallel()
 	// Non-markdown → no structure
 	goDoc := vfs.NewTextDocument("/work/a.go", "text/x-go", "utf-8", "package a\n")
 	if len(goDoc.Blocks()) != 0 {

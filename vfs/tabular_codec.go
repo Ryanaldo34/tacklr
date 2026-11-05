@@ -163,6 +163,11 @@ func unzipHTMLFiles(data []byte) ([]htmlFile, error) {
 		if !strings.HasSuffix(lower, ".html") && !strings.HasSuffix(lower, ".htm") {
 			continue
 		}
+		// The zip reader fails a part that is longer than its header size, so
+		// the header check bounds the read.
+		if f.UncompressedSize64 > uint64(MaxReadFileBytes) {
+			return nil, errFileExceeds(MaxReadFileBytes)
+		}
 		rc, err := f.Open()
 		if err != nil {
 			return nil, err
@@ -171,9 +176,6 @@ func unzipHTMLFiles(data []byte) ([]htmlFile, error) {
 		_ = rc.Close()
 		if err != nil {
 			return nil, err
-		}
-		if len(body) > MaxReadFileBytes {
-			return nil, errFileExceeds(MaxReadFileBytes)
 		}
 		title := strings.TrimSuffix(base, path.Ext(base))
 		hf := htmlFile{title: title, body: body}
@@ -216,12 +218,7 @@ func parseSheetsHTML(raw []byte, fallback string) ([]Sheet, error) {
 	}
 	out := make([]Sheet, 0, len(tables))
 	for i, grid := range tables {
-		title := fallback
-		if title == "" || i > 0 {
-			if i > 0 || title == "" {
-				title = "Sheet" + strconv.Itoa(i+1)
-			}
-		}
+		title := "Sheet" + strconv.Itoa(i+1)
 		if i == 0 && fallback != "" {
 			title = fallback
 		}
@@ -236,9 +233,6 @@ func collectHTMLTables(n *html.Node) [][][]string {
 	var out [][][]string
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
-		if n == nil {
-			return
-		}
 		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "table") {
 			if grid, ok := tableGrid(n); ok {
 				out = append(out, grid)
@@ -286,9 +280,6 @@ func cellHTMLText(n *html.Node) string {
 	var b strings.Builder
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
-		if n == nil {
-			return
-		}
 		if n.Type == html.TextNode {
 			b.WriteString(n.Data)
 			return
@@ -306,9 +297,6 @@ func cellHTMLText(n *html.Node) string {
 }
 
 func firstHTMLTitle(n *html.Node) string {
-	if n == nil {
-		return ""
-	}
 	if n.Type == html.ElementNode && strings.EqualFold(n.Data, "title") {
 		return strings.TrimSpace(FormatInline(collectInline(n, nil)))
 	}
@@ -321,9 +309,6 @@ func firstHTMLTitle(n *html.Node) string {
 }
 
 func liftTabular(title, body string) []Sheet {
-	if title == "" {
-		title = "Sheet1"
-	}
 	grid := parseDelimited(body)
 	sh := Sheet{Title: title, Cells: cellsFromStrings(grid)}
 	trimSheet(&sh)
@@ -343,16 +328,17 @@ func parseDelimited(body string) [][]string {
 	r.Comma = comma
 	r.LazyQuotes = true
 	r.FieldsPerRecord = -1
-	rows, err := r.ReadAll()
-	if err != nil {
-		return parseToolTSV(body)
-	}
+	// With LazyQuotes, a free field count and a strings.Reader, ReadAll
+	// cannot fail.
+	rows, _ := r.ReadAll()
 	return padStringGrid(rows)
 }
 
+// sheetsFromBlocks lifts the sheet blocks. fallback (never empty) titles a
+// block without a title or ID, and the one sheet when there are no sheet blocks.
 func sheetsFromBlocks(blocks []Block, fallback string) []Sheet {
 	out := make([]Sheet, 0, len(blocks))
-	for i, b := range blocks {
+	for _, b := range blocks {
 		if b.Kind != "" && b.Kind != BlockKindSheet {
 			continue
 		}
@@ -363,9 +349,6 @@ func sheetsFromBlocks(blocks []Block, fallback string) []Sheet {
 		if title == "" {
 			title = fallback
 		}
-		if title == "" {
-			title = "Sheet" + strconv.Itoa(i+1)
-		}
 		sh := Sheet{
 			ID:    blockAttr(b, "sheet_id"),
 			Title: title,
@@ -375,9 +358,6 @@ func sheetsFromBlocks(blocks []Block, fallback string) []Sheet {
 		out = append(out, sh)
 	}
 	if len(out) == 0 {
-		if fallback == "" {
-			fallback = "Sheet1"
-		}
 		out = []Sheet{{Title: fallback}}
 	}
 	return out

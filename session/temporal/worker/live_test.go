@@ -5,35 +5,37 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/session/temporal"
-	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
-
-	enumspb "go.temporal.io/api/enums/v1"
-	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
-
+	"github.com/jackc/pgx/v5/pgxpool"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
+	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
 	"go.temporal.io/sdk/testsuite"
 	sdkworker "go.temporal.io/sdk/worker"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ryanaldo34/tacklr"
-
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/session/postgres"
+	"github.com/ryanaldo34/tacklr/session/temporal"
+	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
 	"github.com/ryanaldo34/tacklr/telemetry/export"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
@@ -51,6 +53,28 @@ type liveStack struct {
 	Secrets   session.SecretStorage
 	// cfg is the worker's Config, so a restart builds the same worker.
 	cfg Config
+	// live serves the worker's live endpoint when cfg.Live has a key: a
+	// restart serves the new worker at a new URL, as a new machine is.
+	live *httptest.Server
+	// listening closes once a client listens on the running worker's live
+	// endpoint, for a model that waits for it.
+	listening atomic.Pointer[chan struct{}]
+}
+
+// flushSignal is a live response that closes its worker's listening once
+// the endpoint flushes: the client listens from then on.
+type flushSignal struct {
+	http.ResponseWriter
+	once      *sync.Once
+	listening chan struct{}
+}
+
+// FlushError flushes the response (http.ResponseController uses it) and
+// reports why it could not.
+func (f flushSignal) FlushError() error {
+	err := http.NewResponseController(f.ResponseWriter).Flush()
+	f.once.Do(func() { close(f.listening) })
+	return err
 }
 
 func newLiveStack(t *testing.T, agent tacklr.AgentOptions, change ...func(*Config)) *liveStack {
@@ -72,29 +96,52 @@ func newLiveStack(t *testing.T, agent tacklr.AgentOptions, change ...func(*Confi
 	store := session.NewMemoryStore()
 	log := session.NewMemoryEventLog()
 	secrets := session.NewMemorySecretStorage()
-	// A lost worker's steps go elsewhere after two seconds, not ten.
-	rt := temporal.Open(c, temporal.Config{TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, WorkerQueueTimeout: 2 * time.Second})
 	cfg := Config{Agent: agent, TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets}
 	for _, f := range change {
 		f(&cfg)
 	}
-	w := New(c, cfg)
-	if err := w.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(w.Stop)
-	return &liveStack{Client: rt, Store: store, Temporal: c, TaskQueue: tq, Worker: w, Secrets: secrets, cfg: cfg}
+	// A lost worker's steps go elsewhere after two seconds, not ten.
+	rt := temporal.Open(c, temporal.Config{TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, WorkerQueueTimeout: 2 * time.Second, Live: temporal.Live{Key: cfg.Live.Key}})
+	s := &liveStack{Client: rt, Store: store, Temporal: c, TaskQueue: tq, Secrets: secrets, cfg: cfg}
+	s.startWorker(t)
+	return s
 }
 
-func (s *liveStack) RestartWorker(t *testing.T) {
+// startWorker starts a worker on the stack's config and, with a live key,
+// serves its live endpoint at a URL of its own.
+func (s *liveStack) startWorker(t *testing.T) {
 	t.Helper()
-	s.Worker.Stop()
-	w := New(s.Temporal, s.cfg)
+	cfg := s.cfg
+	var handler atomic.Pointer[http.Handler]
+	if len(cfg.Live.Key) > 0 {
+		listening, once := make(chan struct{}), new(sync.Once)
+		s.listening.Store(&listening)
+		s.live = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			(*handler.Load()).ServeHTTP(flushSignal{ResponseWriter: w, once: once, listening: listening}, r)
+		}))
+		t.Cleanup(s.live.Close)
+		cfg.Live.URL = s.live.URL
+	}
+	w := New(s.Temporal, cfg)
+	h := w.LiveHandler()
+	handler.Store(&h)
 	if err := w.Start(); err != nil {
 		t.Fatal(err)
 	}
 	s.Worker = w
 	t.Cleanup(w.Stop)
+}
+
+// RestartWorker stops the worker, as a machine that goes away does, and
+// starts another.
+func (s *liveStack) RestartWorker(t *testing.T) {
+	t.Helper()
+	s.Worker.Stop()
+	if s.live != nil {
+		s.live.CloseClientConnections()
+		s.live.Close()
+	}
+	s.startWorker(t)
 }
 
 // spans records every span the package's sessions end.
@@ -160,7 +207,109 @@ func waitContains(t *testing.T, sub session.Subscription, timeout time.Duration,
 	}
 }
 
+// TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages: a
+// client dials the live endpoint of the worker that runs the model call and
+// gets the reply's deltas there; the session's stream keeps only the whole
+// message. After the worker goes away, the next turn's deltas come from the
+// worker that took the session. A request without the session's token is
+// refused, and one without a session is not found.
+func TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	var stacks atomic.Pointer[liveStack]
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		// The reply streams once the client listens on this worker.
+		select {
+		case <-*stacks.Load().listening.Load():
+		case <-ctx.Done():
+		}
+		for _, piece := range []string{"Hel", "lo ", "world"} {
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: piece}
+		}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, IsComplete: true}
+	})
+	stack := newLiveStack(t, liveAgent(t, model, tacklr.AgentOptions{}), func(c *Config) { c.Live.Key = []byte("live-key") })
+	stacks.Store(stack)
+	id, err := stack.Client.CreateSession(ctx, session.CreateSession{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn := func() []session.Event {
+		head, err := stack.Client.Head(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sub, err := stack.Client.Subscribe(ctx, id, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = sub.Close() }()
+		if err := stack.Client.Prompt(ctx, id, session.Prompt{Text: "hi"}); err != nil {
+			t.Fatal(err)
+		}
+		return waitTurn(t, stack.Client, id, sub, 60*time.Second)
+	}
+	deltas := func(evs []session.Event) string {
+		var b strings.Builder
+		for _, ev := range evs {
+			if ev.Delta {
+				b.WriteString(ev.Content)
+			}
+		}
+		return b.String()
+	}
+	whole := func(evs []session.Event) []string {
+		var out []string
+		for _, ev := range evs {
+			if ev.Type == session.EventMessage && !ev.Delta {
+				out = append(out, ev.Content)
+			}
+		}
+		return out
+	}
+
+	first := turn()
+	stored, err := stack.Client.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged := waitTurn(t, stack.Client, id, stored, 10*time.Second)
+	_ = stored.Close()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, stack.live.URL+protocol.LivePath+string(id), nil)
+	req.Header.Set("Authorization", "Bearer "+protocol.LiveToken([]byte("other-key"), id))
+	refused, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = refused.Body.Close()
+	unknown, err := http.Get(stack.live.URL + protocol.LivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unknown.Body.Close()
+	stack.RestartWorker(t)
+	second := turn()
+
+	if deltas(first) != "Hello world" || !slices.Equal(whole(first), []string{"Hello world"}) {
+		t.Fatalf("first turn %+v; want the deltas live, then the whole message", first)
+	}
+	if !slices.EqualFunc(logged, slices.DeleteFunc(slices.Clone(first), func(ev session.Event) bool { return ev.Delta }), sameEvent) {
+		t.Fatalf("the stream from its start %+v; want the first turn's events without its deltas", logged)
+	}
+	if refused.StatusCode != http.StatusUnauthorized || unknown.StatusCode != http.StatusNotFound {
+		t.Fatalf("a request with another key's token got %d, one with no session %d; want 401 and 404", refused.StatusCode, unknown.StatusCode)
+	}
+	if deltas(second) != "Hello world" {
+		t.Fatalf("turn after the worker went away %+v; want its deltas from the worker that took the session", second)
+	}
+}
+
+// TestLive_workerRestartWhileParkedThenResumeRemounts: a session parks, its
+// worker goes away, and a resume with a new token runs on another worker,
+// which mounts the workspace again and reads it. The next prompt goes on
+// after one more restart.
 func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
@@ -259,6 +408,7 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 // run_command there. An empty command gets a correction; a command reads
 // the workspace.
 func TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace(t *testing.T) {
+	t.Parallel()
 	// Arrange
 	ctx := t.Context()
 	dir := t.TempDir()
@@ -320,6 +470,7 @@ func TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace(t *testing.T) {
 // session's records are deleted, a replay still delivers each result
 // event, without the content that went with them.
 func TestLive_historyHoldsNoSecretsOrToolResults(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	token := "tok-history-secret-7f3a"
 	header := "Bearer mcp-secret-9c1e"
@@ -420,9 +571,17 @@ func TestLive_historyHoldsNoSecretsOrToolResults(t *testing.T) {
 		t.Fatalf("replayed results %q, want four events without their deleted content", gone)
 	}
 
-	// A store that cannot read the records ends the subscription with
-	// that error.
-	down := temporal.Open(stack.Temporal, temporal.Config{TaskQueue: stack.TaskQueue, Store: downStore{stack.Store}, Secrets: stack.Secrets})
+	// A store whose database is gone ends the subscription with that error.
+	pool, err := pgxpool.New(ctx, "postgres://tacklr@127.0.0.1:1/tacklr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	db, err := postgres.New(pool, postgres.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	down := temporal.Open(stack.Temporal, temporal.Config{TaskQueue: stack.TaskQueue, Store: db.Store(), Secrets: stack.Secrets})
 	broken, err := down.Subscribe(ctx, id, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -430,33 +589,29 @@ func TestLive_historyHoldsNoSecretsOrToolResults(t *testing.T) {
 	t.Cleanup(func() { _ = broken.Close() })
 	for range broken.Events() {
 	}
-	if !errors.Is(broken.Err(), errStoreDown) {
-		t.Fatalf("subscription error = %v, want %v", broken.Err(), errStoreDown)
+	if broken.Err() == nil || !strings.Contains(broken.Err().Error(), "closed pool") {
+		t.Fatalf("subscription error = %v, want the closed pool's", broken.Err())
 	}
-}
-
-// downStore is a session.Store that cannot read call outcomes.
-type downStore struct{ session.Store }
-
-var errStoreDown = errors.New("session store down")
-
-func (downStore) Outcomes(context.Context, session.ID, []string) (map[string]session.Outcome, error) {
-	return nil, errStoreDown
 }
 
 // TestLive_theHostAPIServesSessionsAndTheirJobs: CreateSession rejects a
 // specialist and a worker together, an empty state key, and state JSON
-// cannot hold; Prompt and Resume reject such state too. A
-// session's head follows its stream, and Jobs lists its running specialist
-// and worker with their kinds. An unknown session, or one this runtime
-// closed, has no status.
+// cannot hold; Prompt and Resume reject such state too. A session's head
+// follows its stream, and Jobs lists its running specialist and worker
+// with their kinds. An unknown session has no status or jobs. Close
+// deletes the session's secrets and record, and after it the session has
+// no status or jobs and takes no prompt.
 func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	release, let := releaseLater(t)
+	// running has a value for each job that runs and waits for release.
+	running := make(chan struct{}, 2)
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		last := lastMsg(msgs)
 		switch {
 		case last != nil && last.Content == "child-task":
+			running <- struct{}{}
 			<-release
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "child-done", IsComplete: true}
 		case last != nil && last.Role == message.RoleUser && last.Content == "go":
@@ -474,7 +629,11 @@ func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
 	}})
 	agent := liveAgent(t, model, tacklr.AgentOptions{Tools: []*tacklr.Tool{start}, Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}})
 	stack := newLiveStack(t, agent, func(c *Config) {
-		c.Jobs = map[string]JobHandler{"ci": func(context.Context, string) (string, error) { <-release; return "built", nil }}
+		c.Jobs = map[string]session.JobHandler{"ci": func(context.Context, string) (string, error) {
+			running <- struct{}{}
+			<-release
+			return "built", nil
+		}}
 	})
 	t.Cleanup(let) // before the stack stops its worker
 	rt := stack.Client
@@ -495,11 +654,14 @@ func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The turn waits on both jobs; it ends only once they finish.
-	var jobs []session.Status
-	var jobsErr error
-	for deadline := time.Now().Add(60 * time.Second); len(jobs) < 2 && jobsErr == nil && time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		jobs, jobsErr = rt.Jobs(ctx, id)
+	for range 2 {
+		select {
+		case <-running:
+		case <-time.After(60 * time.Second):
+			t.Fatal("the session's jobs did not start")
+		}
 	}
+	jobs, jobsErr := rt.Jobs(ctx, id)
 	head, headErr := rt.Head(ctx, id)
 	badPrompt := rt.Prompt(ctx, id, session.Prompt{Text: "x", State: bad})
 	badResume := rt.Resume(ctx, id, session.Resume{State: bad})
@@ -510,6 +672,10 @@ func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, closed := rt.Status(ctx, id)
+	_, closedJobs := rt.Jobs(ctx, id)
+	closedPrompt := rt.Prompt(ctx, id, session.Prompt{Text: "again"})
+	kept, keptErr := stack.Secrets.Get(ctx, id)
+	_, _, record := stack.Store.Load(ctx, id)
 
 	for name, err := range map[string]error{"specialist and worker": both, "an empty state key": emptyKey, "unencodable state": unencodable, "a prompt's unencodable state": badPrompt, "a resume's unencodable state": badResume} {
 		if !errors.Is(err, session.ErrInvalid) {
@@ -523,43 +689,67 @@ func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
 	if headErr != nil || head == 0 || jobsErr != nil || !kinds[session.KindSpecialist] || !kinds[session.KindWorker] {
 		t.Fatalf("head %d %v, jobs %+v %v; want the stream's offset and both running jobs with their kinds", head, headErr, jobs, jobsErr)
 	}
-	for name, err := range map[string]error{"jobs of an unknown session": noJobs, "status of an unknown session": noStatus, "status of a closed session": closed} {
+	for name, err := range map[string]error{"jobs of an unknown session": noJobs, "status of an unknown session": noStatus,
+		"status of a closed session": closed, "jobs of a closed session": closedJobs, "a prompt to a closed session": closedPrompt, "the record of a closed session": record} {
 		if !errors.Is(err, session.ErrNotFound) {
 			t.Errorf("%s = %v, want ErrNotFound", name, err)
 		}
 	}
-}
-
-// TestNew_needsAClientAStoreAndSecrets: New panics without any of them.
-func TestNew_needsAClientAStoreAndSecrets(t *testing.T) {
-	store, secrets := session.NewMemoryStore(), session.NewMemorySecretStorage()
-	stub := &struct{ client.Client }{}
-	for name, tc := range map[string]struct {
-		c   client.Client
-		cfg Config
-	}{
-		"no client":  {nil, Config{Store: store, Secrets: secrets}},
-		"no store":   {stub, Config{Secrets: secrets}},
-		"no secrets": {stub, Config{Store: store}},
-	} {
-		t.Run(name, func(t *testing.T) { mustPanic(t, func() { New(tc.c, tc.cfg) }) })
+	if keptErr != nil || len(kept.Auth.Bindings) != 0 {
+		t.Errorf("secrets of a closed session = %+v %v, want an empty bag", kept, keptErr)
 	}
 }
 
-// TestWorker_aWorkerForAnUnreachableServerFailsToStart: Start and Run
-// report that the server is not there.
-func TestWorker_aWorkerForAnUnreachableServerFailsToStart(t *testing.T) {
+// unreachable is a real Temporal client for a server that is not there.
+func unreachable(t *testing.T) client.Client {
+	t.Helper()
 	c, err := client.NewLazyClient(client.Options{HostPort: "127.0.0.1:1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(c.Close)
-	w := New(c, Config{
+	return c
+}
+
+// TestNew_needsAClientAStoreAndSecrets: New panics without any of them, and
+// with a live URL but no key to sign its tokens.
+func TestNew_needsAClientAStoreAndSecrets(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	c, store, secrets := unreachable(t), session.NewMemoryStore(), session.NewMemorySecretStorage()
+	for name, tc := range map[string]struct {
+		c   client.Client
+		cfg Config
+	}{
+		"no client":   {nil, Config{Store: store, Secrets: secrets}},
+		"no store":    {c, Config{Secrets: secrets}},
+		"no secrets":  {c, Config{Store: store}},
+		"no live key": {c, Config{Store: store, Secrets: secrets, Live: Live{URL: "http://worker.test"}}},
+	} {
+		// Act and assert
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			mustPanic(t, func() { New(tc.c, tc.cfg) })
+		})
+	}
+}
+
+// TestWorker_aWorkerForAnUnreachableServerFailsToStart: Start and Run
+// report that the server is not there, also for a worker with streams off
+// and its own fallback log.
+func TestWorker_aWorkerForAnUnreachableServerFailsToStart(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	w := New(unreachable(t), Config{
 		Agent: tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192}, TaskQueue: "unreachable",
-		Store: session.NewMemoryStore(), Secrets: session.NewMemorySecretStorage(),
+		Store: session.NewMemoryStore(), Secrets: session.NewMemorySecretStorage(), DisableStreams: true,
 	})
+
+	// Act
 	startErr := w.Start()
 	runErr := w.Run(nil)
+
+	// Assert
 	if startErr == nil || runErr == nil {
 		t.Fatalf("Start = %v, Run = %v; want both to fail", startErr, runErr)
 	}
@@ -612,16 +802,10 @@ func querySession(t *testing.T, env *testsuite.TestWorkflowEnvironment) session.
 	return st
 }
 
-type retryLog struct {
-	session.EventLog
-	retry []session.Event
-}
-
-func (l *retryLog) Append(ctx context.Context, id session.ID, topic string, ev session.Event) error {
-	if topic == session.TopicRetry {
-		l.retry = append(l.retry, ev)
-	}
-	return l.EventLog.Append(ctx, id, topic, ev)
+// sameEvent reports whether two events have the same type, content and
+// delta flag.
+func sameEvent(a, b session.Event) bool {
+	return a.Type == b.Type && a.Content == b.Content && a.Delta == b.Delta
 }
 
 func newActs(agent tacklr.AgentOptions, log session.EventLog, disableStreams bool) *activities {

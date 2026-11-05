@@ -79,10 +79,9 @@ func (b Block) PlainText() string {
 	return PlainInline(b.Text)
 }
 
+// inlineRuns is the marked runs of a text block. Callers never pass an image
+// or a table block: those have no inline marks.
 func (b Block) inlineRuns() []Run {
-	if b.Kind == BlockKindImage || b.Kind == BlockKindTable {
-		return nil
-	}
 	if len(b.Runs) > 0 {
 		return b.Runs
 	}
@@ -179,10 +178,8 @@ func parseInline(s string, base map[string]string) []Run {
 	return out
 }
 
+// parseLink reads a [label](href) link at s[i], which is '['.
 func parseLink(s string, i int) (label, href string, next int, ok bool) {
-	if i >= len(s) || s[i] != '[' {
-		return "", "", i, false
-	}
 	depth := 1
 	j := i + 1
 	for j < len(s) {

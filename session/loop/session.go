@@ -13,15 +13,21 @@ import (
 var ErrSuspended = errors.New("session suspended")
 
 // Run drives one session lifetime over d from the state in t, which the
-// caller keeps reading (a status query) while Run changes it. task is a
-// child's prompt: that session runs one turn and returns once the turn is
-// no longer parked. With no task, Run returns when the session is closed
-// (t.Closed). A suspend returns ErrSuspended.
-func Run(d Executor, t *Turn, task string) (string, error) {
+// caller keeps reading (a status query) while Run changes it. A task
+// session (Identity.Task) runs its first prompt, its task, and returns once
+// that turn ended and is no longer parked; any other session returns when
+// it is closed (t.Closed). Either way Run then stops the jobs that still
+// run. A suspend returns ErrSuspended, and the jobs go on.
+func Run(d Executor, t *Turn) (string, error) {
 	r := &runner{turn: t}
-	result, err := r.run(d, task)
+	result, err := r.run(d)
 	if r.suspended {
 		return "", ErrSuspended
+	}
+	for _, j := range t.Jobs {
+		if !j.Ended {
+			d.Cancel(j.ID)
+		}
 	}
 	return result, err
 }
@@ -29,26 +35,13 @@ func Run(d Executor, t *Turn, task string) (string, error) {
 // runner is the state of one Run besides its Turn.
 type runner struct {
 	turn *Turn
-	// running is set while a turn drives; held are the wakes that wait for
-	// it to end (a resume, a close).
+	// running is set while a turn drives.
 	running bool
-	held    []session.Wake
 	// suspended says a suspend stopped the session.
 	suspended bool
 }
 
-func (s *runner) run(d Executor, task string) (string, error) {
-	if s.turn.Worker != "" && task != "" {
-		s.runWorker(d, task)
-		return s.turn.Result, s.turn.Err
-	}
-	if task != "" {
-		s.runTurn(d, session.WakePrompt, UserMessage(task, nil), nil, session.AuthContext{}, nil)
-		for s.turn.Yielded && !s.turn.Closed {
-			s.handle(s.next(d), d)
-		}
-		return s.taskResult()
-	}
+func (s *runner) run(d Executor) (string, error) {
 	if s.turn.Suspended {
 		// The turn the runtime suspended goes on from where it stopped.
 		d.Begin("continue", 0, 0)
@@ -56,18 +49,27 @@ func (s *runner) run(d Executor, task string) (string, error) {
 		s.drive(d, nil, nil)
 		d.End()
 	}
-	for !s.turn.Closed && !s.suspended {
+	for !s.turn.Closed && !s.suspended && !s.taskDone() {
 		s.handle(s.next(d), d)
 	}
+	if s.turn.Task {
+		return s.taskResult()
+	}
 	return s.turn.Result, nil
+}
+
+// taskDone reports whether a task session's turn ended: it completed or
+// failed, and is not parked.
+func (s *runner) taskDone() bool {
+	return s.turn.Task && s.turn.Terminal != "" && !s.turn.Yielded
 }
 
 // next is the next wake to handle while no turn runs: a held one first,
 // else the driver's, blocking.
 func (s *runner) next(d Executor) session.Wake {
-	if len(s.held) > 0 {
-		w := s.held[0]
-		s.held = s.held[1:]
+	if t := s.turn; len(t.held) > 0 {
+		w := t.held[0]
+		t.held = t.held[1:]
 		return w
 	}
 	return d.Next(true)
@@ -132,14 +134,14 @@ func (s *runner) handle(w session.Wake, d Executor) {
 		}
 	case session.WakeResume:
 		if s.running {
-			s.held = append(s.held, w)
+			t.held = append(t.held, w)
 			return
 		}
 		t.Yielded = false
 		s.runTurn(d, session.WakeResume, nil, w.Resume.Responses, w.Resume.Auth, w.Resume.State)
 	case session.WakeClose:
 		if s.running {
-			s.held = append(s.held, w)
+			t.held = append(t.held, w)
 			return
 		}
 		t.Yielded = false
@@ -191,10 +193,18 @@ func (s *runner) drive(d Executor, user *message.Message, resume map[string][]by
 	s.running = true
 	s.turn.drive(d, user, resume, func(block bool) { s.pump(d, block) })
 	s.running = false
+	// A turn that ended or parked has nothing to go on with, even when a
+	// suspend came in with the wakes that ended it: the session handles
+	// what it held (a close, a resume) instead of suspending.
+	if s.turn.Terminal != "" || s.turn.Yielded {
+		s.turn.Suspended = false
+	}
 	s.suspended = s.turn.Suspended
 }
 
 func (s *runner) runWorker(d Executor, task string) {
+	d.Begin(session.WakePrompt, len(task), 0)
+	defer d.End()
 	out, err := d.Job(s.turn.Worker, task)
 	if err != nil {
 		s.turn.Err = err

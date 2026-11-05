@@ -24,39 +24,70 @@ import (
 // chunk becomes the HTTP error the client classifies. Anything else is SSE.
 func HTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
 	tb.Helper()
-	return newHTTPModel(tb, "gpt-4o", respond)
+	return newHTTPModel(tb, "gpt-4o", respond, contentTokens, true)
 }
 
 // TextHTTPModel is HTTPModel on a model id that accepts text only.
 func TextHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
 	tb.Helper()
-	return newHTTPModel(tb, "text-only", respond)
+	return newHTTPModel(tb, "text-only", respond, contentTokens, true)
 }
 
-func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
+// CountedHTTPModel is HTTPModel whose provider counts a request's tokens
+// with count. msgs is the request as the provider got it: the system
+// prompt is its first message. The token-count endpoint answers the count,
+// or HTTP 500 when count fails, and each response reports the count as its
+// input tokens.
+func CountedHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error)) tacklr.Model {
 	tb.Helper()
+	return newHTTPModel(tb, "gpt-4o", respond, count, true)
+}
+
+// UncountedHTTPModel is CountedHTTPModel on a provider with no token-count
+// endpoint (HTTP 404): only each response reports count as its input
+// tokens.
+func UncountedHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error)) tacklr.Model {
+	tb.Helper()
+	return newHTTPModel(tb, "gpt-4o", respond, count, false)
+}
+
+// contentTokens counts a message's content length as its tokens, so a
+// test sets the window in characters.
+func contentTokens(msgs []*message.Message) (int, error) {
+	return ContentTokenEstimate(msgs), nil
+}
+
+func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error), counts bool) tacklr.Model {
+	tb.Helper()
+	// inputTokens is a request's token count; zero when count fails.
+	inputTokens := func(body []byte) int {
+		msgs, _ := messagesFromResponses(body)
+		n, _ := count(msgs)
+		return n
+	}
 	// life ends when the test does. A script blocked on ctx.Done() has to
 	// release the connection before httptest.Server.Close, and the workflow
 	// test environment does not cancel an activity context it has abandoned.
 	life, cancelLife := context.WithCancel(context.Background())
 	srv := testhttp.New(tb, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/input_tokens") {
-			// A message's content length is its token count, so a test sets
-			// the window in characters.
+			if !counts {
+				http.NotFound(w, r)
+				return
+			}
 			body, _ := io.ReadAll(r.Body)
+			msgs, _ := messagesFromResponses(body)
+			n, err := count(msgs)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": inputTokens(body)})
+			_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": n})
 			return
 		}
-		if r.URL.Path != "/responses" {
-			http.NotFound(w, r)
-			return
-		}
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+		// The client asks for a token count or a response; this is a response.
+		body, _ := io.ReadAll(r.Body)
 		// Every request must pair each call with its result: a provider
 		// rejects one that does not.
 		if bad := unpairedCalls(body); bad != "" {
@@ -76,10 +107,11 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 				respond(reqCtx, msgs, tools, ch)
 			}
 		}()
-		// A lone error chunk is an HTTP failure so the client classifies
+		// An error chunk first is an HTTP failure so the client classifies
 		// refusal, max tokens, and network the same way a provider would.
 		// Anything else is flushed as SSE so a caller can observe the stream
-		// before the script returns.
+		// before the script returns; an error chunk after it fails the
+		// stream.
 		flush := func() {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
@@ -107,16 +139,13 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 			return
 		}
 		if c.Error != nil {
-			next, ok2 := <-ch
-			if !ok2 {
-				writeProviderError(w, c.Error)
-				return
+			writeProviderError(w, c.Error)
+			cancelReq()
+			for range ch {
 			}
-			emit(c)
-			emit(next)
-		} else {
-			emit(c)
+			return
 		}
+		emit(c)
 		for c := range ch {
 			emit(c)
 		}
@@ -138,23 +167,14 @@ func completedSSE(inputTokens int) string {
 	return fmt.Sprintf("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":%d,\"output_tokens\":1}}}\n\n", inputTokens)
 }
 
-// inputTokens is a request's token count: a message's content length is
-// its token count, so a test sets the window in characters.
-func inputTokens(body []byte) int {
-	msgs, _ := messagesFromResponses(body)
-	n := 0
-	for _, m := range msgs {
-		n += len(m.Content)
-	}
-	return n
-}
-
 func writeProviderError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
 	code := "invalid_request"
 	switch {
 	case errors.Is(err, session.ErrModelRefused):
 		code = "content_filter"
+	case errors.Is(err, session.ErrContextLength):
+		code = "context_length_exceeded"
 	case errors.Is(err, session.ErrMaxTokens):
 		code = "max_tokens"
 	case errors.Is(err, tacklr.ErrNetwork):
@@ -219,9 +239,7 @@ func unpairedCalls(body []byte) string {
 			CallID string `json:"call_id"`
 		} `json:"input"`
 	}
-	if json.Unmarshal(body, &req) != nil {
-		return ""
-	}
+	_ = json.Unmarshal(body, &req)
 	open := map[string]bool{}
 	var order []string
 	for _, item := range req.Input {
@@ -249,13 +267,9 @@ func messagesFromResponses(body []byte) ([]*message.Message, []*tacklr.Tool) {
 		Input json.RawMessage `json:"input"`
 		Tools json.RawMessage `json:"tools"`
 	}
-	if json.Unmarshal(body, &req) != nil || len(req.Input) == 0 {
-		return nil, toolsFromResponses(req.Tools)
-	}
+	_ = json.Unmarshal(body, &req)
 	var raws []json.RawMessage
-	if json.Unmarshal(req.Input, &raws) != nil {
-		return nil, toolsFromResponses(req.Tools)
-	}
+	_ = json.Unmarshal(req.Input, &raws)
 	var msgs []*message.Message
 	var calls []message.ToolCall
 	flush := func() {
@@ -275,9 +289,8 @@ func messagesFromResponses(body []byte) ([]*message.Message, []*tacklr.Tool) {
 			Arguments string          `json:"arguments"`
 			Output    json.RawMessage `json:"output"`
 		}
-		if json.Unmarshal(raw, &item) != nil {
-			continue
-		}
+		// An item that does not decode matches no case.
+		_ = json.Unmarshal(raw, &item)
 		switch {
 		case item.Type == "function_call":
 			ns, name := splitToolName(item.Name)
@@ -299,14 +312,9 @@ func toolsFromResponses(raw json.RawMessage) []*tacklr.Tool {
 	var defs []struct {
 		Name string `json:"name"`
 	}
-	if json.Unmarshal(raw, &defs) != nil {
-		return nil
-	}
+	_ = json.Unmarshal(raw, &defs)
 	tools := make([]*tacklr.Tool, 0, len(defs))
 	for _, d := range defs {
-		if d.Name == "" {
-			continue
-		}
 		ns, name := splitToolName(d.Name)
 		tools = append(tools, tacklr.NewTool(tacklr.ToolConfig{
 			Name:      name,
@@ -326,9 +334,6 @@ func splitToolName(name string) (namespace, short string) {
 }
 
 func messageContent(raw json.RawMessage) (string, []message.ContentPart) {
-	if len(raw) == 0 {
-		return "", nil
-	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
 		return s, nil
@@ -342,9 +347,7 @@ func messageContent(raw json.RawMessage) (string, []message.ContentPart) {
 		FileData string `json:"file_data"`
 		FileID   string `json:"file_id"`
 	}
-	if json.Unmarshal(raw, &parts) != nil {
-		return "", nil
-	}
+	_ = json.Unmarshal(raw, &parts)
 	var b strings.Builder
 	var out []message.ContentPart
 	for _, p := range parts {
@@ -371,22 +374,15 @@ func messageContent(raw json.RawMessage) (string, []message.ContentPart) {
 	return b.String(), out
 }
 
+// mimeFromDataURL is the MIME type of a data URL the client sent:
+// data:<mime>[;base64],<data>.
 func mimeFromDataURL(s string) string {
-	rest, ok := strings.CutPrefix(s, "data:")
-	if !ok {
-		return ""
-	}
-	mime, _, ok := strings.Cut(rest, ";")
-	if !ok {
-		mime, _, _ = strings.Cut(rest, ",")
-	}
+	mime, _, _ := strings.Cut(strings.TrimPrefix(s, "data:"), ",")
+	mime, _, _ = strings.Cut(mime, ";")
 	return mime
 }
 
 func textContent(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
 		return s
@@ -394,12 +390,10 @@ func textContent(raw json.RawMessage) string {
 	var parts []struct {
 		Text string `json:"text"`
 	}
-	if json.Unmarshal(raw, &parts) == nil {
-		var b strings.Builder
-		for _, p := range parts {
-			b.WriteString(p.Text)
-		}
-		return b.String()
+	_ = json.Unmarshal(raw, &parts)
+	var b strings.Builder
+	for _, p := range parts {
+		b.WriteString(p.Text)
 	}
-	return ""
+	return b.String()
 }

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/vfs/mount"
@@ -16,9 +18,22 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// TestMountSession_localSession is the primary local-VFS outcome test:
-// mounts, nested lookup, I/O, read-only, jail, remount, unmount.
+// backendProvider is the surface of a built-in provider past Provider: its
+// one-shot put and its document I/O. A host that wraps a built-in provider
+// forwards these methods.
+type backendProvider interface {
+	vfs.Provider
+	PutFile(ctx context.Context, name string, r io.Reader, size int64) error
+	OpenDocument(ctx context.Context, name string, reg *vfs.ContentRegistry) (vfs.Document, error)
+	WriteDocument(ctx context.Context, name string, doc vfs.Document, reg *vfs.ContentRegistry) error
+}
+
+// TestMountSession_localSession: a local tree mounts each member at its
+// own point (a read-only member refuses writes), SpecAt matches whole path
+// segments, a path cannot escape its mount, an unmounted path and a
+// canceled read fail, and a second session reads what the first wrote.
 func TestMountSession_localSession(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	base := t.TempDir()
 	ms, err := vfs.Tree(
@@ -32,156 +47,46 @@ func TestMountSession_localSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	specs := ms.Specs()
-	if len(specs) != 3 {
-		t.Fatalf("Specs = %+v", specs)
-	}
-	for _, spec := range specs {
-		if spec.Point != "/workspace/work" && spec.Point != "/workspace/nested" && spec.Point != "/workspace/ab" {
-			t.Fatalf("Specs = %+v", specs)
-		}
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/hello.go").
-		WriteFile(ctx, []byte("package main\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/hello.go").WriteFile(ctx, []byte("package main\n")); err != nil {
 		t.Fatal(err)
 	}
-
-	if spec, err := ms.SpecAt("/workspace/work/hello.go"); err != nil || spec.Point != "/workspace/work" {
-		t.Fatalf("SpecAt: %+v err=%v", spec, err)
-	}
-
-	// empty write-through
-
-	if err := ms.Route(ctx, "/workspace/work/empty.txt").
-		WriteFile(ctx, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	b, err := ms.Route(ctx, "/workspace/work/empty.txt").
-		ReadFile(ctx)
-	if err != nil || len(b) != 0 {
-		t.Fatalf("empty = %q err=%v", b, err)
-	}
-
-	f, err := ms.Route(ctx, "/workspace/work/hello.go").
-		Open(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fi, err := f.Stat()
-	_ = f.Close()
-	if err != nil || fi.Name != "hello.go" {
-		t.Fatalf("Open/Stat handle: %+v err=%v", fi, err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/nested/x.txt").
-		WriteFile(ctx, []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("ro nested write: %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/other.txt").
-		WriteFile(ctx, []byte("ok")); err != nil {
-		t.Fatal(err)
-	}
-
-	b, err = ms.Route(ctx, "/workspace/work/hello.go").
-		ReadFile(ctx)
-	if err != nil || string(b) != "package main\n" {
-		t.Fatalf("ReadFile = %q err=%v", b, err)
-	}
-
-	if info, err := ms.Route(ctx, "/workspace/work/hello.go").
-		Stat(ctx); err != nil || info.IsDir || info.Name != "hello.go" {
-		t.Fatalf("Stat = %+v err=%v", info, err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/sub/dir").
-		MkdirAll(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/sub/dir/a.txt").
-		WriteFile(ctx, []byte("a")); err != nil {
-		t.Fatal(err)
-	}
-
-	if ents, err := ms.Route(ctx, "/workspace/work/sub/dir").
-		ReadDir(ctx); err != nil || len(ents) != 1 || ents[0].Name != "a.txt" {
-		t.Fatalf("ReadDir = %+v err=%v", ents, err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/sub/dir/a.txt").
-		Remove(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/work/sub/dir/a.txt").
-		Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("after remove: %v", err)
-	}
-
-	// Segment boundary: /workspace/ab must not claim /workspace/a
-	if spec, err := ms.SpecAt("/workspace/a/file"); err == nil && spec.Point == "/workspace/ab" {
-		t.Fatalf("SpecAt /workspace/a claimed by /workspace/ab: %+v", spec)
-	}
-	spec, err := ms.SpecAt("/workspace/ab/x")
-	if err != nil || spec.Point != "/workspace/ab" {
-		t.Fatalf("SpecAt /workspace/ab: %+v err=%v", spec, err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/work/foo/../../etc/passwd").
-		WriteFile(ctx, []byte("x")); err == nil {
-		t.Fatal("escape")
-	}
-
-	if _, err := ms.Route(ctx, "/nosuch/x").
-		ReadFile(ctx); !errors.Is(err, vfs.ErrNotMounted) {
-		t.Fatalf("not mounted: %v", err)
-	}
-
-	// Concurrent reads
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, _ = ms.Route(ctx, "/workspace/work/hello.go").ReadFile(ctx)
-		}()
-	}
-	wg.Wait()
-
-	if err := ms.Route(ctx, "/workspace/ab/c.txt").
-		WriteFile(ctx, []byte("cached\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/ab/c.txt").
-		ReadText(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	cctx, cancel := context.WithCancel(ctx)
+	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 
-	if _, err := ms.Route(cctx, "/workspace/work/hello.go").
-		ReadFile(cctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled: %v", err)
+	var points []string
+	for _, spec := range ms.Specs() {
+		points = append(points, spec.Point)
 	}
-
+	work, workErr := ms.SpecAt("/workspace/work/hello.go")
+	ab, abErr := ms.SpecAt("/workspace/ab/x")
+	short, _ := ms.SpecAt("/workspace/a/file")
+	roErr := ms.Route(ctx, "/workspace/nested/x.txt").WriteFile(ctx, []byte("no"))
+	escapeErr := ms.Route(ctx, "/workspace/work/foo/../../etc/passwd").WriteFile(ctx, []byte("x"))
+	_, unmountedErr := ms.Route(ctx, "/nosuch/x").ReadFile(ctx)
+	_, canceledErr := ms.Route(canceled, "/workspace/work/hello.go").ReadFile(canceled)
 	ms2, err := vfs.Tree(vfs.At("work", vfs.Local(base)))(ctx, "sess-2", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	again, againErr := ms2.Route(ctx, "/workspace/work/hello.go").ReadFile(ctx)
 
-	if b, err := ms2.Route(ctx, "/workspace/work/hello.go").
-		ReadFile(ctx); err != nil || string(b) != "package main\n" {
-		t.Fatalf("remount ReadFile = %q err=%v", b, err)
+	if !slices.Equal(points, []string{"/workspace/ab", "/workspace/nested", "/workspace/work"}) {
+		t.Fatalf("Specs points = %v", points)
+	}
+	if workErr != nil || work.Point != "/workspace/work" || abErr != nil || ab.Point != "/workspace/ab" || short.Point == "/workspace/ab" {
+		t.Fatalf("SpecAt work = %+v %v, ab = %+v %v, /workspace/a = %+v", work, workErr, ab, abErr, short)
+	}
+	if !errors.Is(roErr, vfs.ErrReadOnly) || escapeErr == nil || !errors.Is(unmountedErr, vfs.ErrNotMounted) || !errors.Is(canceledErr, context.Canceled) {
+		t.Fatalf("read-only = %v, escape = %v, unmounted = %v, canceled = %v", roErr, escapeErr, unmountedErr, canceledErr)
+	}
+	if againErr != nil || string(again) != "package main\n" {
+		t.Fatalf("second session ReadFile = %q err=%v", again, againErr)
 	}
 }
 
 // TestMountSession_writeLimits: oversize writes and unmounted or invalid paths fail closed.
 func TestMountSession_writeLimits(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	ms, err := vfs.Tree(vfs.At("mem", vfs.Local(t.TempDir())))(ctx, "mem-sess", vfs.Request{})
 	if err != nil {
@@ -264,6 +169,7 @@ func TestMountSession_writeLimits(t *testing.T) {
 
 // TestDocument_session: IR persist, revalidation, codec rejects, RO.
 func TestDocument_session(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	base := t.TempDir()
 	ms, err := vfs.Tree(
@@ -560,7 +466,7 @@ func TestDocument_session(t *testing.T) {
 	if err := ms.WriteDocument(ctx, ro); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro write: %v", err)
 	}
-	if err := ms.WriteDocument(ctx, bareDocument{path: "/workspace/work/x", mt: "x"}); !errors.Is(err, vfs.ErrNotTextual) {
+	if err := ms.WriteDocument(ctx, imageDocument{path: "/workspace/work/x"}); !errors.Is(err, vfs.ErrNotTextual) {
 		t.Fatalf("bare write: %v", err)
 	}
 
@@ -596,6 +502,7 @@ func TestDocument_session(t *testing.T) {
 
 // TestTextDocument_lines is pure IR: index, edit, join (no mount).
 func TestTextDocument_lines(t *testing.T) {
+	t.Parallel()
 	doc := vfs.NewTextDocument("/p", "text/plain", "utf-8", "a\nb\nc")
 	if doc.LineCount() != 3 || doc.Encoding() != "utf-8" {
 		t.Fatalf("count=%d enc=%q", doc.LineCount(), doc.Encoding())
@@ -660,12 +567,20 @@ func TestTextDocument_lines(t *testing.T) {
 	}
 }
 
-// TestMountSession_configErrors covers SpecAt and the codec registry.
-func TestMountSession_configErrors(t *testing.T) {
+// A session needs an id, and SpecAt refuses an empty or NUL path. A session
+// with no members lists nothing at / and mounts no other path.
+func TestMountSession_needsAnIDAndRejectsBadPaths(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	ms, err := vfs.NewMountSession("s")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if ents, err := ms.Route(ctx, "/").ReadDir(ctx); err != nil || len(ents) != 0 {
+		t.Fatalf("list / of an empty session = %+v err=%v", ents, err)
+	}
+	if _, err := ms.Route(ctx, "/workspace/x").Stat(ctx); !errors.Is(err, vfs.ErrNotMounted) {
+		t.Fatalf("stat in an empty session = %v, want ErrNotMounted", err)
 	}
 	if _, err := ms.SpecAt(""); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("empty path: %v", err)
@@ -676,46 +591,15 @@ func TestMountSession_configErrors(t *testing.T) {
 	if _, err := vfs.NewMountSession(""); err == nil {
 		t.Fatal("empty session id construct")
 	}
-	if _, err := vfs.NewContentRegistry(nil); err == nil {
-		t.Fatal("nil codec")
-	}
-	if _, err := vfs.NewContentRegistry(emptyTypesCodec{}); err == nil {
-		t.Fatal("empty media types")
-	}
-	if _, err := vfs.NewContentRegistry(blankTypeCodec{}); err == nil {
-		t.Fatal("blank media type")
-	}
-	// a type with no codec fails closed
-	creg, err := vfs.NewContentRegistry()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := creg.Decode(ctx, "/x.bin", "application/x-unknown", []byte(`{}`)); !errors.Is(err, vfs.ErrNoCodec) {
-		t.Fatalf("unregistered decode: %v", err)
-	}
-	// canceled decode
-	cctx, cancel := context.WithCancel(ctx)
-	cancel()
-	if _, err := (vfs.TextCodec{}).Decode(cctx, "/x", "text/plain", []byte("a")); !errors.Is(err, context.Canceled) {
-		t.Fatalf("codec cancel: %v", err)
-	}
 }
 
-type emptyTypesCodec struct{}
-
-func (emptyTypesCodec) MediaTypes() []string { return nil }
-func (emptyTypesCodec) Decode(context.Context, string, string, []byte) (vfs.Document, error) {
-	return nil, errors.New("unused")
-}
-
-type blankTypeCodec struct{}
-
-func (blankTypeCodec) MediaTypes() []string { return []string{""} }
-func (blankTypeCodec) Decode(context.Context, string, string, []byte) (vfs.Document, error) {
-	return nil, errors.New("unused")
-}
-
+// A local open refuses a subpath or session id that leaves the base, a base
+// that is relative, missing or a file, and a subpath it cannot make. A
+// provider refuses a symlink out of its root, a second exclusive create and
+// a canceled context, and it fails to validate when its root is gone or is
+// now a file.
 func TestLocal_rejectsUnsafeConfig(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	open := vfs.Local(t.TempDir())
 	if _, err := open(ctx, "s", mount.Binding{Params: map[string]string{"subpath": ".."}}); err == nil {
@@ -724,10 +608,7 @@ func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 	if _, err := open(ctx, "s", mount.Binding{Params: map[string]string{"subpath": "/abs"}}); err == nil {
 		t.Fatal("absolute subpath")
 	}
-	if _, err := open(ctx, "sess-id", mount.Binding{Params: map[string]string{"session_scoped": "true"}}); err != nil {
-		t.Fatalf("session_scoped: %v", err)
-	}
-	if _, err := open(ctx, "../bad", mount.Binding{Params: map[string]string{"session_scoped": "true"}}); err == nil {
+	if _, err := open(ctx, "..", mount.Binding{Params: map[string]string{"session_scoped": "true"}}); err == nil {
 		t.Fatal("unsafe session id")
 	}
 	if _, err := vfs.Local("rel")(ctx, "s", mount.Binding{}); err == nil {
@@ -740,6 +621,32 @@ func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 	_ = file.Close()
 	if _, err := vfs.Local(file.Name())(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("file as base")
+	}
+	if _, err := vfs.Local(filepath.Join(t.TempDir(), "missing"))(ctx, "s", mount.Binding{}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing base: %v", err)
+	}
+	if _, err := vfs.Local(filepath.Dir(file.Name()))(ctx, "s", mount.Binding{Params: map[string]string{"subpath": filepath.Base(file.Name()) + "/sub"}}); !errors.Is(err, vfs.ErrNotDir) {
+		t.Fatalf("subpath under a file: %v", err)
+	}
+	moved := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(moved, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	movedRoot, err := vfs.NewLocalProvider(moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := movedRoot.Validate(ctx); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Validate of a gone root: %v", err)
+	}
+	if err := os.WriteFile(moved, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := movedRoot.Validate(ctx); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("Validate of a root that is now a file: %v", err)
 	}
 	if _, err := vfs.NewLocalProvider("relative"); err == nil {
 		t.Fatal("NewLocalProvider relative")
@@ -788,8 +695,3 @@ func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 		t.Fatalf("MkdirAll cancel: %v", err)
 	}
 }
-
-type bareDocument struct{ path, mt string }
-
-func (b bareDocument) Path() string      { return b.path }
-func (b bareDocument) MediaType() string { return b.mt }

@@ -1,16 +1,42 @@
 package vfsindex
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
 
+// split chunks text with sizes and fails the test on an error.
+func split(t *testing.T, text string, sizes ChunkSizes) []chunk {
+	t.Helper()
+	var out []chunk
+	for ch, err := range chunks(t.Context(), strings.NewReader(text), sizes, 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, ch)
+	}
+	return out
+}
+
+func lines(n int) string {
+	var b strings.Builder
+	for i := range n {
+		fmt.Fprintf(&b, "line %04d holds a fact about topic %d\n", i, i*7)
+	}
+	return b.String()
+}
+
+// FuzzChunks: the chunks of any text rebuild it in order, with line and
+// byte ranges that follow on, sizes inside the bounds, and whole runes.
 func FuzzChunks(f *testing.F) {
 	f.Add("alpha line\nbeta line\ngamma line\n", 8, 16, 32)
 	f.Add(strings.Repeat("€", 200), 8, 16, 32)
+	// A line of three-byte runes longer than the default Max.
+	f.Add(strings.Repeat("€", 7_000), 0, 0, 0)
 	f.Add("top\n"+strings.Repeat("\n", 60)+"bottom\n", 8, 16, 32)
-	f.Add(lines(40), 0, 0, 0)
+	f.Add(lines(500), 0, 0, 0)
 	f.Add("a\n"+strings.Repeat("x", 100), 8, 16, 32)
 	f.Add("𝄞𝄞𝄞", 1, 2, 4)
 	f.Fuzz(func(t *testing.T, text string, minSize, avg, maxSize int) {

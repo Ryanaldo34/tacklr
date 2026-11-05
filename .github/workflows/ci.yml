@@ -22,8 +22,8 @@ concurrency:
 env:
   GO_VERSION: "1.27.x"
   GOLANGCI_LINT_VERSION: v2.14.0
-  # Keep in sync with go install path used below.
-  GO_TEST_COVERAGE_VERSION: v2.17.0
+  # Keep in sync with the Makefile's cover target.
+  GO_TEST_COVERAGE_VERSION: v2.21.0
 
 jobs:
   lint:
@@ -56,12 +56,29 @@ jobs:
           args: --timeout=5m
           only-new-issues: false
 
+      # Functions nothing reaches (tests and mains as roots) fail the build.
+      - name: Dead code
+        run: make deadcode
+
+      # The Cloudflare bridge and its example build only for js/wasm.
+      - name: golangci-lint (js/wasm)
+        uses: golangci/golangci-lint-action@v8
+        env:
+          GOOS: js
+          GOARCH: wasm
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout=5m ./session/durableobject/cloudflare ./examples/cloudflare
+          only-new-issues: false
+
   test:
     name: Build, Test & Coverage
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
+      # Read main's coverage breakdown artifact from another run.
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -128,13 +145,35 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # The coverage breakdown of main's last good run: a pull request may
+      # not lower coverage below it (diff.threshold in .testcoverage.yml).
+      - name: Download main's coverage breakdown
+        id: main_breakdown
+        if: github.ref_name != 'main'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          branch: main
+          workflow_conclusion: success
+          name: main.breakdown
+          if_no_artifact_found: warn
+
       - name: Enforce coverage thresholds
-        uses: vladopajic/go-test-coverage@v2
+        id: coverage
+        # Continue so we still upload artifacts / comment when thresholds fail.
+        continue-on-error: true
+        uses: vladopajic/go-test-coverage@v2.21.0
         with:
           config: ./.testcoverage.yml
-          # Continue so we still upload artifacts / comment when thresholds fail.
-          continue-on-error: true
-        id: coverage
+          breakdown-file-name: ${{ github.ref_name == 'main' && 'main.breakdown' || '' }}
+          diff-base-breakdown-file-name: ${{ steps.main_breakdown.outputs.found_artifact == 'true' && 'main.breakdown' || '' }}
+
+      - name: Upload main's coverage breakdown
+        if: github.ref_name == 'main' && steps.coverage.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: main.breakdown
+          path: main.breakdown
+          if-no-files-found: error
 
       - name: Fail if coverage below threshold
         if: steps.coverage.outcome == 'failure'
@@ -193,3 +232,38 @@ jobs:
           name: tacklr
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+  cloudflare:
+    name: Cloudflare Workers (e2e + size)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+          cache: true
+
+      # wrangler runs on Node; Bun installs it and runs the test.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+
+      - name: Vet (js/wasm)
+        run: GOOS=js GOARCH=wasm go vet ./session/durableobject/cloudflare ./examples/cloudflare
+
+      # The example Worker in workerd (wrangler dev) against a scripted
+      # model, then the size gate on its program.
+      - name: End-to-end test and size gate
+        run: |
+          cd examples/cloudflare/worker && bun install --frozen-lockfile && bun test e2e
+          cd ../../.. && ./scripts/wasm-size.sh examples/cloudflare/worker/build/tacklr.wasm
