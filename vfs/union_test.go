@@ -128,31 +128,26 @@ func TestMountSession_unionMergesBackends(t *testing.T) {
 	}
 }
 
-func TestMountSession_unionNameCollisionAtMount(t *testing.T) {
-	c, d := t.TempDir(), t.TempDir()
-	writeUnionTree(t, c, map[string]string{"dup/SKILL.md": "c"})
-	writeUnionTree(t, d, map[string]string{"dup/SKILL.md": "d"})
-	_, err := vfs.Tree(vfs.At("skills", vfs.Union(vfs.Local(c), vfs.Local(d))))(t.Context(), t.Name(), vfs.Request{})
-	if !errors.Is(err, vfs.ErrAmbiguous) {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestMountSession_unionNameCollisionAfterMount(t *testing.T) {
-	a, b := t.TempDir(), t.TempDir()
+// A name that two union members both have is ambiguous: at mount, and when
+// a member gains it after the mount.
+func TestMountSession_unionNameInTwoMembersIsAmbiguous(t *testing.T) {
+	ctx := t.Context()
+	a, b, c, d := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	writeUnionTree(t, a, map[string]string{"alpha/SKILL.md": "a"})
 	writeUnionTree(t, b, map[string]string{"zeta/SKILL.md": "b"})
+	writeUnionTree(t, c, map[string]string{"dup/SKILL.md": "c"})
+	writeUnionTree(t, d, map[string]string{"dup/SKILL.md": "d"})
 	ms := unionSession(t, a, b)
 	writeUnionTree(t, b, map[string]string{"alpha/SKILL.md": "late"})
 
-	if _, err := ms.Route(t.Context(), "/workspace/skills").
-		ReadDir(t.Context()); !errors.Is(err, vfs.ErrAmbiguous) {
-		t.Fatalf("ReadDir = %v", err)
-	}
+	_, atMount := vfs.Tree(vfs.At("skills", vfs.Union(vfs.Local(c), vfs.Local(d))))(ctx, t.Name(), vfs.Request{})
+	_, readDirErr := ms.Route(ctx, "/workspace/skills").ReadDir(ctx)
+	_, statErr := ms.Route(ctx, "/workspace/skills/alpha/SKILL.md").Stat(ctx)
 
-	if _, err := ms.Route(t.Context(), "/workspace/skills/alpha/SKILL.md").
-		Stat(t.Context()); !errors.Is(err, vfs.ErrAmbiguous) {
-		t.Fatalf("Stat = %v", err)
+	for name, err := range map[string]error{"mount": atMount, "ReadDir": readDirErr, "Stat": statErr} {
+		if !errors.Is(err, vfs.ErrAmbiguous) {
+			t.Fatalf("%s = %v, want ErrAmbiguous", name, err)
+		}
 	}
 }
 

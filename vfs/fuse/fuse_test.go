@@ -1,7 +1,6 @@
 package fuse_test
 
 import (
-	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -11,9 +10,13 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/adapters"
 	"github.com/ryanaldo34/tacklr/vfs/fuse"
 )
 
+// TestMount_hostSeesDirtyText: the host lists what the session lists and
+// reads each file as the session reads it: text as edited, a Word file as
+// its projected text, and binary bytes as stored.
 func TestMount_hostSeesDirtyText(t *testing.T) {
 	ctx := t.Context()
 	ms := mustTree(t, vfs.At("work", vfs.Local(t.TempDir())))
@@ -43,6 +46,11 @@ func TestMount_hostSeesDirtyText(t *testing.T) {
 
 	if err := ms.Route(ctx, "/workspace/work/pic.bin").
 		WriteFile(ctx, []byte{0x89, 'P', 'N', 'G', 1, 2, 3, 4}); err != nil {
+		t.Fatal(err)
+	}
+
+	word := "a word phrase"
+	if _, err := ms.Apply(ctx, "/workspace/work/doc.docx", vfs.Mutation{MediaType: adapters.DOCXMediaType, Content: &word}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -88,6 +96,10 @@ func TestMount_hostSeesDirtyText(t *testing.T) {
 	}
 	if st.Size() != int64(len(dirty.Text())) {
 		t.Fatalf("host stat size=%d want %d", st.Size(), len(dirty.Text()))
+	}
+	projected, err := os.ReadFile(filepath.Join(dir, "workspace", "work", "doc.docx"))
+	if err != nil || !strings.Contains(string(projected), word) {
+		t.Fatalf("host read of a Word file: %q err=%v", projected, err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "workspace", "work", "pic.bin"))
 	if err != nil || len(raw) != 8 || raw[1] != 'P' {
@@ -265,64 +277,6 @@ func TestMount_plaintextWritableProjectedEROFS(t *testing.T) {
 	}
 }
 
-// TestMount_projectedTextualReadOnly: a non-identity codec still projects
-// ReadText to the kernel (cat/rg); kernel writes stay EROFS.
-func TestMount_projectedTextualReadOnly(t *testing.T) {
-	ctx := t.Context()
-	ms := mustTree(t, vfs.At("work", vfs.Local(t.TempDir())))
-
-	if err := ms.Route(ctx, "/workspace/work/doc.docx").
-		WriteFile(ctx, []byte("container-bytes")); err != nil {
-		t.Fatal(err)
-	}
-
-	if doc, err := ms.Route(ctx, "/workspace/work/doc.docx").
-		ReadText(ctx); err != nil || doc.Text() != "EXTRACTED:container-bytes" {
-		t.Fatalf("ReadText projection: %q err=%v", textOr(doc), err)
-	}
-
-	dir := t.TempDir()
-	mustMount(t, ms, dir)
-
-	host := filepath.Join(dir, "workspace", "work", "doc.docx")
-	st, err := os.Stat(host)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Size() != int64(len("EXTRACTED:container-bytes")) {
-		t.Fatalf("host size=%d want extracted plaintext", st.Size())
-	}
-	if st.Mode().Perm()&0200 != 0 {
-		t.Fatalf("projected file should be read-only, mode=%v", st.Mode())
-	}
-	got, err := os.ReadFile(host)
-	if err != nil || string(got) != "EXTRACTED:container-bytes" {
-		t.Fatalf("host cat projection: %q err=%v", got, err)
-	}
-	if err := os.WriteFile(host, []byte("nope"), 0o644); err == nil {
-		t.Fatal("projected write: want EROFS")
-	} else if !errors.Is(err, syscall.EROFS) && !errors.Is(err, os.ErrPermission) &&
-		!strings.Contains(err.Error(), "read-only") && !strings.Contains(err.Error(), "EROFS") {
-		t.Fatalf("projected write err = %v", err)
-	}
-	if _, err := exec.LookPath("rg"); err == nil {
-		out, err := exec.Command("rg", "-F", "EXTRACTED:container-bytes", dir).CombinedOutput()
-		if err != nil || !strings.Contains(string(out), "EXTRACTED:container-bytes") {
-			t.Fatalf("rg projection: %v out=%s", err, out)
-		}
-	}
-}
-
-type projectedCodec struct{}
-
-func (projectedCodec) MediaTypes() []string {
-	return []string{"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
-}
-
-func (projectedCodec) Decode(_ context.Context, p, mt string, data []byte) (vfs.Document, error) {
-	return vfs.NewTextDocument(p, mt, "utf-8", "EXTRACTED:"+string(data)), nil
-}
-
 func textOr(t vfs.Textual) string {
 	if t == nil {
 		return ""
@@ -342,9 +296,8 @@ func TestMount_requiresADirectory(t *testing.T) {
 
 func mustTree(t *testing.T, members ...vfs.Member) *vfs.MountSession {
 	t.Helper()
-	// A projected (non-identity) codec for Word files, as a host that reads
-	// them registers.
-	ms, err := vfs.Tree(members...).WithCodecs(projectedCodec{})(t.Context(), t.Name(), vfs.Request{})
+	// The Word and Excel codecs, as a host that reads them registers.
+	ms, err := vfs.Tree(members...).WithCodecs(adapters.Codecs()...)(t.Context(), t.Name(), vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}

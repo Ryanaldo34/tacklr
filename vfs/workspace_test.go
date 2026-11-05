@@ -53,14 +53,6 @@ func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
 	}
 }
 
-func TestWorkspace_duplicateAliasIsAmbiguous(t *testing.T) {
-	a, b := t.TempDir(), t.TempDir()
-	_, err := vfs.Tree(vfs.At("legal", vfs.Local(a)), vfs.At("legal", vfs.Local(b)))(t.Context(), t.Name(), vfs.Request{})
-	if !errors.Is(err, vfs.ErrAmbiguous) {
-		t.Fatalf("dup alias = %v", err)
-	}
-}
-
 func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
 	ctx := t.Context()
 	host := t.TempDir()

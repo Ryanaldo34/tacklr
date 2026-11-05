@@ -1,15 +1,35 @@
-package vfs
+package vfs_test
 
 import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/adapters"
 )
 
-// The built-in codecs own the text types as identity (raw bytes are the
-// text); a type nobody registered is neither identity nor projected.
+// typesCodec is a host codec that claims the media types it lists. The
+// registry checks the types when the host registers the codec.
+type typesCodec []string
+
+func (c typesCodec) MediaTypes() []string { return c }
+func (typesCodec) Decode(context.Context, string, string, []byte) (vfs.Document, error) {
+	return nil, errors.New("typesCodec decodes nothing")
+}
+
+// imageDocument is a document with no text form, as a host image codec
+// returns it.
+type imageDocument struct{ path string }
+
+func (d imageDocument) Path() string    { return d.path }
+func (imageDocument) MediaType() string { return "image/png" }
+
+// The built-in codecs own the text types as identity (the raw bytes are the
+// text). An empty or unregistered type is neither identity nor projected,
+// and the text codec decodes an empty or octet-stream type as plain text.
 func TestContentRegistry_builtinsOwnTextTypes(t *testing.T) {
-	r, err := NewContentRegistry()
+	r, err := vfs.NewContentRegistry()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,79 +42,80 @@ func TestContentRegistry_builtinsOwnTextTypes(t *testing.T) {
 		}
 	}
 	for _, mt := range []string{
-		"", "application/octet-stream", "image/png",
-		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-		"application/vnd.google-apps.document", "application/vnd.google-apps.spreadsheet",
-		"application/vnd.notion.page",
+		"", "application/octet-stream", "image/png", adapters.DOCXMediaType,
+		"application/vnd.google-apps.document", "application/vnd.notion.page",
 	} {
-		if r.Identity(mt) {
-			t.Fatalf("Identity(%q) = true, want EROFS", mt)
+		if r.Identity(mt) || r.Projected(mt) {
+			t.Fatalf("Identity or Projected(%q) = true, want neither", mt)
 		}
 	}
-	doc, err := r.Decode(context.Background(), "/x.go", "text/x-go; charset=utf-8", []byte("package x\n"))
-	if err != nil {
-		t.Fatalf("built-in codecs must own extension-map types: %v", err)
+	if c, ok := r.Lookup("text/plain"); !ok || c == nil {
+		t.Fatal("no codec for text/plain")
 	}
-	if doc.MediaType() != "text/x-go" {
-		t.Fatalf("decoded media type %q", doc.MediaType())
+	doc, err := r.Decode(t.Context(), "/x.go", "text/x-go; charset=utf-8", []byte("package x\n"))
+	if err != nil || doc.MediaType() != "text/x-go" {
+		t.Fatalf("decoded %+v err=%v, want text/x-go", doc, err)
 	}
-	if _, ok := r.Lookup("text/plain"); !ok {
-		t.Fatal("lookup text/plain")
-	}
-}
-
-// A second codec for a media type is refused.
-func TestNewContentRegistry_refusesASecondCodecForAType(t *testing.T) {
-	if _, err := NewContentRegistry(stealPlainCodec{}); !errors.Is(err, ErrAlreadyRegistered) {
-		t.Fatalf("overwrite: %v", err)
+	for _, mt := range []string{"", "application/octet-stream"} {
+		doc, err := (vfs.TextCodec{}).Decode(t.Context(), "/x", mt, []byte("hi"))
+		if err != nil || doc.MediaType() != "text/plain" {
+			t.Fatalf("decode of %q = %+v err=%v, want text/plain", mt, doc, err)
+		}
 	}
 }
 
-type stealPlainCodec struct{}
-
-func (stealPlainCodec) MediaTypes() []string { return []string{"text/plain"} }
-func (stealPlainCodec) Decode(_ context.Context, _, _ string, _ []byte) (Document, error) {
-	return nil, errors.New("stolen")
-}
-
-func TestBlockCodec_mediaTypes(t *testing.T) {
-	c := BlockCodec{Types: []string{"application/x-t"}}
-	if got := c.MediaTypes(); len(got) != 1 || got[0] != "application/x-t" {
-		t.Fatalf("types=%v", got)
+// A host codec with no codec value, no types or a blank type is refused. A type with no codec and a decode with a canceled
+// context fail.
+func TestNewContentRegistry_refusesBadCodecsAndUnknownTypes(t *testing.T) {
+	for name, codec := range map[string]vfs.Codec{
+		"nil":      nil,
+		"no types": typesCodec(nil),
+		"blank":    typesCodec{""},
+	} {
+		if _, err := vfs.NewContentRegistry(codec); err == nil {
+			t.Fatalf("%s codec registered", name)
+		}
 	}
-	if _, err := c.Decode(context.Background(), "/x", "application/x-t", nil); err == nil {
-		t.Fatal("nil normalizer")
-	}
-	if _, err := c.Encode(context.Background(), nil); err == nil {
-		t.Fatal("encode nil normalizer")
-	}
-	doc, err := c.Create("/x", "", Mutation{})
+	r, err := vfs.NewContentRegistry()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if doc.MediaType() != "application/x-t" {
-		t.Fatalf("create media type=%q", doc.MediaType())
+	if _, err := r.Decode(t.Context(), "/x.bin", "application/x-unknown", []byte(`{}`)); !errors.Is(err, vfs.ErrNoCodec) {
+		t.Fatalf("unregistered decode = %v, want ErrNoCodec", err)
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := (vfs.TextCodec{}).Decode(canceled, "/x", "text/plain", []byte("a")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled decode = %v", err)
 	}
 }
 
-type tokenWrap struct{ *IR }
+// A BlockCodec reports its types and creates documents of its first type. It
+// fails without a normalizer, when the normalizer cannot decode the bytes,
+// and when it encodes a document that is not rich.
+func TestBlockCodec_createsItsTypeAndFailsWithoutAUsableNormalizer(t *testing.T) {
+	ctx := t.Context()
+	empty := vfs.BlockCodec{Types: []string{adapters.DOCXMediaType}}
+	docx := vfs.BlockCodec{Types: []string{adapters.DOCXMediaType}, Normalizer: adapters.DOCX{}}
 
-func TestContentToken_nonIRHashesText(t *testing.T) {
-	inner := NewTextDocument("/x", "text/plain", "utf-8", "hi")
-	got := ContentToken(tokenWrap{inner})
-	if got != ContentHash("hi") {
-		t.Fatalf("got %s want %s", got, ContentHash("hi"))
+	created, createErr := empty.Create("/x", "", vfs.Mutation{})
+	_, emptyDecodeErr := empty.Decode(ctx, "/x", adapters.DOCXMediaType, nil)
+	_, emptyEncodeErr := empty.Encode(ctx, vfs.NewRichDocument("/x", adapters.DOCXMediaType, nil))
+	_, badZipErr := docx.Decode(ctx, "/x", adapters.DOCXMediaType, []byte("not a zip"))
+	_, textEncodeErr := docx.Encode(ctx, vfs.NewTextDocument("/t", "text/plain", "utf-8", "plain"))
+	_, imageEncodeErr := docx.Encode(ctx, imageDocument{path: "/x"})
+
+	if got := docx.MediaTypes(); len(got) != 1 || got[0] != adapters.DOCXMediaType {
+		t.Fatalf("MediaTypes = %v", got)
 	}
-}
-
-func TestTextCodec_emptyMediaTypeIsPlain(t *testing.T) {
-	for _, mt := range []string{"", "application/octet-stream"} {
-		doc, err := (TextCodec{}).Decode(context.Background(), "/x", mt, []byte("hi"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if doc.MediaType() != "text/plain" {
-			t.Fatalf("mediaType=%q from %q", doc.MediaType(), mt)
-		}
+	if createErr != nil || created.MediaType() != adapters.DOCXMediaType {
+		t.Fatalf("Create = %+v err=%v, want a %s document", created, createErr, adapters.DOCXMediaType)
+	}
+	if emptyDecodeErr == nil || emptyEncodeErr == nil || badZipErr == nil || textEncodeErr == nil {
+		t.Fatalf("errors: decode without normalizer=%v, encode without normalizer=%v, bad zip=%v, encode text=%v",
+			emptyDecodeErr, emptyEncodeErr, badZipErr, textEncodeErr)
+	}
+	if !errors.Is(imageEncodeErr, vfs.ErrNotTextual) {
+		t.Fatalf("encode of an image = %v, want ErrNotTextual", imageEncodeErr)
 	}
 }

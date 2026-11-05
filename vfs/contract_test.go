@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
-	"github.com/ryanaldo34/tacklr/internal/testhttp"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/awss3"
 	"github.com/ryanaldo34/tacklr/vfs/azureblob"
@@ -51,9 +50,7 @@ func TestDrive_contract(t *testing.T) {
 
 func TestGraph_contract(t *testing.T) {
 	vfstest.Run(t, func(t *testing.T) vfstest.Backend {
-		fx := newGraphFX().legalTree()
-		srv := testhttp.New(t, fx)
-		fx.base = srv.URL
+		_, srv := startGraph(t)
 		ms, _ := mountGraphHTTP(t, srv, true)
 		return vfstest.Backend{Session: ms, Root: "/workspace/legal"}
 	})

@@ -571,13 +571,12 @@ func TestMountIndexer_IndexFileAndDefaults(t *testing.T) {
 		t.Fatalf("policy none: res=%q err=%v", res, err)
 	}
 
-	// Byte-only provider has no Document IR — indexer streams the UTF-8 body.
-	raw := &memFiles{files: map[string]string{"crlf.txt": "alpha stream-unique\r\nbeta line\n"}}
-	idx2, err := vfsindex.NewMountIndexer(treeLocal(t, vfs.At("raw", raw.open)), eng, scope)
-	if err != nil {
+	// CRLF line ends stream like LF ones.
+	if err := ms.Route(ctx, "/workspace/work/crlf.txt").
+		WriteFile(ctx, []byte("alpha stream-unique\r\nbeta line\n")); err != nil {
 		t.Fatal(err)
 	}
-	res, err = idx2.IndexPath(ctx, "/workspace/raw/crlf.txt")
+	res, err = idx.IndexPath(ctx, "/workspace/work/crlf.txt")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("stream index: res=%q err=%v", res, err)
 	}
@@ -595,20 +594,6 @@ func keys(m map[string]brain.Object) []string {
 	return out
 }
 
-// cancelOnEmbed cancels the index's ctx on its first Embed call (the parent).
-type cancelOnEmbed struct{ cancel context.CancelFunc }
-
-func (e cancelOnEmbed) Embed(_ context.Context, texts []string) ([][]float32, error) {
-	e.cancel()
-	out := make([][]float32, len(texts))
-	for i := range out {
-		out[i] = []float32{1}
-	}
-	return out, nil
-}
-
-func (cancelOnEmbed) Model() string { return "cancel-model" }
-
 func TestMountIndexer_aMarkdownIndexStopsAtTheFirstRejectedOrCancelledSection(t *testing.T) {
 	small := "# Small\n\nshort body\n"
 	big := "# Big\n\n" + strings.Repeat("section body words\n", 20)
@@ -625,7 +610,7 @@ func TestMountIndexer_aMarkdownIndexStopsAtTheFirstRejectedOrCancelledSection(t 
 		ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
 		var emb brain.Embedding
 		if tc.cancel {
-			emb.Embedder = cancelOnEmbed{cancel}
+			emb.Embedder = &hookEmbedder{hook: cancel}
 		}
 		eng, err := brain.NewEngine(brain.NewMemoryStore(brain.WithMemoryEmbedding(emb)))
 		if err != nil {

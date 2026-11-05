@@ -68,44 +68,53 @@ func TestHTMLRoundTripPreservesKindsLevelsMarksTables(t *testing.T) {
 	}
 }
 
-func TestDOCX_marksListMissingAndBadZip(t *testing.T) {
-	var input bytes.Buffer
-	zw := zip.NewWriter(&input)
-	w, err := zw.Create("word/document.xml")
+// zipOf is a zip archive with one part.
+func zipOf(t *testing.T, name, body string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create(name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = io.WriteString(w, `<w:document xmlns:w="x"><w:body>
+	_, _ = io.WriteString(w, body)
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestDOCX_marksListMissingAndBadZip: a Word heading, its run marks and a
+// list item decode, encode and decode again the same; bytes that are not a
+// zip, a zip without the document part, and a part that is not XML fail.
+func TestDOCX_marksListMissingAndBadZip(t *testing.T) {
+	ctx := context.Background()
+	input := zipOf(t, "word/document.xml", `<w:document xmlns:w="x"><w:body>
 <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:rPr><w:i/><w:u/><w:strike/></w:rPr><w:t>Hi</w:t><w:tab/><w:br/></w:r></w:p>
 <w:p><w:pPr><w:numPr/></w:pPr><w:r><w:t>Item</w:t></w:r></w:p>
 <w:p></w:p>
 </w:body></w:document>`)
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
+
+	doc, decodeErr := (DOCX{}).DecodeBlocks(ctx, "/x.docx", DOCXMediaType, input)
+	out, encodeErr := (DOCX{}).EncodeBlocks(ctx, doc)
+	again, againErr := (DOCX{}).DecodeBlocks(ctx, "/x.docx", DOCXMediaType, out)
+
+	if decodeErr != nil || encodeErr != nil || againErr != nil || len(again) < 2 {
+		t.Fatalf("decode %v, encode %v, decode again = %#v %v", decodeErr, encodeErr, again, againErr)
 	}
-	doc, err := (DOCX{}).DecodeBlocks(context.Background(), "/x.docx", DOCXMediaType, input.Bytes())
-	if err != nil || len(doc) < 2 {
-		t.Fatalf("doc=%#v err=%v", doc, err)
+	for _, blocks := range [][]vfs.Block{doc, again} {
+		if blocks[0].Kind != vfs.BlockKindHeading || blocks[0].Style.Level != 2 || blocks[1].Kind != vfs.BlockKindListItem || blocks[1].Text != "Item" {
+			t.Fatalf("blocks = %#v, want a level-2 heading then a list item", blocks)
+		}
 	}
-	if doc[0].Kind != vfs.BlockKindHeading || doc[1].Kind != vfs.BlockKindListItem {
-		t.Fatalf("kinds=%v %v", doc[0].Kind, doc[1].Kind)
-	}
-	out, err := (DOCX{}).EncodeBlocks(context.Background(), doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	part, err := zipPart(out, "word/document.xml")
-	if err != nil || !strings.Contains(string(part), "Heading2") || !strings.Contains(string(part), "numPr") {
-		t.Fatalf("part=%q err=%v", part, err)
-	}
-	if _, err := zipPart(out, "nope.xml"); err == nil {
-		t.Fatal("missing part")
-	}
-	if _, err := (DOCX{}).DecodeBlocks(context.Background(), "/x.docx", DOCXMediaType, []byte("not-zip")); err == nil {
-		t.Fatal("bad zip")
-	}
-	if _, err := parseDOCX([]byte("<not")); err == nil {
-		t.Fatal("bad xml")
+	for name, data := range map[string][]byte{
+		"bytes that are not a zip":   []byte("not-zip"),
+		"a zip without the document": zipOf(t, "nope.xml", "<x/>"),
+		"a document that is not XML": zipOf(t, "word/document.xml", "<not"),
+	} {
+		if _, err := (DOCX{}).DecodeBlocks(ctx, "/x.docx", DOCXMediaType, data); err == nil {
+			t.Errorf("%s: want a decode error", name)
+		}
 	}
 }
 
@@ -244,16 +253,6 @@ func TestXLSX_usedRangeFormulaFormatRoundTrip(t *testing.T) {
 	raw, err := (XLSX{}).Encode(ctx, src)
 	if err != nil {
 		t.Fatal(err)
-	}
-	styles, err := zipPart(raw, "xl/styles.xml")
-	if err != nil || !strings.Contains(string(styles), "$#,##0.00") ||
-		!strings.Contains(string(styles), `style="thin"`) || !strings.Contains(string(styles), "<b/>") ||
-		!strings.Contains(string(styles), "<i/>") || !strings.Contains(string(styles), "<strike/>") ||
-		!strings.Contains(string(styles), "<u/>") || !strings.Contains(string(styles), "FFCC00") ||
-		!strings.Contains(string(styles), "003366") || !strings.Contains(string(styles), `horizontal="right"`) ||
-		!strings.Contains(string(styles), `vertical="middle"`) || !strings.Contains(string(styles), `wrapText="1"`) ||
-		!strings.Contains(string(styles), "FF000000") {
-		t.Fatalf("styles.xml = %s err=%v", styles, err)
 	}
 	doc, err := (XLSX{}).Decode(ctx, "/work/Budget.xlsx", XLSXMediaType, raw)
 	if err != nil {

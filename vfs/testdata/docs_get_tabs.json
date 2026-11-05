@@ -1,0 +1,92 @@
+{
+  "documentId": "doc1",
+  "revisionId": "R0",
+  "title": "Spec",
+  "tabs": [
+    null,
+    {
+      "tabProperties": {"tabId": "t.a", "title": "Intro"},
+      "documentTab": {
+        "body": {"content": [
+          null,
+          {"startIndex": 1, "endIndex": 2, "sectionBreak": {}},
+          {"startIndex": 2, "endIndex": 8, "paragraph": {
+            "paragraphStyle": {"namedStyleType": "HEADING_1"},
+            "elements": [{"textRun": {"content": "Intro\n", "textStyle": {"bold": true}}}]
+          }},
+          {"startIndex": 8, "endIndex": 13, "paragraph": {
+            "paragraphStyle": {"namedStyleType": "HEADING_7"},
+            "elements": [{"textRun": {"content": "Deep\n"}}]
+          }},
+          {"startIndex": 13, "endIndex": 17, "paragraph": {
+            "paragraphStyle": {"namedStyleType": "HEADING_"},
+            "elements": [{"textRun": {"content": "Low\n"}}]
+          }},
+          {"startIndex": 17, "endIndex": 40, "paragraph": {
+            "elements": [
+              null,
+              {"textRun": {"content": "See "}},
+              {"textRun": {"content": "x", "textStyle": {"bold": true}}},
+              {"textRun": {"content": " "}},
+              {"textRun": {"content": "i", "textStyle": {"italic": true, "strikethrough": true}}},
+              {"textRun": {"content": ""}},
+              {"textRun": {"content": " and "}},
+              {"textRun": {"content": "Maya\n", "textStyle": {"link": {"url": "mailto:maya"}}}}
+            ]
+          }},
+          {"startIndex": 40, "endIndex": 42, "paragraph": {
+            "bullet": {"listId": "kix.ol", "nestingLevel": 1},
+            "elements": [{"textRun": {"content": "a\n"}}]
+          }},
+          {"startIndex": 42, "endIndex": 44, "paragraph": {
+            "bullet": {"listId": "kix.ul"},
+            "elements": [{"textRun": {"content": "b\n"}}]
+          }},
+          {"startIndex": 44, "endIndex": 45, "paragraph": {
+            "elements": [{"startIndex": 44, "endIndex": 45, "inlineObjectElement": {"inlineObjectId": "kix.pic"}}]
+          }},
+          {"startIndex": 45, "endIndex": 48, "paragraph": {
+            "elements": [
+              {"textRun": {"content": "Fig"}},
+              {"startIndex": 46, "endIndex": 47, "inlineObjectElement": {"inlineObjectId": "kix.bare"}}
+            ]
+          }},
+          {"startIndex": 48, "endIndex": 49, "tableOfContents": {}},
+          {"startIndex": 49, "endIndex": 56, "table": {"tableRows": [
+            null,
+            {"tableCells": [
+              null,
+              {"startIndex": 50, "endIndex": 55, "content": [
+                null,
+                {"startIndex": 51, "endIndex": 55, "paragraph": {"elements": [{"textRun": {"content": "Cell\n"}}]}}
+              ]},
+              {"startIndex": 55, "endIndex": 56}
+            ]}
+          ]}},
+          {"startIndex": 56, "endIndex": 57}
+        ]},
+        "lists": {
+          "kix.ol": {"listProperties": {"nestingLevels": [null, {"glyphType": "DECIMAL"}]}},
+          "kix.ul": {"listProperties": {"nestingLevels": [{"glyphType": "BULLET"}]}},
+          "kix.none": {}
+        },
+        "inlineObjects": {
+          "kix.pic": {"inlineObjectProperties": {"embeddedObject": {
+            "title": "Chart", "imageProperties": {"contentUri": "https://img"}
+          }}}
+        }
+      },
+      "childTabs": [{"documentTab": {"body": {}}}, {
+        "tabProperties": {"tabId": "t.c"},
+        "documentTab": {"body": {"content": [
+          {"startIndex": 1, "endIndex": 10, "paragraph": {"elements": [{"textRun": {"content": "Untitled\n"}}]}}
+        ]}}
+      }, {
+        "tabProperties": {"tabId": "t.b", "title": "Appendix", "index": 1},
+        "documentTab": {"body": {"content": [
+          {"startIndex": 1, "endIndex": 6, "paragraph": {"elements": [{"textRun": {"content": "More\n"}}]}}
+        ]}}
+      }]
+    }
+  ]
+}

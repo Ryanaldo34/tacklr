@@ -415,7 +415,7 @@ func applyDocsBatch(s *vfs.DocsSnapshot, reqs []*docs.Request) {
 					if s.Body[i].ListID == "" {
 						s.Body[i].ListID = "list"
 					}
-					s.Body[i].Nesting = s.Body[i].Level - 1
+					s.Body[i].Nesting = max(s.Body[i].Level-1, 0)
 				}
 			}
 		}

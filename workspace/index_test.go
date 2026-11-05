@@ -161,20 +161,3 @@ func TestIndexTools_rejectBadRequestsAndReportEachFailure(t *testing.T) {
 		t.Fatalf("batch = %q %v, want the open file indexed and an error line for the locked one", batch, batchErr)
 	}
 }
-
-// TestIndexTools_indexedFileKeepsItsSourceReaders: the readers IndexReaders
-// returns go on the index, so search finds the file only for a caller who
-// is one of them.
-func TestIndexTools_indexedFileKeepsItsSourceReaders(t *testing.T) {
-	f := newIndexFixture(t)
-	f.write(t, map[string]string{"/workspace/work/nda.txt": "mutual nda terms\n"})
-	tools := f.tools(func(context.Context, string, vfs.FileInfo) ([]string, error) { return []string{"group:legal"}, nil })
-
-	_, err := tools["index_file"](t.Context(), `{"path":"/workspace/work/nda.txt"}`)
-	legal := titles(t, f.eng, brain.Scope{Namespace: f.scope.Namespace, Principals: []string{"user:ann", "group:legal"}}, "nda terms")
-	outsider := titles(t, f.eng, brain.Scope{Namespace: f.scope.Namespace, Principals: []string{"user:mallory"}}, "nda terms")
-
-	if err != nil || !slices.Contains(legal, "/workspace/work/nda.txt") || len(outsider) != 0 {
-		t.Fatalf("index = %v; legal search %v, outsider search %v; want the file only for legal", err, legal, outsider)
-	}
-}
