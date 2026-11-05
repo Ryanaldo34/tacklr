@@ -234,6 +234,8 @@ func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte
 		fail(unknownAnswer(resume, ""))
 		return
 	}
+	// refit is set while the model is asked again after a collapse.
+	refit := false
 	for {
 		if r := t.Round; r != nil {
 			if r.Complete() {
@@ -298,10 +300,21 @@ func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte
 			continue
 		}
 		reply, err := d.Infer()
+		if errors.Is(err, session.ErrContextLength) && !refit {
+			// The provider refused the window as too long, though its
+			// count or bound was under: it collapses, and the model is
+			// asked again, once.
+			if !commit(tacklr.CommitIn{Collapse: true}) {
+				return
+			}
+			refit = true
+			continue
+		}
 		if err != nil {
 			fail(err)
 			return
 		}
+		refit = false
 		if len(reply.Calls) > 0 {
 			t.Round = tacklr.NewRound(reply)
 			continue

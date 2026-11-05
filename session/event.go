@@ -55,25 +55,37 @@ type Event struct {
 func (ev Event) Live() bool { return ev.Delta || ev.Type == EventToolUpdate }
 
 // FailKind names a turn failure a client acts on: a refusal, the token
-// limit, or a cancel. Empty is any other failure.
+// limit, a request over the context window, or a cancel. Empty is any
+// other failure.
 type FailKind string
 
 const (
-	FailRefused   FailKind = "refused"
-	FailMaxTokens FailKind = "max_tokens"
-	FailCancelled FailKind = "cancelled"
+	FailRefused       FailKind = "refused"
+	FailMaxTokens     FailKind = "max_tokens"
+	FailContextLength FailKind = "context_length"
+	FailCancelled     FailKind = "cancelled"
 )
+
+// KindOf is the kind of failure err is, or empty.
+func KindOf(err error) FailKind {
+	switch {
+	case errors.Is(err, ErrModelRefused):
+		return FailRefused
+	case errors.Is(err, ErrContextLength):
+		return FailContextLength
+	case errors.Is(err, ErrMaxTokens):
+		return FailMaxTokens
+	case errors.Is(err, context.Canceled):
+		return FailCancelled
+	}
+	return ""
+}
 
 // FailureEvent is the error event that reports a turn ended with err.
 func FailureEvent(err error) Event {
-	var kind FailKind
-	switch {
-	case errors.Is(err, ErrModelRefused):
-		kind = FailRefused
-	case errors.Is(err, ErrMaxTokens):
-		kind = FailMaxTokens
-	case errors.Is(err, context.Canceled):
-		kind, err = FailCancelled, context.Canceled
+	kind := KindOf(err)
+	if kind == FailCancelled {
+		err = context.Canceled
 	}
 	return Event{Type: EventError, Fail: err.Error(), Content: err.Error(), FailKind: kind}
 }
@@ -106,6 +118,8 @@ func (k FailKind) Err(text string) error {
 		return ErrModelRefused
 	case FailMaxTokens:
 		return ErrMaxTokens
+	case FailContextLength:
+		return ErrContextLength
 	case FailCancelled:
 		return context.Canceled
 	}

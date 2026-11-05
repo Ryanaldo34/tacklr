@@ -105,8 +105,8 @@ func TestActivities_commitIsTheOnlyWriterAndAppliesItsInputOnce(t *testing.T) {
 
 // TestActivityError_retriesOnlyWhatCanClear: a network error, a refusal and
 // a stale checkpoint retry. A cancel is a cancel, not a failure. Anything
-// else fails on its first attempt. A refusal and the token limit cross the
-// boundary typed with their kind. The test workflow environment does not
+// else fails on its first attempt. A refusal, the token limit and a request
+// over the context window cross the boundary typed with their kind. The test workflow environment does not
 // cancel a running step, so this small test holds the mapping.
 func TestActivityError_retriesOnlyWhatCanClear(t *testing.T) {
 	t.Parallel()
@@ -121,13 +121,14 @@ func TestActivityError_retriesOnlyWhatCanClear(t *testing.T) {
 		permanent bool
 		kind      session.FailKind
 	}{
-		"no error":           {ctx: t.Context()},
-		"a network error":    {ctx: t.Context(), err: fmt.Errorf("dial: %w", tacklr.ErrNetwork), retry: true},
-		"a refusal":          {ctx: t.Context(), err: session.ErrModelRefused, retry: true, kind: session.FailRefused},
-		"the token limit":    {ctx: t.Context(), err: session.ErrMaxTokens, permanent: true, kind: session.FailMaxTokens},
-		"a stale checkpoint": {ctx: t.Context(), err: session.ErrStaleCheckpoint, retry: true},
-		"a cancelled step":   {ctx: cancelled, err: errors.New("stopped"), canceled: true},
-		"a missing api key":  {ctx: t.Context(), err: tacklr.ErrApiKeyNotSet, permanent: true},
+		"no error":                          {ctx: t.Context()},
+		"a network error":                   {ctx: t.Context(), err: fmt.Errorf("dial: %w", tacklr.ErrNetwork), retry: true},
+		"a refusal":                         {ctx: t.Context(), err: session.ErrModelRefused, retry: true, kind: session.FailRefused},
+		"the token limit":                   {ctx: t.Context(), err: session.ErrMaxTokens, permanent: true, kind: session.FailMaxTokens},
+		"a request over the context window": {ctx: t.Context(), err: session.ErrContextLength, permanent: true, kind: session.FailContextLength},
+		"a stale checkpoint":                {ctx: t.Context(), err: session.ErrStaleCheckpoint, retry: true},
+		"a cancelled step":                  {ctx: cancelled, err: errors.New("stopped"), canceled: true},
+		"a missing api key":                 {ctx: t.Context(), err: tacklr.ErrApiKeyNotSet, permanent: true},
 	} {
 		// Act
 		got := activityError(tc.ctx, tc.err)

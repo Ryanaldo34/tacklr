@@ -121,8 +121,8 @@ func TestInvoke_requiresKeyAndModel(t *testing.T) {
 
 // TestCountTokens_reportsWhatTheProviderAnswers: a count is the provider's
 // input_tokens. A provider without the count endpoint (404) fails the count
-// with an error that says so, and names the provider. A request past the
-// context length is ErrMaxTokens. A body that
+// with ErrCannotCount, and names the provider. A request past the context
+// length is ErrContextLength, which is also ErrMaxTokens. A body that
 // is not JSON, a body cut off by the network, a provider that is gone and a
 // base URL that does not parse fail the count.
 func TestCountTokens_reportsWhatTheProviderAnswers(t *testing.T) {
@@ -147,10 +147,10 @@ func TestCountTokens_reportsWhatTheProviderAnswers(t *testing.T) {
 		"a count": {handler: answer(http.StatusOK, `{"input_tokens":42}`, 0), want: func(n int, err error) bool { return err == nil && n == 42 }},
 		"a provider without the endpoint": {handler: answer(http.StatusNotFound, "", 0), want: func(_ int, err error) bool {
 			apiErr, ok := errors.AsType[*openai.APIStatusError](err)
-			return ok && apiErr.Status == http.StatusNotFound && strings.Contains(err.Error(), "cannot count tokens (no /responses/input_tokens endpoint)")
+			return ok && apiErr.Status == http.StatusNotFound && errors.Is(err, tacklr.ErrCannotCount) && strings.Contains(err.Error(), "http://127.0.0.1")
 		}},
 		"a 400 for a request past the context length": {handler: answer(http.StatusBadRequest, `{"error":{"message":"context_length_exceeded"}}`, 0), want: func(_ int, err error) bool {
-			return errors.Is(err, session.ErrMaxTokens)
+			return errors.Is(err, session.ErrContextLength) && errors.Is(err, session.ErrMaxTokens)
 		}},
 		"a body that is not JSON": {handler: answer(http.StatusOK, `not json`, 0), want: func(_ int, err error) bool {
 			return err != nil && strings.Contains(err.Error(), "unmarshal response")

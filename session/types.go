@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 
@@ -215,9 +216,13 @@ func cloneAuth(a AuthContext) AuthContext {
 	return out
 }
 
-// ErrModelRefused and ErrMaxTokens are why a turn ended that a client acts
-// on (a refusal, the token limit); its error event names them.
+// ErrModelRefused, ErrMaxTokens and ErrContextLength are why a turn ended
+// that a client acts on (a refusal, the token limit); its error event names
+// them.
 var (
 	ErrModelRefused = errors.New("model refused")
 	ErrMaxTokens    = errors.New("max tokens reached")
+	// ErrContextLength is a request the provider refused because it is over
+	// the model's context window. It is also ErrMaxTokens.
+	ErrContextLength = fmt.Errorf("%w: the request is over the context window", ErrMaxTokens)
 )

@@ -13,8 +13,10 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/storetest"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/openai"
+	"github.com/ryanaldo34/tacklr/session"
 )
 
 // vectors is the host's embedding provider: it embeds every text as one
@@ -281,6 +283,89 @@ func TestHandoff_failsAndKeepsTheWindowWhenItsContextEnds(t *testing.T) {
 
 			if window := contents(checkpoint(t, h).window); !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), tc.want) || !slices.Equal(window[2:], []string{"kept-detail", "", r.Calls[0].Body.Text()}) {
 				t.Fatalf("handoff = %v with window %q, want %v and the window with the round", err, window, tc.want)
+			}
+		})
+	}
+}
+
+// TestCommit_sizesTheWindowFromUsageWhenTheProviderCannotCount: with a
+// provider that has no token-count endpoint, each commit is sized from
+// the input tokens the last response reported, plus the size of what was
+// added since. A round that takes the window over pressure collapses it
+// into a summary, and a result too large for the window is cut to fit.
+func TestCommit_sizesTheWindowFromUsageWhenTheProviderCannotCount(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	const window = 100_000
+	big := tacklr.NewTool(tacklr.ToolConfig{Name: "big", Handler: func(context.Context) (string, error) {
+		return strings.Repeat("x", 2*window), nil
+	}})
+	p := &provider{replies: [][]tacklr.LLMResponseChunk{{text("reading")}, {text("summary")}}}
+	model := testkit.UncountedHTTPModel(t, p.respond, windowTokens)
+	h := newHarness(t, "uncounted", tacklr.AgentOptions{Model: model, MaxWindowSize: window, Tools: []*tacklr.Tool{big}})
+	prompt(t, h, "go")
+	out := newStream(t).out
+	reading, err := h.Infer(t.Context(), out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Commit(t.Context(), tacklr.CommitIn{Round: &tacklr.Round{Reply: reading}}, out); err != nil {
+		t.Fatal(err)
+	}
+
+	// Act
+	_, err = runRound(t, h, call("b1", "big", "{}"))
+
+	// Assert
+	got := checkpoint(t, h).window
+	cut := got[len(got)-1].Content
+	if err != nil || len(got) != 4 || !strings.HasPrefix(got[1].Content, "CONVERSATION SUMMARY") || !strings.Contains(cut, "[Output truncated to fit the context window") || len(cut) >= window {
+		t.Fatalf("window = %d messages (%v), last %d bytes; want the goal, a summary, the call and its result cut under the window", len(got), err, len(cut))
+	}
+}
+
+// TestCommit_aCollapseAfterARefusedRequestSummarizesTheWindow: after the
+// provider refused a request as over the context window, a collapse with
+// no counted request after the goal summarizes everything after it. A
+// summary request that fails keeps the window, and a window of only the
+// goal has nothing to collapse.
+func TestCommit_aCollapseAfterARefusedRequestSummarizesTheWindow(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		summary []tacklr.LLMResponseChunk
+		answer  bool // the goal was answered before the collapse
+		want    []string
+		fail    error
+	}{
+		{name: "summarized", summary: []tacklr.LLMResponseChunk{text("summary")}, answer: true, want: []string{"go", "CONVERSATION SUMMARY\n────────────\nsummary"}},
+		{name: "a summary request that fails", summary: []tacklr.LLMResponseChunk{failure(fmt.Errorf("%w: stream failed", tacklr.ErrNetwork))}, answer: true, want: []string{"go", "done", "next"}, fail: tacklr.ErrNetwork},
+		{name: "only the goal", want: []string{"go"}, fail: session.ErrContextLength},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange
+			model, _ := scripted(t, []tacklr.LLMResponseChunk{text("done")}, tc.summary)
+			h := newHarness(t, "refit", tacklr.AgentOptions{Model: model, MaxWindowSize: 100_000})
+			prompt(t, h, "go")
+			out := newStream(t).out
+			if tc.answer {
+				done, err := h.Infer(t.Context(), out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := h.Commit(t.Context(), tacklr.CommitIn{Round: &tacklr.Round{Reply: done}}, out); err != nil {
+					t.Fatal(err)
+				}
+				prompt(t, h, "next")
+			}
+
+			// Act
+			err := h.Commit(t.Context(), tacklr.CommitIn{Collapse: true}, out)
+
+			// Assert
+			if got := contents(checkpoint(t, h).window); !errors.Is(err, tc.fail) || !slices.Equal(got, tc.want) {
+				t.Fatalf("collapse = %v with window %q, want %v and %q", err, got, tc.fail, tc.want)
 			}
 		})
 	}

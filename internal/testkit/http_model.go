@@ -24,13 +24,13 @@ import (
 // chunk becomes the HTTP error the client classifies. Anything else is SSE.
 func HTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
 	tb.Helper()
-	return newHTTPModel(tb, "gpt-4o", respond, contentTokens)
+	return newHTTPModel(tb, "gpt-4o", respond, contentTokens, true)
 }
 
 // TextHTTPModel is HTTPModel on a model id that accepts text only.
 func TextHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
 	tb.Helper()
-	return newHTTPModel(tb, "text-only", respond, contentTokens)
+	return newHTTPModel(tb, "text-only", respond, contentTokens, true)
 }
 
 // CountedHTTPModel is HTTPModel whose provider counts a request's tokens
@@ -40,7 +40,15 @@ func TextHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*mess
 // input tokens.
 func CountedHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error)) tacklr.Model {
 	tb.Helper()
-	return newHTTPModel(tb, "gpt-4o", respond, count)
+	return newHTTPModel(tb, "gpt-4o", respond, count, true)
+}
+
+// UncountedHTTPModel is CountedHTTPModel on a provider with no token-count
+// endpoint (HTTP 404): only each response reports count as its input
+// tokens.
+func UncountedHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error)) tacklr.Model {
+	tb.Helper()
+	return newHTTPModel(tb, "gpt-4o", respond, count, false)
 }
 
 // contentTokens counts a message's content length as its tokens, so a
@@ -49,7 +57,7 @@ func contentTokens(msgs []*message.Message) (int, error) {
 	return ContentTokenEstimate(msgs), nil
 }
 
-func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error)) tacklr.Model {
+func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error), counts bool) tacklr.Model {
 	tb.Helper()
 	// inputTokens is a request's token count; zero when count fails.
 	inputTokens := func(body []byte) int {
@@ -63,6 +71,10 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 	life, cancelLife := context.WithCancel(context.Background())
 	srv := testhttp.New(tb, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/input_tokens") {
+			if !counts {
+				http.NotFound(w, r)
+				return
+			}
 			body, _ := io.ReadAll(r.Body)
 			msgs, _ := messagesFromResponses(body)
 			n, err := count(msgs)
@@ -161,6 +173,8 @@ func writeProviderError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, session.ErrModelRefused):
 		code = "content_filter"
+	case errors.Is(err, session.ErrContextLength):
+		code = "context_length_exceeded"
 	case errors.Is(err, session.ErrMaxTokens):
 		code = "max_tokens"
 	case errors.Is(err, tacklr.ErrNetwork):

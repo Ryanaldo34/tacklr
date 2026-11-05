@@ -174,9 +174,9 @@ func (s *Model) CountTokens(ctx context.Context, req tacklr.ModelRequest) (int, 
 		err := classifyAPIStatus(&APIStatusError{Status: httpResp.StatusCode, Body: extractErrorMessage(respBody)}, "")
 		switch httpResp.StatusCode {
 		case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
-			// Tacklr counts with the provider only: a provider without the
-			// endpoint (Azure OpenAI, local servers) cannot manage a window.
-			return 0, fmt.Errorf("openai: the provider at %s cannot count tokens (no /responses/input_tokens endpoint): %w", s.baseURL, err)
+			// A provider without the endpoint (Azure OpenAI, local servers):
+			// the harness sizes requests from the usage it reports.
+			return 0, fmt.Errorf("openai: the provider at %s has no /responses/input_tokens endpoint: %w: %w", s.baseURL, tacklr.ErrCannotCount, err)
 		}
 		return 0, err
 	}

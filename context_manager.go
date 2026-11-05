@@ -19,6 +19,29 @@ const pressureRatio = 0.85
 type modelContextManager struct {
 	mu     sync.RWMutex
 	window []*message.Message
+	// usage is the provider's count of the last request on this window. A
+	// Replace or a Restore forgets it: it counted messages that are gone.
+	usage requestUsage
+}
+
+// requestUsage is a provider's input token count for one model request,
+// and how many window messages that request carried. Zero is no count.
+type requestUsage struct {
+	tokens, messages int
+}
+
+// Usage is the provider's count of the last request on the window.
+func (m *modelContextManager) Usage() requestUsage {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.usage
+}
+
+// Counted notes the provider's count of a request on the window as it is.
+func (m *modelContextManager) Counted(tokens int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.usage = requestUsage{tokens: tokens, messages: len(m.window)}
 }
 
 func newModelContextManager() *modelContextManager {
@@ -39,6 +62,7 @@ func (m *modelContextManager) Messages() []*message.Message {
 func (m *modelContextManager) Restore(window []*message.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.usage = requestUsage{}
 	if len(window) == 0 {
 		m.window = nil
 		return
@@ -51,10 +75,11 @@ func (m *modelContextManager) Replace(window []*message.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.window = window
+	m.usage = requestUsage{}
 }
 
-// Add appends a round without fitting it, for a round whose window effect
-// replaces the window next.
+// Add appends a round. The usage stays: the request it counted is the
+// window's start.
 func (m *modelContextManager) Add(round ...*message.Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -69,6 +94,7 @@ func (m *modelContextManager) InstallPlanDocument(planRaw string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.window = []*message.Message{m.window[0], buildPlanDocumentMessage(planRaw)}
+	m.usage = requestUsage{}
 	return nil
 }
 

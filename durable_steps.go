@@ -37,6 +37,9 @@ func (a *Harness) Commit(ctx context.Context, in CommitIn, out chan session.Even
 			return err
 		}
 	}
+	if in.Collapse {
+		return a.refit(ctx)
+	}
 	return nil
 }
 
@@ -106,7 +109,7 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 		if chunk.InputTokens > 0 {
 			// The provider counted this request: the window as it is now,
 			// the tools and the system prompt.
-			a.usage = requestUsage{tokens: chunk.InputTokens, messages: len(a.context.Messages())}
+			a.context.Counted(chunk.InputTokens)
 		}
 		asm.AddDelta(chunk)
 		if chunk.IsComplete {

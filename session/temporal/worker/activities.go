@@ -45,11 +45,11 @@ func activityError(ctx context.Context, err error) error {
 	}
 	// A failure a client acts on crosses the boundary typed with its kind,
 	// which the workflow maps back to the sentinel (executor.stepErr).
-	if errors.Is(err, session.ErrModelRefused) {
-		return temporal.NewApplicationErrorWithCause(err.Error(), string(session.FailRefused), err)
-	}
-	if errors.Is(err, session.ErrMaxTokens) {
-		return temporal.NewNonRetryableApplicationError(err.Error(), string(session.FailMaxTokens), err)
+	switch kind := session.KindOf(err); kind {
+	case session.FailRefused:
+		return temporal.NewApplicationErrorWithCause(err.Error(), string(kind), err)
+	case session.FailMaxTokens, session.FailContextLength:
+		return temporal.NewNonRetryableApplicationError(err.Error(), string(kind), err)
 	}
 	if errors.Is(err, tacklr.ErrNetwork) || errors.Is(err, session.ErrStaleCheckpoint) {
 		return err

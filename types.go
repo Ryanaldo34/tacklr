@@ -29,10 +29,14 @@ var (
 )
 
 var (
-	ErrModelAfterTools      = errors.New("model request failed after tools completed")
-	ErrApiKeyNotSet         = errors.New("api key not set")
-	ErrModelNotSet          = errors.New("model not set")
-	ErrUnknownModel         = errors.New("unknown model")
+	ErrModelAfterTools = errors.New("model request failed after tools completed")
+	ErrApiKeyNotSet    = errors.New("api key not set")
+	ErrModelNotSet     = errors.New("model not set")
+	ErrUnknownModel    = errors.New("unknown model")
+	// ErrCannotCount is a CountTokens error: the provider has no way to
+	// count a request's tokens. The harness then sizes requests from the
+	// input tokens the provider reports for each response.
+	ErrCannotCount          = errors.New("the model cannot count tokens")
 	ErrToolTimeout          = errors.New("tool timed out")
 	ErrToolPermissionDenied = errors.New("tool permission denied")
 )
@@ -75,7 +79,10 @@ type ModelRequest struct {
 // is in ModelRequest.
 type Model interface {
 	Invoke(ctx context.Context, req ModelRequest) (chan LLMResponseChunk, error)
-	// CountTokens counts what Invoke would send for req.
+	// CountTokens counts what Invoke would send for req, with the provider.
+	// A provider that cannot count returns an error that wraps
+	// ErrCannotCount. Invoke reports a request the provider refused as over
+	// the context window with session.ErrContextLength.
 	CountTokens(ctx context.Context, req ModelRequest) (int, error)
 	MaxContextWindow() (int, error)
 	// ModelTelemetryIdentity names the provider and model for model spans.

@@ -151,7 +151,6 @@ func (a *Harness) RestoreCheckpoint(rows []session.CheckpointEntry) error {
 		return fmt.Errorf("checkpoint: invalid context window: %w", err)
 	}
 	a.context.Restore(window)
-	a.usage = requestUsage{}
 	a.session.Plan.restore(todos, plan)
 	a.session.Permissions.restore(permissions)
 	a.session.Search.SetRests(rests)

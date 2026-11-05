@@ -49,9 +49,9 @@ type Harness struct {
 	toolRunner *toolRunner
 	// modelSeq counts model requests, for model span sequence numbers.
 	modelSeq int
-	// usage is the provider's input token count for the last model request
-	// of this harness, so a commit far below the window skips CountTokens.
-	usage requestUsage
+	// cannotCount is set when the model's CountTokens said it cannot count:
+	// requests are then sized from the provider's reported usage.
+	cannotCount bool
 }
 
 // commitRound appends one complete round to the window. A round with a

@@ -65,6 +65,9 @@ type CommitIn struct {
 	State map[string]any     `json:"state,omitempty"`
 	Round *Round             `json:"round,omitempty"`
 	Users []*message.Message `json:"users,omitempty"`
+	// Collapse collapses the window into a summary after the rest: the
+	// provider refused the last request as over the context window.
+	Collapse bool `json:"collapse,omitempty"`
 }
 
 const streamEventBuffer = 64

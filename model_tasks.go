@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -136,69 +137,117 @@ func (a *Harness) handoff(ctx context.Context) error {
 // The window is then small, so the next rounds append without collapsing.
 // A round still over MaxWindowSize has its largest results trimmed.
 func (a *Harness) fit(ctx context.Context, round []*message.Message) error {
-	window := a.context.Messages()
+	window, usage := a.context.Messages(), a.context.Usage()
 	threshold := int(float64(a.maxWindowSize) * pressureRatio)
-	if a.usage.below(window, round, threshold) {
-		a.context.Replace(slices.Concat(window, round))
+	if a.bound(usage, window, round) < threshold {
+		a.context.Add(round...)
 		return nil
 	}
-	n, err := a.count(ctx, window, round)
+	n, err := a.size(ctx, usage, window, round)
 	if err != nil {
 		return err
 	}
-	keep := protectedPrefixLen(window)
-	if n > threshold && len(window) > keep {
-		if err := a.saveSessionMessages(ctx, window[keep:]); err != nil {
+	collapsed := false
+	if n > threshold && len(window) > protectedPrefixLen(window) {
+		if window, err = a.collapse(ctx, window, len(window)); err != nil {
 			return err
 		}
-		summary, err := a.summarize(ctx, window)
-		if err != nil {
-			return err
-		}
-		window = append(window[:keep:keep], summary)
-		if n, err = a.count(ctx, window, round); err != nil {
+		collapsed, usage = true, requestUsage{}
+		if n, err = a.size(ctx, usage, window, round); err != nil {
 			return err
 		}
 	}
 	if n > a.maxWindowSize {
-		if round, err = a.trim(ctx, window, round, n); err != nil {
+		if round, err = a.trim(ctx, usage, window, round, n); err != nil {
 			return err
 		}
+	}
+	if !collapsed {
+		a.context.Add(round...)
+		return nil
 	}
 	a.context.Replace(slices.Concat(window, round))
 	return nil
 }
 
-// requestUsage is a provider's input token count for one model request,
-// and how many window messages that request carried.
-type requestUsage struct {
-	tokens, messages int
-}
-
-// below reports whether window and round are surely under threshold: the
-// last request's count, plus the encoded size in bytes of the messages
-// added since. A byte-level tokenizer gives every token at least one byte,
-// and the encoding is larger than a message's framing tokens, so that sum
-// bounds the count from above. When the bound is not under threshold, or
-// there is no count, the caller counts exactly.
-func (u requestUsage) below(window, round []*message.Message, threshold int) bool {
-	if u.tokens == 0 || u.messages > len(window) {
-		return false
+// refit collapses the window after the provider refused a request on it
+// as over the context window, although its count or bound was under. The
+// messages after the protected prefix that the last counted request
+// carried become one summary: the provider took that request, so the
+// summary request fits. The messages after it stay. With no counted
+// request, everything after the prefix becomes the summary. A window with
+// nothing to collapse fails with session.ErrContextLength.
+func (a *Harness) refit(ctx context.Context) error {
+	window, usage := a.context.Messages(), a.context.Usage()
+	keep := protectedPrefixLen(window)
+	end := usage.messages
+	if end <= keep {
+		end = len(window)
 	}
-	bound := u.tokens
-	for _, m := range slices.Concat(window[u.messages:], round) {
-		raw, _ := json.Marshal(m)
-		bound += len(raw)
+	if end <= keep {
+		return fmt.Errorf("%w: the window has nothing to collapse", session.ErrContextLength)
 	}
-	return bound < threshold
-}
-
-func (a *Harness) count(ctx context.Context, window, round []*message.Message) (int, error) {
-	n, err := a.model.CountTokens(ctx, a.request(slices.Concat(window, round)))
+	window, err := a.collapse(ctx, window, end)
 	if err != nil {
-		return 0, fmt.Errorf("count tokens: %w", err)
+		return err
 	}
-	return n, nil
+	a.context.Replace(window)
+	return nil
+}
+
+// collapse saves window[keep:end] for search and replaces it with one
+// summary of window[:end], where keep is the protected prefix.
+func (a *Harness) collapse(ctx context.Context, window []*message.Message, end int) ([]*message.Message, error) {
+	keep := protectedPrefixLen(window)
+	if err := a.saveSessionMessages(ctx, window[keep:end]); err != nil {
+		return nil, err
+	}
+	summary, err := a.summarize(ctx, window[:end])
+	if err != nil {
+		return nil, err
+	}
+	return slices.Concat(window[:keep], []*message.Message{summary}, window[end:]), nil
+}
+
+// bound is an upper bound on the input tokens of a request with window and
+// round: usage's count, plus the encoded size in bytes of the messages
+// added after the messages it counted. With no count, it is the encoded
+// size of the whole request. A byte-level tokenizer gives every token at
+// least one byte, and the encoding is larger than a message's framing
+// tokens, so the sum bounds the count from above.
+func (a *Harness) bound(usage requestUsage, window, round []*message.Message) int {
+	n, from := usage.tokens, usage.messages
+	if n == 0 {
+		n = len(a.constructSystemPrompt())
+		for _, t := range a.tools {
+			// It encodes: the parameters are a JSON schema.
+			raw, _ := json.Marshal(t.parameters)
+			n += len(t.QualifiedName()) + len(t.description) + len(raw)
+		}
+	}
+	for _, m := range slices.Concat(window[from:], round) {
+		raw, _ := json.Marshal(m)
+		n += len(raw)
+	}
+	return n
+}
+
+// size is the input tokens of a request with window and round: the
+// provider's count, or the bound when the provider cannot count.
+func (a *Harness) size(ctx context.Context, usage requestUsage, window, round []*message.Message) (int, error) {
+	if !a.cannotCount {
+		n, err := a.model.CountTokens(ctx, a.request(slices.Concat(window, round)))
+		if err == nil {
+			return n, nil
+		}
+		if !errors.Is(err, ErrCannotCount) {
+			return 0, fmt.Errorf("count tokens: %w", err)
+		}
+		slog.InfoContext(ctx, "the model cannot count tokens; requests are sized from the usage the provider reports",
+			"area", telemetry.AreaModelTasks, "error", err)
+		a.cannotCount = true
+	}
+	return a.bound(usage, window, round), nil
 }
 
 // summarize asks the model for one summary of window. Tools and the live
@@ -248,7 +297,7 @@ const searchableHistoryNote = "The full earlier conversation is saved. Use the s
 // trim cuts the round's largest results until the window and round fit
 // MaxWindowSize. Before a result's first cut, its full text is kept in
 // Overflow when that is set, and the cut result says where.
-func (a *Harness) trim(ctx context.Context, window, round []*message.Message, n int) ([]*message.Message, error) {
+func (a *Harness) trim(ctx context.Context, usage requestUsage, window, round []*message.Message, n int) ([]*message.Message, error) {
 	round = slices.Clone(round)
 	full := map[int]string{}
 	kept := map[int]int{}
@@ -290,7 +339,7 @@ func (a *Harness) trim(ctx context.Context, window, round []*message.Message, n 
 		cut.Content = full[i][:keep] + truncationNote(keep, len(full[i]), where[i])
 		round[i] = &cut
 		var err error
-		if n, err = a.count(ctx, window, round); err != nil {
+		if n, err = a.size(ctx, usage, window, round); err != nil {
 			return nil, err
 		}
 	}

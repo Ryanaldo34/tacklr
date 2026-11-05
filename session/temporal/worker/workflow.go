@@ -429,7 +429,7 @@ func (w *executor) stepErr(err error) error {
 	// Error() appends the cause, which repeats the message.
 	text := cmp.Or(app.Message(), err.Error())
 	switch kind := session.FailKind(app.Type()); kind {
-	case session.FailRefused, session.FailMaxTokens:
+	case session.FailRefused, session.FailMaxTokens, session.FailContextLength:
 		return kind.WithText(text)
 	}
 	return errors.New(text)

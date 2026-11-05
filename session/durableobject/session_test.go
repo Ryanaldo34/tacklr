@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -627,6 +628,73 @@ func TestSession_aModelFailureRunsAgainOrFailsTheTurnWithItsKind(t *testing.T) {
 	}
 	if refused.FailKind != session.FailRefused || long.FailKind != session.FailMaxTokens || !errors.Is(refused.FailKind.Err(refused.Fail), session.ErrModelRefused) {
 		t.Fatalf("refused %+v, long %+v; want the refusal and the token limit", refused, long)
+	}
+}
+
+// TestSession_aRequestOverTheContextWindowCollapsesItAndAsksAgainOnce: a
+// request the provider refuses as over the context window collapses the
+// window into a summary, and the model is asked again: the turn ends with
+// its answer. The messages after the last request the provider took stay.
+// A request it refuses again, or a first prompt it refuses (there is
+// nothing to collapse), fails the turn as over the context window.
+func TestSession_aRequestOverTheContextWindowCollapsesItAndAsksAgainOnce(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	var refusals atomic.Int32
+	var mu sync.Mutex
+	var retried []string
+	answer := func(msgs []*message.Message) tacklr.LLMResponseChunk {
+		last := msgs[len(msgs)-1].Content
+		switch {
+		case strings.Contains(last, "Summarize the entire message history"):
+			return tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "summary", IsComplete: true}
+		case last == "always too long", last == "too long" && refusals.Add(1) == 1:
+			return tacklr.LLMResponseChunk{Type: session.EventError, Error: session.ErrContextLength}
+		case last == "too long":
+			mu.Lock()
+			for _, m := range msgs[1:] {
+				retried = append(retried, m.Content)
+			}
+			mu.Unlock()
+		}
+		return tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "re: " + last, IsComplete: true}
+	}
+	f := newFixture(t, answer, nil)
+	ctx := t.Context()
+	open := func() func(text string) session.Event {
+		id, err := f.c.CreateSession(ctx, session.CreateSession{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sub := f.subscribe(t, id)
+		return func(text string) session.Event {
+			t.Helper()
+			if err := f.c.Prompt(ctx, id, session.Prompt{Text: text}); err != nil {
+				t.Fatal(err)
+			}
+			return last(untilEnd(t, sub))
+		}
+	}
+	end, first := open(), open()
+	end("a")
+	end("b")
+
+	// Act
+	answered := end("too long")
+	failed := end("always too long")
+	refusedFirst := first("always too long")
+
+	// Assert
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"a", "CONVERSATION SUMMARY\n────────────\nsummary", "re: b", "too long"}
+	if answered.Type != session.EventComplete || !slices.Equal(retried, want) {
+		t.Fatalf("after a refusal %+v, the request asked again %q; want the answer to %q", answered, retried, want)
+	}
+	for _, ev := range []session.Event{failed, refusedFirst} {
+		if ev.FailKind != session.FailContextLength || !errors.Is(ev.FailKind.Err(ev.Fail), session.ErrMaxTokens) {
+			t.Fatalf("refused twice or first %+v, want a turn over the context window", ev)
+		}
 	}
 }
 

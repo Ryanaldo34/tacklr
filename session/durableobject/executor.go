@@ -64,17 +64,14 @@ type stepError struct {
 }
 
 func encodeErr(err error) *stepError {
-	switch {
-	case err == nil:
+	if err == nil {
 		return nil
-	case errors.Is(err, context.Canceled):
-		return &stepError{Text: context.Canceled.Error(), Kind: session.FailCancelled}
-	case errors.Is(err, session.ErrModelRefused):
-		return &stepError{Text: err.Error(), Kind: session.FailRefused}
-	case errors.Is(err, session.ErrMaxTokens):
-		return &stepError{Text: err.Error(), Kind: session.FailMaxTokens}
 	}
-	return &stepError{Text: err.Error()}
+	kind := session.KindOf(err)
+	if kind == session.FailCancelled {
+		err = context.Canceled
+	}
+	return &stepError{Text: err.Error(), Kind: kind}
 }
 
 // err is the error the turn sees: the sentinel of its kind, with its text.
