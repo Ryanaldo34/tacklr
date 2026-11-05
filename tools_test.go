@@ -1,461 +1,292 @@
-package tacklr
+package tacklr_test
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-type BasicArgs struct {
+type basicArgs struct {
 	Name string `json:"name" desc:"The name"`
 	Age  int    `json:"age" desc:"The age"`
 }
 
-type TaggedArgs struct {
-	Field    string  `json:"field_name" desc:"A field" enum:"a,b,c"`
-	Optional *string `json:"optional,omitempty" desc:"Optional value"`
-	Skipped  string  `json:"-"`
-}
-
-type NestedInner struct {
-	Value string `json:"value"`
-}
-
-type NestedArgs struct {
-	Inner  NestedInner    `json:"inner"`
-	Items  []string       `json:"items"`
-	Lookup map[string]int `json:"lookup"`
-}
-
-type WithTime struct {
-	CreatedAt time.Time `json:"created_at" desc:"When created"`
-}
-
-type WithEmbedded struct {
-	NestedInner
-	Extra string `json:"extra"`
-}
-
-func zeroArgsStringHandler(ctx context.Context) (string, error)              { return "hello", nil }
-func zeroArgsIntHandler(ctx context.Context) (int, error)                    { return 42, nil }
-func basicHandler(ctx context.Context, args BasicArgs) (string, error)       { return "ok", nil }
-func taggedHandler(ctx context.Context, args TaggedArgs) (string, error)     { return "ok", nil }
-func nestedHandler(ctx context.Context, args NestedArgs) (string, error)     { return "ok", nil }
-func timeHandler(ctx context.Context, args WithTime) (string, error)         { return "ok", nil }
-func embeddedHandler(ctx context.Context, args WithEmbedded) (string, error) { return "ok", nil }
-
-type testErr struct{ msg string }
-
-func (e testErr) Error() string { return e.msg }
-
-func errHandler(ctx context.Context, args BasicArgs) (string, error) {
-	return "", testErr{"boom"}
-}
-
-func TestInvoke(t *testing.T) {
-	t.Run("returns raw string", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "zero", Handler: zeroArgsStringHandler})
-		res, err := tool.invoke(context.Background(), "", nil)
-		got := res.Output
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "hello" {
-			t.Errorf("got %q, want %q", got, "hello")
-		}
-	})
-
-	t.Run("marshals non-string return", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "zero_int", Handler: zeroArgsIntHandler})
-		res, err := tool.invoke(context.Background(), "", nil)
-		got := res.Output
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "42" {
-			t.Errorf("got %q, want %q", got, "42")
-		}
-	})
-
-	t.Run("unmarshals args and calls handler", func(t *testing.T) {
-		h := func(ctx context.Context, args BasicArgs) (string, error) {
-			if args.Name != "test" || args.Age != 10 {
-				t.Errorf("unexpected args: %+v", args)
-			}
-			return "result", nil
-		}
-		tool := NewTool(ToolConfig{Name: "handler", Handler: h})
-		res, err := tool.invoke(context.Background(), `{"name":"test","age":10}`, nil)
-		got := res.Output
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "result" {
-			t.Errorf("got %q, want %q", got, "result")
-		}
-	})
-
-	t.Run("unmarshals pointer args", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "ptr_args", Handler: func(ctx context.Context, a *BasicArgs) (string, error) { return a.Name, nil }})
-		res, err := tool.invoke(context.Background(), `{"name":"x"}`, nil)
-		if err != nil || res.Output != "x" {
-			t.Fatalf("got %q %v", res.Output, err)
-		}
-	})
-
-	t.Run("an arg of the wrong type errors", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
-		if _, err := tool.invoke(context.Background(), `{"name":123}`, nil); err == nil || !strings.Contains(err.Error(), "unmarshal args") {
-			t.Fatalf("got %v, want an unmarshal error", err)
-		}
-	})
-
-	t.Run("a result that cannot be marshaled errors", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "bad_out", Handler: func(ctx context.Context) (chan int, error) { return make(chan int), nil }})
-		if _, err := tool.invoke(context.Background(), "", nil); err == nil {
-			t.Fatal("want marshal result error")
-		}
-	})
-
-	t.Run("handler that needs runtime fails closed without one", func(t *testing.T) {
-		tool := NewTool(ToolConfig{
-			Name: "needs_rt",
-			Handler: func(ctx context.Context, cc *CallContext) (string, error) {
-				return "ok", nil
-			},
-		})
-		_, err := tool.invoke(context.Background(), "", nil)
-		if err == nil || !errors.Is(err, ErrFailed) {
-			t.Fatalf("nil runtime: %v", err)
-		}
-	})
-
-	t.Run("propagates handler error", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "err", Handler: errHandler})
-		_, err := tool.invoke(context.Background(), `{"name":"x","age":1}`, nil)
-		if err == nil || !errors.Is(err, ErrCorrection) || !strings.Contains(err.Error(), "boom") {
-			t.Fatalf("got %v, want ErrCorrection wrapping boom", err)
-		}
-	})
-
-	t.Run("bad json args errors", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
-		_, err := tool.invoke(context.Background(), `{bad`, nil)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
-
-	t.Run("a tool past its timeout is a correction to narrow the request", func(t *testing.T) {
-		for name, handler := range map[string]func(context.Context) (string, error){
-			"one that stops on its deadline": func(ctx context.Context) (string, error) { <-ctx.Done(); return "", ctx.Err() },
-			"one that ignores its deadline":  func(context.Context) (string, error) { time.Sleep(50 * time.Millisecond); return "late", nil },
-		} {
-			tool := NewTool(ToolConfig{Name: "slow", Timeout: 5 * time.Millisecond, Handler: handler})
-
-			_, err := tool.invoke(context.Background(), "", nil)
-
-			if !errors.Is(err, ErrToolTimeout) {
-				t.Errorf("%s = %v, want ErrToolTimeout", name, err)
-			}
-		}
-	})
-
-	t.Run("parent cancellation is not reported as tool timeout", func(t *testing.T) {
-		tool := NewTool(ToolConfig{
-			Name:    "slow",
-			Timeout: time.Second,
-			Handler: func(ctx context.Context) (string, error) {
-				<-ctx.Done()
-				return "", ctx.Err()
-			},
-		})
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		_, err := tool.invoke(ctx, "", nil)
-		if err == nil {
-			t.Fatal("expected error")
-		}
-		if errors.Is(err, ErrToolTimeout) {
-			t.Fatalf("got ErrToolTimeout, want parent cancellation: %v", err)
-		}
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("got %v, want context.Canceled", err)
-		}
-	})
-}
-
-func TestSchema(t *testing.T) {
-	t.Run("basic fields with desc and required", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
-		s := asParams(t, tool)
-		if s["type"] != "object" || s["additionalProperties"] != false {
-			t.Errorf("expected {type:object, additionalProperties:false}, got %v", s)
-		}
-		props := s["properties"].(map[string]any)
-
-		n := props["name"].(map[string]any)
-		if n["type"] != "string" || n["description"] != "The name" {
-			t.Errorf("name = %v", n)
-		}
-		a := props["age"].(map[string]any)
-		if a["type"] != "integer" || a["description"] != "The age" {
-			t.Errorf("age = %v", a)
-		}
-
-		assertRequired(t, s, "name", "age")
-	})
-
-	t.Run("tags: json rename, enum, skip, optional", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "tagged", Handler: taggedHandler})
-		s := asParams(t, tool)
-		props := s["properties"].(map[string]any)
-
-		if _, ok := props["Skipped"]; ok {
-			t.Error(`json:"-" field should be skipped`)
-		}
-
-		f := props["field_name"].(map[string]any)
-		if f["type"] != "string" || f["description"] != "A field" {
-			t.Errorf("field = %v", f)
-		}
-		enumVals := f["enum"].([]string)
-		if len(enumVals) != 3 || enumVals[0] != "a" || enumVals[1] != "b" || enumVals[2] != "c" {
-			t.Errorf("enum = %v", enumVals)
-		}
-
-		// Strict tool schemas list every property in required; optionals are T|null.
-		assertRequired(t, s, "field_name", "optional")
-		opt := props["optional"].(map[string]any)
-		optType, ok := opt["type"].([]any)
-		if !ok || len(optType) != 2 {
-			t.Fatalf("optional type should be [string,null], got %v", opt["type"])
-		}
-	})
-
-	t.Run("nested structs, slices, and maps", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "nested", Handler: nestedHandler})
-		s := asParams(t, tool)
-		props := s["properties"].(map[string]any)
-
-		inner := props["inner"].(map[string]any)
-		if inner["type"] != "object" {
-			t.Errorf("inner type = %v", inner["type"])
-		}
-		innerProps := inner["properties"].(map[string]any)
-		if innerProps["value"].(map[string]any)["type"] != "string" {
-			t.Error("nested value type mismatch")
-		}
-
-		items := props["items"].(map[string]any)
-		if items["type"] != "array" || items["items"].(map[string]any)["type"] != "string" {
-			t.Errorf("items = %v", items)
-		}
-
-		lookup := props["lookup"].(map[string]any)
-		if lookup["type"] != "object" || lookup["additionalProperties"].(map[string]any)["type"] != "integer" {
-			t.Errorf("lookup = %v", lookup)
-		}
-	})
-
-	t.Run("numbers and a recursive type", func(t *testing.T) {
-		type node struct {
-			Weight   float64 `json:"weight"`
-			Children []node  `json:"children"`
-		}
-		tool := NewTool(ToolConfig{Name: "tree", Handler: func(context.Context, node) (string, error) { return "", nil }})
-		s := asParams(t, tool)
-		props := s["properties"].(map[string]any)
-		if props["weight"].(map[string]any)["type"] != "number" {
-			t.Errorf("weight = %v, want a number", props["weight"])
-		}
-		// The schema of a recursive type stops at a fixed depth.
-		for depth := 0; ; depth++ {
-			items, ok := props["children"].(map[string]any)["items"].(map[string]any)
-			if !ok || items["type"] != "object" {
-				if depth == 0 {
-					t.Fatalf("children = %v, want nested objects", props["children"])
-				}
-				break
-			}
-			props = items["properties"].(map[string]any)
-		}
-	})
-
-	t.Run("time.Time treated as string", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "time", Handler: timeHandler})
-		s := asParams(t, tool)
-		created := s["properties"].(map[string]any)["created_at"].(map[string]any)
-		if created["type"] != "string" || created["description"] != "When created" {
-			t.Errorf("created_at = %v", created)
-		}
-	})
-
-	t.Run("embedded struct flattened", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "embedded", Handler: embeddedHandler})
-		s := asParams(t, tool)
-		props := s["properties"].(map[string]any)
-		if _, ok := props["value"]; !ok {
-			t.Error("embedded field not flattened")
-		}
-		if _, ok := props["extra"]; !ok {
-			t.Error("own field missing")
-		}
-		assertRequired(t, s, "value", "extra")
-	})
-}
-
-// TestTypeToJSONSchema_structuredOutput is the public structured-output
-// helper: omitempty fields stay optional (non-strict).
-func TestTypeToJSONSchema_structuredOutput(t *testing.T) {
-	type hostOut struct {
-		Title string  `json:"title" desc:"Headline"`
-		Note  *string `json:"note,omitempty" desc:"Optional note"`
-		Count int     `json:"count"`
+// TestNewTool_runsAHandlerOfEachShape: a tool's result is a string as it
+// is, any other value as JSON; its arguments decode into its struct or a
+// pointer to one, with or without a context before them. Arguments that do not decode, a result that does not
+// encode, a handler error, a handler past its timeout, and the end of the
+// step's context are each the call's result.
+func TestNewTool_runsAHandlerOfEachShape(t *testing.T) {
+	tools := []*tacklr.Tool{
+		tacklr.NewTool(tacklr.ToolConfig{Name: "text", Handler: func(context.Context) (string, error) { return "hello", nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "bare", Handler: func() (string, error) { return "plain", nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "argsOnly", Handler: func(a basicArgs) (string, error) { return a.Name, nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "number", Handler: func(context.Context) (int, error) { return 42, nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "args", Handler: func(_ context.Context, a basicArgs) (string, error) { return fmt.Sprintf("%s %d", a.Name, a.Age), nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "pointer", Handler: func(_ context.Context, a *basicArgs) (string, error) { return a.Name, nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "channel", Handler: func(context.Context) (chan int, error) { return make(chan int), nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "fails", Handler: func(context.Context, basicArgs) (string, error) { return "", errors.New("boom") }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "stops", Timeout: 5 * time.Millisecond, Handler: func(ctx context.Context) (string, error) { <-ctx.Done(); return "", ctx.Err() }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "ignores", Timeout: 5 * time.Millisecond, Handler: func(context.Context) (string, error) { time.Sleep(50 * time.Millisecond); return "late", nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "waits", Timeout: time.Minute, Handler: func(ctx context.Context) (string, error) { <-ctx.Done(); return "", ctx.Err() }}),
 	}
-	schema, err := TypeToJSONSchema(hostOut{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if schema["type"] != "object" {
-		t.Fatalf("type = %v", schema["type"])
-	}
-	props, _ := schema["properties"].(map[string]any)
-	title, _ := props["title"].(map[string]any)
-	if title["type"] != "string" || title["description"] != "Headline" {
-		t.Fatalf("title = %#v", title)
-	}
-	note, _ := props["note"].(map[string]any)
-	if note["type"] != "string" || note["description"] != "Optional note" {
-		t.Fatalf("note must stay a plain string (non-strict), got %#v", note)
-	}
-	req, _ := schema["required"].([]string)
-	if len(req) != 2 || req[0] != "title" || req[1] != "count" {
-		t.Fatalf("required = %v, want title and count only", req)
-	}
-	_, err = TypeToJSONSchema(nil)
-	if err == nil || !strings.Contains(err.Error(), "nil value") {
-		t.Fatalf("want nil-value error, got %v", err)
-	}
-}
-
-// TestToolsAsJson is the wire shape of a tool list: each tool a strict
-// function with its schema, a namespaced name joined with "__", and an
-// empty list as [].
-func TestToolsAsJson(t *testing.T) {
-	raw := ToolsAsJson([]*Tool{
-		NewTool(ToolConfig{Name: "get_weather", Description: "Get the weather", Handler: basicHandler}),
-		NewTool(ToolConfig{Name: "greet", Namespace: "ado", Handler: zeroArgsStringHandler}),
-	})
-	var parsed []map[string]any
-
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		t.Fatal(err)
-	}
-	if ToolsAsJson(nil) != "[]" {
-		t.Fatalf("empty = %s", ToolsAsJson(nil))
-	}
-	first := parsed[0]
-	if len(parsed) != 2 || first["type"] != "function" || first["name"] != "get_weather" || first["description"] != "Get the weather" || first["strict"] != true || first["parameters"] == nil {
-		t.Fatalf("tool = %v", first)
-	}
-	if parsed[1]["name"] != "ado__greet" {
-		t.Fatalf("namespaced name = %v", parsed[1]["name"])
-	}
-	if params, _ := parsed[1]["parameters"].(map[string]any); params == nil || params["type"] != "object" {
-		t.Fatalf("a tool with no arguments has parameters %#v, want an empty object schema", parsed[1]["parameters"])
-	}
-}
-
-type unregisteredOnCall struct{}
-
-func (unregisteredOnCall) TypeName() string           { return "not_registered_on_call" }
-func (unregisteredOnCall) Serialize() ([]byte, error) { return []byte(`{}`), nil }
-func (unregisteredOnCall) Return([]byte) error        { return nil }
-func (unregisteredOnCall) Error() string              { return "unregistered" }
-
-func TestNewTool_validation(t *testing.T) {
-	if NewTool(ToolConfig{Name: "my_tool", Handler: zeroArgsStringHandler}) == nil {
-		t.Fatal("valid tool")
-	}
-	for _, c := range []struct {
-		name    string
-		cfg     ToolConfig
-		wantSub string
+	model, _ := scripted(t)
+	h := newHarness(t, "shapes", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: tools})
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+	cases := []struct {
+		ctx              context.Context
+		name, args, want string
 	}{
-		{"empty name", ToolConfig{Handler: zeroArgsStringHandler}, ""},
-		{"not a function", ToolConfig{Name: "t", Handler: "not a func"}, "must be a function"},
-		{"wrong return count", ToolConfig{Name: "t", Handler: func() string { return "" }}, "must return"},
-		{"wrong return type", ToolConfig{Name: "t", Handler: func() (string, string) { return "", "" }}, "must return"},
-		{"arg not struct", ToolConfig{Name: "t", Handler: func(ctx context.Context, s string) (string, error) { return s, nil }}, "must be a struct"},
-		{"too many args", ToolConfig{Name: "t", Handler: func(ctx context.Context, a BasicArgs, b BasicArgs, c BasicArgs) (string, error) {
-			return "", nil
-		}}, ""}, // "too many parameters" or "unexpected parameter"
-		{"a parameter after the arguments that is not the runtime", ToolConfig{Name: "t", Handler: func(context.Context, BasicArgs, string) (string, error) { return "", nil }}, "want *CallContext"},
-		{"a nil on-call", ToolConfig{Name: "t", Handler: zeroArgsStringHandler, OnCall: []OnCallFunc{nil}}, "must not be nil"},
-		{"unregistered on-call", ToolConfig{Name: "t", Handler: zeroArgsStringHandler, OnCall: []OnCallFunc{func(ToolInvocation) Interrupt {
-			return unregisteredOnCall{}
-		}}}, "not registered"},
+		{t.Context(), "text", "", "hello"},
+		{t.Context(), "bare", "", "plain"},
+		{t.Context(), "argsOnly", `{"name":"solo"}`, "solo"},
+		{t.Context(), "number", "", "42"},
+		{t.Context(), "args", `{"name":"test","age":10}`, "test 10"},
+		{t.Context(), "pointer", `{"name":"x"}`, "x"},
+		{t.Context(), "args", `{"name":123}`, "unmarshal args"},
+		{t.Context(), "args", `{bad`, "args: arguments were not valid JSON"},
+		{t.Context(), "channel", "", "marshal result"},
+		{t.Context(), "fails", `{"name":"x","age":1}`, "fails: boom"},
+		{t.Context(), "stops", "", "stops timed out"},
+		{t.Context(), "ignores", "", "ignores timed out"},
+		{ended, "waits", "", "context canceled"},
+	}
+	for _, tc := range cases {
+		c, err := h.RunCall(tc.ctx, tacklr.NewCall(call("c", tc.name, tc.args), 0), newStream(t).out)
+		if err != nil || !c.Done || !strings.Contains(c.Body.Text(), tc.want) {
+			t.Errorf("%s(%s) = %q %v, want %q", tc.name, tc.args, c.Body.Text(), err, tc.want)
+		}
+	}
+}
+
+// TestToolsAsJson_describesEachToolAsAStrictFunction: each tool is a
+// strict function named by its qualified name; its arguments' schema names
+// each field with its type, description and enum, lists every field as
+// required, makes an optional field nullable, flattens an embedded struct,
+// treats a time as a string, and stops a recursive type at a fixed depth.
+// A tool without arguments takes an empty object, and no tools are [].
+// TypeToJSONSchema, for structured output, keeps an optional field
+// optional.
+func TestToolsAsJson_describesEachToolAsAStrictFunction(t *testing.T) {
+	type Inner struct {
+		Value string `json:"value"`
+	}
+	type node struct {
+		Weight   float64 `json:"weight"`
+		Children []node  `json:"children"`
+	}
+	type args struct {
+		Inner
+		Field    string         `json:"field_name" desc:"A field" enum:"a,b,c"`
+		Optional *string        `json:"optional,omitempty"`
+		Skipped  string         `json:"-"`
+		Hidden   string         `schema:"-"`
+		private  string         //nolint:unused // unexported fields are not arguments
+		Plain    bool           // no json tag: the Go name
+		Items    []string       `json:"items"`
+		Lookup   map[string]int `json:"lookup"`
+		When     time.Time      `json:"when"`
+		Tree     node           `json:"tree"`
+	}
+	raw := tacklr.ToolsAsJson([]*tacklr.Tool{
+		tacklr.NewTool(tacklr.ToolConfig{Name: "get", Description: "Get it", Handler: func(context.Context, args) (string, error) { return "", nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "greet", Namespace: "ado", Handler: func(context.Context) (string, error) { return "", nil }}),
+	})
+	var defs []struct {
+		Type, Name, Description string
+		Strict                  bool
+		Parameters              schema
+	}
+
+	err := json.Unmarshal([]byte(raw), &defs)
+
+	if err != nil || len(defs) != 2 || defs[0].Type != "function" || defs[0].Name != "get" || defs[0].Description != "Get it" || !defs[0].Strict || defs[1].Name != "ado__greet" {
+		t.Fatalf("tools = %s %v, want two strict functions by qualified name", raw, err)
+	}
+	p := defs[0].Parameters
+	want := []string{"Plain", "field_name", "items", "lookup", "optional", "tree", "value", "when"}
+	if got := slices.Sorted(maps.Keys(p.Properties)); !slices.Equal(got, want) || !slices.Equal(slices.Sorted(slices.Values(p.Required)), want) || p.AdditionalProperties != false {
+		t.Fatalf("properties %v, required %v, want %v for both", got, p.Required, want)
+	}
+	props := p.Properties
+	if f := props["field_name"]; f.Type != "string" || f.Description != "A field" || !slices.Equal(f.Enum, []string{"a", "b", "c"}) ||
+		fmt.Sprint(props["optional"].Type) != "[string null]" || props["Plain"].Type != "boolean" || props["when"].Type != "string" ||
+		props["items"].Items.Type != "string" || props["lookup"].AdditionalProperties.(map[string]any)["type"] != "integer" ||
+		props["tree"].Properties["weight"].Type != "number" {
+		t.Fatalf("properties = %+v", props)
+	}
+	depth := 0
+	for n := props["tree"]; n.Properties["children"].Items != nil && n.Properties["children"].Items.Type == "object"; n = *n.Properties["children"].Items {
+		depth++
+	}
+	if depth == 0 || depth > 10 {
+		t.Fatalf("recursive depth = %d, want nested objects that stop", depth)
+	}
+	if g := defs[1].Parameters; g.Type != "object" || len(g.Properties) != 0 || tacklr.ToolsAsJson(nil) != "[]" {
+		t.Fatalf("no arguments = %+v, want an empty object; no tools %s", g, tacklr.ToolsAsJson(nil))
+	}
+	type hostOut struct {
+		Title string  `json:"title"`
+		Note  *string `json:"note,omitempty"`
+	}
+	out, err := tacklr.TypeToJSONSchema(hostOut{})
+	if _, nilErr := tacklr.TypeToJSONSchema(nil); err != nil || !slices.Equal(out["required"].([]string), []string{"title"}) || out["properties"].(map[string]any)["note"].(map[string]any)["type"] != "string" || nilErr == nil {
+		t.Fatalf("structured output schema = %v %v, want note optional and plain; nil = %v", out, err, nilErr)
+	}
+}
+
+// schema is a JSON schema as a model gets it.
+type schema struct {
+	Type                 any               `json:"type"`
+	Description          string            `json:"description"`
+	Enum                 []string          `json:"enum"`
+	Properties           map[string]schema `json:"properties"`
+	Required             []string          `json:"required"`
+	Items                *schema           `json:"items"`
+	AdditionalProperties any               `json:"additionalProperties"`
+}
+
+// TestNewTool_panicsOnAnInvalidConfig: a tool without a name, a handler of
+// the wrong shape, or an OnCall that is nil or parks on an unregistered
+// type is a programming error.
+func TestNewTool_panicsOnAnInvalidConfig(t *testing.T) {
+	ok := func(context.Context) (string, error) { return "", nil }
+	for name, tc := range map[string]struct {
+		cfg  tacklr.ToolConfig
+		want string
+	}{
+		"no name":                       {tacklr.ToolConfig{Handler: ok}, "name is required"},
+		"not a function":                {tacklr.ToolConfig{Name: "t", Handler: "not a func"}, "must be a function"},
+		"one result":                    {tacklr.ToolConfig{Name: "t", Handler: func() string { return "" }}, "must return"},
+		"a second result not an error":  {tacklr.ToolConfig{Name: "t", Handler: func() (string, string) { return "", "" }}, "must return"},
+		"arguments not a struct":        {tacklr.ToolConfig{Name: "t", Handler: func(context.Context, string) (string, error) { return "", nil }}, "must be a struct"},
+		"too many parameters":           {tacklr.ToolConfig{Name: "t", Handler: func(context.Context, basicArgs, basicArgs, basicArgs) (string, error) { return "", nil }}, "too many parameters"},
+		"a parameter not a CallContext": {tacklr.ToolConfig{Name: "t", Handler: func(context.Context, basicArgs, string) (string, error) { return "", nil }}, "want *CallContext"},
+		"a nil OnCall":                  {tacklr.ToolConfig{Name: "t", Handler: ok, OnCall: []tacklr.OnCallFunc{nil}}, "must not be nil"},
+		"an unregistered OnCall":        {tacklr.ToolConfig{Name: "t", Handler: ok, OnCall: []tacklr.OnCallFunc{func(tacklr.ToolInvocation) tacklr.Interrupt { return hostChoice{} }}}, "not registered"},
 	} {
-		t.Run(c.name, func(t *testing.T) {
+		t.Run(name, func(t *testing.T) {
 			defer func() {
-				r := recover()
-				if r == nil {
-					t.Fatal("expected panic")
-				}
-				if c.wantSub != "" && !strings.Contains(fmt.Sprint(r), c.wantSub) {
-					t.Fatalf("got %v", r)
+				if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), tc.want) {
+					t.Fatalf("panic = %v, want %q", r, tc.want)
 				}
 			}()
-			NewTool(c.cfg)
+			tacklr.NewTool(tc.cfg)
 		})
 	}
 }
 
-func assertRequired(t *testing.T, s map[string]any, vals ...string) {
-	t.Helper()
-	req := s["required"].([]string)
-	for _, v := range vals {
-		if !slices.Contains(req, v) {
-			t.Errorf("required %v missing %q", req, v)
+// TestCorrection_isTheModelsToCorrect: a correction is ErrCorrection and
+// its cause, with its own text, or the cause's without the vfs prefix, or
+// ErrCorrection's when it has neither; a correction of a correction is the
+// first.
+func TestCorrection_isTheModelsToCorrect(t *testing.T) {
+	empty := tacklr.Correction(nil, "  ")
+	fromCause := tacklr.Correction(vfs.ErrNotExist, "")
+	first := tacklr.Correctionf(vfs.ErrUseHTML, "write %s, not plain text", "HTML")
+	again := tacklr.Correction(first, "other")
+
+	if !errors.Is(empty, tacklr.ErrCorrection) || empty.Error() != tacklr.ErrCorrection.Error() {
+		t.Fatalf("empty = %v", empty)
+	}
+	if !errors.Is(fromCause, tacklr.ErrCorrection) || !errors.Is(fromCause, vfs.ErrNotExist) || fromCause.Error() != "not found" {
+		t.Fatalf("from its cause = %q", fromCause)
+	}
+	if again.Error() != "write HTML, not plain text" || !errors.Is(again, vfs.ErrUseHTML) {
+		t.Fatalf("already a correction = %v", again)
+	}
+}
+
+// TestRunCall_aToolsOutcomeIsItsCallsResult: a tool's failure, a tool that
+// is not registered, and an interceptor's change are each the call's
+// result in the window; a tool whose credentials expired parks the call on
+// auth_expired. A tool's progress updates name the call and never block it.
+func TestRunCall_aToolsOutcomeIsItsCallsResult(t *testing.T) {
+	emitted := make(chan struct{})
+	tools := []*tacklr.Tool{
+		tacklr.NewTool(tacklr.ToolConfig{Name: "boom", Handler: func(context.Context) (string, error) {
+			return "", fmt.Errorf("upstream: the search provider failed: %w", tacklr.ErrFailed)
+		}}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "expired", Handler: func(context.Context) (string, error) {
+			return "", fmt.Errorf("token refresh: %w", tacklr.ErrAuthExpired)
+		}}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "big", Handler: func(context.Context) (string, error) { return "very long output", nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "needs_call", Handler: func(context.Context, *tacklr.CallContext) (string, error) { return "ran", nil }}),
+		tacklr.NewTool(tacklr.ToolConfig{Name: "progress", Handler: func(_ context.Context, cc *tacklr.CallContext) (string, error) {
+			cc.EmitUpdate("half way")
+			cc.EmitUpdate("dropped: the stream is full")
+			close(emitted)
+			return "done", nil
+		}}),
+	}
+	capBig := func(ctx context.Context, inv tacklr.ToolInvocation, next tacklr.ToolCallFunc) (tacklr.ToolOutcome, error) {
+		if inv.Tool.Name() == "needs_call" {
+			inv.CallContext = nil
 		}
+		out, err := next(ctx, inv)
+		if inv.Tool.Name() == "big" {
+			out.Output, out.Effect = out.Output[:4], tacklr.EffectHandoff
+		}
+		return out, err
+	}
+	model, _ := scripted(t, []tacklr.LLMResponseChunk{text("the handoff")})
+	h := newHarness(t, "outcomes", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: tools, ToolInterceptors: []tacklr.ToolInterceptor{capBig}})
+	prompt(t, h, "goal")
+	full := make(chan session.Event, 1)
+	progress := make(chan tacklr.Call)
+	go func() {
+		c, _ := h.RunCall(t.Context(), tacklr.NewCall(call("p1", "progress", "{}"), 0), full)
+		progress <- c
+	}()
+	<-emitted
+	update := <-full
+	resultEvent := <-full
+
+	failed, failErr := runRound(t, h, call("b1", "boom", "{}"), call("x1", "missing", "{}"))
+	window := checkpoint(t, h).window
+	parked, parkErr := h.RunCall(t.Context(), tacklr.NewCall(call("e1", "expired", "{}"), 0), newStream(t).out)
+	stripped := result(t, h, call("n1", "needs_call", "{}"))
+	capped, cappedErr := runRound(t, h, call("c1", "big", "{}"))
+
+	if update.Type != session.EventToolUpdate || update.Content != "half way" || update.MessageID != "p1" || resultEvent.Type != session.EventToolResult || (<-progress).Body.Text() != "done" {
+		t.Fatalf("events = %+v then %+v, want the update named by the call, then the result", update, resultEvent)
+	}
+	if got := contents(window[len(window)-2:]); failErr != nil || !strings.Contains(got[0], "search provider failed") || !strings.Contains(got[1], "missing: not found") ||
+		!strings.Contains(failed.Calls[1].Body.Text(), "not a registered tool") {
+		t.Fatalf("results %q %v, want the failure and the unknown tool in the window", got, failErr)
+	}
+	if parkErr != nil || parkType(t, parked) != tacklr.TypeAuthExpired || !strings.Contains(stripped, "requires a CallContext") {
+		t.Fatalf("expired = %+v %v, stripped = %q; want an auth_expired park and the missing CallContext named", parked, parkErr, stripped)
+	}
+	if after := checkpoint(t, h).window; cappedErr != nil || capped.Calls[0].Body.Text() != "very" || !slices.Equal(contents(after), []string{"goal", "the handoff"}) {
+		t.Fatalf("capped = %q %v, window %q; want the cut output and the interceptor's handoff", capped.Calls[0].Body.Text(), cappedErr, contents(after))
 	}
 }
 
-func asParams(t *testing.T, tool *Tool) map[string]any {
-	t.Helper()
-	return tool.AsJson()["parameters"].(map[string]any)
-}
+// TestLLMResponseChunk_anErrorChunkFails: an error chunk fails with its
+// error, or with its text when it has none; any other chunk does not fail.
+func TestLLMResponseChunk_anErrorChunkFails(t *testing.T) {
+	cause := errors.New("cause")
 
-func TestCorrection_emptyMsgAndAlreadyWrapped(t *testing.T) {
-	if got := Correction(nil, "  "); !errors.Is(got, ErrCorrection) || got.Error() != ErrCorrection.Error() {
-		t.Fatalf("empty: %v", got)
+	got := []error{
+		tacklr.LLMResponseChunk{Type: session.EventError, Error: cause}.Err(),
+		tacklr.LLMResponseChunk{Type: session.EventError, Content: "provider said no"}.Err(),
+		tacklr.LLMResponseChunk{Type: session.EventError}.Err(),
+		tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "hi"}.Err(),
 	}
-	fromCause := Correction(vfs.ErrNotExist, "")
-	if !errors.Is(fromCause, ErrCorrection) || !errors.Is(fromCause, vfs.ErrNotExist) {
-		t.Fatalf("cause: %v", fromCause)
-	}
-	if strings.Contains(fromCause.Error(), "vfs:") || fromCause.Error() != "not found" {
-		t.Fatalf("stripped: %q", fromCause.Error())
-	}
-	first := Correctionf(vfs.ErrUseHTML, "write HTML, not plain text")
-	again := Correction(first, "other")
-	if again.Error() != first.Error() || !errors.Is(again, vfs.ErrUseHTML) {
-		t.Fatalf("already wrapped: %v", again)
-	}
-	var nilAE *correctionError
-	if nilAE.Error() != ErrCorrection.Error() {
-		t.Fatal("nil receiver")
-	}
-	if (&correctionError{}).Error() != ErrCorrection.Error() {
-		t.Fatal("empty msg")
+
+	if !errors.Is(got[0], cause) || got[1].Error() != "provider said no" || got[2].Error() != "model stream failed" || got[3] != nil {
+		t.Fatalf("errors = %v", got)
 	}
 }

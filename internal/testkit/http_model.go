@@ -24,28 +24,54 @@ import (
 // chunk becomes the HTTP error the client classifies. Anything else is SSE.
 func HTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
 	tb.Helper()
-	return newHTTPModel(tb, "gpt-4o", respond)
+	return newHTTPModel(tb, "gpt-4o", respond, contentTokens)
 }
 
 // TextHTTPModel is HTTPModel on a model id that accepts text only.
 func TextHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
 	tb.Helper()
-	return newHTTPModel(tb, "text-only", respond)
+	return newHTTPModel(tb, "text-only", respond, contentTokens)
 }
 
-func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
+// CountedHTTPModel is HTTPModel whose provider counts a request's tokens
+// with count. msgs is the request as the provider got it: the system
+// prompt is its first message. The token-count endpoint answers the count,
+// or HTTP 500 when count fails, and each response reports the count as its
+// input tokens.
+func CountedHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error)) tacklr.Model {
 	tb.Helper()
+	return newHTTPModel(tb, "gpt-4o", respond, count)
+}
+
+// contentTokens counts a message's content length as its tokens, so a
+// test sets the window in characters.
+func contentTokens(msgs []*message.Message) (int, error) {
+	return ContentTokenEstimate(msgs), nil
+}
+
+func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error)) tacklr.Model {
+	tb.Helper()
+	// inputTokens is a request's token count; zero when count fails.
+	inputTokens := func(body []byte) int {
+		msgs, _ := messagesFromResponses(body)
+		n, _ := count(msgs)
+		return n
+	}
 	// life ends when the test does. A script blocked on ctx.Done() has to
 	// release the connection before httptest.Server.Close, and the workflow
 	// test environment does not cancel an activity context it has abandoned.
 	life, cancelLife := context.WithCancel(context.Background())
 	srv := testhttp.New(tb, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/input_tokens") {
-			// A message's content length is its token count, so a test sets
-			// the window in characters.
 			body, _ := io.ReadAll(r.Body)
+			msgs, _ := messagesFromResponses(body)
+			n, err := count(msgs)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": inputTokens(body)})
+			_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": n})
 			return
 		}
 		if r.URL.Path != "/responses" {
@@ -136,17 +162,6 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 // does: the same count the token-count endpoint gives for the request.
 func completedSSE(inputTokens int) string {
 	return fmt.Sprintf("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":%d,\"output_tokens\":1}}}\n\n", inputTokens)
-}
-
-// inputTokens is a request's token count: a message's content length is
-// its token count, so a test sets the window in characters.
-func inputTokens(body []byte) int {
-	msgs, _ := messagesFromResponses(body)
-	n := 0
-	for _, m := range msgs {
-		n += len(m.Content)
-	}
-	return n
 }
 
 func writeProviderError(w http.ResponseWriter, err error) {
