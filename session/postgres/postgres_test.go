@@ -45,6 +45,35 @@ func sealer(t *testing.T) *session.AESGCM {
 	return s
 }
 
+// TestSetup_deploysThatStartTogetherAllSetUp: hosts and workers that start
+// at once each run Setup on a new schema, and each one succeeds.
+func TestSetup_deploysThatStartTogetherAllSetUp(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	pool, err := pgxpool.New(t.Context(), pgtest.Conn(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	db, err := postgres.New(pool, postgres.Options{Schema: pgtest.Schema(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	errs := make(chan error, 8)
+
+	// Act
+	for range cap(errs) {
+		go func() { errs <- db.Setup(t.Context()) }()
+	}
+
+	// Assert
+	for range cap(errs) {
+		if err := <-errs; err != nil {
+			t.Fatalf("a concurrent setup = %v, want each to succeed", err)
+		}
+	}
+}
+
 // TestPostgresStores_meetTheContract: the Postgres Store, SecretStorage and
 // EventLog meet the contract every session store must meet.
 func TestPostgresStores_meetTheContract(t *testing.T) {
