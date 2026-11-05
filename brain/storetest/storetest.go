@@ -70,6 +70,7 @@ func (e *Embedder) Take() int { return int(e.texts.Swap(0)) }
 // which embeds with emb (nil: lexical only).
 func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Store) {
 	t.Run("another tenant's id is not found for reads and writes", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, nil)
 		takeover := newDoc(f.b, "stolen")
 		takeover.ID = f.docA
@@ -92,6 +93,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("every read and search returns only the caller's tenant", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, &Embedder{})
 
 		many, _ := s.GetMany(ctx, f.scopeB, []uuid.UUID{f.docA, f.docB})
@@ -118,9 +120,12 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		}
 	})
 
-	t.Run("an empty scope is rejected by every scoped method", func(t *testing.T) {
+	t.Run("an empty scope, an object without an id or a kind or outside the scope, and a bad filter are invalid", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, nil)
 		var none brain.Scope
+		noID, noKind := newDoc(f.a, "x"), newDoc(f.a, "x")
+		noID.ID, noKind.Kind = uuid.Nil, " "
 
 		errs := map[string]error{"soft delete": s.SoftDelete(ctx, none, f.docA)}
 		_, errs["put"] = s.Put(ctx, none, indexed(newDoc(f.a, "x")))
@@ -135,15 +140,20 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		errs["delete session"] = s.DeleteSessionMessages(ctx, nil, "s")
 		_, errs["purge session"] = s.PurgeSessionMessages(ctx, nil, time.Now())
 		_, errs["save session"] = s.SaveSessionMessages(ctx, nil, "s", "k", []brain.SessionMessage{{Role: "user"}})
+		_, errs["put without an id"] = s.Put(ctx, f.scopeA, indexed(noID))
+		_, errs["put without a kind"] = s.Put(ctx, f.scopeA, indexed(noKind))
+		_, errs["put outside the scope"] = s.Put(ctx, f.scopeA, indexed(newDoc(f.b, "x")))
+		_, errs["search with a bad filter"] = s.Search(ctx, f.scopeA, brain.RecordSearch{Query: "shared", Filters: brain.Filter{UpdatedAfter: "not-a-time"}, Limit: 10})
 
 		for name, err := range errs {
 			if !errors.Is(err, brain.ErrInvalid) {
-				t.Errorf("%s with empty scope = %v, want ErrInvalid", name, err)
+				t.Errorf("%s = %v, want ErrInvalid", name, err)
 			}
 		}
 	})
 
 	t.Run("a scope on another tenant reaches nothing, even with the same attrs", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, nil)
 		teamNS := append(f.a.Clone(), brain.Attr{Name: "team", Value: "x"})
 		doc := newDoc(teamNS, "team plan")
@@ -166,6 +176,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("readers limit an object to scopes holding one of its principals", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, nil)
 		restricted := newDoc(f.a, "board minutes")
 		restricted.Readers = []string{"group:board"}
@@ -192,6 +203,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("put tree replaces parts atomically and soft delete takes the parts too", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, nil)
 		parent := newDoc(f.a, "doc a")
 		parent.ID = f.docA
@@ -227,6 +239,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("put tree indexes only new parts, moves reused ones, and loses to a tree committed first", func(t *testing.T) {
+		t.Parallel()
 		emb := &Embedder{}
 		ctx, s, f := arrange(t, newStore, emb)
 		parent := newDoc(f.a, "doc a")
@@ -279,6 +292,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("get tree reads a record with its first parts, or a part with its record and its record's parts", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, nil)
 		parent := newDoc(f.a, "doc a")
 		parent.ID = f.docA
@@ -302,12 +316,13 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("search ranks by meaning, and exact search by the words and the title", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, &Embedder{})
 		parent := newDoc(f.a, "doc a")
 		parent.ID = f.docA
-		car, title := newChunk(parent, "the car is red", 0), newChunk(parent, "red notes", 1)
-		title.Title = "red"
-		_, err := s.PutTree(ctx, f.scopeA, indexed(parent), parts(car, title))
+		car, title, blank := newChunk(parent, "the car is red", 0), newChunk(parent, "red notes", 1), newChunk(parent, "", 2)
+		title.Title, blank.Title = "red", ""
+		_, err := s.PutTree(ctx, f.scopeA, indexed(parent), parts(car, title, blank))
 		must(t, err)
 		search := func(q brain.RecordSearch) []uuid.UUID {
 			q.Limit = 10
@@ -334,6 +349,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("an embedding failure fails a write, but not a session save or a search", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, &Embedder{})
 		poisoned := newDoc(f.a, "poison")
 
@@ -357,6 +373,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("search filters narrow hits the same way in every store", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, nil)
 		// Filters test the record a row belongs to, so the records carry the
 		// fields and the hits are their parts.
@@ -408,6 +425,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("within keeps one record's parts, and an empty query lists the filtered records newest first", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, nil)
 		hour := time.Hour
 		older, newer, closed := newDoc(f.a, "older"), newDoc(f.a, "newer"), newDoc(f.a, "closed")
@@ -453,6 +471,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("search ranks a record by its own text, with no part", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, nil)
 		policy := newDoc(f.a, "Refund policy")
 		policy.Content = "refunds within thirty days"
@@ -467,6 +486,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("purge and erase remove only the scope's rows", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, nil)
 		_, err := s.SaveSessionMessages(ctx, f.a, "s1", "k", []brain.SessionMessage{{Role: "user", SearchText: "transcript"}})
 		must(t, err)
@@ -497,6 +517,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 	})
 
 	t.Run("deleting a session's messages leaves the same session id under another host", func(t *testing.T) {
+		t.Parallel()
 		ctx, s, f := arrange(t, newStore, &Embedder{})
 		msg := []brain.SessionMessage{{Role: "user", SearchText: "transcript about a car"}}
 		_, err := s.SaveSessionMessages(ctx, f.a, "s1", "k", msg)

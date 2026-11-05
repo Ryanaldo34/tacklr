@@ -13,6 +13,7 @@ import (
 // value that is empty or holds a dot, a repeated name, or a name with a
 // space is rejected.
 func TestParseNamespace_rejectsInvalid(t *testing.T) {
+	t.Parallel()
 	cases := [][]string{
 		{},
 		{"org"},
@@ -36,6 +37,7 @@ func TestParseNamespace_rejectsInvalid(t *testing.T) {
 // JSON and from a SQL value; an empty or NULL column scans as empty, and a
 // column of another type fails.
 func TestNamespace_roundTripsThroughJSONAndSQL(t *testing.T) {
+	t.Parallel()
 	ns := storetest.Namespace(t, "org", "acme", "workspace", "west")
 	raw, err := json.Marshal(ns)
 	if err != nil {
@@ -68,6 +70,7 @@ func TestNamespace_roundTripsThroughJSONAndSQL(t *testing.T) {
 // host ceiling or repeats them; an empty call keeps the ceiling; a call that
 // changes a ceiling attr, an invalid call or an invalid ceiling fails.
 func TestNamespace_bindNarrowsTheHostCeiling(t *testing.T) {
+	t.Parallel()
 	org := storetest.Namespace(t, "org", "acme")
 
 	narrowed, narrowErr := org.Bind(storetest.Namespace(t, "org", "acme", "workspace", "west"))

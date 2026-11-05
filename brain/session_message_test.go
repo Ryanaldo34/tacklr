@@ -19,6 +19,7 @@ import (
 // needs a session, a generation key and messages, and a zero MemoryStore
 // saves too.
 func TestSessionMessages_saveOnceSearchWithRecordsAndDelete(t *testing.T) {
+	t.Parallel()
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
 	if err != nil {

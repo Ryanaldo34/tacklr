@@ -10,9 +10,13 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/message"
+	"github.com/ryanaldo34/tacklr/session"
 )
 
 func newExaTestClient(t *testing.T, handler http.HandlerFunc) *Exa {
@@ -29,6 +33,7 @@ func newExaTestClient(t *testing.T, handler http.HandlerFunc) *Exa {
 // rejects arguments it cannot send, and drops or moves filters Exa does not
 // take, with a note that says so.
 func TestWebSearch_searchesAndCoercesFilters(t *testing.T) {
+	t.Parallel()
 	client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		var body map[string]any
@@ -109,6 +114,7 @@ func TestWebSearch_searchesAndCoercesFilters(t *testing.T) {
 // finds nothing, or that Exa rejects for its filters, runs again without the
 // filters; a retry that fails is the tool's failure.
 func TestWebSearch_retriesOnTheOpenWebWhenTheFiltersFail(t *testing.T) {
+	t.Parallel()
 	hit := `{"results":[{"title":"Open web hit","url":"https://example.com"}]}`
 	for name, tc := range map[string]struct {
 		args        webSearchArgs
@@ -166,6 +172,7 @@ func TestWebSearch_retriesOnTheOpenWebWhenTheFiltersFail(t *testing.T) {
 // that is down or limits the rate is ErrFailed, and any other failure keeps
 // its own error.
 func TestWebSearch_mapsProviderFailuresToToolErrors(t *testing.T) {
+	t.Parallel()
 	answering := func(status int, body string) *Exa {
 		return newExaTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(status)
@@ -200,6 +207,7 @@ func TestWebSearch_mapsProviderFailuresToToolErrors(t *testing.T) {
 // asks Exa for text, highlights or both, reports a URL Exa could not read,
 // and rejects arguments it cannot send.
 func TestWebFetch_readsKnownURLs(t *testing.T) {
+	t.Parallel()
 	var highlights any
 	client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/contents" {
@@ -275,6 +283,7 @@ func TestWebFetch_readsKnownURLs(t *testing.T) {
 // each tool's schema holds only the arguments the agent sets (the harness
 // sets the Exa options), and each constructor panics without an Exa client.
 func TestWebConstructors_offerOnlyTheAgentsArgumentsAndPanicWithoutAClient(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct {
 		build func(*Exa) *tacklr.Tool
 		args  []string
@@ -294,5 +303,54 @@ func TestWebConstructors_offerOnlyTheAgentsArgumentsAndPanicWithoutAClient(t *te
 		if got := slices.Sorted(maps.Keys(props)); tool.Name() != name || !slices.Equal(got, tc.args) || !panicked {
 			t.Errorf("%s: tool %q with arguments %v, panicked without a client %v, want %v and a panic", name, tool.Name(), got, panicked, tc.args)
 		}
+	}
+}
+
+// TestWebTools_runInAHarnessAndReportProgress: web_search and web_fetch run as
+// harness tools: each reports its progress on the call's stream and returns
+// what Exa answered.
+func TestWebTools_runInAHarnessAndReportProgress(t *testing.T) {
+	t.Parallel()
+	client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/contents" {
+			_, _ = w.Write([]byte(`{"results":[{"title":"City Code","url":"https://example.gov/code","text":"Section 1.2 setbacks"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"results":[{"title":"Paris","url":"https://example.com/paris","text":"Paris is the capital of France."}]}`))
+	})
+	h, err := tacklr.NewHarness(t.Context(), tacklr.BindTurn(tacklr.AgentOptions{
+		Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192, Tools: []*tacklr.Tool{WebSearch(client), WebFetch(client)},
+	}, "web", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(h.Close)
+	run := func(name, args string) (string, []string) {
+		var mu sync.Mutex
+		var updates []string
+		out, stop := tacklr.PipeEvents(func(ev session.Event) {
+			if ev.Type == session.EventToolUpdate {
+				mu.Lock()
+				defer mu.Unlock()
+				updates = append(updates, ev.Content)
+			}
+		})
+		c, err := h.RunCall(t.Context(), tacklr.NewCall(message.ToolCall{ID: name, CallID: name, Name: name, Arguments: args}, 0), out)
+		stop()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.Body.Text(), updates
+	}
+
+	searched, searchUpdates := run("web_search", `{"query":"capital of France"}`)
+	fetched, fetchUpdates := run("web_fetch", `{"urls":["https://example.gov/code"]}`)
+
+	if !strings.Contains(searched, "Paris is the capital") || !slices.Equal(searchUpdates, []string{"Searching the web…"}) {
+		t.Errorf("web_search = %q with updates %q, want Exa's result and one search update", searched, searchUpdates)
+	}
+	if !strings.Contains(fetched, "Section 1.2 setbacks") || !slices.Equal(fetchUpdates, []string{"Fetching page content…"}) {
+		t.Errorf("web_fetch = %q with updates %q, want the page and one fetch update", fetched, fetchUpdates)
 	}
 }

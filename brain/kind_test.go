@@ -16,6 +16,7 @@ import (
 // TestKindSpecNormalize_rejectsInvalidFields: a kind with no name, a path in
 // its name, or an invalid field is rejected with the reason.
 func TestKindSpecNormalize_rejectsInvalidFields(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		spec brain.KindSpec
@@ -55,9 +56,22 @@ func TestKindSpecNormalize_rejectsInvalidFields(t *testing.T) {
 			Kind:   "Document",
 			Fields: []brain.FieldSpec{{Name: "stage", Type: "uuid"}},
 		}, "unknown type"},
+		{"field with no name", brain.KindSpec{
+			Kind:   "Document",
+			Fields: []brain.FieldSpec{{Name: " ", Type: brain.FieldTypeString}},
+		}, "name is required"},
+		{"field with no type", brain.KindSpec{
+			Kind:   "Document",
+			Fields: []brain.FieldSpec{{Name: "stage"}},
+		}, "type is required"},
+		{"duplicate enum value", brain.KindSpec{
+			Kind:   "Document",
+			Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString, Enum: []string{"open", "open"}}},
+		}, "duplicate enum value"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := tc.spec.Normalize()
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %v, want containing %q", err, tc.want)
@@ -70,6 +84,7 @@ func TestKindSpecNormalize_rejectsInvalidFields(t *testing.T) {
 // only when it names registered kinds and fields of the right type; each case
 // is one return path.
 func TestFilterValidateAgainst_catalogRules(t *testing.T) {
+	t.Parallel()
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store, brain.WithKinds(
 		brain.KindSpec{
@@ -116,6 +131,7 @@ func TestFilterValidateAgainst_catalogRules(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			err := tc.filters.ValidateAgainst(cat)
 			if tc.wantErr == "" {
 				if err != nil {
@@ -135,6 +151,7 @@ func TestFilterValidateAgainst_catalogRules(t *testing.T) {
 // an unregistered kind with the same words, and the first search freezes the
 // catalog against more migrations.
 func TestSearch_catalogRestrictsKindsAndFreezesIt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	scope := brain.Scope{Namespace: tenant(t)}
@@ -173,6 +190,7 @@ func TestSearch_catalogRestrictsKindsAndFreezesIt(t *testing.T) {
 // and the durable kinds, a new engine loads them from the store, PersistKinds
 // and SyncKindsToStore write kinds, and a search freezes the catalog.
 func TestApplyKinds_migrationAddAndModify(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
@@ -278,30 +296,50 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	}
 }
 
-// TestApplyKinds_invalidBatchFailsClosed: a migration with an invalid kind
-// changes neither the catalog nor the store, and a store refuses a kind with
-// no name.
+// TestApplyKinds_invalidBatchFailsClosed: a migration with an invalid or a
+// repeated kind changes neither the catalog nor the store, PersistKinds
+// refuses an invalid kind, a store refuses a kind with no name, and loading
+// a stored kind that is invalid or has fields that do not parse fails and
+// keeps the catalog.
 func TestApplyKinds_invalidBatchFailsClosed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = eng.ApplyKinds(ctx,
-		brain.KindSpec{Kind: "Document", IsParent: true},
-		brain.KindSpec{}, // invalid
-	)
-	if err == nil {
-		t.Fatal("want error")
+	loadStored := func(row brain.ObjectKind) error {
+		s := brain.NewMemoryStore()
+		if err := s.PutKind(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+		e, err := brain.NewEngine(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = e.LoadKindsFromStore(ctx)
+		if !e.Catalog().Empty() {
+			t.Errorf("catalog after a failed load of %+v = %v, want it empty", row, e.Catalog().Names())
+		}
+		return err
 	}
-	if !eng.Catalog().Empty() {
-		t.Fatal("catalog must stay empty on failed migration")
+
+	invalidErr := eng.ApplyKinds(ctx, brain.KindSpec{Kind: "Document", IsParent: true}, brain.KindSpec{})
+	repeatedErr := eng.ApplyKinds(ctx, brain.KindSpec{Kind: "Document"}, brain.KindSpec{Kind: "Document"})
+	persistErr := brain.PersistKinds(ctx, store, brain.KindSpec{Kind: "Deal/x"})
+	nameErr := store.PutKind(ctx, brain.ObjectKind{})
+	badNameErr := loadStored(brain.ObjectKind{Kind: "Deal/x"})
+	badFieldsErr := loadStored(brain.ObjectKind{Kind: "Deal", FilterableFields: []byte(`{"not":"a list"}`)})
+
+	_, storedErr := storetest.Kind(ctx, store, "Document")
+	if invalidErr == nil || !strings.Contains(repeatedErr.Error(), "duplicate kind") || !eng.Catalog().Empty() || !errors.Is(storedErr, brain.ErrNotFound) {
+		t.Errorf("invalid batch %v, repeated kind %v, then catalog %v and stored %v, want both refused and nothing written", invalidErr, repeatedErr, eng.Catalog().Names(), storedErr)
 	}
-	if _, err := storetest.Kind(ctx, store, "Document"); !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("no partial durable write on batch validate fail: %v", err)
+	if persistErr == nil || nameErr == nil {
+		t.Errorf("persist an invalid kind %v, store a kind with no name %v, want both refused", persistErr, nameErr)
 	}
-	if err := store.PutKind(ctx, brain.ObjectKind{}); err == nil {
-		t.Fatal("the store saved a kind with no name")
+	if badNameErr == nil || badFieldsErr == nil || !strings.Contains(badFieldsErr.Error(), "filterable_fields") {
+		t.Errorf("load a stored kind with a bad name %v, with fields that do not parse %v, want both to fail", badNameErr, badFieldsErr)
 	}
 }

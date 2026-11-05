@@ -13,6 +13,7 @@ import (
 // ends during the first embed, a session save and a tree write return
 // Canceled and embed nothing more.
 func TestEngine_cancelledWritesStopEmbeddingTheRest(t *testing.T) {
+	t.Parallel()
 	scope := brain.Scope{Namespace: storetest.Namespace(t, "org", "a")}
 	msgs := []brain.SessionMessage{{Role: "user", SearchText: "one"}, {Role: "user", SearchText: "two"}, {Role: "user", SearchText: "three"}}
 	parts := []brain.Object{{Kind: "Chunk", Content: "one"}, {Kind: "Chunk", Content: "two"}, {Kind: "Chunk", Content: "three"}}

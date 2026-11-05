@@ -13,6 +13,7 @@ import (
 // IDs, both URLs and IDs, no client, or a base URL that does not parse fails
 // before the client sends it.
 func TestExa_rejectsARequestItCannotSend(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	unparsable := NewExa("k")
 	unparsable.BaseURL = "://bad"
@@ -45,6 +46,7 @@ func TestExa_rejectsARequestItCannotSend(t *testing.T) {
 // body, cut to a short length, or the status text when the body is empty or
 // breaks off.
 func TestExa_reportsWhatTheServerAnswers(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	exa := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host != "api.exa.ai" || r.URL.Path != "/search" || r.Header.Get("x-api-key") != "k" {

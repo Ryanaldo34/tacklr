@@ -196,10 +196,8 @@ func (c *client) callTool(ctx context.Context, name string, args map[string]any)
 		}
 	}
 	if text == "" && res.StructuredContent != nil {
-		b, err := json.Marshal(res.StructuredContent)
-		if err != nil {
-			return "", fmt.Errorf("mcp server %q: marshal structured result: %w", c.config.Name, err)
-		}
+		// The SDK decoded it from JSON, so it encodes again.
+		b, _ := json.Marshal(res.StructuredContent)
 		text = string(b)
 	}
 	return text, nil
@@ -222,10 +220,6 @@ func (c *client) interpretError(operation string, err error) error {
 			c.config.Name, operation, httpErr.Status, httpErr.Body, err)
 	}
 
-	if errors.Is(err, mcpsdk.ErrSessionMissing) {
-		return fmt.Errorf("mcp server %q: %s: session missing; the server endpoint may be invalid or the session may have expired: %w",
-			c.config.Name, operation, err)
-	}
 	if errors.Is(err, mcpsdk.ErrConnectionClosed) {
 		return fmt.Errorf("mcp server %q: %s: connection closed: %w", c.config.Name, operation, err)
 	}
@@ -233,10 +227,8 @@ func (c *client) interpretError(operation string, err error) error {
 	return fmt.Errorf("mcp server %q: %s: %w", c.config.Name, operation, err)
 }
 
+// close ends a connected client's session.
 func (c *client) close() error {
-	if c.session == nil {
-		return nil
-	}
 	err := c.session.Close()
 	if err == nil {
 		return nil

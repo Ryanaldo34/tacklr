@@ -103,6 +103,7 @@ func describe(results []brain.Result) []string {
 // TestEngine_searchAndRelatedAreSafeToRunConcurrently: many searches and
 // related reads of one engine at the same time all succeed (run with -race).
 func TestEngine_searchAndRelatedAreSafeToRunConcurrently(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {

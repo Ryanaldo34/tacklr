@@ -22,7 +22,8 @@ import (
 )
 
 // TestConfigureAndOpen_rejectABadSchema: Configure and Open reject a schema
-// name that is not a plain identifier.
+// name that is not a plain identifier, and Configure puts the default schema
+// on the search path when the schema is empty.
 func TestConfigureAndOpen_rejectABadSchema(t *testing.T) {
 	t.Parallel()
 	cfg, err := pgxpool.ParseConfig("postgres://u:p@db.example.com:5432/postgres")
@@ -32,15 +33,20 @@ func TestConfigureAndOpen_rejectABadSchema(t *testing.T) {
 	bad := postgres.Options{Schema: "public;drop"}
 	configureErr := postgres.Configure(cfg, bad)
 	_, openErr := postgres.Open(nil, bad)
+	defaultErr := postgres.Configure(cfg, postgres.Options{})
 
 	if configureErr == nil || openErr == nil {
 		t.Fatalf("configure = %v, open = %v, want both to reject the schema", configureErr, openErr)
 	}
+	if path := cfg.ConnConfig.RuntimeParams["search_path"]; defaultErr != nil || path != postgres.DefaultSchema+", public" {
+		t.Fatalf("configure with no schema = %v, search path %q, want the default schema first", defaultErr, path)
+	}
 }
 
 // TestStore_aStatementStuckPastTheTimeoutIsCancelledByTheServer: the server
-// cancels a statement that waits past StatementTimeout; with the timeout off,
-// only the caller's deadline ends it.
+// cancels a write, an engine soft delete, or a get of a session row, that
+// waits past StatementTimeout; with the timeout off, only the caller's
+// deadline ends it.
 func TestStore_aStatementStuckPastTheTimeoutIsCancelledByTheServer(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -70,13 +76,37 @@ func TestStore_aStatementStuckPastTheTimeoutIsCancelledByTheServer(t *testing.T)
 			if _, err := holder.Exec(t.Context(), `SELECT 1 FROM objects WHERE id = $1 FOR UPDATE`, doc.ID); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-			defer cancel()
+			eng, err := brain.NewEngine(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			blocked := func(call func(context.Context) error) error {
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				return call(ctx)
+			}
 
-			_, err = store.Put(ctx, scope, brain.Indexed{Object: doc})
+			putErr := blocked(func(ctx context.Context) error {
+				_, err := store.Put(ctx, scope, brain.Indexed{Object: doc})
+				return err
+			})
+			deleteErr := blocked(func(ctx context.Context) error { return eng.SoftDelete(ctx, scope, doc.ID) })
+			// The holder also takes the session table; a read of a session row waits behind it.
+			if _, err := holder.Exec(t.Context(), `LOCK TABLE session_messages IN ACCESS EXCLUSIVE MODE`); err != nil {
+				t.Fatal(err)
+			}
+			session := brain.Scope{Namespace: scope.Namespace, SessionID: "s1"}
+			getErr := blocked(func(ctx context.Context) error {
+				_, err := store.Get(ctx, session, uuid.New())
+				return err
+			})
+			getManyErr := blocked(func(ctx context.Context) error {
+				_, err := store.GetMany(ctx, session, []uuid.UUID{uuid.New()})
+				return err
+			})
 
-			if !tc.want(err) {
-				t.Fatalf("blocked write = %v", err)
+			if !tc.want(putErr) || !tc.want(deleteErr) || !tc.want(getErr) || !tc.want(getManyErr) {
+				t.Fatalf("blocked write = %v, engine soft delete = %v, session get = %v, session get many = %v", putErr, deleteErr, getErr, getManyErr)
 			}
 		})
 	}
@@ -144,9 +174,6 @@ func TestStore_rejectsInvalidArgumentsBeforeQuerying(t *testing.T) {
 	poisoned := brain.Indexed{Object: brain.Object{ID: id, Kind: "Document", Namespace: scope.Namespace}, Text: "poison"}
 	if _, err := embedding.PutTree(ctx, scope, poisoned, nil); err == nil || !strings.Contains(err.Error(), "embedder down") {
 		t.Fatalf("tree whose parent does not embed = %v, want the embedder's error", err)
-	}
-	if _, err := store.Search(ctx, scope, brain.RecordSearch{Query: "q", Filters: brain.Filter{UpdatedAfter: "not-a-time"}, Limit: 5}); !errors.Is(err, brain.ErrInvalid) {
-		t.Fatalf("invalid search filter = %v, want ErrInvalid", err)
 	}
 	if got, err := store.Search(ctx, scope, brain.RecordSearch{Query: "q"}); err != nil || got != nil {
 		t.Fatalf("search with no limit = %v %v, want nothing", got, err)
@@ -243,7 +270,19 @@ func TestStore_setupWaitsForOtherSetupsAndRefusesANewDimension(t *testing.T) {
 	for i := range errs {
 		wg.Go(func() { errs[i] = newStore(3).Setup(ctx, deal) })
 	}
-	time.Sleep(300 * time.Millisecond)
+	// The holder lets go only when the server shows every setup blocked
+	// behind it for longer than the statement timeout.
+	if _, err := holder.Exec(ctx, `DO $$ BEGIN
+		LOOP
+			PERFORM pg_stat_clear_snapshot();
+			EXIT WHEN (SELECT count(*) FROM pg_stat_activity
+				WHERE pg_backend_pid() = ANY(pg_blocking_pids(pid))
+					AND clock_timestamp() - query_start > interval '200 milliseconds') = 4;
+			PERFORM pg_sleep(0.01);
+		END LOOP;
+	END $$`); err != nil {
+		t.Fatal(err)
+	}
 	if err := holder.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -294,8 +333,9 @@ func TestStore_auditEventsArePersisted(t *testing.T) {
 }
 
 // TestEngine_aClosedStoreFailsTheCallsThatReadIt: after the pool closes, every
-// engine call that reads the store returns its error.
+// engine call that reads or writes the store returns its error.
 func TestEngine_aClosedStoreFailsTheCallsThatReadIt(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	store, pool := testOpen(t, postgres.Options{Schema: pgtest.Schema(t), EmbeddingDim: 3})
 	if err := store.Setup(ctx); err != nil {
@@ -340,8 +380,17 @@ func TestEngine_aClosedStoreFailsTheCallsThatReadIt(t *testing.T) {
 	_, withinErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "shared", Within: ids[0]})
 	_, resolveErr := eng.Resolve(ctx, scope, brain.Ref{Path: "/workspace/work/doc.md"})
 	kindsErr := eng.ApplyKinds(ctx, brain.KindSpec{Kind: "Document", IsParent: true})
+	loadErr := fresh.LoadKindsFromStore(ctx)
+	_, purgeErr := eng.PurgeDeleted(ctx, scope, time.Now())
+	eraseErr := fresh.Erase(ctx, scope)
+	deleteSessionErr := eng.DeleteSessionMessages(ctx, scope.Namespace, "s1")
+	_, purgeSessionErr := eng.PurgeSessionMessages(ctx, scope.Namespace, time.Now())
 
-	for name, err := range map[string]error{"next page": nextErr, "search": searchErr, "related": relatedErr, "open": openErr, "open's kind registry": registryErr, "list records": listErr, "search within": withinErr, "resolve a path": resolveErr, "apply kinds": kindsErr} {
+	for name, err := range map[string]error{
+		"next page": nextErr, "search": searchErr, "related": relatedErr, "open": openErr, "open's kind registry": registryErr,
+		"list records": listErr, "search within": withinErr, "resolve a path": resolveErr, "apply kinds": kindsErr, "load kinds": loadErr,
+		"purge deleted": purgeErr, "erase": eraseErr, "delete session messages": deleteSessionErr, "purge session messages": purgeSessionErr,
+	} {
 		if err == nil || !strings.Contains(err.Error(), "closed pool") {
 			t.Errorf("%s on a closed store = %v, want its error", name, err)
 		}

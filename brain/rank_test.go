@@ -18,6 +18,7 @@ import (
 // equal stale one, and a hit with no time keeps its score. Edges fuse the
 // same way, and decay ages them by their own time.
 func TestRanking_fusesListsByRankAfterAgingEach(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 	a, b, c, parent := uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -60,9 +61,47 @@ func TestRanking_fusesListsByRankAfterAgingEach(t *testing.T) {
 	}
 }
 
+// TestMemoryStore_ranksSearchHitsWithItsRanking: a memory store fuses its
+// hits with the Ranking the host gives it. With decay, a fresh record passes
+// a stale record that holds the query word more often.
+func TestMemoryStore_ranksSearchHitsWithItsRanking(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	plain := brain.NewMemoryStore()
+	aging := brain.NewMemoryStore(brain.WithMemoryRanking(brain.Ranking{Decay: 0.1, Now: func() time.Time { return now }}))
+	scope := brain.Scope{Namespace: tenant(t)}
+	stale := brain.Object{ID: uuid.New(), Kind: "Fact", Title: "refund", Namespace: scope.Namespace, UpdatedAt: now.AddDate(0, 0, -60)}
+	fresh := brain.Object{ID: uuid.New(), Kind: "Fact", Title: "refund", Content: "policy for late orders", Namespace: scope.Namespace, UpdatedAt: now}
+	for _, s := range []*brain.MemoryStore{plain, aging} {
+		for _, obj := range []brain.Object{stale, fresh} {
+			if _, err := s.Put(t.Context(), scope, brain.Indexed{Object: obj, Text: obj.IndexText()}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	order := func(s *brain.MemoryStore) []uuid.UUID {
+		hits, err := s.Search(t.Context(), scope, brain.RecordSearch{Query: "refund", Limit: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := make([]uuid.UUID, len(hits))
+		for i, h := range hits {
+			out[i] = h.ID
+		}
+		return out
+	}
+
+	byWords, byAge := order(plain), order(aging)
+
+	if !slices.Equal(byWords, []uuid.UUID{stale.ID, fresh.ID}) || !slices.Equal(byAge, []uuid.UUID{fresh.ID, stale.ID}) {
+		t.Errorf("hits without decay = %v, with decay = %v, want the stale record first, then the fresh record first", byWords, byAge)
+	}
+}
+
 // TestEmbedding_embedBatchesStopsAtTheFirstStageError: a failed stage ends
 // the embedding with its error, before the reader reads the rest.
 func TestEmbedding_embedBatchesStopsAtTheFirstStageError(t *testing.T) {
+	t.Parallel()
 	parts := func(yield func(brain.Indexed, error) bool) {
 		for i := range 10 {
 			if !yield(brain.Indexed{Object: brain.Object{ID: uuid.New()}, Text: strings.Repeat("x", i+1)}, nil) {

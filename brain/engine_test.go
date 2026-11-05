@@ -21,6 +21,7 @@ import (
 // object or an unindexed path is not found; Resolve finds an object by path or
 // id, and a call with no id is invalid.
 func TestEngine_openReadsTheObjectItsKindAndItsFirstChildren(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	ns := tenant(t)
@@ -107,6 +108,7 @@ func TestEngine_openReadsTheObjectItsKindAndItsFirstChildren(t *testing.T) {
 // registered, Open returns the catalog's kind and fields, even when the store
 // holds another copy, and no kind for an object of an unregistered kind.
 func TestEngine_openTakesTheKindFromTheCatalogOverTheStore(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	if err := store.PutKind(ctx, brain.ObjectKind{Kind: "Deal", Description: "store copy", IsParent: true}); err != nil {
@@ -137,15 +139,19 @@ func TestEngine_openTakesTheKindFromTheCatalogOverTheStore(t *testing.T) {
 	}
 }
 
-// TestNewEngine_requiresAStoreAndValidKinds: NewEngine fails with no store or
-// an invalid kind, and otherwise serves the kinds it was given, with no graph.
+// TestNewEngine_requiresAStoreAndValidKinds: NewEngine fails with no store,
+// an invalid kind before valid ones, or kinds for a catalog a host option
+// froze, and otherwise serves the kinds it was given, with no graph.
 func TestNewEngine_requiresAStoreAndValidKinds(t *testing.T) {
+	t.Parallel()
+	freeze := func(e *brain.Engine) { e.Catalog().Freeze() }
 	_, noStore := brain.NewEngine(nil)
-	_, badKind := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{Kind: ""}))
+	_, badKind := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{Kind: ""}), brain.WithKinds(brain.KindSpec{Kind: "Note"}))
+	_, frozen := brain.NewEngine(brain.NewMemoryStore(), freeze, brain.WithKinds(brain.KindSpec{Kind: "Note"}))
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{Kind: "Note"}), brain.WithConfig(brain.EngineConfig{Now: time.Now}))
 
-	if noStore == nil || badKind == nil {
-		t.Errorf("no store %v, bad kind %v, want errors", noStore, badKind)
+	if noStore == nil || badKind == nil || !errors.Is(frozen, brain.ErrInvalid) {
+		t.Errorf("no store %v, bad kind %v, frozen catalog %v, want errors", noStore, badKind, frozen)
 	}
 	if err != nil || eng.HasGraph() || !slices.Equal(eng.Catalog().RecordKinds(), []string{"Note"}) {
 		t.Errorf("engine = %v, graph %v, kinds %v", err, eng.HasGraph(), eng.Catalog().RecordKinds())

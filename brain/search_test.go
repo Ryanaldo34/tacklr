@@ -35,6 +35,7 @@ func docWithParts(t *testing.T, eng *brain.Engine, scope brain.Scope, title stri
 // the record, a kind, an id or an exact phrase; an empty query, a bad filter
 // or no scope is invalid.
 func TestSearch_ranksRecordsAndTheirPartsInTheCallersTenant(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
@@ -90,13 +91,14 @@ func TestSearch_ranksRecordsAndTheirPartsInTheCallersTenant(t *testing.T) {
 // side; a part that holds no query word is quoted from its start, and a part
 // with no text has an empty quote.
 func TestSearch_quotesARecordsBestPartsAroundTheQuery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithConfig(brain.EngineConfig{EvidenceN: 2, SnippetCap: 60}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	scope := brain.Scope{Namespace: tenant(t)}
-	middle := strings.Repeat("x", 50) + " oauth " + strings.Repeat("y", 50)
+	middle := strings.Repeat("é", 50) + " oauth " + strings.Repeat("y", 50)
 	manual, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "Manual"}, brain.Parts(
 		brain.Object{Kind: "Chunk", Title: "setup", Content: middle},
 		brain.Object{Kind: "Chunk", Title: "oauth notes", Content: strings.Repeat("z", 100)},
@@ -119,7 +121,7 @@ func TestSearch_quotesARecordsBestPartsAroundTheQuery(t *testing.T) {
 		quotes = append(quotes, o.Evidence[0].Snippet)
 	}
 	slices.Sort(quotes)
-	want := []string{"", "oauth", strings.Repeat("z", 60) + "…", "…" + middle[11:71] + "…"}
+	want := []string{"", "oauth", strings.Repeat("z", 60) + "…", "…" + strings.Repeat("é", 39) + " oauth " + strings.Repeat("y", 14) + "…"}
 	slices.Sort(want)
 	if withinErr != nil || !slices.Equal(quotes, want) {
 		t.Errorf("quotes within the manual = %q %v, want %q", quotes, withinErr, want)
@@ -130,6 +132,7 @@ func TestSearch_quotesARecordsBestPartsAroundTheQuery(t *testing.T) {
 // and the few-valued fields of its records; under a catalog it counts only the
 // kind's fields.
 func TestSearch_facetsCountTheKindsAndFieldValuesOfAPage(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	open, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
@@ -169,9 +172,11 @@ func TestSearch_facetsCountTheKindsAndFieldValuesOfAPage(t *testing.T) {
 }
 
 // TestSearch_morePagesThroughTheRestEvenAfterACheckpoint: Next pages through
-// every result once, also from a rest restored from a checkpoint, and a
-// restored rest whose filter is no longer valid is invalid.
+// every result once, also from a rest restored from a checkpoint; a
+// restored rest whose filter is no longer valid is invalid, and a rest that
+// does not parse does not load.
 func TestSearch_morePagesThroughTheRestEvenAfterACheckpoint(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
@@ -205,6 +210,8 @@ func TestSearch_morePagesThroughTheRestEvenAfterACheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, staleErr := eng.Next(ctx, scope, stale["search"], 1)
+	var corrupt map[string]brain.Rest
+	corruptErr := json.Unmarshal([]byte(`{"search":{"refs":"not a list"}}`), &corrupt)
 
 	seen := map[uuid.UUID]bool{}
 	for _, o := range slices.Concat(slices.Collect(first.Results.Objects()), slices.Collect(second.Results.Objects()), slices.Collect(last.Results.Objects())) {
@@ -219,12 +226,16 @@ func TestSearch_morePagesThroughTheRestEvenAfterACheckpoint(t *testing.T) {
 	if !errors.Is(staleErr, brain.ErrInvalid) {
 		t.Errorf("more from a checkpoint whose filter no longer validates = %v, want ErrInvalid", staleErr)
 	}
+	if corruptErr == nil {
+		t.Error("a checkpoint whose rest does not parse loaded, want an error")
+	}
 }
 
 // TestSearch_aRerankerReordersAndDropsTheTopResults: a reranker gets the query
 // and sets the order and the number of results; a failing reranker fails the
 // search.
 func TestSearch_aRerankerReordersAndDropsTheTopResults(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	plain, err := brain.NewEngine(store)

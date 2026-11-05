@@ -411,26 +411,12 @@ func (obj Object) Validate(cat *KindCatalog) error {
 		if err := checkFieldValue(v, f.Type); err != nil {
 			return fmt.Errorf("brain: property %q: %w", name, err)
 		}
-		if err := checkFieldEnum(v, f); err != nil {
-			return fmt.Errorf("brain: property %q: %w", name, err)
+		// Only a string field has an enum, and its value is a string.
+		if s, ok := v.(string); ok && len(f.Enum) > 0 && !slices.Contains(f.Enum, strings.TrimSpace(s)) {
+			return fmt.Errorf("brain: property %q: value %q is not in enum", name, strings.TrimSpace(s))
 		}
 	}
 	return nil
-}
-
-func checkFieldEnum(v any, f FieldSpec) error {
-	if len(f.Enum) == 0 {
-		return nil
-	}
-	s, ok := v.(string)
-	if !ok {
-		return nil
-	}
-	s = strings.TrimSpace(s)
-	if slices.Contains(f.Enum, s) {
-		return nil
-	}
-	return fmt.Errorf("value %q is not in enum", s)
 }
 
 // Reserved store properties persisted on objects without a KindSpec field.

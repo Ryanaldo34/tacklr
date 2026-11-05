@@ -56,6 +56,7 @@ func TestEngine_everyEntryPointRejectsAnEmptyScope(t *testing.T) {
 // caller's scope, a part under a part, a tree rooted at a part, or a part
 // under another tenant's record fails; a narrower namespace is saved.
 func TestEngine_putKeepsObjectsInsideTheCallersScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {

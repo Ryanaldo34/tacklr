@@ -10,6 +10,7 @@ import (
 // TestFilters_malformedInputIsInvalid: every malformed filter, decoded from
 // the tool boundary or built by hand, is ErrInvalid.
 func TestFilters_malformedInputIsInvalid(t *testing.T) {
+	t.Parallel()
 	decode := func(m map[string]any) error {
 		_, err := brain.DecodeFilter(m)
 		return err

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +32,7 @@ func pingServer() *mcpsdk.Server {
 // tools are skipped; the streamable HTTP and SSE servers that answer keep
 // their tools.
 func TestConnect_skipsServersThatFail(t *testing.T) {
+	t.Parallel()
 	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusInternalServerError)
 	}))
@@ -75,11 +77,50 @@ func TestConnect_skipsServersThatFail(t *testing.T) {
 	}
 }
 
-// TestClient_callToolReturnsWhatTheServerAnswers: a call sends the server's
-// headers and returns the tool's text or its structured result. A tool error
-// joins its texts, a JSON-RPC error names its code and data, and a call after the connections close names the closed
-// connection.
+// TestConnect_closingLogsAServerThatFailsToEndItsSession: closing the
+// connections ends each server's session. A server that does not allow the
+// session DELETE (405) counts as closed; a server that fails it is logged
+// with its status.
+func TestConnect_closingLogsAServerThatFailsToEndItsSession(t *testing.T) {
+	// Not parallel: it reads what the process-wide default logger writes.
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	srv := pingServer()
+	mcpHandler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil)
+	deleting := func(status int) string {
+		hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodDelete {
+				http.Error(w, "no delete", status)
+				return
+			}
+			mcpHandler.ServeHTTP(w, r)
+		}))
+		t.Cleanup(hs.Close)
+		return hs.URL
+	}
+	tools, cleanup := Client{}.Connect(t.Context(), []session.MCPServer{
+		{Type: session.MCPHTTP, Name: "refuses", URL: deleting(http.StatusMethodNotAllowed)},
+		{Type: session.MCPHTTP, Name: "fails", URL: deleting(http.StatusInternalServerError)},
+	})
+
+	cleanup()
+
+	out := logs.String()
+	if len(tools) != 2 || !strings.Contains(out, `msg="mcp server close returned 405, treating as successful" server=refuses`) ||
+		!strings.Contains(out, `msg="failed to close MCP client" server=fails`) || !strings.Contains(out, "close: HTTP error (status 500)") {
+		t.Fatalf("tools %v, logs after close:\n%s\nwant the 405 closed and the 500 logged with its status", tools, out)
+	}
+}
+
+// TestClient_callToolReturnsWhatTheServerAnswers: the client lists every page
+// of tools, and a call sends the server's headers and returns the tool's
+// text or its structured result, also when the result has no text. A tool
+// error joins its texts, a JSON-RPC error names its code and data, and a
+// call after the connections close names the closed connection.
 func TestClient_callToolReturnsWhatTheServerAnswers(t *testing.T) {
+	t.Parallel()
 	type kv struct {
 		K string `json:"k"`
 	}
@@ -108,14 +149,26 @@ func TestClient_callToolReturnsWhatTheServerAnswers(t *testing.T) {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Params struct {
-				Name string `json:"name"`
+				Name   string `json:"name"`
+				Cursor string `json:"cursor"`
 			} `json:"params"`
 		}
 		_ = json.Unmarshal(body, &call)
+		answer := func(payload string) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + string(call.ID) + `,` + payload + `}`))
+		}
 		switch {
 		case call.Method == "tools/call" && call.Params.Name == "rpc":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + string(call.ID) + `,"error":{"code":-32602,"message":"invalid params","data":{"detail":"missing field"}}}`))
+			answer(`"error":{"code":-32602,"message":"invalid params","data":{"detail":"missing field"}}`)
+		case call.Method == "tools/call" && call.Params.Name == "raw":
+			answer(`"result":{"content":[],"structuredContent":{"k":"raw"}}`)
+		// The first page of tools is raw alone; the next page is the SDK server's.
+		case call.Method == "tools/list" && call.Params.Cursor == "":
+			answer(`"result":{"tools":[{"name":"raw","inputSchema":{"type":"object"}}],"nextCursor":"more"}`)
+		case call.Method == "tools/list":
+			r.Body = io.NopCloser(bytes.NewReader(bytes.Replace(body, []byte(`"cursor":"more"`), nil, 1)))
+			mcpHandler.ServeHTTP(w, r)
 		default:
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			mcpHandler.ServeHTTP(w, r)
@@ -133,6 +186,7 @@ func TestClient_callToolReturnsWhatTheServerAnswers(t *testing.T) {
 	call := func(name string) (string, error) { return byName[name].Call(t.Context(), map[string]any{}) }
 
 	structured, structuredErr := call("obj")
+	raw, rawErr := call("raw")
 	_, toolErr := call("fail")
 	_, rpcErr := call("rpc")
 	cleanup()
@@ -141,8 +195,8 @@ func TestClient_callToolReturnsWhatTheServerAnswers(t *testing.T) {
 	if byName["obj"].Description != "FromTitle" || byName["obj"].Server != "svc" {
 		t.Errorf("tool = %+v, want the title as its description", byName["obj"])
 	}
-	if structuredErr != nil || structured != `{"k":"v"}` {
-		t.Errorf("structured result = %q %v, want its JSON", structured, structuredErr)
+	if structuredErr != nil || structured != `{"k":"v"}` || rawErr != nil || raw != `{"k":"raw"}` {
+		t.Errorf("structured result = %q %v, with no text = %q %v, want its JSON", structured, structuredErr, raw, rawErr)
 	}
 	for name, tc := range map[string]struct {
 		err  error

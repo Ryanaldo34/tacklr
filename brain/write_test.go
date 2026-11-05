@@ -2,6 +2,7 @@ package brain_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -19,6 +20,7 @@ import (
 // its kind (each case is one return path), and saves a record and its part
 // that keep it. Examples do not close a field the way an enum does.
 func TestPut_catalogEnforced(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{
@@ -54,9 +56,13 @@ func TestPut_catalogEnforced(t *testing.T) {
 		{"bad datetime", brain.Object{Kind: "Document", Properties: map[string]any{"stage": "open", "when": "nope"}}, "RFC3339"},
 		{"zero datetime", brain.Object{Kind: "Document", Properties: map[string]any{"stage": "open", "when": time.Time{}}}, "zero time"},
 		{"value outside the enum", brain.Object{Kind: "Document", Properties: map[string]any{"stage": "open", "tier": "Yellowish"}}, "enum"},
+		{"no kind", brain.Object{Kind: " "}, "kind is required"},
+		{"invalid namespace", brain.Object{Kind: "Document", Namespace: brain.Namespace{{Name: "", Value: "x"}}}, "name"},
+		{"nil parent id", brain.Object{Kind: "Chunk", ParentID: &uuid.Nil}, "nil UUID"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := eng.Save(ctx, scope, tc.obj)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("got %v, want containing %q", err, tc.wantErr)
@@ -72,6 +78,7 @@ func TestPut_catalogEnforced(t *testing.T) {
 			"when":     time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
 			"tier":     "gold",
 			"note":     "not one of the examples",
+			"when2":    nil,
 			"slug":     "memo",
 			"vfs_path": "/workspace/work/memo.md",
 		},
@@ -91,6 +98,7 @@ func TestPut_catalogEnforced(t *testing.T) {
 // TestSave_failsWhenTheEmbedderFails: a Save whose text the store cannot
 // embed returns the embedder's error.
 func TestSave_failsWhenTheEmbedderFails(t *testing.T) {
+	t.Parallel()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: &storetest.Embedder{}})))
 	if err != nil {
 		t.Fatal(err)
@@ -105,8 +113,9 @@ func TestSave_failsWhenTheEmbedderFails(t *testing.T) {
 
 // TestSave_indexesTheHostsTextOverTheIndexedFields: a record is embedded and
 // put in the graph as the host's index text over its title, summary, indexed
-// properties in key order and content; a SkipIndex field and the store's
-// own properties stay on the object only.
+// properties in key order (each Go number type as its number) and content; a
+// SkipIndex field, a blank or missing value and the store's own properties
+// stay out of the text.
 func TestSave_indexesTheHostsTextOverTheIndexedFields(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -122,6 +131,12 @@ func TestSave_indexesTheHostsTextOverTheIndexedFields(t *testing.T) {
 			{Name: "amount", Type: brain.FieldTypeNumber},
 			{Name: "hot", Type: brain.FieldTypeBoolean},
 			{Name: "message_id", Type: brain.FieldTypeString, SkipIndex: true},
+			{Name: "share", Type: brain.FieldTypeNumber},
+			{Name: "rank", Type: brain.FieldTypeNumber},
+			{Name: "views", Type: brain.FieldTypeNumber},
+			{Name: "seats", Type: brain.FieldTypeNumber},
+			{Name: "owner", Type: brain.FieldTypeString},
+			{Name: "lost", Type: brain.FieldTypeString},
 		}}),
 		brain.WithIndexText(func(_ brain.Object, defaultText string) string {
 			return "related: neighbor record\n" + defaultText
@@ -134,11 +149,14 @@ func TestSave_indexesTheHostsTextOverTheIndexedFields(t *testing.T) {
 
 	deal, err := eng.Save(ctx, scope, brain.Object{
 		Kind: "Deal", Title: "Acme renewal", Summary: "enterprise opportunity", Content: "the renewal terms",
-		Properties: map[string]any{"stage": "open", "amount": 120000.0, "hot": true, "message_id": "msg-1", brain.PropSlug: "acme"},
+		Properties: map[string]any{
+			"stage": "open", "amount": 120000.0, "hot": true, "message_id": "msg-1", brain.PropSlug: "acme",
+			"share": float32(0.5), "rank": int32(3), "views": int64(4000), "seats": json.Number("12"), "owner": "  ", "lost": nil,
+		},
 	})
 	hits, findErr := g.FindObjects(ctx, brain.ObjectSearch{Namespace: scope.Namespace, Query: "neighbor record", Limit: 5})
 
-	want := "related: neighbor record\nAcme renewal\nenterprise opportunity\namount: 120000\nhot: true\nstage: open\nthe renewal terms"
+	want := "related: neighbor record\nAcme renewal\nenterprise opportunity\namount: 120000\nhot: true\nrank: 3\nseats: 12\nshare: 0.5\nstage: open\nviews: 4000\nthe renewal terms"
 	if err != nil || !slices.Equal(embedded, []string{want}) {
 		t.Errorf("embedded %q %v, want %q", embedded, err, want)
 	}

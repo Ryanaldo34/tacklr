@@ -275,7 +275,7 @@ func (spec KindSpec) normalizedObjectKind() ObjectKind {
 	}
 }
 
-// kindSpec parses a registry row into a KindSpec.
+// kindSpec parses a registry row into a KindSpec. The catalog normalizes it.
 func (k ObjectKind) kindSpec() (KindSpec, error) {
 	var fields []FieldSpec
 	if len(k.FilterableFields) > 0 {
@@ -286,7 +286,7 @@ func (k ObjectKind) kindSpec() (KindSpec, error) {
 	return KindSpec{
 		Kind: k.Kind, Description: k.Description,
 		IsParent: k.IsParent, IsPart: k.IsPart, Fields: fields,
-	}.Normalize()
+	}, nil
 }
 
 // Info builds the agent-facing schema payload for one kind.
