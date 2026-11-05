@@ -365,6 +365,7 @@ Custom stores can check themselves against the shared tests in `session/storetes
 | Doc | Covers |
 |---|---|
 | [docs/session.md](docs/session.md) | Sessions, the Temporal client and worker, questions, specialists and jobs, credentials, tracing |
+| [docs/context.md](docs/context.md) | The context window: what owns it, how a request is sized, collapse, cuts and handoffs |
 | [docs/tools.md](docs/tools.md) | Writing tools, `CallContext`, permissions |
 | [docs/vfs.md](docs/vfs.md) | The workspace, its sources, documents and spreadsheets |
 | [docs/knowledge.md](docs/knowledge.md) | The knowledge store: search, kinds, graph, file indexing |

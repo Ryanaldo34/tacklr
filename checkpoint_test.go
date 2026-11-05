@@ -85,7 +85,13 @@ func TestCheckpoint_failsOnStateItCannotKeepOrABadCheckpoint(t *testing.T) {
 	row := func(kind, key, value string) session.CheckpointEntry {
 		return session.CheckpointEntry{Kind: kind, Key: key, Value: []byte(value)}
 	}
-	version := row("version", "", "6")
+	// The version row of a good checkpoint, so each bad row below is
+	// refused for itself.
+	good, err := newHarness(t, "good", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}).Checkpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := good[0]
 	message0 := func(value string) []session.CheckpointEntry {
 		return []session.CheckpointEntry{version, row("message", "00000000", value)}
 	}

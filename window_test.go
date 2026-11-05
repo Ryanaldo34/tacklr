@@ -327,25 +327,30 @@ func TestCommit_sizesTheWindowFromUsageWhenTheProviderCannotCount(t *testing.T) 
 // TestCommit_aCollapseAfterARefusedRequestSummarizesTheWindow: after the
 // provider refused a request as over the context window, a collapse with
 // no counted request after the goal summarizes everything after it. A
-// summary request that fails keeps the window, and a window of only the
-// goal has nothing to collapse.
+// summary request that fails, or that the model cannot send, keeps the
+// window, and a window of only the goal has nothing to collapse.
 func TestCommit_aCollapseAfterARefusedRequestSummarizesTheWindow(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name    string
-		summary []tacklr.LLMResponseChunk
-		answer  bool // the goal was answered before the collapse
-		want    []string
-		fail    error
+		name       string
+		summary    []tacklr.LLMResponseChunk
+		answer     bool // the goal was answered before the collapse
+		unsendable bool // the model has no API key
+		want       []string
+		fail       error
 	}{
 		{name: "summarized", summary: []tacklr.LLMResponseChunk{text("summary")}, answer: true, want: []string{"go", "CONVERSATION SUMMARY\n────────────\nsummary"}},
 		{name: "a summary request that fails", summary: []tacklr.LLMResponseChunk{failure(fmt.Errorf("%w: stream failed", tacklr.ErrNetwork))}, answer: true, want: []string{"go", "done", "next"}, fail: tacklr.ErrNetwork},
+		{name: "a summary request the model cannot send", unsendable: true, want: []string{"go", "next"}, fail: tacklr.ErrApiKeyNotSet},
 		{name: "only the goal", want: []string{"go"}, fail: session.ErrContextLength},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			// Arrange
 			model, _ := scripted(t, []tacklr.LLMResponseChunk{text("done")}, tc.summary)
+			if tc.unsendable {
+				model = openai.New(http.DefaultClient).WithModel("gpt-4o")
+			}
 			h := newHarness(t, "refit", tacklr.AgentOptions{Model: model, MaxWindowSize: 100_000})
 			prompt(t, h, "go")
 			out := newStream(t).out
@@ -357,6 +362,8 @@ func TestCommit_aCollapseAfterARefusedRequestSummarizesTheWindow(t *testing.T) {
 				if err := h.Commit(t.Context(), tacklr.CommitIn{Round: &tacklr.Round{Reply: done}}, out); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if tc.answer || tc.unsendable {
 				prompt(t, h, "next")
 			}
 

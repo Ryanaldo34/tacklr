@@ -1,6 +1,7 @@
 package tacklr
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,12 +34,12 @@ func (a *Harness) Commit(ctx context.Context, in CommitIn, out chan session.Even
 		if bad := UnsupportedMIMEs(a.model, user.MIMETypes()); len(bad) > 0 {
 			return fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
 		}
-		if err := a.commitRound(ctx, []*message.Message{user}, EffectNone); err != nil {
+		if err := a.commitRound(ctx, []*message.Message{user}, EffectNone, 0); err != nil {
 			return err
 		}
 	}
 	if in.Collapse {
-		return a.refit(ctx)
+		return a.window.Refit(ctx)
 	}
 	return nil
 }
@@ -64,14 +65,14 @@ func (a *Harness) commitReplyRound(ctx context.Context, r *Round, out chan sessi
 		}
 		msgs = append(msgs, result)
 	}
-	return a.commitRound(ctx, msgs, effect)
+	return a.commitRound(ctx, msgs, effect, r.Reply.InputTokens)
 }
 
 // Infer is the Infer step: one model request on the committed window. It
 // changes no session state: the reply commits as a round once its calls
 // have their results.
 func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, error) {
-	afterTools := a.afterTools()
+	afterTools := a.window.afterTools()
 	turnCtx := ctx
 	if afterTools {
 		turnCtx = telemetry.ContextWithAfterTools(ctx)
@@ -88,6 +89,7 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 	asm := newStreamAssembler()
 	var reply []*message.Message
 	var toolCalls []message.ToolCall
+	inputTokens := 0
 	for {
 		var chunk LLMResponseChunk
 		var ok bool
@@ -106,11 +108,7 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 		if err := chunk.Err(); err != nil {
 			return Reply{}, err
 		}
-		if chunk.InputTokens > 0 {
-			// The provider counted this request: the window as it is now,
-			// the tools and the system prompt.
-			a.context.Counted(chunk.InputTokens)
-		}
+		inputTokens = cmp.Or(chunk.InputTokens, inputTokens)
 		asm.AddDelta(chunk)
 		if chunk.IsComplete {
 			toolCalls = append(toolCalls, chunk.ToolCalls...)
@@ -120,7 +118,7 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 			}
 		}
 	}
-	r := Reply{Messages: reply, Calls: toolCalls}
+	r := Reply{Messages: reply, Calls: toolCalls, InputTokens: inputTokens}
 	for i, tc := range toolCalls {
 		if tool := a.findTool(tc.Name, tc.Namespace); tool != nil && tool.timeout > 0 {
 			if r.Timeouts == nil {
@@ -139,13 +137,6 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 	}
 	r.Messages = append(r.Messages, &message.Message{Role: message.RoleAssistant, ToolCalls: slices.Clone(toolCalls)})
 	return r, nil
-}
-
-// afterTools reports whether the model is answering tool results: the
-// window's last committed round is a tool round.
-func (a *Harness) afterTools() bool {
-	window := a.context.Messages()
-	return len(window) > 0 && window[len(window)-1].Role == message.RoleTool
 }
 
 // RunCall is the Tool step: it runs c once, from what its earlier runs did

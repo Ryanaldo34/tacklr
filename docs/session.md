@@ -16,7 +16,7 @@ The packages split along that line. A host that only talks to sessions imports `
 | **Child** | Nested session job. Agent tools `list_children` / `cancel_child` |
 | **Park** | Session idle waiting for `Resume`. Parent-facing `Status` stays `running`; `Waiting` is true until the interrupt is resolved. Parent park does not stop children |
 | **Cancel** | Abort the in-flight turn and stop child sessions (`Client.Cancel`, original Prompt/Resume context cancel, client stop). The parent session stays open for a later Prompt |
-| **Checkpoint** | Committed harness state inside the snapshot: the window of complete rounds, plan, user state, permission decisions, search cursors. Rows (`Harness.Checkpoint`, `session.CheckpointEntry`) in `session.Store`: one per window message, todo, user-state key, permission decision and search rest, plus the plan and the schema version. A Commit diffs them against the rows it last saved (`session.Diff`) and saves only the changed ones, so an append writes the new messages, not the window. Only a Commit step saves it |
+| **Checkpoint** | Committed harness state inside the snapshot: the window of complete rounds, plan, user state, permission decisions, search cursors. Rows (`Harness.Checkpoint`, `session.CheckpointEntry`) in `session.Store`: one per window message, todo, user-state key, permission decision and search rest, plus the provider's count of the last request, the plan and the schema version. A Commit diffs them against the rows it last saved (`session.Diff`) and saves only the changed ones, so an append writes the new messages, not the window. Only a Commit step saves it |
 | **Session messages** | Messages that left the context window (a collapse or a plan handoff), saved in the brain, searchable for this session only. Not the checkpoint. Deleted on Close |
 | **Close** | Destroy the session, stop children, and delete its session messages |
 
@@ -198,20 +198,7 @@ A reply with calls opens a round. It stays out of the window, in the checkpoint,
 
 When the last call has a result, the round commits. The model is called only when no round is open. When a `block=false` job later completes, the drain appends a separate `RoleUser` job result (not another `RoleTool` for that `call_id`).
 
-A commit fits the round into `MaxWindowSize`:
-
-1. A round with a plan install or handoff goes in as it is; the effect then replaces the window.
-2. Under 85% of `MaxWindowSize`, the round is appended.
-3. Over it, the window **collapses**: everything after the first user message and the plan document (an earlier summary too) is saved as session messages, then replaced by one summary of the window as it was. The new round is not in the summary request; it is appended after the summary. With a Brain the summary says that `search` finds the earlier messages and `open` reads one. The window is then small, so the next rounds append without another model call: a session pays for a summary only when the window fills again.
-4. A round still over `MaxWindowSize` alone has its largest tool results cut. With an `AgentOptions.Overflow` (the workspace's `workspace.Config.OverflowPath`: a directory on a writable mount, for example an object-storage mount), each one's full text is first written to `<OverflowPath>/<session>/<call id>.txt`. The cut result ends with a note: how much was kept, and the path to `read` with `start` and `end`, or that the full text was not kept.
-
-The size of a request comes from the provider, never from a local tokenizer:
-
-- **The provider's count.** `Model.CountTokens` asks the provider (for `openai`, `POST /responses/input_tokens`).
-- **The usage it reports.** Each response reports the input tokens of its request. A commit adds the encoded size in bytes of the messages after that request to that count. Each token is at least one byte, so the sum is an upper bound. When the bound is under the pressure, the commit does not ask for a count. A provider whose `CountTokens` fails with `tacklr.ErrCannotCount` (for `openai`, one without the count endpoint, such as Azure OpenAI or a local server) is sized by this bound alone. The bound is high for text (about four bytes per token), so such a window collapses and cuts results sooner. With no reported usage (the first request, or after the window was replaced or loaded again), the bound is the encoded size of the whole request.
-- **A refusal.** When the provider refuses a request as over the context window (`session.ErrContextLength`), the turn commits a collapse (`CommitIn.Collapse`) and asks the model again, once. The collapse summarizes the messages that the last request the provider took carried, so the summary request fits, and keeps the messages after them. With no such request, it summarizes everything after the first user message and the plan document. A second refusal, or a window with nothing to collapse, fails the turn with `FailKind` `context_length`. `ErrContextLength` is also `ErrMaxTokens`.
-
-A commit that fails (a token count, the session-message save, the summary request, a round that cannot fit, or the overflow write) fails the step and saves nothing.
+A commit fits the round into `MaxWindowSize`: it appends the round, collapses the window into a summary, or cuts the round's largest results. The size of each request comes from the provider. See [context.md](context.md).
 
 ### Steps
 

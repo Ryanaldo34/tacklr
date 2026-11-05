@@ -218,16 +218,23 @@ func TestCommit_cutsAResultTooLargeForTheWindow(t *testing.T) {
 
 // TestCommit_countsTokensOnlyNearTheWindow: with the provider's count of
 // the last request, a round far below the window commits without a token
-// count request, and one near it is counted.
+// count request, and one near it is counted. The count is part of the
+// checkpoint: a session restored from it sizes its next commit the same
+// way.
 func TestCommit_countsTokensOnlyNearTheWindow(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name        string
+		window      uint
 		inputTokens int
+		restore     bool
 		wantCounts  int
 	}{
-		{"far below the window", 100, 0},
-		{"near the window", 7000, 1},
+		{name: "far below the window", window: 8192, inputTokens: 100},
+		{name: "near the window", window: 8192, inputTokens: 7000, wantCounts: 1},
+		// The system prompt alone is over this window's pressure: only the
+		// saved count keeps the next commit from a count request.
+		{name: "after a restore", window: 1000, inputTokens: 100, restore: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -235,7 +242,8 @@ func TestCommit_countsTokensOnlyNearTheWindow(t *testing.T) {
 			model, _ := counted(t, func([]*message.Message) (int, error) { counts.Add(1); return tc.inputTokens, nil },
 				[]tacklr.LLMResponseChunk{calls(call("f1", "free", "{}"))})
 			free := tacklr.NewTool(tacklr.ToolConfig{Name: "free", Handler: func(context.Context) (string, error) { return "free-ok", nil }})
-			h := newHarness(t, "counts", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{free}})
+			opts := tacklr.AgentOptions{Model: model, MaxWindowSize: tc.window, Tools: []*tacklr.Tool{free}}
+			h := newHarness(t, "counts", opts)
 			out := newStream(t).out
 			reply, err := h.Infer(t.Context(), out)
 			if err != nil {
@@ -248,6 +256,14 @@ func TestCommit_countsTokensOnlyNearTheWindow(t *testing.T) {
 			counts.Store(0)
 
 			err = h.Commit(t.Context(), tacklr.CommitIn{Round: r}, out)
+			if tc.restore && err == nil {
+				rows, _ := h.Checkpoint()
+				restored := newHarness(t, "counts", opts)
+				if err := restored.RestoreCheckpoint(rows); err != nil {
+					t.Fatal(err)
+				}
+				err = restored.Commit(t.Context(), tacklr.CommitIn{Users: []*message.Message{userMsg("next")}}, out)
+			}
 
 			if n := int(counts.Load()); err != nil || n != tc.wantCounts {
 				t.Fatalf("commit = %v with %d token count requests, want %d", err, n, tc.wantCounts)

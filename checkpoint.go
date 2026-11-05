@@ -9,13 +9,12 @@ import (
 	"strconv"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
 )
 
 // checkpointVersion is the schema of the checkpoint's rows. A checkpoint of
 // another version fails to restore.
-const checkpointVersion = 6
+const checkpointVersion = 7
 
 // The kinds of a checkpoint's rows. Host configuration (the search
 // namespace and principals, AllowTools) is not in it: each step takes that
@@ -26,6 +25,9 @@ const (
 	// rowMessage is one message of the window, keyed by its position, so
 	// an append writes only the new positions.
 	rowMessage = "message"
+	// rowCount is the one row of the provider's count of the last request
+	// on the window.
+	rowCount = "count"
 	// rowTodo is one todo of the plan, keyed by its position.
 	rowTodo = "todo"
 	// rowPlan is the one row of the plan document.
@@ -57,9 +59,7 @@ func (a *Harness) Checkpoint() ([]session.CheckpointEntry, error) {
 		rows = append(rows, session.CheckpointEntry{Kind: kind, Key: key, Value: raw})
 		return nil
 	}
-	for i, m := range a.context.Messages() {
-		_ = add(rowMessage, position(i), m) // messages are plain data
-	}
+	rows = append(rows, a.window.rows()...)
 	todos, plan := a.session.Plan.snapshot()
 	for i, td := range todos {
 		_ = add(rowTodo, position(i), td) // strings only
@@ -103,7 +103,7 @@ func (a *Harness) RestoreCheckpoint(rows []session.CheckpointEntry) error {
 	})
 	var (
 		version     int
-		window      []*message.Message
+		window      []session.CheckpointEntry
 		todos       []Todo
 		plan        string
 		permissions = map[string]permissionDecision{}
@@ -115,10 +115,8 @@ func (a *Harness) RestoreCheckpoint(rows []session.CheckpointEntry) error {
 		switch r.Kind {
 		case rowVersion:
 			version, err = strconv.Atoi(string(r.Value))
-		case rowMessage:
-			m := new(message.Message)
-			err = json.Unmarshal(r.Value, m)
-			window = append(window, m)
+		case rowMessage, rowCount:
+			window = append(window, r)
 		case rowTodo:
 			var td Todo
 			err = json.Unmarshal(r.Value, &td)
@@ -147,10 +145,9 @@ func (a *Harness) RestoreCheckpoint(rows []session.CheckpointEntry) error {
 	if version != checkpointVersion {
 		return fmt.Errorf("checkpoint: unsupported version %d", version)
 	}
-	if err := ValidateMessages(window); err != nil {
-		return fmt.Errorf("checkpoint: invalid context window: %w", err)
+	if err := a.window.restore(window); err != nil {
+		return err
 	}
-	a.context.Restore(window)
 	a.session.Plan.restore(todos, plan)
 	a.session.Permissions.restore(permissions)
 	a.session.Search.SetRests(rests)

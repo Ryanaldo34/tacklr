@@ -112,7 +112,6 @@ func NewHarness(ctx context.Context, opts AgentOptions) (*Harness, error) {
 	sm.Search.SetPrincipals(opts.SearchPrincipals)
 	h := &Harness{
 		model:                 opts.Model,
-		maxWindowSize:         int(opts.MaxWindowSize),
 		instructions:          opts.SystemPrompt,
 		session:               sm,
 		tools:                 opts.Tools,
@@ -125,9 +124,9 @@ func NewHarness(ctx context.Context, opts AgentOptions) (*Harness, error) {
 		sessionId:             opts.sessionID,
 		jobs:                  opts.jobs,
 		specialists:           make(map[string]*Specialist),
-		context:               newModelContextManager(),
 		overflow:              opts.Overflow,
 	}
+	h.window = newWindow(opts.Model, h, int(opts.MaxWindowSize))
 	chain := slices.Clone(opts.ToolInterceptors)
 	if !opts.skipPlanningLock {
 		chain = append(chain, h.planningWriteLock)

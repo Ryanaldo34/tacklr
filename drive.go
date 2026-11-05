@@ -19,6 +19,11 @@ type Reply struct {
 	// Timeouts are each call's tool timeout (ToolConfig.Timeout), by call
 	// index; zero is none. A runtime bounds the call's step by it.
 	Timeouts []time.Duration `json:"timeouts,omitempty"`
+	// InputTokens is the provider's count of the request, on the window
+	// the reply's round commits to; zero when it reported none. The
+	// round's Commit gives it to the window, which sizes the next
+	// requests from it.
+	InputTokens int `json:"inputTokens,omitempty"`
 }
 
 // Timeout is call i's tool timeout, zero when it has none.
