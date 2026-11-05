@@ -48,6 +48,10 @@ func TestMCPServer_durableCopiesHoldNoInlineCredentialsAndResolveThroughTheHost(
 	}
 }
 
+// TestMCPServer_validateRejectsUnsafeOrIncompleteDefinitions: validation
+// refuses a server without a name, a command or a network URL, a header or
+// env name that can inject, and an unknown transport. It accepts a whole
+// HTTP server.
 func TestMCPServer_validateRejectsUnsafeOrIncompleteDefinitions(t *testing.T) {
 	// Arrange
 	cases := map[string]session.MCPServer{

@@ -75,17 +75,6 @@ func newFixtureOn(t *testing.T, platform func(durableobject.Config) *dotest.Plat
 	return fixture{p: p, c: durableobject.NewClient(p), infers: &infers}
 }
 
-// stored is how many keys of kind id's storage holds for its session.
-func stored(p *dotest.Platform, id session.ID, kind string) int {
-	n := 0
-	for _, k := range p.Keys(id) {
-		if strings.HasPrefix(k, kind+"/"+url.PathEscape(string(id))) {
-			n++
-		}
-	}
-	return n
-}
-
 // always fails every write.
 func always([]durableobject.Op) bool { return true }
 
@@ -152,13 +141,22 @@ func toolResult(evs []session.Event) string {
 
 // TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents: the model
 // calls a tool, the tool runs, and the model streams its answer from the
-// result; a subscriber sees the call, its result, the answer's deltas live,
-// the whole answer and the end of the turn, and the session reports the
-// turn complete with its result. The log keeps the whole answer and no
-// delta, and a second turn leaves only its own events and outcome.
+// result. A subscriber sees the call, its result, the answer's deltas live,
+// the whole answer and the end of the turn. The session reports the turn
+// complete with its result, and the log holds the durable events only. The
+// next turn sees the conversation, and then the log and the stored call
+// results hold that turn's alone.
 func TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents(t *testing.T) {
+	// Arrange
 	lookup := tacklr.NewTool(tacklr.ToolConfig{Name: "lookup", Timeout: time.Minute, Handler: func(context.Context) (string, error) { return "42", nil }})
-	f := newWireFixture(t, callThenAnswer("lookup", `{}`), []*tacklr.Tool{lookup})
+	var sawFirstTurn atomic.Bool
+	answer := func(msgs []*message.Message) tacklr.LLMResponseChunk {
+		if slices.ContainsFunc(msgs, func(m *message.Message) bool { return m.Role == message.RoleAssistant && m.Content == "done: 42" }) {
+			sawFirstTurn.Store(true)
+		}
+		return callThenAnswer("lookup", `{}`)(msgs)
+	}
+	f := newWireFixture(t, answer, []*tacklr.Tool{lookup})
 	ctx := t.Context()
 	id, err := f.c.CreateSession(ctx, session.CreateSession{State: map[string]any{"tier": "pro"}})
 	if err != nil {
@@ -180,12 +178,18 @@ func TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents(t *testing.T) {
 		return untilEnd(t, sub)
 	}
 
+	// Act
 	evs := turn()
 	st, stErr := f.c.Status(ctx, id)
 	logged := fromStart()
-	turn()
-	events, outcomes := stored(f.p, id, "event"), stored(f.p, id, "body")
+	second := turn()
+	if err := f.p.Idle(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	replayed := fromStart()
+	bodies := slices.DeleteFunc(f.p.Keys(id), func(k string) bool { return !strings.HasPrefix(k, "body/") })
 
+	// Assert
 	if last(evs).Type != session.EventComplete || toolResult(evs) != "42" {
 		t.Fatalf("events %+v; want the tool's result, then the end of the turn", evs)
 	}
@@ -195,12 +199,34 @@ func TestSession_aPromptRunsATurnWithItsToolAndStreamsItsEvents(t *testing.T) {
 	if stErr != nil || st.State != session.Complete || st.Result != "done: 42" || st.Waiting || st.ID != id {
 		t.Fatalf("status %+v %v; want the turn complete with its answer", st, stErr)
 	}
-	if deltas(logged) != "" || !slices.Equal(answers(logged), []string{"done: 42"}) || toolResult(logged) != "42" {
-		t.Fatalf("the log %+v; want the whole answer and no delta", logged)
+	want := []session.EventType{session.EventFunctionCall, session.EventToolResult, session.EventMessage, session.EventComplete}
+	if !slices.Equal(types(logged), want) || !slices.Equal(answers(logged), []string{"done: 42"}) || toolResult(logged) != "42" {
+		t.Fatalf("the log %+v; want the call, its result, the whole answer and the end", logged)
 	}
-	if events != len(logged) || outcomes != 1 {
-		t.Fatalf("after a second turn the log holds %d events and %d outcomes; want that turn's %d and its one outcome", events, outcomes, len(logged))
+	call := second[1].MessageID
+	if !sawFirstTurn.Load() || !slices.Equal(summary(replayed), summary(second)) || !slices.Equal(bodies, []string{"body/" + url.PathEscape(string(id)) + "/" + call}) {
+		t.Fatalf("next turn saw the first %v; log %v and call results %v after it; want the conversation kept and the next turn's events %v and result of %s alone", sawFirstTurn.Load(), summary(replayed), bodies, summary(second), call)
 	}
+}
+
+// types are the types of evs, in order.
+func types(evs []session.Event) []session.EventType {
+	out := make([]session.EventType, len(evs))
+	for i, ev := range evs {
+		out[i] = ev.Type
+	}
+	return out
+}
+
+// summary is each durable event of evs as its type, message id and content.
+func summary(evs []session.Event) []string {
+	var out []string
+	for _, ev := range evs {
+		if !ev.Delta {
+			out = append(out, fmt.Sprintf("%s %s %s", ev.Type, ev.MessageID, ev.Content))
+		}
+	}
+	return out
 }
 
 // deltas is the text evs streamed as deltas.
@@ -433,26 +459,24 @@ func TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth(t *testing.T) {
 	if err := f.c.Close(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.p.Idle(ctx, id); err != nil {
-		t.Fatal(err)
+	for _, obj := range []session.ID{id, child} {
+		if err := f.p.Idle(ctx, obj); err != nil {
+			t.Fatal(err)
+		}
 	}
 	_, parentGone := f.c.Status(ctx, id)
 	again := f.c.Close(ctx, id)
-	left := 0
-	for _, obj := range []session.ID{id, child} {
-		for _, kind := range []string{"snapshot", "checkpoint", "event", "secrets", "journal", "mailbox", "body", "child", "outbox"} {
-			left += stored(f.p, obj, kind)
-		}
-	}
+	parentKeys, childKeys := f.p.Keys(id), f.p.Keys(child)
 
+	// Assert
 	if last(evs).Type != session.EventComplete || toolResult(evs) != "exported q3" {
 		t.Fatalf("events %+v; want the job's output as the call's result", evs)
 	}
 	if !errors.Is(jobGone, session.ErrNotFound) || !errors.Is(parentGone, session.ErrNotFound) || again != nil {
 		t.Fatalf("job once its result was taken %v, session after close %v, second close %v; want both gone and the close safe to repeat", jobGone, parentGone, again)
 	}
-	if left != 0 {
-		t.Fatalf("%d entries left; want none", left)
+	if kept := []string{"meta", "status"}; !slices.Equal(parentKeys, kept) || !slices.Equal(childKeys, kept) {
+		t.Fatalf("storage after close: session %v, job %v; want only who each object is and its status (every letter delivered), %v", parentKeys, childKeys, kept)
 	}
 }
 
@@ -463,82 +487,6 @@ func driveAuth(token string) session.AuthContext {
 		Params:   map[string]string{mount.ParamName: "docs"},
 		Auth:     mount.Credential{Token: token},
 	}}}
-}
-
-// TestSession_eachTurnEndsItsJournalAndTheConversationGoesOn: once a turn
-// ends, the session restarts from its state with an empty journal, so its
-// storage holds one turn's journal at most; the next turn still sees the
-// whole conversation.
-func TestSession_eachTurnEndsItsJournalAndTheConversationGoesOn(t *testing.T) {
-	var sawFirst atomic.Bool
-	answer := func(msgs []*message.Message) tacklr.LLMResponseChunk {
-		if strings.Contains(msgs[len(msgs)-1].Content, "third") {
-			sawFirst.Store(strings.Contains(fmt.Sprint(contents(msgs)), "first"))
-		}
-		return tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok", IsComplete: true}
-	}
-	f := newFixture(t, answer, nil)
-	ctx := t.Context()
-	id, err := f.c.CreateSession(ctx, session.CreateSession{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sub := f.subscribe(t, id)
-	var journals []int
-	for _, text := range []string{"first", "second", "third"} {
-		if err := f.c.Prompt(ctx, id, session.Prompt{Text: text}); err != nil {
-			t.Fatal(err)
-		}
-		if ev := last(untilEnd(t, sub)); ev.Type != session.EventComplete {
-			t.Fatalf("turn %q ended with %+v", text, ev)
-		}
-		if err := f.p.Idle(ctx, id); err != nil {
-			t.Fatal(err)
-		}
-		journals = append(journals, stored(f.p, id, "journal")+stored(f.p, id, "mailbox"))
-	}
-
-	if !sawFirst.Load() || stored(f.p, id, "carry") != 1 || !slices.Equal(journals, []int{0, 0, 0}) {
-		t.Fatalf("third turn saw the first prompt %v, carried state %d, journal and mailbox after each turn %v; want the conversation kept and each turn's journal gone", sawFirst.Load(), stored(f.p, id, "carry"), journals)
-	}
-}
-
-func contents(msgs []*message.Message) []string {
-	out := make([]string, len(msgs))
-	for i, m := range msgs {
-		out[i] = m.Content
-	}
-	return out
-}
-
-// TestSession_aModelRequestThatFailsOnTheNetworkRunsAgain: the model's
-// first answer is a network failure; the request runs again and the turn
-// ends with the second answer.
-func TestSession_aModelRequestThatFailsOnTheNetworkRunsAgain(t *testing.T) {
-	var calls atomic.Int32
-	answer := func([]*message.Message) tacklr.LLMResponseChunk {
-		if calls.Add(1) == 1 {
-			return tacklr.LLMResponseChunk{Type: session.EventError, Error: tacklr.Network(errors.New("connection reset"))}
-		}
-		return tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "back", IsComplete: true}
-	}
-	f := newFixture(t, answer, nil)
-	ctx := t.Context()
-	id, err := f.c.CreateSession(ctx, session.CreateSession{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sub := f.subscribe(t, id)
-
-	if err := f.c.Prompt(ctx, id, session.Prompt{Text: "go"}); err != nil {
-		t.Fatal(err)
-	}
-	evs := untilEnd(t, sub)
-	st, _ := f.c.Status(ctx, id)
-
-	if last(evs).Type != session.EventComplete || st.Result != "back" || f.infers.Load() != 2 {
-		t.Fatalf("events %+v, status %+v after %d requests; want the second answer", evs, st, f.infers.Load())
-	}
 }
 
 // TestClient_refusesBadAndUnknownSessions: a session that is both a
@@ -583,12 +531,22 @@ func TestClient_refusesBadAndUnknownSessions(t *testing.T) {
 	}
 }
 
-// TestSession_aRefusalOrTheTokenLimitFailsTheTurnWithItsKind: a model that
-// keeps refusing fails the turn as refused once its retries ran out, and
-// one that hits the token limit fails it as max tokens.
-func TestSession_aRefusalOrTheTokenLimitFailsTheTurnWithItsKind(t *testing.T) {
+// TestSession_aModelFailureRunsAgainOrFailsTheTurnWithItsKind: a model
+// request that fails on the network runs again, and the turn ends with the
+// second answer. A model that keeps refusing fails the turn as refused once
+// its retries ran out, and one that hits the token limit fails it as max
+// tokens.
+func TestSession_aModelFailureRunsAgainOrFailsTheTurnWithItsKind(t *testing.T) {
+	// Arrange
+	var flaky atomic.Int32
 	answer := func(msgs []*message.Message) tacklr.LLMResponseChunk {
-		if msgs[len(msgs)-1].Content == "long" {
+		switch msgs[len(msgs)-1].Content {
+		case "flaky":
+			if flaky.Add(1) == 1 {
+				return tacklr.LLMResponseChunk{Type: session.EventError, Error: tacklr.Network(errors.New("connection reset"))}
+			}
+			return tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "back", IsComplete: true}
+		case "long":
 			return tacklr.LLMResponseChunk{Type: session.EventError, Error: session.ErrMaxTokens}
 		}
 		return tacklr.LLMResponseChunk{Type: session.EventError, Error: session.ErrModelRefused}
@@ -608,8 +566,15 @@ func TestSession_aRefusalOrTheTokenLimitFailsTheTurnWithItsKind(t *testing.T) {
 		return last(untilEnd(t, sub))
 	}
 
+	// Act
+	recovered := end("flaky")
+	st, stErr := f.c.Status(ctx, id)
 	refused, long := end("say it"), end("long")
 
+	// Assert
+	if recovered.Type != session.EventComplete || stErr != nil || st.Result != "back" || flaky.Load() != 2 {
+		t.Fatalf("after a network failure %+v, status %+v %v, %d requests; want the second answer", recovered, st, stErr, flaky.Load())
+	}
 	if refused.FailKind != session.FailRefused || long.FailKind != session.FailMaxTokens || !errors.Is(refused.FailKind.Err(refused.Fail), session.ErrModelRefused) {
 		t.Fatalf("refused %+v, long %+v; want the refusal and the token limit", refused, long)
 	}
@@ -700,11 +665,8 @@ func TestSession_aStorageOutageStopsTheObjectAndTheAlarmFinishesTheTurn(t *testi
 	}
 	ended := last(untilEnd(t, sub))
 
-	if refused == nil {
-		t.Fatal("a prompt while storage was down succeeded")
-	}
-	if noCreate != nil {
-		t.Fatalf("another session's create during the outage: %v; want it unaffected", noCreate)
+	if refused == nil || !strings.Contains(refused.Error(), "storage unavailable") || noCreate != nil {
+		t.Fatalf("a prompt while storage was down %v, another session's create %v; want the outage's error, and the other session made", refused, noCreate)
 	}
 	if ended.Type != session.EventComplete || runs.Load() < 2 {
 		t.Fatalf("after the outage %+v, tool runs %d; want the turn ended", ended, runs.Load())
@@ -715,10 +677,14 @@ func TestSession_aStorageOutageStopsTheObjectAndTheAlarmFinishesTheTurn(t *testi
 // session without an id, and the constructors refuse what they cannot run
 // without.
 func TestObject_refusesAnInitWithoutAnIDAndNeedsItsParts(t *testing.T) {
+	// Arrange
 	f := newFixture(t, callThenAnswer("none", `{}`), nil)
+
+	// Act
 	noID := f.p.Object("blank").Create(t.Context(), durableobject.Init{})
 	both := f.p.Object("both").Create(t.Context(), durableobject.Init{SessionID: "both", Specialist: "a", Worker: "b"})
 
+	// Assert
 	if !errors.Is(noID, session.ErrInvalid) || !errors.Is(both, session.ErrInvalid) {
 		t.Fatalf("no id %v, specialist and worker %v; want both invalid", noID, both)
 	}
@@ -785,13 +751,9 @@ func TestSession_anObjectStoppedAtAnyWriteGoesOnToTheSameTurn(t *testing.T) {
 			evs := untilEnd(t, sub)
 			st, _ := f.c.Status(ctx, id)
 
-			var types []session.EventType
-			for _, ev := range evs {
-				types = append(types, ev.Type)
-			}
 			want := []session.EventType{session.EventFunctionCall, session.EventToolResult, session.EventMessage, session.EventComplete}
-			if !failed.Load() || !slices.Equal(types, want) || toolResult(evs) != "42" || runs.Load() != 1 || st.State != session.Complete {
-				t.Fatalf("stopped %v; events %v, tool runs %d, status %+v; want each event once, the tool run once, and the turn complete", failed.Load(), types, runs.Load(), st)
+			if !failed.Load() || !slices.Equal(types(evs), want) || toolResult(evs) != "42" || runs.Load() != 1 || st.State != session.Complete {
+				t.Fatalf("stopped %v; events %v, tool runs %d, status %+v; want each event once, the tool run once, and the turn complete", failed.Load(), types(evs), runs.Load(), st)
 			}
 		})
 	}

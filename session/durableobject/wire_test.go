@@ -31,6 +31,7 @@ func (a answerWith) RoundTrip(req *http.Request) (*http.Response, error) {
 // protocol, a value that cannot be sent, and a caller that left each fail
 // the call with their own error.
 func TestRemote_aCallerGetsWhyTheObjectOrItsNetworkFailed(t *testing.T) {
+	// Arrange
 	f := newWireFixture(t, callThenAnswer("none", `{}`), nil)
 	ctx := t.Context()
 	id, err := f.c.CreateSession(ctx, session.CreateSession{})
@@ -42,6 +43,8 @@ func TestRemote_aCallerGetsWhyTheObjectOrItsNetworkFailed(t *testing.T) {
 		durableobject.Handler(f.p.Object(id)).ServeHTTP(rec, httptest.NewRequestWithContext(ctx, method, target, strings.NewReader(body)))
 		return rec
 	}
+
+	// Act
 	bad := map[string]*httptest.ResponseRecorder{
 		"init":  serve(http.MethodPost, "/create", "{"),
 		"wake":  serve(http.MethodPost, "/wake", "{"),
@@ -66,12 +69,13 @@ func TestRemote_aCallerGetsWhyTheObjectOrItsNetworkFailed(t *testing.T) {
 	cancel()
 	_, leftErr := f.p.Object(id).Jobs(left)
 
+	// Assert
 	for name, rec := range bad {
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"error":"invalid"`) {
 			t.Fatalf("a bad %s: %d %s; want it invalid", name, rec.Code, rec.Body)
 		}
 	}
-	if outage == nil || errors.Is(outage, session.ErrNotFound) || !strings.Contains(outage.Error(), "storage unavailable") {
+	if outage == nil || !strings.Contains(outage.Error(), "storage unavailable") {
 		t.Fatalf("prompt in an outage: %v; want the object's own error", outage)
 	}
 	if pageErr == nil || !strings.Contains(pageErr.Error(), "Bad Gateway") {

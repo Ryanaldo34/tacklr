@@ -15,27 +15,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/session/temporal"
-	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
-
-	enumspb "go.temporal.io/api/enums/v1"
-	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
-
+	"github.com/jackc/pgx/v5/pgxpool"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
+	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
 	"go.temporal.io/sdk/testsuite"
 	sdkworker "go.temporal.io/sdk/worker"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ryanaldo34/tacklr"
-
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/session/postgres"
+	"github.com/ryanaldo34/tacklr/session/temporal"
+	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
 	"github.com/ryanaldo34/tacklr/telemetry/export"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
@@ -274,8 +273,8 @@ func TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages(t *testi
 	if deltas(first) != "Hello world" || !slices.Equal(whole(first), []string{"Hello world"}) {
 		t.Fatalf("first turn %+v; want the deltas live, then the whole message", first)
 	}
-	if deltas(logged) != "" || !slices.Equal(whole(logged), []string{"Hello world"}) {
-		t.Fatalf("the stream from its start %+v; want the whole message and no delta", logged)
+	if !slices.EqualFunc(logged, slices.DeleteFunc(slices.Clone(first), func(ev session.Event) bool { return ev.Delta }), sameEvent) {
+		t.Fatalf("the stream from its start %+v; want the first turn's events without its deltas", logged)
 	}
 	if refused.StatusCode != http.StatusUnauthorized || unknown.StatusCode != http.StatusNotFound {
 		t.Fatalf("a request with another key's token got %d, one with no session %d; want 401 and 404", refused.StatusCode, unknown.StatusCode)
@@ -285,6 +284,10 @@ func TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages(t *testi
 	}
 }
 
+// TestLive_workerRestartWhileParkedThenResumeRemounts: a session parks, its
+// worker goes away, and a resume with a new token runs on another worker,
+// which mounts the workspace again and reads it. The next prompt goes on
+// after one more restart.
 func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()
@@ -545,9 +548,17 @@ func TestLive_historyHoldsNoSecretsOrToolResults(t *testing.T) {
 		t.Fatalf("replayed results %q, want four events without their deleted content", gone)
 	}
 
-	// A store that cannot read the records ends the subscription with
-	// that error.
-	down := temporal.Open(stack.Temporal, temporal.Config{TaskQueue: stack.TaskQueue, Store: downStore{stack.Store}, Secrets: stack.Secrets})
+	// A store whose database is gone ends the subscription with that error.
+	pool, err := pgxpool.New(ctx, "postgres://tacklr@127.0.0.1:1/tacklr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	db, err := postgres.New(pool, postgres.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	down := temporal.Open(stack.Temporal, temporal.Config{TaskQueue: stack.TaskQueue, Store: db.Store(), Secrets: stack.Secrets})
 	broken, err := down.Subscribe(ctx, id, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -555,26 +566,18 @@ func TestLive_historyHoldsNoSecretsOrToolResults(t *testing.T) {
 	t.Cleanup(func() { _ = broken.Close() })
 	for range broken.Events() {
 	}
-	if !errors.Is(broken.Err(), errStoreDown) {
-		t.Fatalf("subscription error = %v, want %v", broken.Err(), errStoreDown)
+	if broken.Err() == nil || !strings.Contains(broken.Err().Error(), "closed pool") {
+		t.Fatalf("subscription error = %v, want the closed pool's", broken.Err())
 	}
-}
-
-// downStore is a session.Store that cannot read call bodies.
-type downStore struct{ session.Store }
-
-var errStoreDown = errors.New("session store down")
-
-func (downStore) Calls(context.Context, session.ID, []string) (map[string][]byte, error) {
-	return nil, errStoreDown
 }
 
 // TestLive_theHostAPIServesSessionsAndTheirJobs: CreateSession rejects a
 // specialist and a worker together, an empty state key, and state JSON
-// cannot hold; Prompt and Resume reject such state too. A
-// session's head follows its stream, and Jobs lists its running specialist
-// and worker with their kinds. An unknown session, or one this runtime
-// closed, has no status.
+// cannot hold; Prompt and Resume reject such state too. A session's head
+// follows its stream, and Jobs lists its running specialist and worker
+// with their kinds. An unknown session has no status or jobs. Close
+// deletes the session's secrets and record, and after it the session has
+// no status or jobs and takes no prompt.
 func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
 	ctx := t.Context()
 	release, let := releaseLater(t)
@@ -635,6 +638,10 @@ func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, closed := rt.Status(ctx, id)
+	_, closedJobs := rt.Jobs(ctx, id)
+	closedPrompt := rt.Prompt(ctx, id, session.Prompt{Text: "again"})
+	kept, keptErr := stack.Secrets.Get(ctx, id)
+	_, _, record := stack.Store.Load(ctx, id)
 
 	for name, err := range map[string]error{"specialist and worker": both, "an empty state key": emptyKey, "unencodable state": unencodable, "a prompt's unencodable state": badPrompt, "a resume's unencodable state": badResume} {
 		if !errors.Is(err, session.ErrInvalid) {
@@ -648,25 +655,41 @@ func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
 	if headErr != nil || head == 0 || jobsErr != nil || !kinds[session.KindSpecialist] || !kinds[session.KindWorker] {
 		t.Fatalf("head %d %v, jobs %+v %v; want the stream's offset and both running jobs with their kinds", head, headErr, jobs, jobsErr)
 	}
-	for name, err := range map[string]error{"jobs of an unknown session": noJobs, "status of an unknown session": noStatus, "status of a closed session": closed} {
+	for name, err := range map[string]error{"jobs of an unknown session": noJobs, "status of an unknown session": noStatus,
+		"status of a closed session": closed, "jobs of a closed session": closedJobs, "a prompt to a closed session": closedPrompt, "the record of a closed session": record} {
 		if !errors.Is(err, session.ErrNotFound) {
 			t.Errorf("%s = %v, want ErrNotFound", name, err)
 		}
 	}
+	if keptErr != nil || len(kept.Auth.Bindings) != 0 {
+		t.Errorf("secrets of a closed session = %+v %v, want an empty bag", kept, keptErr)
+	}
+}
+
+// unreachable is a real Temporal client for a server that is not there.
+func unreachable(t *testing.T) client.Client {
+	t.Helper()
+	c, err := client.NewLazyClient(client.Options{HostPort: "127.0.0.1:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close)
+	return c
 }
 
 // TestNew_needsAClientAStoreAndSecrets: New panics without any of them.
 func TestNew_needsAClientAStoreAndSecrets(t *testing.T) {
-	store, secrets := session.NewMemoryStore(), session.NewMemorySecretStorage()
-	stub := &struct{ client.Client }{}
+	// Arrange
+	c, store, secrets := unreachable(t), session.NewMemoryStore(), session.NewMemorySecretStorage()
 	for name, tc := range map[string]struct {
 		c   client.Client
 		cfg Config
 	}{
 		"no client":  {nil, Config{Store: store, Secrets: secrets}},
-		"no store":   {stub, Config{Secrets: secrets}},
-		"no secrets": {stub, Config{Store: store}},
+		"no store":   {c, Config{Secrets: secrets}},
+		"no secrets": {c, Config{Store: store}},
 	} {
+		// Act and assert
 		t.Run(name, func(t *testing.T) { mustPanic(t, func() { New(tc.c, tc.cfg) }) })
 	}
 }
@@ -674,17 +697,17 @@ func TestNew_needsAClientAStoreAndSecrets(t *testing.T) {
 // TestWorker_aWorkerForAnUnreachableServerFailsToStart: Start and Run
 // report that the server is not there.
 func TestWorker_aWorkerForAnUnreachableServerFailsToStart(t *testing.T) {
-	c, err := client.NewLazyClient(client.Options{HostPort: "127.0.0.1:1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(c.Close)
-	w := New(c, Config{
+	// Arrange
+	w := New(unreachable(t), Config{
 		Agent: tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192}, TaskQueue: "unreachable",
 		Store: session.NewMemoryStore(), Secrets: session.NewMemorySecretStorage(),
 	})
+
+	// Act
 	startErr := w.Start()
 	runErr := w.Run(nil)
+
+	// Assert
 	if startErr == nil || runErr == nil {
 		t.Fatalf("Start = %v, Run = %v; want both to fail", startErr, runErr)
 	}
@@ -737,16 +760,10 @@ func querySession(t *testing.T, env *testsuite.TestWorkflowEnvironment) session.
 	return st
 }
 
-type retryLog struct {
-	session.EventLog
-	retry []session.Event
-}
-
-func (l *retryLog) Append(ctx context.Context, id session.ID, topic string, ev session.Event) error {
-	if topic == session.TopicRetry {
-		l.retry = append(l.retry, ev)
-	}
-	return l.EventLog.Append(ctx, id, topic, ev)
+// sameEvent reports whether two events have the same type, content and
+// delta flag.
+func sameEvent(a, b session.Event) bool {
+	return a.Type == b.Type && a.Content == b.Content && a.Delta == b.Delta
 }
 
 func newActs(agent tacklr.AgentOptions, log session.EventLog, disableStreams bool) *activities {

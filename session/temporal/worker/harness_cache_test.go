@@ -7,60 +7,45 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/message"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/pgtest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
+	"github.com/ryanaldo34/tacklr/session/postgres"
 	"github.com/ryanaldo34/tacklr/vfs/fuse"
 )
 
-// failingStore is a session.Store whose named operations fail. unreadable
-// returns a checkpoint that does not decode.
-type failingStore struct {
-	*session.MemoryStore
-	revision, load, save, put, calls error
-	unreadable                       bool
+// postgresDB is the session tables in a schema of their own, in the shared
+// Postgres container.
+func postgresDB(t *testing.T) (*postgres.DB, *pgxpool.Pool, string) {
+	t.Helper()
+	pool, err := pgxpool.New(t.Context(), pgtest.Conn(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	schema := pgtest.Schema(t)
+	db, err := postgres.New(pool, postgres.Options{Schema: schema})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Setup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	return db, pool, schema
 }
 
-func (s *failingStore) PutCall(ctx context.Context, id session.ID, key string, body []byte) error {
-	if s.put != nil {
-		return s.put
+// dropTable drops one of the session tables, so the database fails each
+// query of that table.
+func dropTable(t *testing.T, pool *pgxpool.Pool, schema, table string) {
+	t.Helper()
+	if _, err := pool.Exec(t.Context(), "DROP TABLE "+schema+"."+table); err != nil {
+		t.Fatal(err)
 	}
-	return s.MemoryStore.PutCall(ctx, id, key, body)
-}
-
-func (s *failingStore) Calls(ctx context.Context, id session.ID, keys []string) (map[string][]byte, error) {
-	if s.calls != nil {
-		return nil, s.calls
-	}
-	return s.MemoryStore.Calls(ctx, id, keys)
-}
-
-func (s *failingStore) Revision(ctx context.Context, id session.ID) (session.Revision, error) {
-	if s.revision != nil {
-		return "", s.revision
-	}
-	return s.MemoryStore.Revision(ctx, id)
-}
-
-func (s *failingStore) Load(ctx context.Context, id session.ID) ([]session.CheckpointEntry, session.Revision, error) {
-	if s.load != nil {
-		return nil, "", s.load
-	}
-	cp, rev, err := s.MemoryStore.Load(ctx, id)
-	if s.unreadable {
-		cp = nil
-	}
-	return cp, rev, err
-}
-
-func (s *failingStore) Save(ctx context.Context, id session.ID, cp []session.CheckpointChange, expected session.Revision) (session.Revision, error) {
-	if s.save != nil {
-		return "", s.save
-	}
-	return s.MemoryStore.Save(ctx, id, cp, expected)
 }
 
 // testHarness is session id's harness, built by a plain harness; builds counts
@@ -88,8 +73,12 @@ func events() chan session.Event {
 	return out
 }
 
-// Each failure fails its step.
+// TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes: a harness that cannot
+// be built, a run that fails, a call body that is gone at commit, and each
+// store query the database fails, fail their step.
 func TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes(t *testing.T) {
+	// Arrange
+	type step = func(*harnessCache, session.Store, harnessSpec) error
 	boom := errors.New("boom")
 	read := func(ws *harnessCache, store session.Store, w harnessSpec) error {
 		return ws.Read(t.Context(), store, w, func(*tacklr.Harness) error { return nil })
@@ -99,7 +88,7 @@ func TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes(t *testing.T) {
 		return err
 	}
 	call := message.ToolCall{ID: "c", CallID: "c", Name: "nope"}
-	runCall := func(c tacklr.Call) func(*harnessCache, session.Store, harnessSpec) error {
+	runCall := func(c tacklr.Call) step {
 		return func(ws *harnessCache, store session.Store, w harnessSpec) error {
 			return ws.Read(t.Context(), store, w, func(h *tacklr.Harness) error {
 				_, err := adapter.RunCall(t.Context(), store, w.ID, h, c, events())
@@ -113,65 +102,93 @@ func TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes(t *testing.T) {
 		_, err := ws.Commit(t.Context(), store, w, "", tacklr.CommitIn{Round: round}, events())
 		return err
 	}
-	for name, tc := range map[string]struct {
-		store *failingStore
-		saved bool
-		build error
-		step  func(*harnessCache, session.Store, harnessSpec) error
-	}{
-		"a harness that cannot be built":             {store: &failingStore{}, build: boom, step: read},
-		"a revision the store cannot read":           {store: &failingStore{revision: boom}, step: read},
-		"a revision the store cannot read at commit": {store: &failingStore{revision: boom}, step: commit},
-		"a snapshot the store cannot load":           {store: &failingStore{load: boom}, saved: true, step: read},
-		"a snapshot that does not decode":            {store: &failingStore{unreadable: true}, saved: true, step: read},
-		"a call body the store cannot keep":          {store: &failingStore{put: boom}, step: runCall(tacklr.NewCall(call, 0))},
-		"a call body the store cannot read back":     {store: &failingStore{calls: boom}, step: runCall(ran)},
-		"a call body that is gone at commit":         {store: &failingStore{}, step: commitGone},
-		"a run that fails":                           {store: &failingStore{}, step: runCall(tacklr.Call{Tool: call, Answer: []byte(`{}`)})},
-	} {
-		t.Run(name, func(t *testing.T) {
-			tc.store.MemoryStore = session.NewMemoryStore()
-			var builds atomic.Int32
-			if tc.saved {
-				if _, err := newHarnessCache(time.Minute, 0).Commit(t.Context(), tc.store.MemoryStore, testHarness(t, "s", &builds), "", say("before"), events()); err != nil {
+	memory := func(*testing.T) session.Store { return session.NewMemoryStore() }
+	// without is a Postgres store whose database no longer has table; saved
+	// commits a first prompt before the table goes.
+	without := func(table string, saved bool) func(*testing.T) session.Store {
+		return func(t *testing.T) session.Store {
+			db, pool, schema := postgresDB(t)
+			store := db.Store()
+			if saved {
+				var builds atomic.Int32
+				if _, err := newHarnessCache(time.Minute, 0).Commit(t.Context(), store, testHarness(t, "s", &builds), "", say("before"), events()); err != nil {
 					t.Fatal(err)
 				}
 			}
+			dropTable(t, pool, schema, table)
+			return store
+		}
+	}
+	// unreadable holds a checkpoint without its version row.
+	unreadable := func(t *testing.T) session.Store {
+		store := session.NewMemoryStore()
+		if _, err := store.Save(t.Context(), "s", []session.CheckpointChange{{CheckpointEntry: session.CheckpointEntry{Kind: "state", Key: "k", Value: []byte(`"v"`)}}}, ""); err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+	for name, tc := range map[string]struct {
+		store func(*testing.T) session.Store
+		build error
+		steps []step
+	}{
+		"a harness that cannot be built":                 {store: memory, build: boom, steps: []step{read}},
+		"a run that fails":                               {store: memory, steps: []step{runCall(tacklr.Call{Tool: call, Answer: []byte(`{}`)})}},
+		"a call body that is gone at commit":             {store: memory, steps: []step{commitGone}},
+		"a snapshot that does not decode":                {store: unreadable, steps: []step{read}},
+		"a revision the store cannot read":               {store: without("session_checkpoints", false), steps: []step{read, commit}},
+		"a snapshot the store cannot load":               {store: without("session_checkpoint_rows", true), steps: []step{read}},
+		"a call body the store cannot keep or read back": {store: without("session_calls", false), steps: []step{runCall(tacklr.NewCall(call, 0)), runCall(ran)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := tc.store(t)
+			var builds atomic.Int32
 			w := testHarness(t, "s", &builds)
 			if tc.build != nil {
 				w.Build = func(context.Context) (*tacklr.Harness, *fuse.Server, error) { return nil, nil, tc.build }
 			}
 
-			err := tc.step(newHarnessCache(time.Minute, 0), tc.store, w)
-
-			if err == nil {
-				t.Fatal("step succeeded, want its failure")
+			// Act and assert
+			for n, step := range tc.steps {
+				if err := step(newHarnessCache(time.Minute, 0), store, w); err == nil {
+					t.Fatalf("step %d succeeded, want its failure", n)
+				}
 			}
 		})
 	}
 }
 
-// A Commit whose save fails may leave the harness ahead of the store, so the
-// next step builds a new harness.
+// TestHarnesses_aFailedCommitDropsItsHarness: a Commit whose save fails may
+// leave the harness ahead of the store, so the next step builds a new
+// harness, which commits.
 func TestHarnesses_aFailedCommitDropsItsHarness(t *testing.T) {
-	store := &failingStore{MemoryStore: session.NewMemoryStore(), save: errors.New("boom")}
+	// Arrange
+	db, pool, schema := postgresDB(t)
+	store := db.Store()
 	var builds atomic.Int32
 	w := testHarness(t, "s", &builds)
 	ws := newHarnessCache(time.Minute, 0)
+	dropTable(t, pool, schema, "session_checkpoint_rows")
 
+	// Act
 	_, failed := ws.Commit(t.Context(), store, w, "", say("hi"), events())
-	store.save = nil
+	if err := db.Setup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	_, err := ws.Commit(t.Context(), store, w, "", say("hi"), events())
 
+	// Assert
 	if failed == nil || err != nil || builds.Load() != 2 {
 		t.Fatalf("commits = %v then %v after %d builds, want a failure, then a new harness that commits", failed, err, builds.Load())
 	}
 }
 
-// A step the turn moved past (a cancelled tool that has not returned) still
-// reads the harness when another worker commits. The next step does not wait
-// for it: it builds a new harness at the new revision.
+// TestHarnesses_aStaleHarnessAStepStillHoldsIsReplaced: a step the turn
+// moved past (a cancelled tool that has not returned) still reads the
+// harness when another worker commits. The next step builds a new harness
+// at the new revision.
 func TestHarnesses_aStaleHarnessAStepStillHoldsIsReplaced(t *testing.T) {
+	// Arrange
 	store := session.NewMemoryStore()
 	var here, there atomic.Int32
 	w, other := testHarness(t, "s", &here), testHarness(t, "s", &there)
@@ -193,17 +210,21 @@ func TestHarnesses_aStaleHarnessAStepStillHoldsIsReplaced(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Act
 	err = ws.Read(t.Context(), store, w, func(*tacklr.Harness) error { return nil })
 	close(release)
 
+	// Assert
 	if err != nil || here.Load() != 2 {
 		t.Fatalf("read = %v after %d builds, want a new harness built at the new revision", err, here.Load())
 	}
 }
 
-// A worker at its harness limit closes the harness unused longest to build a
-// new one; the next step of that session builds it again.
+// TestHarnesses_pastItsLimitTheHarnessUnusedLongestCloses: a worker at its
+// harness limit closes the harness unused longest to build a new one. The
+// next step of that session builds it again.
 func TestHarnesses_pastItsLimitTheHarnessUnusedLongestCloses(t *testing.T) {
+	// Arrange
 	store := session.NewMemoryStore()
 	var aBuilds, bBuilds atomic.Int32
 	a, b := testHarness(t, "a", &aBuilds), testHarness(t, "b", &bBuilds)
@@ -212,8 +233,10 @@ func TestHarnesses_pastItsLimitTheHarnessUnusedLongestCloses(t *testing.T) {
 		return ws.Read(t.Context(), store, w, func(*tacklr.Harness) error { return nil })
 	}
 
+	// Act
 	err := errors.Join(read(a), read(b), read(b), read(a))
 
+	// Assert
 	if err != nil || aBuilds.Load() != 2 || bBuilds.Load() != 1 {
 		t.Fatalf("reads = %v with a built %d and b built %d times, want a closed for b and built again", err, aBuilds.Load(), bBuilds.Load())
 	}

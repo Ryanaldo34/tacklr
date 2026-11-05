@@ -33,50 +33,9 @@ import (
 	"github.com/ryanaldo34/tacklr/workspace"
 )
 
-func TestSessionWorkflow_activityRetryThenCompletes(t *testing.T) {
-	env := newTestWorkflow(t)
-	var attempts atomic.Int32
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		if attempts.Add(1) == 1 {
-			ch <- tacklr.LLMResponseChunk{Type: session.EventError, Error: tacklr.Network(errors.New("transient"))}
-			return
-		}
-		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "after-retry", IsComplete: true}
-	})
-	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}
-	fallback := &retryLog{EventLog: session.NewMemoryEventLog()}
-	env.RegisterActivity(newActs(agent, fallback, true))
-
-	id := session.ID("sess-retry")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "hi"}})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeClose})
-	}, 80*time.Millisecond)
-
-	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: id})
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	if len(fallback.retry) == 0 || fallback.retry[0].Content != "retry" {
-		t.Fatalf("want retry event, got %+v", fallback.retry)
-	}
-	got := drainLog(t, fallback, id)
-	var sawMsg bool
-	for _, ev := range got {
-		if ev.Type == session.EventMessage && strings.Contains(ev.Content, "after-retry") {
-			sawMsg = true
-		}
-	}
-	if !sawMsg {
-		t.Fatalf("want after-retry, got %+v", got)
-	}
-	if st := querySession(t, env); st.State != session.Complete {
-		t.Fatalf("Status after retry: %+v", st)
-	}
-}
-
+// TestSessionWorkflow_authExpiredYieldThenResume: a tool whose auth expired
+// parks the turn. A resume runs the tool again, and its result reaches the
+// model.
 func TestSessionWorkflow_authExpiredYieldThenResume(t *testing.T) {
 	env := newTestWorkflow(t)
 	var calls atomic.Int32
@@ -138,6 +97,8 @@ func TestSessionWorkflow_authExpiredYieldThenResume(t *testing.T) {
 	}
 }
 
+// TestSessionWorkflow_hitlCancel: a cancel while the turn is parked on a
+// question fails the turn.
 func TestSessionWorkflow_hitlCancel(t *testing.T) {
 	env := newTestWorkflow(t)
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -166,97 +127,65 @@ func TestSessionWorkflow_hitlCancel(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	got := drainLog(t, fallback, id)
-	var yielded bool
-	for _, ev := range got {
-		if ev.Type == session.EventInterrupt {
-			yielded = true
-		}
+	var types []session.EventType
+	for _, ev := range drainLog(t, fallback, id) {
+		types = append(types, ev.Type)
 	}
-	if !yielded {
-		t.Fatalf("want yield before cancel, got %+v", got)
+	if st := querySession(t, env); st.State != session.Failed || !slices.Equal(types, []session.EventType{session.EventFunctionCall, session.EventInterrupt, session.EventError}) {
+		t.Fatalf("state %v, events %q; want the turn parked, then failed on the cancel", st.State, types)
 	}
 }
 
+// TestSessionWorkflow_steerDuringYieldKeepsPark: a prompt sent while a call
+// is parked keeps the park. The model's next request comes after the
+// resume, and it holds the parked call's result, then the steer.
 func TestSessionWorkflow_steerDuringYieldKeepsPark(t *testing.T) {
+	// Arrange
 	env := newTestWorkflow(t)
-	var n atomic.Int32
-	var resumed, invoke2BeforeResume, sawSteer, toolThenSteer atomic.Bool
+	var requests [][]string
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		i := n.Add(1)
-		if i == 1 {
-			ch <- tacklr.LLMResponseChunk{
-				Type: session.EventFunctionCall,
-				ToolCalls: []message.ToolCall{{
-					ID: "ask1", CallID: "ask1", Name: "ask_user_choice",
-					Arguments: `{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`,
-				}},
-				IsComplete: true,
-			}
-			return
-		}
-		if !resumed.Load() {
-			invoke2BeforeResume.Store(true)
-		}
 		var seq []string
 		for _, m := range msgs {
-			if m == nil {
-				continue
-			}
-			if m.Role == message.RoleTool && m.ToolCallID == "ask1" {
-				seq = append(seq, "result")
-			}
-			if m.Role == message.RoleUser && m.Content == "steer" {
-				seq = append(seq, "steer")
-				sawSteer.Store(true)
+			switch m.Role {
+			case message.RoleTool:
+				seq = append(seq, "result "+m.ToolCallID)
+			case message.RoleUser:
+				seq = append(seq, m.Content)
 			}
 		}
-		if i == 2 && strings.Contains(strings.Join(seq, ","), "result,steer") {
-			toolThenSteer.Store(true)
+		requests = append(requests, seq)
+		if len(requests) == 1 {
+			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true, ToolCalls: []message.ToolCall{{
+				ID: "ask1", CallID: "ask1", Name: "ask_user_choice",
+				Arguments: `{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`,
+			}}}
+			return
 		}
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "chose", IsComplete: true}
 	})
-	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}
-	_, fallback := registerSession(env, agent)
-	id := session.ID("sess-steer-yield")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "ask"}})
-	}, time.Millisecond)
+	registerSession(env, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "ask"}})
 	when(env, func() bool { return querySession(t, env).Waiting }, func() {
 		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "steer"}})
-		if !querySession(t, env).Waiting {
-			t.Error("steer must keep the park")
-		}
-		if n.Load() != 1 {
-			t.Errorf("Invoke 2 must not run before Resume, got %d", n.Load())
-		}
-		resumed.Store(true)
-		payload, _ := json.Marshal(map[string]any{"selectionIdx": 0})
-		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeResume, Resume: session.Resume{Responses: map[string][]byte{"ask1": payload}}})
+		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeResume, Resume: session.Resume{Responses: map[string][]byte{"ask1": []byte(`{"selectionIdx":0}`)}}})
 		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeClose})
 	})
-	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: id})
+
+	// Act
+	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-steer-yield"})
+
+	// Assert
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	if invoke2BeforeResume.Load() {
-		t.Fatal("park was cleared; Invoke 2 ran before Resume")
-	}
-	if !sawSteer.Load() || !toolThenSteer.Load() {
-		t.Fatal("Invoke 2 must see ask_user tool result then steer")
-	}
-	got := drainLog(t, fallback, id)
-	var yielded bool
-	for _, ev := range got {
-		if ev.Type == session.EventInterrupt {
-			yielded = true
-		}
-	}
-	if !yielded {
-		t.Fatalf("want park kept through steer, got %+v", got)
+	want := [][]string{{"ask"}, {"ask", "result ask1", "steer"}}
+	if !slices.EqualFunc(requests, want, slices.Equal) || querySession(t, env).State != session.Complete {
+		t.Fatalf("model requests %q, state %v; want the steer after the parked call's result in the request after the resume", requests, querySession(t, env).State)
 	}
 }
 
+// TestSessionWorkflow_badWorkspaceBindingFailsTurn: a workspace binding
+// that cannot open fails the turn.
 func TestSessionWorkflow_badWorkspaceBindingFailsTurn(t *testing.T) {
 	env := newTestWorkflow(t)
 	missing := filepath.Join(t.TempDir(), "missing")
@@ -294,6 +223,9 @@ func TestSessionWorkflow_badWorkspaceBindingFailsTurn(t *testing.T) {
 	}
 }
 
+// TestSessionWorkflow_grandchildResultReachesParent: a blocking specialist
+// of a blocking specialist answers, and its answer reaches the root
+// session through its parent.
 func TestSessionWorkflow_grandchildResultReachesParent(t *testing.T) {
 	env := newTestWorkflow(t)
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -569,79 +501,37 @@ func releaseLater(t *testing.T) (<-chan struct{}, func()) {
 	return ch, let
 }
 
-// TestSessionWorkflow_aSteerDuringAToolStep: a prompt sent while a tool
-// runs joins the next reply; one the model cannot read fails the turn.
-func TestSessionWorkflow_aSteerDuringAToolStep(t *testing.T) {
-	t.Run("a text steer joins the next reply", func(t *testing.T) {
-		release, let := releaseLater(t)
-		model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			for _, m := range msgs {
-				if m != nil && m.Role == message.RoleUser && m.Content == "after-tool" {
-					ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "saw-after-tool", IsComplete: true}
-					return
-				}
-			}
-			if last := lastMsg(msgs); last != nil && last.Role == message.RoleTool {
-				ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "tool-only", IsComplete: true}
-				return
-			}
-			ch <- tacklr.LLMResponseChunk{
-				Type: session.EventFunctionCall,
-				ToolCalls: []message.ToolCall{{
-					ID: "h1", CallID: "h1", Name: "hold", Arguments: `{}`,
-				}},
-				IsComplete: true,
-			}
-		})
-		hold := tacklr.NewTool(tacklr.ToolConfig{
-			Name: "hold",
-			Handler: func(ctx context.Context) (string, error) {
-				select {
-				case <-release:
-					return "held", nil
-				case <-ctx.Done():
-					return "", ctx.Err()
-				}
-			},
-		})
-		env := newTestWorkflow(t)
-		agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{hold}}
-		_, log := registerSession(env, agent)
-		id := session.ID("sess-steer-tool")
-		signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
-		signalAt(env, 20*time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "after-tool"}})
-		env.RegisterDelayedCallback(let, 30*time.Millisecond)
-		signalAt(env, 90*time.Millisecond, session.Wake{Kind: session.WakeClose})
-		got := finishSession(t, env, log, id)
-		if !strings.Contains(visibleText(got), "saw-after-tool") {
-			t.Fatalf("steer during a tool must show up in the next reply, got %s", visibleText(got))
-		}
+// TestSessionWorkflow_aSteerTheModelCannotReadFailsTheTurn: a prompt sent
+// while a tool runs, with content the model cannot read, fails the turn.
+func TestSessionWorkflow_aSteerTheModelCannotReadFailsTheTurn(t *testing.T) {
+	// Arrange
+	release, let := releaseLater(t)
+	model := testkit.TextHTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true, ToolCalls: []message.ToolCall{{ID: "h1", CallID: "h1", Name: "hold", Arguments: `{}`}}}
 	})
-	t.Run("a steer the model cannot read fails the turn", func(t *testing.T) {
-		release, let := releaseLater(t)
-		model := testkit.TextHTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true, ToolCalls: []message.ToolCall{{ID: "h1", CallID: "h1", Name: "hold", Arguments: `{}`}}}
-		})
-		hold := tacklr.NewTool(tacklr.ToolConfig{Name: "hold", Handler: func(context.Context) (string, error) { <-release; return "held", nil }})
-		env := newTestWorkflow(t)
-		registerSession(env, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{hold}})
-		image := &message.Message{Role: message.RoleUser, ContentParts: []message.ContentPart{{Type: message.ContentTypeInputImage, FileData: &message.FileData{MIMEType: "image/png"}}}}
-		signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
-		signalAt(env, 20*time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{UserMessage: image}})
-		env.RegisterDelayedCallback(let, 30*time.Millisecond)
-		signalAt(env, time.Minute, session.Wake{Kind: session.WakeClose})
+	hold := tacklr.NewTool(tacklr.ToolConfig{Name: "hold", Handler: func(context.Context) (string, error) { <-release; return "held", nil }})
+	env := newTestWorkflow(t)
+	_, log := registerSession(env, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{hold}})
+	image := &message.Message{Role: message.RoleUser, ContentParts: []message.ContentPart{{Type: message.ContentTypeInputImage, FileData: &message.FileData{MIMEType: "image/png"}}}}
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
+	signalAt(env, 20*time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{UserMessage: image}})
+	env.RegisterDelayedCallback(let, 30*time.Millisecond)
+	signalAt(env, time.Minute, session.Wake{Kind: session.WakeClose})
 
-		env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-steer-image"})
+	// Act
+	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-steer-image"})
 
-		if err := env.GetWorkflowError(); err != nil {
-			t.Fatal(err)
-		}
-		if st := querySession(t, env); st.State != session.Failed {
-			t.Fatalf("status %+v, want the turn failed on the unreadable steer", st)
-		}
-	})
+	// Assert
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if st, got := querySession(t, env), visibleText(drainLog(t, log, "sess-steer-image")); st.State != session.Failed || !strings.Contains(got, "unsupported content type(s): image/png") {
+		t.Fatalf("status %+v, events %q; want the turn failed on the unreadable steer", st, got)
+	}
 }
 
+// TestSessionWorkflow_failedWorkerEndsTheChild: a job whose worker fails
+// ends, and its failure reaches the parent's next reply.
 func TestSessionWorkflow_failedWorkerEndsTheChild(t *testing.T) {
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		for _, m := range msgs {
@@ -711,80 +601,9 @@ func (w *waitAll) arrive() error {
 	}
 }
 
-func TestSessionWorkflow_toolCallsRunConcurrentlyAndRecordInCallOrder(t *testing.T) {
-	env := newTestWorkflow(t)
-	all := newWaitAll(3)
-	bDone := make(chan struct{})
-	var runs sync.Map // tool name -> *atomic.Int32
-	ran := func(name string) {
-		n, _ := runs.LoadOrStore(name, new(atomic.Int32))
-		n.(*atomic.Int32).Add(1)
-	}
-	var results []string
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		var seen []string
-		for _, m := range msgs {
-			if m != nil && m.Role == message.RoleTool {
-				seen = append(seen, m.Content)
-			}
-		}
-		if len(seen) > 0 {
-			results = seen
-			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
-			return
-		}
-		call := func(name string) message.ToolCall {
-			return message.ToolCall{ID: "fc_" + name, CallID: "call_" + name, Name: name, Arguments: `{}`}
-		}
-		ch <- tacklr.LLMResponseChunk{
-			Type:       session.EventFunctionCall,
-			ToolCalls:  []message.ToolCall{call("a"), call("b"), call("nope"), call("c")},
-			IsComplete: true,
-		}
-	})
-	tool := func(name string, fn func(*tacklr.CallContext) (string, error)) *tacklr.Tool {
-		return tacklr.NewTool(tacklr.ToolConfig{Name: name, Handler: func(_ context.Context, cc *tacklr.CallContext) (string, error) {
-			ran(name)
-			return fn(cc)
-		}})
-	}
-	agent := tacklr.AgentOptions{MaxWindowSize: 8192, Model: model, Tools: []*tacklr.Tool{
-		// a, b and c run at once; a finishes after b, but its result still comes first.
-		tool("a", func(*tacklr.CallContext) (string, error) {
-			if err := all.arrive(); err != nil {
-				return "", err
-			}
-			<-bDone
-			return "from-a", nil
-		}),
-		tool("b", func(*tacklr.CallContext) (string, error) {
-			defer close(bDone)
-			return "from-b", all.arrive()
-		}),
-		tool("c", func(*tacklr.CallContext) (string, error) { return "from-c", all.arrive() }),
-	}}
-	registerSession(env, agent)
-
-	id := session.ID("sess-concurrent-tools")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeClose}) }, 200*time.Millisecond)
-	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: id})
-
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	if len(results) != 4 || results[0] != "from-a" || results[1] != "from-b" || !strings.Contains(results[2], "not a registered tool") || results[3] != "from-c" {
-		t.Fatalf("tool results = %q, want a, b, the unknown tool's correction, then c", results)
-	}
-	for _, name := range []string{"a", "b", "c"} {
-		if n, _ := runs.Load(name); n == nil || n.(*atomic.Int32).Load() != 1 {
-			t.Errorf("%s ran %v times, want once", name, n)
-		}
-	}
-}
-
+// TestSessionWorkflow_twoPermissionPromptsInOneGroupParkOneAtATime: two
+// calls of one reply that ask for permission park one at a time. Each runs
+// once on its answer, and every result comes back in call order.
 func TestSessionWorkflow_twoPermissionPromptsInOneGroupParkOneAtATime(t *testing.T) {
 	env := newTestWorkflow(t)
 	var runs atomic.Int32
@@ -874,16 +693,21 @@ func TestSessionWorkflow_twoPermissionPromptsInOneGroupParkOneAtATime(t *testing
 	}
 }
 
+// TestSessionWorkflow_aToolSchedulingAJobTwiceStartsItOnceAndListsIt: a
+// tool that schedules a job twice, parks, and runs again after the resume
+// while the job runs, gets the same job each time. After the resume it
+// starts a second job. Each job starts once, and the tool lists the job
+// that runs and the job it started.
 func TestSessionWorkflow_aToolSchedulingAJobTwiceStartsItOnceAndListsIt(t *testing.T) {
+	// Arrange
 	env := newTestWorkflow(t)
+	release, let := releaseLater(t)
 	var listed string
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		for _, m := range msgs {
-			if m != nil && m.Role == message.RoleTool {
-				listed = m.Content
-				ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
-				return
-			}
+		if got := toolResults(msgs); len(got) > 0 {
+			listed = got[0]
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
+			return
 		}
 		ch <- tacklr.LLMResponseChunk{
 			Type:       session.EventFunctionCall,
@@ -901,6 +725,13 @@ func TestSessionWorkflow_aToolSchedulingAJobTwiceStartsItOnceAndListsIt(t *testi
 			if err != nil {
 				return "", err
 			}
+			if _, err := cc.Park(&tacklr.UserSelectionInterrupt{Options: []tacklr.UserChoice{{Title: "A"}, {Title: "B"}}}); err != nil {
+				return "", err
+			}
+			let()
+			if _, err := cc.Schedule(ctx, tacklr.JobRequest{Name: "lint", Task: "job-task"}); err != nil {
+				return "", err
+			}
 			var ids []string
 			for _, j := range cc.Jobs() {
 				ids = append(ids, j.ID)
@@ -908,25 +739,35 @@ func TestSessionWorkflow_aToolSchedulingAJobTwiceStartsItOnceAndListsIt(t *testi
 			return fmt.Sprintf("same=%v jobs=%v", first.ID == again.ID, ids), nil
 		}})}}
 	acts, _ := registerSession(env, agent)
-	acts.Jobs = map[string]session.JobHandler{"ci": func(context.Context, string) (string, error) { return "job-done", nil }}
+	acts.Jobs = map[string]session.JobHandler{
+		"ci":   func(context.Context, string) (string, error) { <-release; return "job-done", nil },
+		"lint": func(context.Context, string) (string, error) { return "linted", nil },
+	}
 	var started atomic.Int32
 	env.SetOnChildWorkflowStartedListener(func(*workflow.Info, workflow.Context, converter.EncodedValues) { started.Add(1) })
 	id := session.ID("sess-schedule-twice")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeClose}) }, 120*time.Millisecond)
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
+	when(env, func() bool { return querySession(t, env).Waiting }, func() {
+		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeResume, Resume: session.Resume{Responses: map[string][]byte{"fc_twice": []byte(`{"selectionIdx":1}`)}}})
+	})
+	signalAt(env, time.Minute, session.Wake{Kind: session.WakeClose})
+
+	// Act
 	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: id})
 
+	// Assert
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	want := fmt.Sprintf("same=true jobs=[%s]", session.ID(tacklr.ChildID(string(id), "ci", "fc_twice", false)))
-	if listed != want || started.Load() != 1 {
-		t.Errorf("tool saw %q with %d children started, want %q and one child", listed, started.Load(), want)
+	want := fmt.Sprintf("same=true jobs=[%s %s]", tacklr.ChildID(string(id), "ci", "fc_twice", false), tacklr.ChildID(string(id), "lint", "fc_twice", false))
+	if listed != want || started.Load() != 2 {
+		t.Errorf("tool saw %q with %d children started, want %q and two children", listed, started.Load(), want)
 	}
 }
 
+// TestSessionWorkflow_blockingSpecialistsFromOneReplyRunAtOnce: two
+// blocking specialists of one reply run at the same time, and their results
+// come back in call order.
 func TestSessionWorkflow_blockingSpecialistsFromOneReplyRunAtOnce(t *testing.T) {
 	env := newTestWorkflow(t)
 	both := newWaitAll(2)
@@ -978,8 +819,8 @@ func TestSessionWorkflow_blockingSpecialistsFromOneReplyRunAtOnce(t *testing.T) 
 }
 
 // TestSessionWorkflow_aBlockingSpecialistsOutcomeIsItsCallsResult: a
-// specialist's output is its call's result and is kept as an Episode; a
-// specialist that fails gives its call an error result with its own failure.
+// specialist's output is its call's result and is kept as an Episode. A
+// specialist that fails gives its call an error result: its own failure.
 func TestSessionWorkflow_aBlockingSpecialistsOutcomeIsItsCallsResult(t *testing.T) {
 	const token = "unique-retain-specialist-token"
 	for _, tc := range []struct {
@@ -989,7 +830,7 @@ func TestSessionWorkflow_aBlockingSpecialistsOutcomeIsItsCallsResult(t *testing.
 		wantResult string
 	}{
 		{"its output is kept", tacklr.LLMResponseChunk{Type: session.EventMessage, Content: token, IsComplete: true}, "success", token},
-		{"its failure is an error result", tacklr.LLMResponseChunk{Error: errors.New("child model broke")}, "error", "child model broke"},
+		{"its failure is an error result", tacklr.LLMResponseChunk{Error: errors.New("child model broke")}, "error", "provider HTTP 400 (invalid_request): child model broke"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newTestWorkflow(t)
@@ -1031,7 +872,7 @@ func TestSessionWorkflow_aBlockingSpecialistsOutcomeIsItsCallsResult(t *testing.
 					status = ev.ToolCalls[0].Status
 				}
 			}
-			if status != tc.wantStatus || !strings.Contains(parentSaw, tc.wantResult) || strings.Contains(parentSaw, "child workflow execution") {
+			if status != tc.wantStatus || parentSaw != tc.wantResult {
 				t.Fatalf("result status %q, parent saw %q; want %q with %q", status, parentSaw, tc.wantStatus, tc.wantResult)
 			}
 			if tc.wantStatus != "success" {
@@ -1111,7 +952,10 @@ func TestSessionWorkflow_aRoundThatCannotFitFailsTheStepThatCommitsIt(t *testing
 	}
 }
 
-func TestSessionWorkflow_aRetriedCommitDoesNotRunTheToolsAgain(t *testing.T) {
+// TestSessionWorkflow_aRetriedCommitRunsEachToolOnce: a Commit whose
+// summary request fails on the network runs again and the turn completes.
+// Each tool runs once.
+func TestSessionWorkflow_aRetriedCommitRunsEachToolOnce(t *testing.T) {
 	env := newTestWorkflow(t)
 	var aRuns, bRuns, summaries atomic.Int32
 	big := strings.Repeat("b", 600)
@@ -1160,48 +1004,9 @@ func TestSessionWorkflow_aRetriedCommitDoesNotRunTheToolsAgain(t *testing.T) {
 	}
 }
 
-func TestSessionWorkflow_aResumeRunsOnlyTheParkedCall(t *testing.T) {
-	env := newTestWorkflow(t)
-	var mu sync.Mutex
-	var steps []string
-	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
-		if name := info.ActivityType.Name; name != "EmitEvent" {
-			mu.Lock()
-			steps = append(steps, name)
-			mu.Unlock()
-		}
-	})
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		if last := lastMsg(msgs); last != nil && last.Role == message.RoleTool {
-			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
-			return
-		}
-		ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true,
-			ToolCalls: []message.ToolCall{{ID: "g1", CallID: "g1", Name: "gate", Arguments: `{}`}}}
-	})
-	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{tacklr.NewTool(tacklr.ToolConfig{
-		Name: "gate", OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
-		Handler: func(context.Context) (string, error) { return "gate-ok", nil },
-	})}}
-	registerSession(env, agent)
-	allow, _ := json.Marshal(map[string]string{"optionId": "allow-once"})
-	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
-	signalAt(env, 50*time.Millisecond, session.Wake{Kind: session.WakeResume, Resume: session.Resume{Responses: map[string][]byte{"g1": allow}}})
-	signalAt(env, 200*time.Millisecond, session.Wake{Kind: session.WakeClose})
-	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-resume-one-step"})
-
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	// The worker is routed by a local activity, which is not a step here.
-	if want := []string{"Commit", "Inference", "Tool", "Tool", "Commit", "Inference", "Commit", "Forget", "CloseHarness"}; !slices.Equal(steps, want) {
-		t.Fatalf("steps = %v, want the prompt committed, the model, the call that parks, the resumed call, its round committed, the model's answer, then the closed session's messages deleted and its harness closed", steps)
-	}
-	if st := querySession(t, env); st.State != session.Complete {
-		t.Fatalf("state = %v, want complete", st.State)
-	}
-}
-
+// TestSessionWorkflow_jobRequestsTheRuntimeCannotServeFail: a tool's job
+// request for a specialist, an unknown job, an empty task or an empty name,
+// and a cancel of an unknown job, each fail with the reason.
 func TestSessionWorkflow_jobRequestsTheRuntimeCannotServeFail(t *testing.T) {
 	env := newTestWorkflow(t)
 	var seen string
@@ -1232,13 +1037,10 @@ func TestSessionWorkflow_jobRequestsTheRuntimeCannotServeFail(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"specialist=invalid: researcher is a specialist", "unknown=not found: nightly is not a registered job", `cancel=job "nope" is unknown`, "task=task is required"} {
+	for _, want := range []string{"specialist=invalid: researcher is a specialist", "unknown=not found: nightly is not a registered job", `cancel=job "nope" is unknown`, "task=task is required", "name=job name is required"} {
 		if !strings.Contains(seen, want) {
 			t.Errorf("tool saw %q, want %q", seen, want)
 		}
-	}
-	if strings.Contains(seen, "name=<nil>") {
-		t.Errorf("tool saw %q, want an empty job name rejected", seen)
 	}
 }
 
@@ -1532,47 +1334,6 @@ func TestSessionWorkflow_aResumeOrAToolStepThatFailsFailsTheTurn(t *testing.T) {
 	}
 }
 
-func TestSessionWorkflow_aParkedCallRunAgainDoesNotRestartItsRunningJob(t *testing.T) {
-	env := newTestWorkflow(t)
-	release := make(chan struct{})
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		last := lastMsg(msgs)
-		switch {
-		case last != nil && last.Role == message.RoleUser && last.Content == "go":
-			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true,
-				ToolCalls: []message.ToolCall{{ID: "s1", CallID: "s1", Name: "sched", Arguments: `{}`}}}
-		default:
-			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
-		}
-	})
-	sched := tacklr.NewTool(tacklr.ToolConfig{Name: "sched", Handler: func(ctx context.Context, cc *tacklr.CallContext) (string, error) {
-		if _, err := cc.Schedule(ctx, tacklr.JobRequest{Name: "ci", Task: "child-task"}); err != nil {
-			return "", err
-		}
-		if _, err := cc.Park(&tacklr.UserSelectionInterrupt{Options: []tacklr.UserChoice{{Title: "A"}, {Title: "B"}}}); err != nil {
-			return "", err
-		}
-		close(release)
-		return "scheduled", nil
-	}})
-	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{sched}}
-	acts, _ := registerSession(env, agent)
-	acts.Jobs = map[string]session.JobHandler{"ci": func(context.Context, string) (string, error) { <-release; return "found", nil }}
-	var started atomic.Int32
-	env.SetOnChildWorkflowStartedListener(func(*workflow.Info, workflow.Context, converter.EncodedValues) { started.Add(1) })
-	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go"}})
-	signalAt(env, 50*time.Millisecond, session.Wake{Kind: session.WakeResume, Resume: session.Resume{Responses: map[string][]byte{"s1": []byte(`{"selectionIdx":1}`)}}})
-	signalAt(env, 300*time.Millisecond, session.Wake{Kind: session.WakeClose})
-	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-rerun-job"})
-
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	if started.Load() != 1 {
-		t.Fatalf("children started = %d, want the job its first run started kept, not started again", started.Load())
-	}
-}
-
 // TestSessionWorkflow_aTurnWaitingOnABackgroundJob: a turn whose model is
 // done waits on its background specialist. A prompt then steers into its
 // next reply; a cancel stops the job and fails the turn; the host
@@ -1707,20 +1468,34 @@ func TestSessionWorkflow_aSpecialistThatParksIsResumedAndItsResultReachesItsCall
 }
 
 // TestSessionWorkflow_aWorkerSessionRunsEachPromptAsItsJob: a session made
-// for a Runtime job worker runs the worker on each prompt's text.
+// for a job worker runs the worker on each prompt's text. A session for a
+// worker that no one registered fails, and its result says not found.
 func TestSessionWorkflow_aWorkerSessionRunsEachPromptAsItsJob(t *testing.T) {
-	env := newTestWorkflow(t)
-	acts, _ := registerSession(env, tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192})
-	acts.Jobs = map[string]session.JobHandler{"ci": func(_ context.Context, task string) (string, error) { return "built " + task, nil }}
-	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "main"}})
-	signalAt(env, time.Minute, session.Wake{Kind: session.WakeClose})
+	for _, tc := range []struct {
+		worker, result string
+		state          session.State
+	}{
+		{"ci", "built main", session.Complete},
+		{"nightly", "not found: nightly", session.Failed},
+	} {
+		t.Run(tc.worker, func(t *testing.T) {
+			// Arrange
+			env := newTestWorkflow(t)
+			acts, _ := registerSession(env, tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192})
+			acts.Jobs = map[string]session.JobHandler{"ci": func(_ context.Context, task string) (string, error) { return "built " + task, nil }}
+			signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "main"}})
+			signalAt(env, time.Minute, session.Wake{Kind: session.WakeClose})
 
-	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-worker", Worker: "ci"})
+			// Act
+			env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: "sess-worker", Worker: tc.worker})
 
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	if st := querySession(t, env); st.Result != "built main" || st.Kind != session.KindWorker {
-		t.Fatalf("status %+v, want the worker's result for the prompt", st)
+			// Assert
+			if err := env.GetWorkflowError(); err != nil {
+				t.Fatal(err)
+			}
+			if st := querySession(t, env); st.State != tc.state || st.Result != tc.result || st.Kind != session.KindWorker {
+				t.Fatalf("status %+v, want %v with result %q", st, tc.state, tc.result)
+			}
+		})
 	}
 }

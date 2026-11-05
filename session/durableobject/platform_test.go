@@ -7,6 +7,9 @@ import (
 	"github.com/ryanaldo34/tacklr/session/storetest"
 )
 
+// TestStores_meetTheSessionStoreContracts: the snapshot, secret and event
+// stores an object keeps over its storage meet the contract every session
+// store must meet.
 func TestStores_meetTheSessionStoreContracts(t *testing.T) {
 	sealer, err := session.NewAESGCM(make([]byte, 32))
 	if err != nil {

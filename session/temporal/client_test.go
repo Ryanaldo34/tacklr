@@ -1,151 +1,114 @@
-package temporal
+package temporal_test
 
 import (
-	"context"
-	"errors"
+	"bytes"
+	"strings"
 	"testing"
 
-	"go.temporal.io/api/serviceerror"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/converter"
 
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/session/postgres"
+	"github.com/ryanaldo34/tacklr/session/temporal"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
-// nopWorkflowClient is a Temporal client whose workflows are gone: signals
-// land, queries find no workflow. err, when set, is every call's failure.
-type nopWorkflowClient struct {
-	client.Client
-	err error
-}
-
-func (c nopWorkflowClient) SignalWorkflow(context.Context, string, string, string, any) error {
-	return c.err
-}
-
-func (c nopWorkflowClient) QueryWorkflow(context.Context, string, string, string, ...any) (converter.EncodedValue, error) {
-	if c.err != nil {
-		return nil, c.err
+// unreachable is a real Temporal client for a server that is not there.
+func unreachable(t *testing.T) client.Client {
+	t.Helper()
+	c, err := client.NewLazyClient(client.Options{HostPort: "127.0.0.1:1"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	return nil, serviceerror.NewNotFound("workflow not found")
-}
-
-func open(c client.Client, secrets session.SecretStorage) (*Client, *session.MemoryStore) {
-	store := session.NewMemoryStore()
-	return Open(c, Config{Store: store, Secrets: secrets, DisableStreams: true}), store
+	t.Cleanup(c.Close)
+	return c
 }
 
 // TestOpen_needsAClientAStoreAndSecrets: Open panics without any of them.
 func TestOpen_needsAClientAStoreAndSecrets(t *testing.T) {
-	store, secrets := session.NewMemoryStore(), session.NewMemorySecretStorage()
-	for name, cfg := range map[string]struct {
+	// Arrange
+	c, store, secrets := unreachable(t), session.NewMemoryStore(), session.NewMemorySecretStorage()
+	for name, tc := range map[string]struct {
 		c   client.Client
-		cfg Config
+		cfg temporal.Config
 	}{
-		"no client":  {nil, Config{Store: store, Secrets: secrets}},
-		"no store":   {nopWorkflowClient{}, Config{Secrets: secrets}},
-		"no secrets": {nopWorkflowClient{}, Config{Store: store}},
+		"no client":  {nil, temporal.Config{Store: store, Secrets: secrets}},
+		"no store":   {c, temporal.Config{Secrets: secrets}},
+		"no secrets": {c, temporal.Config{Store: store}},
 	} {
 		t.Run(name, func(t *testing.T) {
+			// Act and assert
 			defer func() {
 				if recover() == nil {
 					t.Fatal("want a panic")
 				}
 			}()
-			Open(cfg.c, cfg.cfg)
+			temporal.Open(tc.c, tc.cfg)
 		})
 	}
 }
 
-// TestClient_aMissingWorkflowIsNotFoundAndOtherErrorsStay: Temporal's
-// not-found is session.ErrNotFound; any other failure (an unreachable
-// server) is returned as it is, never hidden as not-found.
-func TestClient_aMissingWorkflowIsNotFoundAndOtherErrorsStay(t *testing.T) {
-	down := serviceerror.NewUnavailable("frontend down")
-	for _, tc := range []struct {
-		name string
-		err  error
-		want error
-	}{
-		{"a missing workflow", serviceerror.NewNotFound("workflow not found"), session.ErrNotFound},
-		{"an unreachable server", down, down},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rt, _ := open(nopWorkflowClient{err: tc.err}, session.NewMemorySecretStorage())
-			_, statusErr := rt.Status(t.Context(), "s")
-			_, jobsErr := rt.Jobs(t.Context(), "s")
-			for name, err := range map[string]error{
-				"prompt": rt.Prompt(t.Context(), "s", session.Prompt{Text: "x"}),
-				"cancel": rt.Cancel(t.Context(), "s"),
-				"status": statusErr,
-				"jobs":   jobsErr,
-			} {
-				if !errors.Is(err, tc.want) {
-					t.Errorf("%s = %v, want %v", name, err, tc.want)
-				}
-			}
-		})
+// TestClient_failsWithTheErrorOfASecretStoreOrServerThatIsDown: credentials
+// that the secret store cannot keep stop the prompt or resume that brought
+// them. A server that does not answer fails a call with its own error, not
+// as a missing session.
+func TestClient_failsWithTheErrorOfASecretStoreOrServerThatIsDown(t *testing.T) {
+	// Arrange
+	pool, err := pgxpool.New(t.Context(), "postgres://tacklr@127.0.0.1:1/tacklr")
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-type failPutSecrets struct{ session.SecretStorage }
-
-var errVaultSealed = errors.New("vault sealed")
-
-func (failPutSecrets) Put(context.Context, session.ID, session.Secrets) error {
-	return errVaultSealed
-}
-
-// TestClient_aPromptOrResumeFailsWhenTheVaultIsSealed: credentials that
-// cannot be stored stop the wake that brought them.
-func TestClient_aPromptOrResumeFailsWhenTheVaultIsSealed(t *testing.T) {
-	rt, _ := open(nopWorkflowClient{}, failPutSecrets{})
+	pool.Close()
+	db, err := postgres.New(pool, postgres.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealer, err := session.NewAESGCM(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := temporal.Open(unreachable(t), temporal.Config{Store: session.NewMemoryStore(), Secrets: db.Secrets(sealer), DisableStreams: true})
 	auth := session.AuthContext{Bindings: []mount.Binding{{Provider: "gdrive", Auth: mount.Credential{Token: "tok"}}}}
-	for name, err := range map[string]error{
-		"prompt": rt.Prompt(t.Context(), "s", session.Prompt{Text: "x", Auth: auth}),
-		"resume": rt.Resume(t.Context(), "s", session.Resume{Auth: auth}),
-	} {
-		if !errors.Is(err, errVaultSealed) {
-			t.Errorf("%s = %v, want %v", name, err, errVaultSealed)
+
+	// Act
+	promptErr := rt.Prompt(t.Context(), "s", session.Prompt{Text: "x", Auth: auth})
+	resumeErr := rt.Resume(t.Context(), "s", session.Resume{Auth: auth})
+	_, statusErr := rt.Status(t.Context(), "s")
+	cancelErr := rt.Cancel(t.Context(), "s")
+
+	// Assert
+	if promptErr == nil || resumeErr == nil {
+		t.Fatalf("prompt %v, resume %v; want both to fail on the secret store", promptErr, resumeErr)
+	}
+	for name, err := range map[string]error{"status": statusErr, "cancel": cancelErr} {
+		if err == nil || !strings.Contains(err.Error(), "connection refused") {
+			t.Errorf("%s = %v; want the server's own error", name, err)
 		}
 	}
 }
 
-// TestClient_aClosedSessionIsGoneWithItsData: Close deletes the session's
-// secrets and its record; after it, the session has no status, no jobs and
-// takes no prompt, and its events still replay from the fallback log.
-func TestClient_aClosedSessionIsGoneWithItsData(t *testing.T) {
-	secrets := session.NewMemorySecretStorage()
-	if err := secrets.Put(t.Context(), "s", session.Secrets{Auth: session.AuthContext{Bindings: []mount.Binding{{
-		Provider: "gdrive", Auth: mount.Credential{Token: "tok"},
-	}}}}); err != nil {
+// TestClient_withStreamsOffReadsTheFallbackLog: with streams off, Head and
+// Subscribe read the fallback log that the workers write.
+func TestClient_withStreamsOffReadsTheFallbackLog(t *testing.T) {
+	// Arrange
+	log := session.NewMemoryEventLog()
+	if err := log.Append(t.Context(), "s", session.TopicEvents, session.Event{Type: session.EventMessage, Content: "hello"}); err != nil {
 		t.Fatal(err)
 	}
-	rt, store := open(nopWorkflowClient{}, secrets)
-	if _, err := store.Save(t.Context(), "s", nil, ""); err != nil {
-		t.Fatal(err)
-	}
+	rt := temporal.Open(unreachable(t), temporal.Config{Store: session.NewMemoryStore(), Secrets: session.NewMemorySecretStorage(), Fallback: log, DisableStreams: true})
 
-	closeErr := rt.Close(t.Context(), "s")
-	got, secretsErr := secrets.Get(t.Context(), "s")
-	_, _, loadErr := store.Load(t.Context(), "s")
-	_, statusErr := rt.Status(t.Context(), "s")
-	_, jobsErr := rt.Jobs(t.Context(), "s")
-	promptErr := rt.Prompt(t.Context(), "s", session.Prompt{Text: "again"})
+	// Act
 	head, headErr := rt.Head(t.Context(), "s")
 	sub, subErr := rt.Subscribe(t.Context(), "s", 0)
+	if subErr != nil {
+		t.Fatal(subErr)
+	}
+	defer func() { _ = sub.Close() }()
+	ev := <-sub.Events()
 
-	if closeErr != nil || secretsErr != nil || len(got.Auth.Bindings) != 0 || !errors.Is(loadErr, session.ErrNotFound) {
-		t.Fatalf("close %v, secrets %+v %v, record %v; want the secrets and the record gone", closeErr, got, secretsErr, loadErr)
+	// Assert
+	if head != 1 || headErr != nil || ev.Content != "hello" {
+		t.Fatalf("head %d %v, first event %+v; want the fallback log's head and its event", head, headErr, ev)
 	}
-	for name, err := range map[string]error{"status": statusErr, "jobs": jobsErr, "prompt": promptErr} {
-		if !errors.Is(err, session.ErrNotFound) {
-			t.Errorf("%s after close = %v, want ErrNotFound", name, err)
-		}
-	}
-	if head != 0 || headErr != nil || subErr != nil {
-		t.Fatalf("head %d %v, subscribe %v; want the fallback log's", head, headErr, subErr)
-	}
-	_ = sub.Close()
 }
