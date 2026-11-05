@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,10 @@ import (
 )
 
 // localProvider is a host directory as a mount source (unexported host root).
+//
+// Every operation goes through an os.Root on the directory, so no path and no
+// symlink, at any segment, reaches outside it: the agent can make symlinks
+// with its shell, and their targets are the host's.
 type localProvider struct {
 	root string
 }
@@ -36,9 +41,6 @@ func (p localProvider) Validate(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if p.root == "" || !filepath.IsAbs(p.root) {
-		return fmt.Errorf("vfs: local root must be absolute")
-	}
 	info, err := os.Stat(p.root)
 	if err != nil {
 		return fmt.Errorf("vfs: local root %q: %w", p.root, err)
@@ -49,52 +51,52 @@ func (p localProvider) Validate(ctx context.Context) error {
 	return nil
 }
 
-// Stat implements Provider.
-func (p localProvider) Stat(ctx context.Context, name string) (FileInfo, error) {
+// at opens the provider's root for one operation on name, and gives name
+// relative to it.
+func (p localProvider) at(ctx context.Context, name string) (*os.Root, string, error) {
 	if err := ctx.Err(); err != nil {
-		return FileInfo{}, err
+		return nil, "", err
 	}
-	host, err := p.hostPath(name)
+	rel, err := cleanRel(name)
+	if err != nil {
+		return nil, "", err
+	}
+	r, err := os.OpenRoot(p.root)
+	if err != nil {
+		return nil, "", mapOSError(err)
+	}
+	return r, cmp.Or(rel, "."), nil
+}
+
+// Stat implements Provider. A symlink is its target's info under its own
+// name.
+func (p localProvider) Stat(ctx context.Context, name string) (FileInfo, error) {
+	r, rel, err := p.at(ctx, name)
 	if err != nil {
 		return FileInfo{}, err
 	}
-	info, err := os.Lstat(host)
+	defer r.Close()
+	info, err := r.Stat(rel)
 	if err != nil {
 		return FileInfo{}, mapOSError(err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		resolved, err := p.follow(host)
+	return localFileInfo(info, func() (io.ReaderAt, func() error, error) {
+		f, err := r.Open(rel)
 		if err != nil {
-			return FileInfo{}, err
+			return nil, nil, err
 		}
-		target, err := os.Stat(resolved)
-		if err != nil {
-			return FileInfo{}, mapOSError(err)
-		}
-		fi := localFileInfo(resolved, target)
-		fi.Name = info.Name()
-		return fi, nil
-	}
-	return localFileInfo(host, info), nil
+		return f, f.Close, nil
+	}), nil
 }
 
 // OpenFile implements Provider.
 func (p localProvider) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	host, err := p.hostPath(name)
+	r, rel, err := p.at(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	if flag&os.O_CREATE == 0 {
-		if resolved, err := p.follow(host); err == nil {
-			host = resolved
-		} else if !errors.Is(err, ErrNotExist) {
-			return nil, err
-		}
-	}
-	f, err := os.OpenFile(host, flag, perm)
+	defer r.Close()
+	f, err := r.OpenFile(rel, flag, perm)
 	if err != nil {
 		return nil, mapOSError(err)
 	}
@@ -108,15 +110,13 @@ func (p localProvider) OpenFile(ctx context.Context, name string, flag int, perm
 
 // PutFile writes a full file in one shot (used by MountSession.WriteFile).
 func (p localProvider) PutFile(ctx context.Context, name string, r io.Reader, size int64) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	host, err := p.hostPath(name)
+	root, rel, err := p.at(ctx, name)
 	if err != nil {
 		return err
 	}
+	defer root.Close()
 	// 0o644 matches prior WriteFile/OpenFile create mode for workspace files.
-	f, err := os.OpenFile(host, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) //nolint:gosec // G302: agent workspace files are group/world-readable by design
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) //nolint:gosec // G302: agent workspace files are group/world-readable by design
 	if err != nil {
 		return mapOSError(err)
 	}
@@ -132,9 +132,6 @@ func (p localProvider) PutFile(ctx context.Context, name string, r io.Reader, si
 
 // OpenDocument translates local file bytes into Document IR.
 func (p localProvider) OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	fi, err := p.Stat(ctx, name)
 	if err != nil {
 		return nil, err
@@ -145,11 +142,12 @@ func (p localProvider) OpenDocument(ctx context.Context, name string, reg *Conte
 	if fi.Size > int64(MaxReadFileBytes) {
 		return nil, errFileExceeds(MaxReadFileBytes)
 	}
-	host, err := p.hostPath(name)
+	r, rel, err := p.at(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(host) //nolint:gosec // G304: host is jailed by hostPath
+	defer r.Close()
+	data, err := r.ReadFile(rel)
 	if err != nil {
 		return nil, mapOSError(err)
 	}
@@ -175,18 +173,17 @@ func (p localProvider) WriteDocument(ctx context.Context, name string, doc Docum
 
 // ReadDir implements Provider.
 func (p localProvider) ReadDir(ctx context.Context, name string) ([]DirEntry, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	host, err := p.hostPath(name)
+	r, rel, err := p.at(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	host, err = p.follow(host)
+	defer r.Close()
+	dir, err := r.Open(rel)
 	if err != nil {
-		return nil, err
+		return nil, mapOSError(err)
 	}
-	entries, err := os.ReadDir(host)
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		return nil, mapOSError(err)
 	}
@@ -199,52 +196,22 @@ func (p localProvider) ReadDir(ctx context.Context, name string) ([]DirEntry, er
 
 // Remove implements Provider.
 func (p localProvider) Remove(ctx context.Context, name string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	host, err := p.hostPath(name)
+	r, rel, err := p.at(ctx, name)
 	if err != nil {
 		return err
 	}
-	return mapOSError(os.Remove(host))
+	defer r.Close()
+	return mapOSError(r.Remove(rel))
 }
 
 // MkdirAll implements Provider.
 func (p localProvider) MkdirAll(ctx context.Context, name string, perm fs.FileMode) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	host, err := p.hostPath(name)
+	r, rel, err := p.at(ctx, name)
 	if err != nil {
 		return err
 	}
-	return mapOSError(os.MkdirAll(host, perm))
-}
-
-func (p localProvider) hostPath(name string) (string, error) {
-	rel, err := cleanRel(name)
-	if err != nil {
-		return "", err
-	}
-	if rel == "" {
-		return p.root, nil
-	}
-	full := filepath.Join(p.root, filepath.FromSlash(rel))
-	if !within(p.root, full) {
-		return "", ErrInvalidPath
-	}
-	return full, nil
-}
-
-func (p localProvider) follow(host string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(host)
-	if err != nil {
-		return "", mapOSError(err)
-	}
-	if !within(p.root, resolved) {
-		return "", ErrInvalidPath
-	}
-	return resolved, nil
+	defer r.Close()
+	return mapOSError(r.MkdirAll(rel, perm))
 }
 
 func cleanRel(name string) (string, error) {
@@ -252,14 +219,11 @@ func cleanRel(name string) (string, error) {
 	if name == "" || name == "." {
 		return "", nil
 	}
+	// A cleaned relative path has a ".." only at the start, and is "." only
+	// when its segments cancel ("a/..").
 	cleaned := path.Clean(name)
-	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || path.IsAbs(cleaned) {
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return "", ErrInvalidPath
-	}
-	for _, seg := range strings.Split(cleaned, "/") {
-		if seg == "" || seg == "." || seg == ".." {
-			return "", ErrInvalidPath
-		}
 	}
 	return cleaned, nil
 }
@@ -271,11 +235,6 @@ func safeSegment(seg string) error {
 		return fmt.Errorf("vfs: unsafe path segment %q", seg)
 	}
 	return nil
-}
-
-func within(root, full string) bool {
-	rel, err := filepath.Rel(root, filepath.Clean(full))
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func canonicalizeDir(dir string) (string, error) {
@@ -321,7 +280,9 @@ func localVersion(info os.FileInfo) string {
 	return v
 }
 
-func localFileInfo(host string, info os.FileInfo) FileInfo {
+// localFileInfo is info as a FileInfo. A file with no known extension is
+// peeked through open, so README (no suffix) can still be text.
+func localFileInfo(info os.FileInfo, open func() (io.ReaderAt, func() error, error)) FileInfo {
 	fi := fileInfoFromOS(info)
 	if fi.IsDir {
 		return fi
@@ -330,14 +291,13 @@ func localFileInfo(host string, info os.FileInfo) FileInfo {
 	if fi.MediaType != "application/octet-stream" {
 		return fi
 	}
-	// No known extension: peek so README (no suffix) can still be text.
-	f, err := os.Open(host)
+	f, done, err := open()
 	if err != nil {
 		return fi
 	}
-	defer f.Close()
+	defer func() { _ = done() }()
 	var buf [512]byte
-	n, _ := f.Read(buf[:])
+	n, _ := f.ReadAt(buf[:], 0)
 	if n > 0 {
 		fi.MediaType = DetectMediaType(info.Name(), buf[:n])
 	}
@@ -361,6 +321,10 @@ func mapOSError(err error) error {
 		return ErrNotDir
 	case errors.Is(err, syscall.EISDIR):
 		return ErrIsDir
+	case strings.Contains(err.Error(), "path escapes from parent"):
+		// os.Root's refusal of a path or symlink that leaves the root; the
+		// os package does not export its sentinel.
+		return ErrInvalidPath
 	}
 	if pe, ok := errors.AsType[*fs.PathError](err); ok {
 		return fmt.Errorf("vfs: %s: %w", pe.Op, pe.Err)
@@ -375,7 +339,9 @@ func (f *localFile) Stat() (FileInfo, error) {
 	if err != nil {
 		return FileInfo{}, mapOSError(err)
 	}
-	return localFileInfo(f.Name(), info), nil
+	return localFileInfo(info, func() (io.ReaderAt, func() error, error) {
+		return f.File, func() error { return nil }, nil
+	}), nil
 }
 
 var _ documentBackend = localProvider{}
@@ -392,6 +358,7 @@ func Local(base string) Open {
 		if err != nil {
 			return nil, err
 		}
+		var rel string
 		if sub := b.Params["subpath"]; sub != "" {
 			if filepath.IsAbs(sub) {
 				return nil, fmt.Errorf("vfs: subpath must be relative")
@@ -400,20 +367,27 @@ func Local(base string) Open {
 			if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 				return nil, fmt.Errorf("vfs: subpath escapes base")
 			}
-			joined := filepath.Join(root, cleaned)
-			if !within(root, joined) {
-				return nil, fmt.Errorf("vfs: subpath escapes base")
-			}
-			root = joined
+			rel = cleaned
 		}
 		if b.Params["session_scoped"] == "true" && sessionID != "" {
 			if err := safeSegment(sessionID); err != nil {
 				return nil, err
 			}
-			root = filepath.Join(root, sessionID)
+			rel = filepath.Join(rel, sessionID)
 		}
-		if err := os.MkdirAll(root, 0o750); err != nil {
-			return nil, fmt.Errorf("vfs: mkdir %q: %w", root, err)
+		if rel != "" {
+			// Made through the base's os.Root, so a symlink under the base
+			// cannot move the mount's root outside it.
+			br, err := os.OpenRoot(root)
+			if err != nil {
+				return nil, fmt.Errorf("vfs: open %q: %w", root, err)
+			}
+			err = br.MkdirAll(rel, 0o750)
+			_ = br.Close()
+			if err != nil {
+				return nil, fmt.Errorf("vfs: mkdir under %q: %w", root, mapOSError(err))
+			}
+			root = filepath.Join(root, rel)
 		}
 		return NewLocalProvider(root)
 	}

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,11 +18,22 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
+// backendProvider is the surface of a built-in provider past Provider: its
+// one-shot put and its document I/O. A host that wraps a built-in provider
+// forwards these methods.
+type backendProvider interface {
+	vfs.Provider
+	PutFile(ctx context.Context, name string, r io.Reader, size int64) error
+	OpenDocument(ctx context.Context, name string, reg *vfs.ContentRegistry) (vfs.Document, error)
+	WriteDocument(ctx context.Context, name string, doc vfs.Document, reg *vfs.ContentRegistry) error
+}
+
 // TestMountSession_localSession: a local tree mounts each member at its
 // own point (a read-only member refuses writes), SpecAt matches whole path
 // segments, a path cannot escape its mount, an unmounted path and a
 // canceled read fail, and a second session reads what the first wrote.
 func TestMountSession_localSession(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	base := t.TempDir()
 	ms, err := vfs.Tree(
@@ -73,6 +86,7 @@ func TestMountSession_localSession(t *testing.T) {
 
 // TestMountSession_writeLimits: oversize writes and unmounted or invalid paths fail closed.
 func TestMountSession_writeLimits(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	ms, err := vfs.Tree(vfs.At("mem", vfs.Local(t.TempDir())))(ctx, "mem-sess", vfs.Request{})
 	if err != nil {
@@ -155,6 +169,7 @@ func TestMountSession_writeLimits(t *testing.T) {
 
 // TestDocument_session: IR persist, revalidation, codec rejects, RO.
 func TestDocument_session(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	base := t.TempDir()
 	ms, err := vfs.Tree(
@@ -487,6 +502,7 @@ func TestDocument_session(t *testing.T) {
 
 // TestTextDocument_lines is pure IR: index, edit, join (no mount).
 func TestTextDocument_lines(t *testing.T) {
+	t.Parallel()
 	doc := vfs.NewTextDocument("/p", "text/plain", "utf-8", "a\nb\nc")
 	if doc.LineCount() != 3 || doc.Encoding() != "utf-8" {
 		t.Fatalf("count=%d enc=%q", doc.LineCount(), doc.Encoding())
@@ -551,11 +567,20 @@ func TestTextDocument_lines(t *testing.T) {
 	}
 }
 
-// A session needs an id, and SpecAt refuses an empty or NUL path.
+// A session needs an id, and SpecAt refuses an empty or NUL path. A session
+// with no members lists nothing at / and mounts no other path.
 func TestMountSession_needsAnIDAndRejectsBadPaths(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
 	ms, err := vfs.NewMountSession("s")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if ents, err := ms.Route(ctx, "/").ReadDir(ctx); err != nil || len(ents) != 0 {
+		t.Fatalf("list / of an empty session = %+v err=%v", ents, err)
+	}
+	if _, err := ms.Route(ctx, "/workspace/x").Stat(ctx); !errors.Is(err, vfs.ErrNotMounted) {
+		t.Fatalf("stat in an empty session = %v, want ErrNotMounted", err)
 	}
 	if _, err := ms.SpecAt(""); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("empty path: %v", err)
@@ -568,7 +593,13 @@ func TestMountSession_needsAnIDAndRejectsBadPaths(t *testing.T) {
 	}
 }
 
+// A local open refuses a subpath or session id that leaves the base, a base
+// that is relative, missing or a file, and a subpath it cannot make. A
+// provider refuses a symlink out of its root, a second exclusive create and
+// a canceled context, and it fails to validate when its root is gone or is
+// now a file.
 func TestLocal_rejectsUnsafeConfig(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	open := vfs.Local(t.TempDir())
 	if _, err := open(ctx, "s", mount.Binding{Params: map[string]string{"subpath": ".."}}); err == nil {
@@ -593,6 +624,32 @@ func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 	_ = file.Close()
 	if _, err := vfs.Local(file.Name())(ctx, "s", mount.Binding{}); err == nil {
 		t.Fatal("file as base")
+	}
+	if _, err := vfs.Local(filepath.Join(t.TempDir(), "missing"))(ctx, "s", mount.Binding{}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing base: %v", err)
+	}
+	if _, err := vfs.Local(filepath.Dir(file.Name()))(ctx, "s", mount.Binding{Params: map[string]string{"subpath": filepath.Base(file.Name()) + "/sub"}}); !errors.Is(err, vfs.ErrNotDir) {
+		t.Fatalf("subpath under a file: %v", err)
+	}
+	moved := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(moved, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	movedRoot, err := vfs.NewLocalProvider(moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := movedRoot.Validate(ctx); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Validate of a gone root: %v", err)
+	}
+	if err := os.WriteFile(moved, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := movedRoot.Validate(ctx); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("Validate of a root that is now a file: %v", err)
 	}
 	if _, err := vfs.NewLocalProvider("relative"); err == nil {
 		t.Fatal("NewLocalProvider relative")
