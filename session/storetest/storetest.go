@@ -213,7 +213,7 @@ func EventLog(t *testing.T, newLog func(t *testing.T) session.EventLog) {
 		if got := contents(tailed[:70]); !slices.Equal(got, want) {
 			t.Fatalf("tailed %v; want every appended event once, in order", got)
 		}
-		if failure := tailed[70]; !errors.Is(failure.FailKind.Err(failure.Fail), session.ErrModelRefused) {
+		if failure := tailed[70]; !errors.Is(failure.Error, session.ErrModelRefused) {
 			t.Fatalf("failure event %+v; want the refusal it carried", failure)
 		}
 		if atHead != 74 || reused != 0 || unknownClose != nil {

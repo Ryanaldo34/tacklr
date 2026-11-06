@@ -1,11 +1,11 @@
-package loop
+package orchestrator
 
 import "github.com/ryanaldo34/tacklr/session"
 
-// Status is the session's status as the Turn holds it: running (waiting
+// Status is the session's status as the State holds it: running (waiting
 // while parked), or the terminal state its turn or a close set. A runtime
 // answers a status query with it.
-func (t *Turn) Status() session.Status {
+func (t *State) Status() session.Status {
 	id := t.Identity
 	st := session.Status{
 		ID:         t.SessionID,

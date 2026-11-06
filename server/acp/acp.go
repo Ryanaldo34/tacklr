@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -104,6 +105,8 @@ func jsonInt(m map[string]json.RawMessage, key string) int {
 	return n
 }
 
+// validateACPRequest parses one request. A request it refuses is nil when
+// body is not JSON-RPC, else it carries the request's id for the answer.
 func validateACPRequest(body []byte) (*parsedRequest, error) {
 	var env acpRequest
 	if json.Unmarshal(body, &env) != nil || env.JSONRPC != "2.0" || env.Method == "" {
@@ -132,22 +135,22 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 	switch env.Method {
 	case "initialize":
 		if pr.ProtocolVersion < 1 {
-			return nil, server.Errorf(server.ErrInvalidRequest, "unsupported protocol version %d", pr.ProtocolVersion)
+			return pr, server.Errorf(server.ErrInvalidRequest, "unsupported protocol version %d", pr.ProtocolVersion)
 		}
 	case "session/load", "session/resume", "session/prompt", "session/set_config_option", "session/close", "session/cancel":
 		if err := requireSessionID(env.Method, pr.ThreadID); err != nil {
-			return nil, err
+			return pr, err
 		}
 		if env.Method == "session/prompt" {
 			msg, err := parseACPPrompt(params["prompt"])
 			if err != nil {
-				return nil, server.Errorf(server.ErrInvalidRequest, "invalid prompt content: %v", err)
+				return pr, server.Errorf(server.ErrInvalidRequest, "invalid prompt content: %v", err)
 			}
 			pr.Prompt, pr.UserMessage = msg.Content, msg
 		}
 	case "authenticate":
 		if pr.AuthMethodID == "" {
-			return nil, server.Errorf(server.ErrInvalidRequest, "methodId is required for authenticate")
+			return pr, server.Errorf(server.ErrInvalidRequest, "methodId is required for authenticate")
 		}
 	}
 	return pr, nil
@@ -323,10 +326,8 @@ func presentationToACP(threadID string, ev session.Event) [][]byte {
 		}
 		return [][]byte{acpTextChunk(threadID, presented.MessageID, "agent_thought_chunk", presented.Content)}
 	case string(session.EventFunctionCall):
+		// A model's text comes as its own message; a call carries none.
 		var toStream [][]byte
-		if presented.Content != "" {
-			toStream = append(toStream, acpTextChunk(threadID, presented.MessageID, "agent_message_chunk", presented.Content))
-		}
 		for _, toolCall := range presented.ToolCalls {
 			toStream = append(toStream, acpUpdateFrame(threadID, acpToolCallUpdate(toolCall, "tool_call", "in_progress", "")))
 		}
@@ -373,13 +374,9 @@ func presentationToACP(threadID string, ev session.Event) [][]byte {
 			})
 			return [][]byte{b}
 		}
-		msg := presented.ErrorText
-		if msg == "" {
-			msg = "internal error"
-		}
 		b, _ := json.Marshal(map[string]any{
 			"jsonrpc": "2.0", "id": presented.TurnID,
-			"error": map[string]any{"code": CodeInternal, "message": msg},
+			"error": map[string]any{"code": CodeInternal, "message": cmp.Or(presented.ErrorText, "internal error")},
 		})
 		return [][]byte{b}
 	default:
@@ -461,8 +458,7 @@ func presentEvent(event session.Event) presentationEvent {
 	return presented
 }
 
-// parsedRequest is retained for ACP parse helpers and tests that assert on
-// validated request fields.
+// parsedRequest is one validated ACP request.
 type parsedRequest struct {
 	ThreadID string
 	Prompt   string
@@ -475,7 +471,7 @@ type parsedRequest struct {
 	ID           json.RawMessage
 	Method       string
 	Notification bool
-	// Params is the raw JSON-RPC params object (passed to server.Protocol session methods).
+	// Params is the raw JSON-RPC params object.
 	Params json.RawMessage
 
 	// ACP session lifecycle (validated view of Params)

@@ -19,8 +19,8 @@ import (
 	"go.temporal.io/sdk/client"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/examples/host"
 	"github.com/ryanaldo34/tacklr/examples/temporal/agent"
-	"github.com/ryanaldo34/tacklr/examples/temporal/host"
 	"github.com/ryanaldo34/tacklr/internal/pgtest"
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
@@ -116,7 +116,9 @@ func deploy(t *testing.T, model tacklr.Model) deployment {
 		DisableStreams: true,
 		Live:           temporal.Live{Key: liveKey},
 	})
-	hostSrv := httptest.NewServer(host.New(sessions, model, wire, token).HTTPMux())
+	srv := host.New(sessions, model, wire, token)
+	srv.Workspace = true
+	hostSrv := httptest.NewServer(srv.HTTPMux())
 	t.Cleanup(hostSrv.Close)
 	return deployment{acp: "ws" + strings.TrimPrefix(hostSrv.URL, "http") + "/acp", workspace: dir}
 }
@@ -256,6 +258,32 @@ func TestExample_anOperatorAsksAboutAReleaseAndSavesANote(t *testing.T) {
 	note, err := os.ReadFile(filepath.Join(d.workspace, url.PathEscape(sid), "notes.txt"))
 	if saved != "end_turn" || len(asked) != 1 || asked[0] != "session/request_permission" || err != nil || string(note) != "v2 shipped" {
 		t.Fatalf("the note ended %q after asking %v; the file is %q (%v); want it written once allowed", saved, asked, note, err)
+	}
+}
+
+// TestExample_anOperatorCancelsAWriteItWasAskedFor: the operator cancels
+// the turn while the agent asks to write, and answers the ask with
+// cancelled, as ACP asks: the prompt ends cancelled, and the session takes
+// the next question.
+func TestExample_anOperatorCancelsAWriteItWasAskedFor(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	d := deploy(t, releases(t))
+	o := connect(t, d)
+	created, _ := o.call("session/new", `{"cwd":"/tmp"}`, nil)
+	sid, _ := created["result"].(map[string]any)["sessionId"].(string)
+	cancel := func(req map[string]any) any {
+		o.write(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"` + sid + `"}}`)
+		return map[string]any{"outcome": map[string]any{"outcome": "cancelled"}}
+	}
+
+	// Act
+	cancelled, _ := o.prompt(sid, "save a note", cancel)
+	answered, _ := o.prompt(sid, "status of v2?", nil)
+
+	// Assert
+	if cancelled != "cancelled" || answered != "end_turn" {
+		t.Fatalf("the cancelled note ended %q, the next question %q; want cancelled, then end_turn", cancelled, answered)
 	}
 }
 

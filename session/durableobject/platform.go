@@ -5,7 +5,7 @@
 //
 // An object can stop at any moment and lose everything but its storage. Its
 // session survives by journal replay: the object records the result of
-// every loop.Executor call, and a restarted object runs loop.Run again and
+// every orchestrator.Runtime call, and a restarted object runs orchestrator.Run again and
 // answers from the journal until it reaches the first step that never
 // finished. Wakes go into a mailbox in storage first, so none is lost, and
 // an alarm restarts an object whose step stopped with it.
@@ -61,6 +61,13 @@ type Ref interface {
 	Jobs(ctx context.Context) ([]session.ID, error)
 	Head(ctx context.Context) (session.Seq, error)
 	Subscribe(ctx context.Context, after session.Seq) (session.Subscription, error)
+	// Wire is the wire state a protocol server keeps with the session
+	// (the payload of server.ProtocolWireStore). It is session.ErrNotFound
+	// when the object holds no session, or no wire state.
+	Wire(ctx context.Context) ([]byte, error)
+	// SetWire replaces the session's wire state; nil deletes it. A close
+	// of the session deletes it too.
+	SetWire(ctx context.Context, raw []byte) error
 }
 
 // Platform reaches session objects by id. An object starts on first use.

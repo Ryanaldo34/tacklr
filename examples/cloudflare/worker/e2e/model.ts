@@ -4,7 +4,7 @@
 //   "lookup"/"report"  -> calls that tool
 //   "deploy"           -> calls deploy, which asks for permission
 //   "research"         -> starts the researcher specialist
-//   "check the deploy" -> (the specialist's task) calls deploy
+//   "find the answer"  -> (the specialist's task) calls lookup
 //   a tool's output    -> "done: " and the output (its first 40 bytes)
 // It keeps the size of each tool output it got, for the test to read.
 
@@ -68,10 +68,10 @@ export function startModel() {
       const said = text(last?.content);
       if (said.includes("hello")) return say("Hello from the edge", 3);
       if (said.includes("deploy")) return call("deploy", {});
-      if (said.includes("lookup")) return call("lookup", {});
+      if (said.includes("lookup") || said.includes("find the answer")) return call("lookup", {});
       if (said.includes("report")) return call("report", {});
       if (said.includes("research")) {
-        return call("spawn_specialist", { specialist: "researcher", task_description_and_context: "check the deploy", block: true });
+        return call("spawn_specialist", { specialist: "researcher", task_description_and_context: "find the answer", block: true });
       }
       return say("I do not know that.");
     },

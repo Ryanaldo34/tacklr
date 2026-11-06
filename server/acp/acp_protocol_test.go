@@ -2,184 +2,81 @@ package acp_test
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/coder/websocket"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/message"
-	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
+	"github.com/ryanaldo34/tacklr/session"
 )
 
-// startACPWSServer serves r's ACP over HTTP, as a host does.
-func startACPWSServer(t *testing.T, r *acptest.Runtime) (*httptest.Server, *server.Server) {
-	t.Helper()
-	srv := server.NewServer(r.Client, r.Agent, acp.New(server.NewMemoryWireStore()))
-	hs := httptest.NewServer(srv.HTTPMux())
-	t.Cleanup(hs.Close)
-	return hs, srv
-}
-
-// wsClient is an ACP client on a WebSocket to the server's /acp route.
-type wsClient struct {
-	t    *testing.T
-	conn *websocket.Conn
-	// ID is the Acp-Connection-Id of the upgrade response.
-	ID   string
-	next int
-}
-
-// dial connects to hs and says hello with the initialize params.
-func dial(t *testing.T, hs *httptest.Server, initialize string) *wsClient {
-	t.Helper()
-	conn, resp, err := websocket.Dial(t.Context(), "ws"+strings.TrimPrefix(hs.URL, "http")+"/acp", nil)
-	if err != nil {
-		t.Fatalf("dial /acp: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "") })
-	c := &wsClient{t: t, conn: conn, ID: resp.Header.Get(acp.HeaderConnectionID)}
-	c.send("") // an empty message is not a request
-	c.call("initialize", initialize)
-	return c
-}
-
-func (c *wsClient) send(body string) {
-	c.t.Helper()
-	if err := c.conn.Write(c.t.Context(), websocket.MessageText, []byte(body)); err != nil {
-		c.t.Fatalf("ws write: %v", err)
-	}
-}
-
-func (c *wsClient) frame() map[string]any {
-	c.t.Helper()
-	ctx, cancel := context.WithTimeout(c.t.Context(), 5*time.Second)
-	defer cancel()
-	_, data, err := c.conn.Read(ctx)
-	if err != nil {
-		c.t.Fatalf("ws read: %v", err)
-	}
-	var frame map[string]any
-	if err := json.Unmarshal(data, &frame); err != nil {
-		c.t.Fatalf("unmarshal frame %q: %v", data, err)
-	}
-	return frame
-}
-
-// request sends method with params and returns its id.
-func (c *wsClient) request(method, params string) int {
-	c.t.Helper()
-	c.next++
-	c.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q,"params":%s}`, c.next, method, params))
-	return c.next
-}
-
-// until reads frames until the response to id, answering each request the
-// agent makes with answer, and returns that response and what came first.
-func (c *wsClient) until(id int, answer func(req map[string]any) any) (map[string]any, []map[string]any) {
-	c.t.Helper()
-	var before []map[string]any
-	for {
-		frame := c.frame()
-		if method, _ := frame["method"].(string); method != "" && frame["id"] != nil {
-			if answer == nil {
-				c.t.Fatalf("unexpected request %v", frame)
-			}
-			body, _ := json.Marshal(answer(frame))
-			c.send(string(body))
-			continue
-		}
-		if frame["id"] == float64(id) {
-			return frame, before
-		}
-		before = append(before, frame)
-	}
-}
-
-// call sends method with params and returns its response.
-func (c *wsClient) call(method, params string) map[string]any {
-	c.t.Helper()
-	resp, _ := c.until(c.request(method, params), nil)
-	return resp
-}
-
-// newSession makes a session and returns its id.
-func (c *wsClient) newSession() string {
-	c.t.Helper()
-	resp := c.call("session/new", `{"cwd":"/tmp"}`)
-	sid, _ := resp["result"].(map[string]any)["sessionId"].(string)
-	if sid == "" {
-		c.t.Fatalf("session/new = %v", resp)
-	}
-	return sid
-}
-
-// prompt sends text to sid and returns the request id.
-func (c *wsClient) prompt(sid, text string) int {
-	c.t.Helper()
-	return c.request("session/prompt", `{"sessionId":"`+sid+`","prompt":[{"type":"text","text":"`+text+`"}]}`)
-}
-
-// TestACP_WS_cancelAndDisconnectEndTheTurn: a message that is not a
-// request is refused; session/cancel ends a running prompt with stopReason
-// cancelled; and a client that closes its socket cancels its running model
-// call, and its connection leaves the registry.
-func TestACP_WS_cancelAndDisconnectEndTheTurn(t *testing.T) {
+// TestACP_aTurnOutlivesItsConnection: a message that is not a request is
+// refused, and a response to nothing the agent asked gets no answer;
+// session/cancel ends a running prompt with stopReason
+// cancelled, and the next prompt runs; and a turn whose client hangs up
+// goes on, so a new connection that loads the session gets the rest of
+// it.
+func TestACP_aTurnOutlivesItsConnection(t *testing.T) {
 	t.Parallel()
-	started := map[string]chan struct{}{"cancel": make(chan struct{}, 1), "disconnect": make(chan struct{}, 1)}
-	stopped := map[string]chan struct{}{"cancel": make(chan struct{}, 1), "disconnect": make(chan struct{}, 1)}
-	signal := func(ch chan struct{}) {
+	started := map[string]chan struct{}{"cancel": make(chan struct{}, 1), "hang up": make(chan struct{}, 1)}
+	release := make(chan struct{})
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		text := msgs[len(msgs)-1].Content
 		select {
-		case ch <- struct{}{}:
+		case started[text] <- struct{}{}:
 		default:
 		}
-	}
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		text := msgs[len(msgs)-1].Content
-		signal(started[text])
-		<-ctx.Done()
-		signal(stopped[text])
+		switch text {
+		case "cancel":
+			<-ctx.Done()
+		case "hang up":
+			<-release
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "finished without you", IsComplete: true}
+		default:
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "after the cancel", IsComplete: true}
+		}
 	})
-	hs, srv := startACPWSServer(t, acptest.NewRuntime(t, model, tacklr.AgentOptions{}))
-	wait := func(ch chan struct{}, what string) {
+	url := acptest.Listen(t, acptest.Server(acptest.NewRuntime(t, model, tacklr.AgentOptions{}), nil))
+	wait := func(ch chan struct{}) {
 		t.Helper()
 		select {
 		case <-ch:
-		case <-time.After(8 * time.Second):
-			t.Fatalf("timed out waiting for the model call to %s", what)
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for the model call")
 		}
 	}
-	c := dial(t, hs, `{"protocolVersion":1}`)
-	d := dial(t, hs, `{"protocolVersion":1}`)
-	connection := srv.Connections.Get(d.ID)
+	c := acptest.Connect(t, url, `{"protocolVersion":1}`)
 
-	c.send(`{`)
-	c.send(`{"jsonrpc":"2.0","id":99,"result":{}}`)
-	notRequests := []any{c.frame()["error"], c.frame()["error"]}
-	sid := c.newSession()
-	id := c.prompt(sid, "cancel")
-	wait(started["cancel"], "start")
-	c.send(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"` + sid + `"}}`)
-	cancelled, _ := c.until(id, nil)
-	d.prompt(d.newSession(), "disconnect")
-	wait(started["disconnect"], "start")
-	_ = d.conn.Close(websocket.StatusNormalClosure, "")
-	wait(stopped["disconnect"], "stop")
-	// The registry ends a connection's context when it removes it.
-	removed := connection != nil
-	if removed {
-		select {
-		case <-connection.Context().Done():
-			removed = srv.Connections.Get(d.ID) == nil
-		case <-time.After(2 * time.Second):
-			removed = false
+	c.Send(`{`)
+	c.Send(`{"jsonrpc":"2.0","id":99}`)
+	notRequests := []any{c.Frame()["error"], c.Frame()["error"]}
+	c.Send(`{"jsonrpc":"2.0","id":99,"result":{}}`)
+	created := c.Request("session/new", `{"cwd":"/tmp"}`)
+	afterStray := c.Frame()
+	sid := acptest.SessionID(t, afterStray)
+	id := c.Prompt(sid, `[{"type":"text","text":"cancel"}]`)
+	wait(started["cancel"])
+	c.Send(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"` + sid + `"}}`)
+	cancelled, _ := c.Until(id, nil)
+	next, _ := c.Say(sid, "again")
+	gone := acptest.Connect(t, url, `{"protocolVersion":1}`)
+	left := gone.NewSession("/tmp")
+	gone.Prompt(left, `[{"type":"text","text":"hang up"}]`)
+	wait(started["hang up"])
+	gone.Close()
+	back := acptest.Connect(t, url, `{"protocolVersion":1}`)
+	loaded := back.Call("session/load", `{"sessionId":"`+left+`","cwd":"/tmp"}`)
+	close(release)
+	var rest string
+	for !strings.Contains(rest, "finished") {
+		for _, u := range acptest.Updates([]map[string]any{back.Frame()}) {
+			if content, ok := u["content"].(map[string]any); ok {
+				rest += content["text"].(string)
+			}
 		}
 	}
 
@@ -188,10 +85,13 @@ func TestACP_WS_cancelAndDisconnectEndTheTurn(t *testing.T) {
 			t.Errorf("message that is not a request = %v, want invalid request", e)
 		}
 	}
-	if res, _ := cancelled["result"].(map[string]any); res["stopReason"] != "cancelled" {
-		t.Errorf("cancelled prompt = %v, want stopReason cancelled", cancelled)
+	if afterStray["id"] != float64(created) {
+		t.Errorf("after a response to nothing it asked, the agent sent %v; want the next request's answer", afterStray)
 	}
-	if d.ID == "" || connection == nil || !removed {
-		t.Errorf("connection %q registered %v, removed after close %v; want both", d.ID, connection != nil, removed)
+	if acptest.StopReason(cancelled) != "cancelled" || acptest.StopReason(next) != "end_turn" {
+		t.Errorf("cancelled prompt = %v, next = %v; want cancelled, then end_turn", cancelled, next)
+	}
+	if acptest.Result(t, loaded)["sessionId"] != left || rest != "finished without you" {
+		t.Errorf("load = %v, then %q; want the rest of the turn the first client left", loaded, rest)
 	}
 }

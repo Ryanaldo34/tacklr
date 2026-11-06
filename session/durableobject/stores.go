@@ -348,9 +348,6 @@ func (l *eventLog) commit(id session.ID, evs []storedEvent, ops ...Op) error {
 	}
 	head := sl.head
 	for _, se := range evs {
-		if se.Event.Error != nil && se.Event.Fail == "" {
-			se.Event.Fail = se.Event.Error.Error()
-		}
 		raw, err := json.Marshal(se)
 		if err != nil {
 			return err

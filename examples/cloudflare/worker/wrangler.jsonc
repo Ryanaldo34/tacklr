@@ -5,9 +5,14 @@
   // Go's js/wasm runtime reads process; nodejs_compat provides it.
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
-    "bindings": [{ "name": "SESSIONS", "class_name": "Session" }]
+    "bindings": [
+      { "name": "SESSIONS", "class_name": "Session" },
+      { "name": "CONNECTIONS", "class_name": "Connection" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Session"] }],
+  // The Free plan has SQLite-backed objects only; a connection object
+  // stores nothing.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Session", "Connection"] }],
   // A request may use up to five minutes of CPU (Workers Paid).
   "limits": { "cpu_ms": 300000 }
 }

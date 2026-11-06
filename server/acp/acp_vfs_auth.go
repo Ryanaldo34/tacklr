@@ -9,6 +9,7 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 
 	"github.com/ryanaldo34/tacklr/server"
+	"github.com/ryanaldo34/tacklr/session"
 )
 
 type vfsAuthWire struct {
@@ -66,18 +67,24 @@ func (item vfsBindItem) binding() mount.Binding {
 	}
 }
 
-func (p *acpProtocol) ownedVFSSession(ctx context.Context, env server.ProtocolEnv, sessionID string) (*acpWireSession, error) {
+// vfsBag is the credentials of a session the connection's principal owns,
+// for its next turn.
+func (c *conn) vfsBag(ctx context.Context, sessionID string) (*server.CredentialBag, error) {
 	if sessionID == "" {
 		return nil, server.Errorf(server.ErrInvalidRequest, "sessionId is required")
 	}
-	return p.resolveOwnedWireSession(ctx, env, sessionID, actionVFSCredentials)
+	if _, err := c.ownedSession(ctx, sessionID, actionVFSCredentials); err != nil {
+		return nil, err
+	}
+	return &c.nextOf(session.ID(sessionID)).creds, nil
 }
 
-// handleVFSBind parses the ACP bind payload. The credential bag is session.CredentialBag.
-func (p *acpProtocol) handleVFSBind(ctx context.Context, env server.ProtocolEnv, pr *parsedRequest) (any, error) {
+// handleVFSBind parses the ACP bind payload into the connection's
+// credentials for the session's next turn.
+func (c *conn) handleVFSBind(ctx context.Context, pr *parsedRequest) (any, error) {
 	var params vfsBindParams
 	_ = json.Unmarshal(pr.Params, &params)
-	sess, err := p.ownedVFSSession(ctx, env, params.SessionID)
+	bag, err := c.vfsBag(ctx, params.SessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -96,12 +103,12 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env server.ProtocolEnv,
 	var errs []itemErr
 	for _, item := range params.Backends {
 		b := item.binding()
-		if !env.Workspace {
+		if !c.env.Workspace {
 			errs = append(errs, itemErr{Point: item.Point, Error: "unknown vfs profile " + b.Provider})
 			continue
 		}
 		// Bind validates b.
-		if err := sess.creds.Bind(b); err != nil {
+		if err := bag.Bind(b); err != nil {
 			errs = append(errs, itemErr{Point: item.Point, Error: err.Error()})
 			continue
 		}
@@ -113,26 +120,26 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env server.ProtocolEnv,
 	}, nil
 }
 
-func (p *acpProtocol) handleVFSRefresh(ctx context.Context, env server.ProtocolEnv, pr *parsedRequest) (any, error) {
+func (c *conn) handleVFSRefresh(ctx context.Context, pr *parsedRequest) (any, error) {
 	var params vfsRefreshParams
 	_ = json.Unmarshal(pr.Params, &params)
 	if params.Provider == "" {
 		return nil, server.Errorf(server.ErrInvalidRequest, "sessionId and provider are required")
 	}
-	sess, err := p.ownedVFSSession(ctx, env, params.SessionID)
+	bag, err := c.vfsBag(ctx, params.SessionID)
 	if err != nil {
 		return nil, err
 	}
-	if !sess.creds.Refresh(params.Provider, params.Auth.credential()) {
+	if !bag.Refresh(params.Provider, params.Auth.credential()) {
 		return nil, server.Errorf(server.ErrInvalidRequest, "no vfs binding for provider")
 	}
 	return map[string]any{}, nil
 }
 
-func (p *acpProtocol) handleVFSUnbind(ctx context.Context, env server.ProtocolEnv, pr *parsedRequest) (any, error) {
+func (c *conn) handleVFSUnbind(ctx context.Context, pr *parsedRequest) (any, error) {
 	var params vfsUnbindParams
 	_ = json.Unmarshal(pr.Params, &params)
-	sess, err := p.ownedVFSSession(ctx, env, params.SessionID)
+	bag, err := c.vfsBag(ctx, params.SessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -140,6 +147,6 @@ func (p *acpProtocol) handleVFSUnbind(ctx context.Context, env server.ProtocolEn
 	if name := strings.TrimSpace(params.Name); name != "" {
 		point = name
 	}
-	sess.creds.Unbind(point, params.Provider)
+	bag.Unbind(point, params.Provider)
 	return map[string]any{}, nil
 }

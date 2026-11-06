@@ -17,8 +17,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/ryanaldo34/tacklr/examples/host"
 	"github.com/ryanaldo34/tacklr/examples/temporal/cmd/internal/stack"
-	"github.com/ryanaldo34/tacklr/examples/temporal/host"
 	serverpg "github.com/ryanaldo34/tacklr/server/postgres"
 	"github.com/ryanaldo34/tacklr/session/temporal"
 )
@@ -54,5 +54,8 @@ func run(ctx context.Context) error {
 		DisableStreams: true,
 		Live:           temporal.Live{Key: st.LiveKey},
 	})
-	return host.New(sessions, st.Model, wire, token).ServeHTTP(ctx, cmp.Or(os.Getenv("ADDR"), ":8080"))
+	srv := host.New(sessions, st.Model, wire, token)
+	// The workers mount a workspace, so a client may bind its own sources.
+	srv.Workspace = true
+	return srv.ServeHTTP(ctx, cmp.Or(os.Getenv("ADDR"), ":8080"))
 }

@@ -74,6 +74,26 @@ func Handler(ref Ref) http.Handler {
 		head, err := ref.Head(r.Context())
 		reply(w, head, err)
 	})
+	mux.HandleFunc("GET /wire", func(w http.ResponseWriter, r *http.Request) {
+		raw, err := ref.Wire(r.Context())
+		if err != nil {
+			reply(w, nil, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(raw)
+	})
+	mux.HandleFunc("PUT /wire", func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			reply(w, nil, fmt.Errorf("%w: %w", session.ErrInvalid, err))
+			return
+		}
+		reply(w, nil, ref.SetWire(r.Context(), raw))
+	})
+	mux.HandleFunc("DELETE /wire", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, nil, ref.SetWire(r.Context(), nil))
+	})
 	mux.HandleFunc("GET /subscribe", func(w http.ResponseWriter, r *http.Request) {
 		after, err := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
 		if err != nil {
@@ -168,6 +188,29 @@ func (r remote) Head(ctx context.Context) (session.Seq, error) {
 	return head, err
 }
 
+// Wire implements Ref.
+func (r remote) Wire(ctx context.Context) ([]byte, error) {
+	resp, err := r.send(ctx, http.MethodGet, "/wire", "", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	return io.ReadAll(resp.Body)
+}
+
+// SetWire implements Ref.
+func (r remote) SetWire(ctx context.Context, raw []byte) error {
+	method := http.MethodPut
+	if raw == nil {
+		method = http.MethodDelete
+	}
+	resp, err := r.do(ctx, method, "/wire", "", raw)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
 // Subscribe implements Ref: the object's events after after, as they
 // come.
 func (r remote) Subscribe(ctx context.Context, after session.Seq) (session.Subscription, error) {
@@ -199,22 +242,31 @@ func (r remote) call(ctx context.Context, method, path string, in, out any) erro
 	return nil
 }
 
-// send sends one request and returns its response once it is a success;
-// an error response is its kind's sentinel. Every request goes to the one
-// host "object": the client's Transport picks the object.
+// send sends one request with in as its JSON body, when in is set, and
+// returns its response once it is a success (do).
 func (r remote) send(ctx context.Context, method, path, query string, in any) (*http.Response, error) {
-	req := (&http.Request{
-		Method: method,
-		URL:    &url.URL{Scheme: "http", Host: "object", Path: path, RawQuery: query},
-		Header: http.Header{},
-	}).WithContext(ctx)
+	var body []byte
 	if in != nil {
 		raw, err := json.Marshal(in)
 		if err != nil {
 			return nil, err
 		}
-		req.Body, req.ContentLength = io.NopCloser(bytes.NewReader(raw)), int64(len(raw))
-		req.Header.Set("Content-Type", "application/json")
+		body = raw
+	}
+	return r.do(ctx, method, path, query, body)
+}
+
+// do sends one request and returns its response once it is a success; an
+// error response is its kind's sentinel. Every request goes to the one
+// host "object": the client's Transport picks the object.
+func (r remote) do(ctx context.Context, method, path, query string, body []byte) (*http.Response, error) {
+	req := (&http.Request{
+		Method: method,
+		URL:    &url.URL{Scheme: "http", Host: "object", Path: path, RawQuery: query},
+		Header: http.Header{},
+	}).WithContext(ctx)
+	if body != nil {
+		req.Body, req.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
 	}
 	resp, err := r.c.Do(req)
 	if err != nil {

@@ -25,7 +25,7 @@ type harnessState struct {
 
 // read is the harness at the store's revision, for a step that reads
 // committed state (Infer, the tool calls of a reply).
-func (hs *harnessState) read(ctx context.Context, e *executor) (*tacklr.Harness, error) {
+func (hs *harnessState) read(ctx context.Context, e *objectRuntime) (*tacklr.Harness, error) {
 	hs.mu.Lock()
 	defer hs.mu.Unlock()
 	if err := hs.build(ctx, e); err != nil {
@@ -36,7 +36,7 @@ func (hs *harnessState) read(ctx context.Context, e *executor) (*tacklr.Harness,
 
 // commit is the Commit step (adapter.Snapshot.Commit) over store, which
 // stages its writes for the step's one write; its events go to the step's.
-func (hs *harnessState) commit(ctx context.Context, e *executor, store session.Store, base session.Revision, in tacklr.CommitIn) (session.Revision, error) {
+func (hs *harnessState) commit(ctx context.Context, e *objectRuntime, store session.Store, base session.Revision, in tacklr.CommitIn) (session.Revision, error) {
 	hs.mu.Lock()
 	defer hs.mu.Unlock()
 	if err := hs.build(ctx, e); err != nil {
@@ -48,8 +48,8 @@ func (hs *harnessState) commit(ctx context.Context, e *executor, store session.S
 }
 
 // build builds or rebuilds the harness as needed. Call it with hs.mu held.
-func (hs *harnessState) build(ctx context.Context, e *executor) error {
-	t := e.turn
+func (hs *harnessState) build(ctx context.Context, e *objectRuntime) error {
+	t := e.state
 	// Strings and slices of them: the key always encodes.
 	key, _ := json.Marshal(struct {
 		Specialist string
@@ -86,9 +86,9 @@ func (hs *harnessState) closeLocked() {
 // build is a harness for the session: the agent, or its specialist, with
 // the session's MCP servers and the deployment's job names. A durable
 // object has no workspace.
-func (e *executor) build(ctx context.Context) (*tacklr.Harness, error) {
+func (e *objectRuntime) build(ctx context.Context) (*tacklr.Harness, error) {
 	spec := e.o.cfg.Agent
-	if s := e.turn.Specialist; s != "" {
+	if s := e.state.Specialist; s != "" {
 		over, err := adapter.OverlaySpecialist(spec, s)
 		if err != nil {
 			return nil, err
@@ -96,8 +96,8 @@ func (e *executor) build(ctx context.Context) (*tacklr.Harness, error) {
 		spec = over
 	}
 	opts := tacklr.BindTurn(spec, string(e.init.SessionID), slices.Sorted(maps.Keys(e.o.cfg.Jobs)))
-	if len(e.turn.MCP) > 0 {
-		opts.MCPConfigs = append(slices.Clone(spec.MCPConfigs), e.turn.MCP...)
+	if len(e.state.MCP) > 0 {
+		opts.MCPConfigs = append(slices.Clone(spec.MCPConfigs), e.state.MCP...)
 	}
 	return tacklr.NewHarness(ctx, opts)
 }

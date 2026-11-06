@@ -2,6 +2,7 @@ package temporal_test
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -101,15 +102,16 @@ func TestClient_failsWithTheErrorOfASecretStoreOrServerThatIsDown(t *testing.T) 
 
 // TestClient_withStreamsOffReadsTheFallbackLog: with streams off, Head and
 // Subscribe read the fallback log that the workers write: an error event
-// carries its error.
+// carries its error, also when the client cannot ask the session's worker
+// for its live deltas.
 func TestClient_withStreamsOffReadsTheFallbackLog(t *testing.T) {
 	t.Parallel()
 	// Arrange
 	log := session.NewMemoryEventLog()
-	if err := log.Append(t.Context(), "s", session.TopicEvents, session.Event{Type: session.EventError, Fail: "model broke"}); err != nil {
+	if err := log.Append(t.Context(), "s", session.TopicEvents, session.FailureEvent(errors.New("model broke"))); err != nil {
 		t.Fatal(err)
 	}
-	rt := temporal.Open(unreachable(t), temporal.Config{Store: session.NewMemoryStore(), Secrets: session.NewMemorySecretStorage(), Fallback: log, DisableStreams: true})
+	rt := temporal.Open(unreachable(t), temporal.Config{Store: session.NewMemoryStore(), Secrets: session.NewMemorySecretStorage(), Fallback: log, DisableStreams: true, Live: temporal.Live{Key: []byte("live-key")}})
 
 	// Act
 	head, headErr := rt.Head(t.Context(), "s")

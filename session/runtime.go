@@ -4,9 +4,9 @@ import (
 	"context"
 )
 
-// Runtime is the host session API. One backend runs one session per id and
-// implements Driver for it. Package session owns the session loop.
-// Open-round and HITL rules live in Turn.Run.
+// Client is the host session API: a runtime (Temporal, Durable Objects)
+// implements it and runs one session per id. The open-round and HITL rules
+// live in package session/orchestrator.
 //
 // Prompt and Resume deliver work to the session. They do not return a harness.
 // Subscribe yields Event values (message, tool, yield, error, complete).

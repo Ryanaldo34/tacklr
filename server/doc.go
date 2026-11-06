@@ -1,17 +1,21 @@
 // Package server serves a session.Client over host-defined wire protocols.
 //
-// Protocol is the extension point. Implement it to own HTTP routes and WebSocket,
-// stream framing, and HITL resume. The ACP built-in is package server/acp.
-// More protocols can be mounted on the same Server:
+// Protocol is the extension point; the ACP built-in is package server/acp.
+// More protocols can be served by the same Server, each at its own path:
 //
-//	srv := server.NewServer(rt, agent, acp.New(nil), myProtocol{})
+//	srv := server.NewServer(rt, agent, acp.New(wire), myProtocol{})
 //	_ = srv.ServeHTTP(ctx, addr) // or srv.Serve(ctx, listener)
 //
-// The program on the other end of a connection is the caller's. This module
-// does not ship that program. A protocol asks it through Conn.Ask.
+// A connection is event-driven: its Handler gets each frame from the peer
+// and each event of the sessions it follows, one call at a time, and never
+// waits for the peer. On net/http the Server accepts each connection as a
+// WebSocket and holds it in a goroutine. A platform that holds the socket
+// itself (a Cloudflare Durable Object) calls Connect, then Connection.Serve
+// on its socket, so every host runs the same protocol code. docs/protocol.md
+// follows a turn through the server, from the client's prompt to the answer.
 //
-// RunTurn pumps Client.Prompt/Resume/Subscribe through Protocol.OnEvent
-// and OnStreamClosed. A protocol parses its own credential payload and stores
-// the bindings on session.CredentialBag. Runtime, harness, VFS, and Temporal
-// do not import this package.
+// The program on the other end of a connection is the caller's. This
+// module does not ship it. A protocol parses its own credential payload and
+// stores the bindings on a CredentialBag; it puts bag.Take() on Prompt or
+// Resume. Runtime, harness, VFS, and Temporal do not import this package.
 package server

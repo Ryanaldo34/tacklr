@@ -4,8 +4,8 @@
 // window and plan, the checkpoint encoding, and the VFS, brain and MCP
 // wiring. Other packages:
 //   - message holds the conversation data (Message, ContentPart, ToolCall).
-//   - session is the client contract (Client, Store, Event); session/loop
-//     runs the session loop over a loop.Executor; session/temporal is the
+//   - session is the client contract (Client, Store, Event); session/orchestrator
+//     decides each step of a session over an orchestrator.Runtime; session/temporal is the
 //     Temporal client and session/temporal/worker its worker.
 //   - brain owns knowledge retrieval; brain/postgres and brain/helixgraph
 //     are the store and graph adapters.

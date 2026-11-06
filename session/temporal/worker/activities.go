@@ -23,7 +23,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
-	"github.com/ryanaldo34/tacklr/session/loop"
+	"github.com/ryanaldo34/tacklr/session/orchestrator"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs/fuse"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
@@ -44,7 +44,7 @@ func activityError(ctx context.Context, err error) error {
 		return temporal.NewCanceledError(err.Error())
 	}
 	// A failure a client acts on crosses the boundary typed with its kind,
-	// which the workflow maps back to the sentinel (executor.stepErr).
+	// which the workflow maps back to the sentinel (workflowRuntime.stepErr).
 	switch kind := session.KindOf(err); kind {
 	case session.FailRefused:
 		return temporal.NewApplicationErrorWithCause(err.Error(), string(kind), err)
@@ -81,7 +81,7 @@ type activities struct {
 // workflow holds it for the session; the generic steps do not carry it.
 type stepSession struct {
 	SessionID  session.ID
-	Identity   loop.Identity
+	Identity   orchestrator.Identity
 	MCPServers []session.MCPServer
 }
 
@@ -92,7 +92,7 @@ type toolInput struct {
 }
 
 // commitInput is one Commit activity. Base is the revision the previous
-// Commit returned (see loop.Executor).
+// Commit returned (see orchestrator.Runtime).
 type commitInput struct {
 	stepSession
 	Base session.Revision
@@ -422,14 +422,11 @@ func publishContext(ctx context.Context) context.Context {
 // the step has no stream. With call set, the stream carries ev without
 // its content; the fallback log, which is not history, gets it whole.
 func (a *activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID session.ID, topic string, ev session.Event, call string, force bool) error {
-	if ev.Error != nil && ev.Fail == "" {
-		ev.Fail = ev.Error.Error()
-	}
 	pubCtx := publishContext(ctx)
 	if stream != nil {
 		item := protocol.StreamItem{Event: ev, Call: call}
 		if call != "" {
-			item.Content = ""
+			item.Event.Content = ""
 		}
 		stream.Topic(topic).Publish(item, force)
 		if force {

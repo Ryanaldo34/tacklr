@@ -2,29 +2,34 @@ package server_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/coder/websocket"
+
+	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
 )
 
 // TestACPAuthentication_ownsSessionsByGenericPrincipal: a client must
 // authenticate through the advertised method before it makes a session;
-// the session is its principal's, so another principal cannot load it; and
-// after logout the client cannot make one.
+// the session is its principal's, so a connection of another principal
+// cannot load it; and after logout the client cannot make one.
 func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 	t.Parallel()
 	service := &server.Service{
 		Authenticator: authenticatorFunc(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
-			if attempt.Scheme != "host-login" {
-				return server.Principal{}, errors.New("unexpected scheme")
+			switch attempt.Scheme {
+			case "host-login":
+				return server.NewPrincipal("alice")
+			case "bearer":
+				return server.NewPrincipal(string(attempt.Credential.Bytes()))
 			}
-			return server.NewPrincipal("alice")
+			return server.Principal{}, errors.New("unexpected scheme")
 		}),
 	}
 	protocol := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{
@@ -33,33 +38,18 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 		Description: "Authenticate with the host",
 		Scheme:      "host-login",
 	}}, true)
-	k := memoryHost(t)
-	bob, err := server.NewPrincipal("bob")
-	if err != nil {
-		t.Fatal(err)
-	}
-	connection := &server.Conn{}
-	bobConnection := &server.Conn{Security: &server.Context{Principal: bob}}
-	call := func(conn *server.Conn, body string) map[string]any {
-		t.Helper()
-		recorder := httptest.NewRecorder()
-		conn.Writer = acp.HTTPWriter(recorder)
-		_ = protocol.HandleInbound(t.Context(), server.ProtocolEnv{Client: k.Client, Agent: k.Agent, Conn: conn, Security: service}, []byte(body))
-		var response map[string]any
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode %q: %v", recorder.Body.String(), err)
-		}
-		return response
-	}
+	url := secured(t, memoryHost(t), protocol, service)
+	c := acptest.Dial(t, url, nil)
 
-	initialize := call(connection, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`)
-	unauthenticated := call(connection, `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	authenticated := call(connection, `{"jsonrpc":"2.0","id":3,"method":"authenticate","params":{"methodId":"agent-login"}}`)
-	created := call(connection, `{"jsonrpc":"2.0","id":4,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	initialize := c.Call("initialize", `{"protocolVersion":1,"clientCapabilities":{}}`)
+	unauthenticated := c.Call("session/new", `{"cwd":"/tmp"}`)
+	authenticated := c.Call("authenticate", `{"methodId":"agent-login"}`)
+	created := c.Call("session/new", `{"cwd":"/tmp"}`)
 	sessionID, _ := created["result"].(map[string]any)["sessionId"].(string)
-	bobLoad := call(bobConnection, `{"jsonrpc":"2.0","id":5,"method":"session/load","params":{"sessionId":"`+sessionID+`"}}`)
-	loggedOut := call(connection, `{"jsonrpc":"2.0","id":6,"method":"logout","params":{}}`)
-	afterLogout := call(connection, `{"jsonrpc":"2.0","id":7,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	bobLoad := connectAs(t, url, "bob").Call("session/load", `{"sessionId":"`+sessionID+`"}`)
+	aliceLoad := connectAs(t, url, "alice").Call("session/load", `{"sessionId":"`+sessionID+`"}`)
+	loggedOut := c.Call("logout", `{}`)
+	afterLogout := c.Call("session/new", `{"cwd":"/tmp"}`)
 
 	methods := initialize["result"].(map[string]any)["authMethods"].([]any)
 	if got := methods[0].(map[string]any)["id"]; got != "agent-login" {
@@ -68,17 +58,20 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 	if unauthenticated["error"] == nil || authenticated["error"] != nil || sessionID == "" {
 		t.Fatalf("before = %v, authenticate = %v, then %v; want refused, then a session", unauthenticated, authenticated, created)
 	}
-	if bobLoad["error"] == nil || loggedOut["error"] != nil || afterLogout["error"] == nil {
-		t.Fatalf("bob's load = %v, logout = %v, after = %v; want bob refused and the logged-out client refused", bobLoad, loggedOut, afterLogout)
+	if bobLoad["error"] == nil || aliceLoad["error"] != nil {
+		t.Fatalf("bob's load = %v, alice's = %v; want bob refused and alice served", bobLoad, aliceLoad)
+	}
+	if loggedOut["error"] != nil || afterLogout["error"] == nil {
+		t.Fatalf("logout = %v, after = %v; want the logged-out client refused", loggedOut, afterLogout)
 	}
 }
 
-// TestServer_WithSecurity_authenticatesHTTPRequests: a route that needs
-// authentication serves a request with a credential the host accepts, and
-// answers 401 to one with no credential or a bad one; the ACP route, which
-// authenticates in its own protocol, asks a plain GET to upgrade, and
-// refuses an upgrade with no WebSocket version as a bad request.
-func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
+// TestServer_WithSecurity_admitsConnections: a connection whose request
+// carries a credential the host refuses gets 401, and one with no
+// credential opens anonymous; a GET that does not upgrade is asked to,
+// and an upgrade with no WebSocket version is a bad request; a platform's
+// request for a path no protocol serves is not found.
+func TestServer_WithSecurity_admitsConnections(t *testing.T) {
 	t.Parallel()
 	service := &server.Service{
 		Authenticator: authenticatorFunc(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
@@ -89,37 +82,32 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 		}),
 	}
 	k := memoryHost(t)
-	mux := server.NewServer(k.Client, k.Agent, hostProtocol{}, acp.New(nil)).WithSecurity(service, func(r *http.Request) (server.Attempt, bool) {
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		return server.Attempt{Scheme: "bearer", Credential: server.NewSecret([]byte(token))}, ok
-	}).HTTPMux()
-	serve := func(path, token string, header ...string) *httptest.ResponseRecorder {
+	srv := server.NewServer(k.Client, k.Agent, acp.New(nil)).WithSecurity(service, bearerOf)
+	url := acptest.Listen(t, srv)
+	serve := func(header ...string) int {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, path, nil)
-		if token != "" {
-			req.Header.Set("Authorization", "Bearer "+token)
-		}
+		req := httptest.NewRequest(http.MethodGet, "/acp", nil)
 		for i := 0; i < len(header); i += 2 {
 			req.Header.Set(header[i], header[i+1])
 		}
-		mux.ServeHTTP(rec, req)
-		return rec
+		srv.HTTPMux().ServeHTTP(rec, req)
+		return rec.Code
 	}
 
-	authorized := serve("/healthz", "alice")
-	anonymous := serve("/healthz", "")
-	bad := serve("/healthz", "bad")
-	acpGet := serve("/acp", "")
-	badUpgrade := serve("/acp", "", "Connection", "Upgrade", "Upgrade", "websocket")
+	_, bad, badErr := websocket.Dial(t.Context(), url, &websocket.DialOptions{HTTPHeader: bearer("bad")})
+	opened := acptest.Connect(t, url, `{"protocolVersion":1}`).Call("session/new", `{"cwd":"/tmp"}`)
+	plainGet := serve()
+	noVersion := serve("Connection", "Upgrade", "Upgrade", "websocket")
+	_, elsewhere := srv.Connect(httptest.NewRequest(http.MethodGet, "/elsewhere", nil))
 
-	if authorized.Code != http.StatusOK || authorized.Body.String() != "ok" {
-		t.Fatalf("authorized = %d %s", authorized.Code, authorized.Body.String())
+	if badErr == nil || bad == nil || bad.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("a refused credential = %v (%v), want 401", bad, badErr)
 	}
-	if anonymous.Code != http.StatusUnauthorized || bad.Code != http.StatusUnauthorized {
-		t.Fatalf("anonymous = %d, bad credential = %d; want 401 each", anonymous.Code, bad.Code)
+	if msg := acptest.Message(t, opened); !strings.Contains(msg, "authentication required") {
+		t.Fatalf("session/new on an anonymous connection = %q, want authentication required", msg)
 	}
-	if acpGet.Code != http.StatusUpgradeRequired || badUpgrade.Code != http.StatusBadRequest {
-		t.Fatalf("unauthenticated ACP GET = %d, upgrade with no version = %d; want upgrade required, bad request", acpGet.Code, badUpgrade.Code)
+	if plainGet != http.StatusUpgradeRequired || noVersion != http.StatusBadRequest || elsewhere != http.StatusNotFound {
+		t.Fatalf("plain GET = %d, upgrade with no version = %d, other path = %d; want upgrade required, bad request, not found", plainGet, noVersion, elsewhere)
 	}
 }
 

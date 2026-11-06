@@ -372,9 +372,6 @@ func (r *Client) resolve(ctx context.Context, id session.ID, it protocol.StreamI
 }
 
 func deliver(ctx context.Context, ch chan<- session.Event, ev session.Event) bool {
-	if ev.Error == nil && ev.Fail != "" {
-		ev.Error = ev.FailKind.Err(ev.Fail)
-	}
 	select {
 	case ch <- ev:
 		return true

@@ -13,7 +13,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
-	"github.com/ryanaldo34/tacklr/session/loop"
+	"github.com/ryanaldo34/tacklr/session/orchestrator"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -294,7 +294,7 @@ func (o *Object) Create(ctx context.Context, init Init) error {
 	}
 	init.Auth = session.AuthContext{}
 	m := meta{Init: init}
-	st := statusRecord{Status: o.turnOf(init, nil).Status()}
+	st := statusRecord{Status: o.stateOf(init, nil).Status()}
 	ops := []Op{writeMeta(m), writeStatus(st)}
 	var mail []queued
 	if init.Task != "" {
@@ -435,6 +435,34 @@ func (o *Object) Subscribe(ctx context.Context, after session.Seq) (session.Subs
 	return &subscription{ch: session.Merge(ctx, t.ch, deltas), tail: t, cancel: cancel}, nil
 }
 
+// Wire implements Ref.
+func (o *Object) Wire(context.Context) ([]byte, error) {
+	id, err := o.openID()
+	if err != nil {
+		return nil, err
+	}
+	raw, ok, err := o.host.Get(key(kindWire, id))
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("%w: no wire state", session.ErrNotFound)
+	}
+	return raw, nil
+}
+
+// SetWire implements Ref.
+func (o *Object) SetWire(_ context.Context, raw []byte) error {
+	id, err := o.openID()
+	if err != nil {
+		return err
+	}
+	if raw == nil {
+		return o.host.Write(del(key(kindWire, id)))
+	}
+	return o.host.Write(put(key(kindWire, id), raw))
+}
+
 // openID is the id of the object's session unless it is unknown or closed.
 func (o *Object) openID() (session.ID, error) {
 	o.mu.Lock()
@@ -504,7 +532,7 @@ func (o *Object) run() {
 	}
 }
 
-// stopped is the panic an executor raises when the object's storage fails:
+// stopped is the panic the object's runtime raises when the object's storage fails:
 // the run stops, and the next request or alarm replays it from storage.
 type stopped struct{ err error }
 
@@ -535,38 +563,38 @@ func (o *Object) runOnce() (ok bool) {
 	if !has || m.Ended {
 		return true
 	}
-	turn, err := o.turn(m.Init)
+	state, err := o.loadState(m.Init)
 	if err != nil {
 		fail(err)
 	}
-	ex := newExecutor(o, m.Init, turn)
-	result, runErr := loop.Run(ex, turn)
-	if errors.Is(runErr, loop.ErrSuspended) {
-		ex.suspend()
+	rt := newObjectRuntime(o, m.Init, state)
+	result, runErr := orchestrator.Run(rt, state)
+	if errors.Is(runErr, orchestrator.ErrSuspended) {
+		rt.suspend()
 		return true
 	}
-	ex.finish(result, runErr)
+	rt.finish(result, runErr)
 	return true
 }
 
-// turnOf is init's Turn, from c when the session suspended before.
-func (o *Object) turnOf(init Init, c *loop.Carry) *loop.Turn {
-	ident := loop.Identity{Specialist: init.Specialist, Worker: init.Worker, Parent: init.Parent, Mounts: init.Mounts, Task: init.Task != ""}
-	return loop.NewTurn(init.SessionID, ident, init.MCPServers, init.State, c)
+// stateOf is init's Turn, from c when the session suspended before.
+func (o *Object) stateOf(init Init, c *orchestrator.Carry) *orchestrator.State {
+	ident := orchestrator.Identity{Specialist: init.Specialist, Worker: init.Worker, Parent: init.Parent, Mounts: init.Mounts, Task: init.Task != ""}
+	return orchestrator.NewState(init.SessionID, ident, init.MCPServers, init.State, c)
 }
 
-// turn is the session's Turn: from init, then from its carry
-// (loop.Carry) when it suspended before.
-func (o *Object) turn(init Init) (*loop.Turn, error) {
+// loadState is the session's Turn: from init, then from its carry
+// (orchestrator.Carry) when it suspended before.
+func (o *Object) loadState(init Init) (*orchestrator.State, error) {
 	raw, ok, err := o.host.Get(key(kindCarry, init.SessionID))
 	if err != nil || !ok {
-		return o.turnOf(init, nil), err
+		return o.stateOf(init, nil), err
 	}
-	var c loop.Carry
+	var c orchestrator.Carry
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return nil, err
 	}
-	return o.turnOf(init, &c), nil
+	return o.stateOf(init, &c), nil
 }
 
 // purge deletes what an ended session left, when it is closed: everything
@@ -610,7 +638,7 @@ func (o *Object) leftovers(id session.ID, all bool) ([]Op, error) {
 	}
 	ops = append(ops, del(key(kindCarry, id)), del(key(kindMailboxHead, id)), del(key(kindSecrets, id)))
 	if all {
-		ops = append(ops, del(key(kindSnapshot, id)), del(key(kindEventHead, id)))
+		ops = append(ops, del(key(kindSnapshot, id)), del(key(kindEventHead, id)), del(key(kindWire, id)))
 	}
 	return ops, nil
 }

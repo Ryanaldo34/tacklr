@@ -22,7 +22,7 @@ Tacklr is a Go SDK for running AI agents as long-lived sessions in the cloud. Yo
 - **Stateless hosts.** Your API servers keep no session state. They call one interface, `session.Client`, and scale like any web service. Workers scale on their own.
 - **Each binary links only what it needs.** A host does not link the agent code. A worker links only the storage adapters you import, and the Google and Microsoft adapters use plain HTTP instead of vendor SDKs. The harness core also builds for WebAssembly, so it can run outside a Linux worker.
 - **State lives in managed services.** Sessions, encrypted user credentials, and knowledge go to Postgres; files stay in the sources they came from. Checkpoints store how to rebuild the workspace, never tokens or file contents.
-- **The runtime is pluggable.** The turn loop is the same everywhere. A runtime implements two interfaces, and [Temporal](https://temporal.io) is the one that ships today.
+- **The runtime is pluggable.** The orchestrator is the same everywhere. A runtime implements two interfaces, and [Temporal](https://temporal.io) is the one that ships today.
 
 ## Architecture
 
@@ -39,10 +39,10 @@ flowchart LR
     end
     subgraph runtime["Durable runtime · pluggable"]
         svc["History and wakes<br/>recorded step results"]
-        rx["Executor<br/>implements loop.Executor"]
+        rx["Runtime<br/>implements orchestrator.Runtime"]
     end
     subgraph sess["Inside a session · the same code in every runtime"]
-        loop["loop.Run<br/>decides every step"]
+        orch["orchestrator.Run<br/>decides every step"]
         harness["tacklr.Harness<br/>model · tools · plan · knowledge"]
     end
     stores[("Stores you choose<br/>session · secrets · events<br/>knowledge · files")]
@@ -52,7 +52,7 @@ flowchart LR
     proto -- "calls" --> rc
     rc -- "RPC: start · signal · query · events" --> svc
     svc -- "wakes, in order" --> rx
-    loop -- "calls" --> rx
+    orch -- "calls" --> rx
     rx -- "runs each step once" --> harness
     harness --> model
     rx --> stores
@@ -60,8 +60,8 @@ flowchart LR
 ```
 
 - **`session.Client`** is what a host calls from outside a session: create, prompt, resume, cancel, and subscribe to events. The runtime supplies it as a client library that runs in the host (on Temporal, `session/temporal`) and reaches the runtime over RPC.
-- **`loop.Executor`** is what the turn loop calls from inside one: run a model request, run the tool calls, commit the state, wait for the next wake.
-- **`loop.Run`** makes every decision. The runtime only carries out the steps durably, so a new runtime never changes how an agent behaves.
+- **`orchestrator.Runtime`** is what the orchestrator calls from inside one: run a model request, run the tool calls, commit the state, wait for the next wake.
+- **`orchestrator.Run`** makes every decision. The runtime only carries out the steps durably, so a new runtime never changes how an agent behaves.
 
 ### On Temporal
 
@@ -75,7 +75,7 @@ flowchart LR
     end
     temporal["Temporal<br/>one workflow per session"]
     subgraph workers["Worker pool · Linux"]
-        worker["session/temporal/worker<br/>loop · harness · workspace<br/>FUSE · command sandbox"]
+        worker["session/temporal/worker<br/>orchestrator · harness · workspace<br/>FUSE · command sandbox"]
     end
     pg[("Postgres<br/>sessions · secrets · knowledge")]
     files[("Files<br/>disk · S3 · Azure Blob · Drive<br/>Microsoft 365 · git")]
@@ -98,7 +98,7 @@ flowchart LR
 
 A session's steps go to the worker that already has it loaded. If that worker stops, any other worker rebuilds the session from Postgres and continues.
 
-Package `session/durableobject` runs sessions as durable objects: one object per session, with journal replay over the object's own storage, so a session needs no Temporal. It is plain Go and builds for WebAssembly, and `session/durableobject/cloudflare` runs it on Cloudflare Workers. See [docs/session.md](docs/session.md#durable-objects) and [examples/cloudflare](examples/cloudflare).
+Package `session/durableobject` runs sessions as durable objects: one object per session, with journal replay over the object's own storage, so a session needs no Temporal. It is plain Go and builds for WebAssembly, and `session/durableobject/cloudflare` runs it on Cloudflare Workers, where a connection object for each WebSocket serves the same ACP server as a host on Temporal. See [docs/session.md](docs/session.md#durable-objects) and [examples/cloudflare](examples/cloudflare).
 
 ## Getting started
 
@@ -355,8 +355,9 @@ func stores(ctx context.Context, pool *pgxpool.Pool, key []byte) (session.Store,
 | A workspace source | `vfs.Provider` | `Local`, `S3`, `Blob`, `Drive`, `Graph`, `Git` |
 | Session storage | `session.Store`, `session.SecretStorage`, `session.EventLog` | memory, `session/postgres` |
 | Knowledge storage | `brain.Store`, `brain.Graph` | memory, `brain/postgres`, `brain/helixgraph` |
-| The protocol clients speak | `server.Protocol` | ACP (`server/acp`) |
-| Where sessions run | `session.Client` and `loop.Executor` | Temporal (`session/temporal`), durable objects (`session/durableobject`) |
+| The protocol clients speak | `server.Protocol` | ACP (`server/acp`), served on net/http or from Cloudflare connection objects |
+| Where a protocol keeps its session state | `server.ProtocolWireStore` | memory, `server/postgres`, each session's durable object |
+| Where sessions run | `session.Client` and `orchestrator.Runtime` | Temporal (`session/temporal`), durable objects (`session/durableobject`) |
 
 Custom stores can check themselves against the shared tests in `session/storetest` and `brain/storetest`. Tacklr also ships web search and fetch tools (`web`), MCP servers (`AgentOptions.MCPConfigs` with `mcp.Client`), and skill files the agent can read (`AgentOptions.SkillsLoader`).
 
@@ -365,12 +366,13 @@ Custom stores can check themselves against the shared tests in `session/storetes
 | Doc | Covers |
 |---|---|
 | [docs/session.md](docs/session.md) | Sessions, the Temporal client and worker, questions, specialists and jobs, credentials, tracing |
+| [docs/protocol.md](docs/protocol.md) | A turn from the client's prompt to the answer: the protocol server, ACP, cancel and reconnect, and how it runs on each host |
 | [docs/context.md](docs/context.md) | The context window: what owns it, how a request is sized, collapse, cuts and handoffs |
 | [docs/tools.md](docs/tools.md) | Writing tools, `CallContext`, permissions |
 | [docs/vfs.md](docs/vfs.md) | The workspace, its sources, documents and spreadsheets |
 | [docs/knowledge.md](docs/knowledge.md) | The knowledge store: search, kinds, graph, file indexing |
 | [examples/temporal](examples/temporal) | A production layout on Temporal: an ACP host, a worker, Postgres, an end-to-end test |
-| [examples/cloudflare](examples/cloudflare) | Sessions as Durable Objects on Cloudflare Workers |
+| [examples/cloudflare](examples/cloudflare) | Sessions as Durable Objects on Cloudflare Workers, with the same ACP server, an end-to-end test |
 
 ## Contributing
 

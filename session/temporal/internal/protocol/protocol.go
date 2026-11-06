@@ -95,8 +95,9 @@ type Input struct {
 
 // StreamItem is one event on a session's workflow stream. A tool result's
 // content stays in the session.Store, out of history: Call is the key of
-// the call whose body holds it, and Subscribe puts it back.
+// the call whose body holds it, and Subscribe puts it back. The event is a
+// named field: embedded, its UnmarshalJSON would decode the whole item.
 type StreamItem struct {
-	session.Event
-	Call string `json:"call,omitempty"`
+	Event session.Event `json:"event"`
+	Call  string        `json:"call,omitempty"`
 }

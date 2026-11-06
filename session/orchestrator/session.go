@@ -1,4 +1,4 @@
-package loop
+package orchestrator
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 )
 
 // ErrSuspended is Run's error when a suspend stopped the session: the
-// runtime restarts it from the Turn as Run left it.
+// runtime restarts it from the State as Run left it.
 var ErrSuspended = errors.New("session suspended")
 
 // Run drives one session lifetime over d from the state in t, which the
@@ -18,39 +18,39 @@ var ErrSuspended = errors.New("session suspended")
 // that turn ended and is no longer parked; any other session returns when
 // it is closed (t.Closed). Either way Run then stops the jobs that still
 // run. A suspend returns ErrSuspended, and the jobs go on.
-func Run(d Executor, t *Turn) (string, error) {
+func Run(rt Runtime, t *State) (string, error) {
 	r := &runner{turn: t}
-	result, err := r.run(d)
+	result, err := r.run(rt)
 	if r.suspended {
 		return "", ErrSuspended
 	}
 	for _, j := range t.Jobs {
 		if !j.Ended {
-			d.Cancel(j.ID)
+			rt.Cancel(j.ID)
 		}
 	}
 	return result, err
 }
 
-// runner is the state of one Run besides its Turn.
+// runner is the state of one Run besides its State.
 type runner struct {
-	turn *Turn
+	turn *State
 	// running is set while a turn drives.
 	running bool
 	// suspended says a suspend stopped the session.
 	suspended bool
 }
 
-func (s *runner) run(d Executor) (string, error) {
+func (s *runner) run(rt Runtime) (string, error) {
 	if s.turn.Suspended {
 		// The turn the runtime suspended goes on from where it stopped.
-		d.Begin("continue", 0, 0)
+		rt.Begin("continue", 0, 0)
 		s.turn.Suspended = false
-		s.drive(d, nil, nil)
-		d.End()
+		s.drive(rt, nil, nil)
+		rt.End()
 	}
 	for !s.turn.Closed && !s.suspended && !s.taskDone() {
-		s.handle(s.next(d), d)
+		s.handle(s.next(rt), rt)
 	}
 	if s.turn.Task {
 		return s.taskResult()
@@ -66,20 +66,20 @@ func (s *runner) taskDone() bool {
 
 // next is the next wake to handle while no turn runs: a held one first,
 // else the driver's, blocking.
-func (s *runner) next(d Executor) session.Wake {
+func (s *runner) next(rt Runtime) session.Wake {
 	if t := s.turn; len(t.held) > 0 {
 		w := t.held[0]
 		t.held = t.held[1:]
 		return w
 	}
-	return d.Next(true)
+	return rt.Next(true)
 }
 
 // pump handles every wake the driver has queued, without blocking; with
 // block, it first waits for one.
-func (s *runner) pump(d Executor, block bool) {
-	for w := d.Next(block); w.Kind != ""; w = d.Next(false) {
-		s.handle(w, d)
+func (s *runner) pump(rt Runtime, block bool) {
+	for w := rt.Next(block); w.Kind != ""; w = rt.Next(false) {
+		s.handle(w, rt)
 	}
 }
 
@@ -96,7 +96,7 @@ func (s *runner) taskResult() (string, error) {
 // that decides it.
 //
 //   - A job's end, in any state, is its waiting call's result or, for a
-//     background job, an inbox message (Turn.jobEnded).
+//     background job, an inbox message (State.jobEnded).
 //   - A prompt steers the turn when one runs (also while it waits on jobs)
 //     and while it is parked; when idle it starts a turn (a worker session
 //     runs its job).
@@ -105,7 +105,7 @@ func (s *runner) taskResult() (string, error) {
 //   - A resume or a close waits for a running turn to end; a resume then
 //     runs the parked turn, a close ends the session.
 //   - A suspend stops a running turn mid-way, or the idle session.
-func (s *runner) handle(w session.Wake, d Executor) {
+func (s *runner) handle(w session.Wake, rt Runtime) {
 	t := s.turn
 	switch w.Kind {
 	case session.WakeJob:
@@ -120,17 +120,17 @@ func (s *runner) handle(w session.Wake, d Executor) {
 		if s.running {
 			t.cancelled = true
 		} else {
-			s.cancel(d)
+			s.cancel(rt)
 		}
 	case session.WakePrompt:
 		switch {
 		case s.running || t.Yielded:
 			t.Steer(w.Prompt)
 		case t.Worker != "":
-			s.runWorker(d, UserMessage(w.Prompt.Text, w.Prompt.UserMessage).Content)
+			s.runWorker(rt, UserMessage(w.Prompt.Text, w.Prompt.UserMessage).Content)
 		default:
 			s.applyQueued(w.Prompt)
-			s.runTurn(d, session.WakePrompt, UserMessage(w.Prompt.Text, w.Prompt.UserMessage), nil, w.Prompt.Auth, w.Prompt.State)
+			s.runTurn(rt, session.WakePrompt, UserMessage(w.Prompt.Text, w.Prompt.UserMessage), nil, w.Prompt.Auth, w.Prompt.State)
 		}
 	case session.WakeResume:
 		if s.running {
@@ -138,7 +138,7 @@ func (s *runner) handle(w session.Wake, d Executor) {
 			return
 		}
 		t.Yielded = false
-		s.runTurn(d, session.WakeResume, nil, w.Resume.Responses, w.Resume.Auth, w.Resume.State)
+		s.runTurn(rt, session.WakeResume, nil, w.Resume.Responses, w.Resume.Auth, w.Resume.State)
 	case session.WakeClose:
 		if s.running {
 			t.held = append(t.held, w)
@@ -163,8 +163,8 @@ func (s *runner) applyQueued(p session.Prompt) {
 // cancel stops child sessions. Idle cancel does not emit: that event would
 // be the first record the next prompt's subscriber reads. Parked cancel
 // aborts the turn, so it does emit.
-func (s *runner) cancel(d Executor) {
-	s.turn.cancelJobs(d)
+func (s *runner) cancel(rt Runtime) {
+	s.turn.cancelJobs(rt)
 	s.turn.Inbox = nil
 	s.turn.NextMCP = nil
 	if !s.turn.Yielded {
@@ -173,25 +173,25 @@ func (s *runner) cancel(d Executor) {
 	s.turn.Yielded = false
 	s.turn.State = nil
 	s.turn.Terminal, s.turn.Err = session.Failed, context.Canceled
-	d.Emit(session.FailureEvent(context.Canceled))
+	rt.Emit(session.FailureEvent(context.Canceled))
 }
 
-func (s *runner) runTurn(d Executor, kind string, user *message.Message, resume map[string][]byte, auth session.AuthContext, extra map[string]any) {
+func (s *runner) runTurn(rt Runtime, kind string, user *message.Message, resume map[string][]byte, auth session.AuthContext, extra map[string]any) {
 	n := 0
 	if user != nil {
 		n = len(user.Content)
 	}
-	d.Begin(kind, n, len(resume))
+	rt.Begin(kind, n, len(resume))
 	s.turn.start(user, resume, auth, extra)
-	s.drive(d, user, resume)
-	d.End()
+	s.drive(rt, user, resume)
+	rt.End()
 }
 
 // drive runs the turn with this session handling the wakes that come in
 // while it runs.
-func (s *runner) drive(d Executor, user *message.Message, resume map[string][]byte) {
+func (s *runner) drive(rt Runtime, user *message.Message, resume map[string][]byte) {
 	s.running = true
-	s.turn.drive(d, user, resume, func(block bool) { s.pump(d, block) })
+	s.turn.drive(rt, user, resume, func(block bool) { s.pump(rt, block) })
 	s.running = false
 	// A turn that ended or parked has nothing to go on with, even when a
 	// suspend came in with the wakes that ended it: the session handles
@@ -202,21 +202,21 @@ func (s *runner) drive(d Executor, user *message.Message, resume map[string][]by
 	s.suspended = s.turn.Suspended
 }
 
-func (s *runner) runWorker(d Executor, task string) {
-	d.Begin(session.WakePrompt, len(task), 0)
-	defer d.End()
-	out, err := d.Job(s.turn.Worker, task)
+func (s *runner) runWorker(rt Runtime, task string) {
+	rt.Begin(session.WakePrompt, len(task), 0)
+	defer rt.End()
+	out, err := rt.Job(s.turn.Worker, task)
 	if err != nil {
 		s.turn.Err = err
 		s.turn.Terminal = session.Failed
 		s.turn.Result = err.Error()
-		d.Emit(session.FailureEvent(err))
+		rt.Emit(session.FailureEvent(err))
 		return
 	}
 	s.turn.Err = nil
 	s.turn.Result = out
 	s.turn.Terminal = session.Complete
-	d.Emit(session.Event{Type: session.EventComplete})
+	rt.Emit(session.Event{Type: session.EventComplete})
 }
 
 // UserMessage is the prompt text, or the host-supplied user message.

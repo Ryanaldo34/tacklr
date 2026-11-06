@@ -626,7 +626,7 @@ func TestSession_aModelFailureRunsAgainOrFailsTheTurnWithItsKind(t *testing.T) {
 	if recovered.Type != session.EventComplete || stErr != nil || st.Result != "back" || flaky.Load() != 2 {
 		t.Fatalf("after a network failure %+v, status %+v %v, %d requests; want the second answer", recovered, st, stErr, flaky.Load())
 	}
-	if refused.FailKind != session.FailRefused || long.FailKind != session.FailMaxTokens || !errors.Is(refused.FailKind.Err(refused.Fail), session.ErrModelRefused) {
+	if refused.FailKind != session.FailRefused || long.FailKind != session.FailMaxTokens || !errors.Is(refused.Error, session.ErrModelRefused) {
 		t.Fatalf("refused %+v, long %+v; want the refusal and the token limit", refused, long)
 	}
 }
@@ -692,7 +692,7 @@ func TestSession_aRequestOverTheContextWindowCollapsesItAndAsksAgainOnce(t *test
 		t.Fatalf("after a refusal %+v, the request asked again %q; want the answer to %q", answered, retried, want)
 	}
 	for _, ev := range []session.Event{failed, refusedFirst} {
-		if ev.FailKind != session.FailContextLength || !errors.Is(ev.FailKind.Err(ev.Fail), session.ErrMaxTokens) {
+		if ev.FailKind != session.FailContextLength || !errors.Is(ev.Error, session.ErrMaxTokens) {
 			t.Fatalf("refused twice or first %+v, want a turn over the context window", ev)
 		}
 	}

@@ -131,18 +131,27 @@ func (r *streamReader) Close() error {
 // once the body ended or was cancelled.
 func serve(h http.Handler, r js.Value, done func()) js.Value {
 	return promise(func() (any, error) {
-		req, err := http.NewRequest(r.Get("method").String(), r.Get("url").String(), bytes.NewReader(bytesToGo(r.Get("body"))))
+		req, err := request(r)
 		if err != nil {
 			done()
 			return nil, err
 		}
-		headers := r.Get("headers")
-		for i := range headers.Length() {
-			pair := headers.Index(i)
-			req.Header.Add(pair.Index(0).String(), pair.Index(1).String())
-		}
 		return response(inproc.Serve(context.Background(), h, req), done), nil //nolint:bodyclose // response closes it when the stream ends
 	})
+}
+
+// request is the shim's request ({method, url, headers, body}) as Go's.
+func request(r js.Value) (*http.Request, error) {
+	req, err := http.NewRequest(r.Get("method").String(), r.Get("url").String(), bytes.NewReader(bytesToGo(r.Get("body"))))
+	if err != nil {
+		return nil, err
+	}
+	headers := r.Get("headers")
+	for i := range headers.Length() {
+		pair := headers.Index(i)
+		req.Header.Add(pair.Index(0).String(), pair.Index(1).String())
+	}
+	return req, nil
 }
 
 // response is resp for the shim, which streams its body.

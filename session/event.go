@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/ryanaldo34/tacklr/message"
@@ -39,15 +40,42 @@ type Event struct {
 	Delta  bool `json:"delta,omitempty"`
 	Offset int  `json:"offset,omitempty"`
 	// Streamed is how many bytes of a complete event's Content the reader
-	// already got as deltas. The pump (server.RunTurn) sets it, so a
-	// protocol sends only the rest. It is not on the wire.
+	// already got as deltas. A protocol server's follow (server.Peer) sets
+	// it, so a protocol sends only the rest. It is not on the wire.
 	Streamed int `json:"-"`
 	// Error is in-process only. Workflow Streams cannot encode error values;
 	// Fail is the durable stand-in (the error's text) and FailKind names the
-	// sentinel a client acts on, so Kind.Err rebuilds it after the wire.
+	// sentinel a client acts on: encoding the event writes them from Error,
+	// and decoding it rebuilds Error (MarshalJSON, UnmarshalJSON).
 	Error    error    `json:"-"`
 	Fail     string   `json:"fail,omitempty"`
 	FailKind FailKind `json:"failKind,omitempty"`
+}
+
+// MarshalJSON encodes an event; a failure's Error goes as its text (Fail)
+// and its kind (FailKind), since an error value cannot cross a log, a store
+// or a wire. UnmarshalJSON gives it back. The event type owns both
+// directions, so no writer or reader converts on its own. (A struct that
+// embeds Event gets these methods for itself: name the field instead.)
+func (ev Event) MarshalJSON() ([]byte, error) {
+	type plain Event
+	if ev.Error != nil && ev.Fail == "" {
+		ev.Fail, ev.FailKind = ev.Error.Error(), KindOf(ev.Error)
+	}
+	return json.Marshal(plain(ev))
+}
+
+// UnmarshalJSON decodes an event and gives a failure back its Error, which
+// errors.Is finds the kind's sentinel in.
+func (ev *Event) UnmarshalJSON(raw []byte) error {
+	type plain Event
+	if err := json.Unmarshal(raw, (*plain)(ev)); err != nil {
+		return err
+	}
+	if ev.Fail != "" {
+		ev.Error = ev.FailKind.WithText(ev.Fail)
+	}
+	return nil
 }
 
 // Live reports whether ev goes only to the subscribers that listen now and
@@ -81,23 +109,34 @@ func KindOf(err error) FailKind {
 	return ""
 }
 
-// FailureEvent is the error event that reports a turn ended with err.
+// FailureEvent is the error event that reports a turn ended with err. It
+// carries err for the readers in this process, and its text and kind for
+// the ones after a wire, which get it back when they decode the event.
 func FailureEvent(err error) Event {
 	kind := KindOf(err)
 	if kind == FailCancelled {
 		err = context.Canceled
 	}
-	return Event{Type: EventError, Fail: err.Error(), Content: err.Error(), FailKind: kind}
+	return Event{Type: EventError, Fail: err.Error(), Content: err.Error(), FailKind: kind, Error: err}
 }
 
 // WithText is a failure of kind k with its text: errors.Is finds k's
-// sentinel (Err) after the failure crossed a step boundary as text. With no
-// kind it is an error with text.
+// sentinel after the failure crossed a step boundary or a wire as text.
+// With no kind it is an error with text.
 func (k FailKind) WithText(text string) error {
-	if k == "" {
+	sentinel, ok := kindSentinels[k]
+	if !ok {
 		return errors.New(text)
 	}
-	return kindError{text: text, kind: k.Err(text)}
+	return kindError{text: text, kind: sentinel}
+}
+
+// kindSentinels is the sentinel each failure kind names.
+var kindSentinels = map[FailKind]error{
+	FailRefused:       ErrModelRefused,
+	FailMaxTokens:     ErrMaxTokens,
+	FailContextLength: ErrContextLength,
+	FailCancelled:     context.Canceled,
 }
 
 // kindError is a failure's text that unwraps to its kind's sentinel.
@@ -109,19 +148,3 @@ type kindError struct {
 func (e kindError) Error() string { return e.text }
 
 func (e kindError) Unwrap() error { return e.kind }
-
-// Err is the failure a FailureEvent carried: the sentinel kind names, else
-// an error with text.
-func (k FailKind) Err(text string) error {
-	switch k {
-	case FailRefused:
-		return ErrModelRefused
-	case FailMaxTokens:
-		return ErrMaxTokens
-	case FailContextLength:
-		return ErrContextLength
-	case FailCancelled:
-		return context.Canceled
-	}
-	return errors.New(text)
-}

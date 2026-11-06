@@ -2,80 +2,113 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
-	"github.com/google/uuid"
+	"github.com/ryanaldo34/tacklr/session"
 )
 
-// Connection is one WebSocket. Harness sessions live on session.Client.
+// Socket is one connection of text frames, both ways: a WebSocket that
+// net/http accepted, or one that a platform holds (on Cloudflare, the
+// server side of a WebSocketPair).
+type Socket interface {
+	// Read is the next frame from the peer. An error ends the connection.
+	Read(ctx context.Context) ([]byte, error)
+	// Write sends one frame to the peer.
+	Write(ctx context.Context, frame []byte) error
+}
+
+// Connection is one connection that a Server admitted (Connect): its
+// protocol and its caller. Serve runs it on a socket.
 type Connection struct {
-	ID     string
-	Writer MessageWriter
+	proto Protocol
+	env   Env
+}
 
+// Serve runs the connection on sock until a read from sock fails or ctx
+// ends. It reads the frames in order and gives each to the protocol's
+// Handler, and it runs one subscription for each follow of the Handler.
+// The sessions' turns go on after the connection ends: a new connection
+// can load a session and follow it again.
+func (c *Connection) Serve(ctx context.Context, sock Socket) {
+	ctx, cancel := context.WithCancel(ctx)
+	p := &peer{ctx: ctx, sock: sock, client: c.env.Client}
+	p.h = c.proto.Open(c.env, p)
+	for {
+		frame, err := sock.Read(ctx)
+		if err != nil {
+			break
+		}
+		if len(frame) == 0 {
+			continue
+		}
+		p.mu.Lock()
+		p.h.Frame(ctx, frame)
+		p.mu.Unlock()
+	}
+	cancel()
+	p.wg.Wait()
+}
+
+// peer is the Peer of a connection that a process holds: frames go to its
+// socket, and a goroutine for each follow delivers its events.
+type peer struct {
 	ctx    context.Context
-	cancel context.CancelFunc
+	sock   Socket
+	client session.Client
+	h      Handler
 
-	mu       sync.Mutex
-	security Context
+	// mu serializes the calls to h.
+	mu sync.Mutex
+	wg sync.WaitGroup
 }
 
-func (c *Connection) SecurityContext() Context {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.security
-}
+func (p *peer) Send(ctx context.Context, frame []byte) error { return p.sock.Write(ctx, frame) }
 
-func (c *Connection) SetSecurityContext(securityContext Context) {
-	c.mu.Lock()
-	c.security = securityContext
-	c.mu.Unlock()
-}
-
-// ConnectionRegistry tracks live ACP WebSockets by Acp-Connection-Id.
-type ConnectionRegistry struct {
-	mu   sync.Mutex
-	byID map[string]*Connection
-}
-
-// NewConnectionRegistry returns an empty registry.
-func NewConnectionRegistry() *ConnectionRegistry {
-	return &ConnectionRegistry{byID: make(map[string]*Connection)}
-}
-
-// Create registers a new connection. Writer may be filled in after Accept.
-func (r *ConnectionRegistry) Create(writer MessageWriter) *Connection {
-	ctx, cancel := context.WithCancel(context.Background())
-	c := &Connection{
-		ID:     uuid.NewString(),
-		Writer: writer,
-		ctx:    ctx,
-		cancel: cancel,
+// Follow subscribes before it returns, so the events that a prompt sent
+// after it makes are not missed.
+func (p *peer) Follow(_ context.Context, id session.ID, after session.Seq) (func(), error) {
+	ctx, stop := context.WithCancel(p.ctx)
+	sub, err := p.client.Subscribe(ctx, id, after)
+	if err != nil {
+		stop()
+		return nil, err
 	}
-	r.mu.Lock()
-	r.byID[c.ID] = c
-	r.mu.Unlock()
-	return c
+	p.wg.Add(1)
+	go p.pump(ctx, id, sub)
+	return stop, nil
 }
 
-// Get returns the connection for id, or nil.
-func (r *ConnectionRegistry) Get(id string) *Connection {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.byID[id]
-}
-
-// Remove deletes the connection and cancels its context.
-func (r *ConnectionRegistry) Remove(id string) {
-	r.mu.Lock()
-	c := r.byID[id]
-	delete(r.byID, id)
-	r.mu.Unlock()
-	if c != nil {
-		c.cancel()
+// pump delivers the events of one follow until it is stopped or its
+// stream ends.
+func (p *peer) pump(ctx context.Context, id session.ID, sub session.Subscription) {
+	defer p.wg.Done()
+	defer func() { _ = sub.Close() }()
+	streamed := map[string]int{}
+	for {
+		var ev session.Event
+		ok := true
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok = <-sub.Events():
+		}
+		if !ok {
+			cause := ErrStreamEnded
+			if err := sub.Err(); err != nil {
+				cause = fmt.Errorf("%w: %w", ErrStreamEnded, err)
+			}
+			ev = session.Event{Type: session.EventError, Error: cause}
+		}
+		p.mu.Lock()
+		// A follow its Handler stopped while it waited delivers nothing
+		// more.
+		if ctx.Err() == nil {
+			p.h.Deliver(p.ctx, id, noteStreamed(streamed, ev))
+		}
+		p.mu.Unlock()
+		if !ok {
+			return
+		}
 	}
-}
-
-// Context is cancelled when the connection is removed.
-func (c *Connection) Context() context.Context {
-	return c.ctx
 }
