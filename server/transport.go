@@ -11,6 +11,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 const (
@@ -63,7 +64,7 @@ func (s *Server) Connect(r *http.Request) (*Connection, int) {
 		if status != 0 {
 			return nil, status
 		}
-		return &Connection{proto: p, env: Env{
+		return &Connection{proto: p, trace: telemetry.Inject(telemetry.FromHeaders(context.Background(), r.Header)), env: Env{
 			Client:    s.Client,
 			Agent:     s.Agent,
 			Workspace: s.Workspace,

@@ -46,7 +46,7 @@ func run(ctx context.Context) error {
 	if err := os.MkdirAll(dir, 0o750); err != nil { //nolint:gosec // G703: the path is the operator's setting
 		return err
 	}
-	st, err := stack.Open(ctx)
+	st, err := stack.Open(ctx, "tacklr-worker")
 	if err != nil {
 		return err
 	}

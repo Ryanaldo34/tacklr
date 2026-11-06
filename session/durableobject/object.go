@@ -299,7 +299,7 @@ func (o *Object) Create(ctx context.Context, init Init) error {
 	var mail []queued
 	if init.Task != "" {
 		// A task session's task is its first prompt, in the same write.
-		w := session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: init.Task}}
+		w := session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: init.Task}, Trace: init.Trace}
 		raw, _ := json.Marshal(w) // plain data
 		ops = append(ops, put(seqKey(kindMailbox, init.SessionID, 1), raw), put(key(kindMailboxHead, init.SessionID), []byte("1")))
 		mail = []queued{{seq: 1, wake: w}}

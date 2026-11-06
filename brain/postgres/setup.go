@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/internal/pgtrace"
 )
 
 // DefaultEmbeddingDim is the pgvector column size when Options.EmbeddingDim is 0.
@@ -69,7 +69,7 @@ func Configure(cfg *pgxpool.Config, opts Options) error {
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema + ", public"
 	timeout := cmp.Or(opts.StatementTimeout, DefaultStatementTimeout)
 	cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(max(timeout.Milliseconds(), 0), 10)
-	cfg.ConnConfig.Tracer = otelpgx.NewTracer(otelpgx.WithTrimSQLInSpanName(), otelpgx.WithDisableAcquireTracer())
+	cfg.ConnConfig.Tracer = pgtrace.Tracer()
 	return nil
 }
 

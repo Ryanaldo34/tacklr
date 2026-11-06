@@ -1,5 +1,7 @@
 package session
 
+import "github.com/ryanaldo34/tacklr/telemetry"
+
 // Wake kinds from the Driver mailbox. A prompt or resume is also the turn-span kind.
 const (
 	WakePrompt = "prompt"
@@ -23,6 +25,10 @@ type Wake struct {
 	Prompt Prompt
 	Resume Resume
 	Job    JobEnd
+	// Trace is the trace context of the request that sent the wake (the
+	// client's span), so the turn it starts or resumes is part of that
+	// request's trace. A session.Client sets it from its context.
+	Trace telemetry.Carrier `json:",omitempty"`
 }
 
 // JobEnd is how a job ended: its result, from the job itself.

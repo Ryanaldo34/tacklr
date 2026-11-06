@@ -12,6 +12,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // Runtime is how one runtime runs a session: its steps, its mailbox and
@@ -61,7 +62,13 @@ import (
 // while idle or while a turn waits on jobs. The running jobs carry over
 // with the turn.
 type Runtime interface {
-	Begin(kind string, promptLen, resumes int)
+	// Begin starts a turn, or the part of one that a resume or a restart
+	// runs: the runtime starts its span (telemetry.StartTurn) once, records
+	// the span's context durably, and returns it; a replay of the turn
+	// returns the recorded context and starts nothing. Each step of the
+	// turn runs in that context.
+	Begin(TurnStart) telemetry.Carrier
+	// End ends the turn's span, when this run started it.
 	End()
 	Commit(base session.Revision, in tacklr.CommitIn) (session.Revision, error)
 	Infer() (tacklr.Reply, error)
@@ -113,6 +120,27 @@ type State struct {
 	// held are the wakes that wait for the running turn to end (a resume,
 	// a close). They carry over a suspend.
 	held []session.Wake
+	// Trace is the trace of the turn that runs or is parked: the context
+	// of the request that sent its prompt. A resume, a restart or a
+	// continue-as-new goes on in the same trace.
+	Trace telemetry.Carrier
+	// Span is the context of the turn's running span (Begin's): each step
+	// and each job the turn starts runs in it.
+	Span telemetry.Carrier
+}
+
+// TurnStart is what Begin starts: the turn's kind (prompt, resume, or
+// continue for a turn a runtime restarted), the prompt's length and the
+// answers it resumes with, for its log, and its trace. Parent is the
+// context of the turn's trace (the request that sent its prompt, or the
+// parent session's turn); Link is the request that resumed it, which the
+// span links to.
+type TurnStart struct {
+	Kind      string
+	PromptLen int
+	Resumes   int
+	Parent    telemetry.Carrier
+	Link      telemetry.Carrier
 }
 
 // Job is one job the session started, by a deterministic id. Call is the

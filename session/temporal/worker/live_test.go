@@ -19,10 +19,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	"go.opentelemetry.io/otel/trace"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
-	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
 	"go.temporal.io/sdk/testsuite"
 	sdkworker "go.temporal.io/sdk/worker"
 	"google.golang.org/protobuf/proto"
@@ -36,6 +34,7 @@ import (
 	"github.com/ryanaldo34/tacklr/session/postgres"
 	"github.com/ryanaldo34/tacklr/session/temporal"
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
+	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/telemetry/export"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
@@ -80,13 +79,7 @@ func (f flushSignal) FlushError() error {
 func newLiveStack(t *testing.T, agent tacklr.AgentOptions, change ...func(*Config)) *liveStack {
 	t.Helper()
 	addr := temporaldocker.HostPort(t)
-	// As a host does: Temporal's tracing plugin on the client; the worker
-	// built from it gets it too.
-	plugin, err := temporalotel.NewPlugin(temporalotel.PluginOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := temporal.Dial(client.Options{HostPort: addr, Plugins: []client.Plugin{plugin}})
+	c, err := temporal.Dial(client.Options{HostPort: addr})
 	if err != nil {
 		t.Fatalf("dial %s: %v", addr, err)
 	}
@@ -152,13 +145,9 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	// As a host does: Temporal tracing needs its replay-safe tracer provider.
-	if err := export.ReinstallTracer(context.Background(), func(opts ...sdktrace.TracerProviderOption) (trace.TracerProvider, func(context.Context) error) {
-		tp := temporalotel.NewReplaySafeTracerProvider(append(opts, sdktrace.WithSpanProcessor(spans))...)
-		return tp, tp.Shutdown
-	}); err != nil {
-		panic(err)
-	}
+	// The standard SDK provider: a turn's span starts once, in a side
+	// effect, so it needs no replay-safe provider.
+	telemetry.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
 	code := m.Run()
 	_ = shutdown(context.Background())
 	temporaldocker.Stop()

@@ -25,6 +25,8 @@ async function start() {
     OPENAI_API_KEY: "e2e",
     OPENAI_BASE_URL: model.url,
     MODEL: "gpt-5-mini",
+    OTEL_EXPORTER_OTLP_ENDPOINT: model.url,
+    OTEL_SERVICE_NAME: "tacklr-edge",
   };
   wrangler = Bun.spawn(
     ["bunx", "wrangler", "dev", "--port", String(port), "--persist-to", state, ...Object.entries(vars).flatMap(([k, v]) => ["--var", `${k}:${v}`])],
@@ -177,6 +179,31 @@ test("a tool's 3 MB result reaches the model and the client whole", async () => 
   expect(last.result?.stopReason).toBe("end_turn");
   expect(output(before)?.length).toBe(3 << 20);
   expect(model.outputs).toContain(3 << 20);
+}, 60_000);
+
+test("a turn is one trace from the client's traceparent, through the session's and the specialist's objects", async () => {
+  const c = await Client.open();
+  const sid = await c.newSession();
+  const traceId = crypto.getRandomValues(new Uint8Array(16)).reduce((s, b) => s + b.toString(16).padStart(2, "0"), "");
+  const clientSpan = "00f067aa0ba902b7";
+  const id = c.request("session/prompt", {
+    sessionId: sid,
+    prompt: [{ type: "text", text: "research" }],
+    _meta: { traceparent: `00-${traceId}-${clientSpan}-01` },
+  });
+  const { last } = await c.until((f) => f.id === id && !f.method);
+  c.close();
+  const want = ["session/prompt", "invoke_agent edge", "execute_tool spawn_specialist", "invoke_agent researcher", "execute_tool lookup"];
+  let spans = model.spans.filter((s) => s.traceId === traceId);
+  for (let i = 0; i < 100 && !want.every((n) => spans.some((s) => s.name === n)); i++) {
+    await Bun.sleep(100);
+    spans = model.spans.filter((s) => s.traceId === traceId);
+  }
+
+  expect(last.result?.stopReason).toBe("end_turn");
+  expect(spans.map((s) => s.name)).toEqual(expect.arrayContaining([...want, expect.stringMatching(/^chat /)]));
+  const ids = new Set(spans.map((s) => s.spanId));
+  expect(spans.filter((s) => !ids.has(s.parentSpanId ?? "") && s.parentSpanId !== clientSpan)).toEqual([]);
 }, 60_000);
 
 test("a specialist runs in its own object and its result reaches the parent's call", async () => {

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // Storage is one object's durable key-value storage, ordered by key. The
@@ -88,7 +89,10 @@ type Host interface {
 // Init is what a session starts from: who it is and, for a child, its
 // task.
 type Init struct {
-	SessionID  session.ID
+	SessionID session.ID
+	// Trace is the context of the parent turn that started a task session:
+	// the child's turn is part of the parent's trace.
+	Trace      telemetry.Carrier `json:",omitempty"`
 	Specialist string
 	// Worker names the JobHandler a job session runs.
 	Worker     string

@@ -1,6 +1,26 @@
 package orchestrator
 
-import "github.com/ryanaldo34/tacklr/session"
+import (
+	"context"
+	"errors"
+
+	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/telemetry"
+)
+
+// Outcome is how the turn that ran last ended, for its span and metrics:
+// parked (yield), cancelled, failed (error), or ok.
+func (t *State) Outcome() string {
+	switch {
+	case t.Yielded:
+		return telemetry.OutcomeYield
+	case errors.Is(t.Err, context.Canceled):
+		return telemetry.OutcomeCancelled
+	case t.Terminal == session.Failed:
+		return telemetry.OutcomeError
+	}
+	return telemetry.OutcomeOK
+}
 
 // Status is the session's status as the State holds it: running (waiting
 // while parked), or the terminal state its turn or a close set. A runtime

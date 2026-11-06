@@ -60,12 +60,17 @@ func (s *Model) promptCache(key string) promptCache {
 	return newPromptCache(s.model, s.baseURL, key)
 }
 
+// New is a model client over client, whose requests carry their trace
+// context (W3C traceparent), so a gateway before the provider continues
+// the turn's trace. A nil client is http.DefaultClient's settings.
 func New(client *http.Client) *Model {
-	if client == nil {
-		client = http.DefaultClient
+	c := http.Client{}
+	if client != nil {
+		c = *client
 	}
+	c.Transport = telemetry.Transport(c.Transport)
 	return &Model{
-		httpClient: client,
+		httpClient: &c,
 		baseURL:    "https://api.openai.com/v1",
 	}
 }
@@ -595,7 +600,7 @@ func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputIte
 	}
 	attrs := []attribute.KeyValue{
 		attribute.String(telemetry.EventAttrInputItems, inputItems),
-		attribute.String(telemetry.AttrErrorClass, telemetry.ClassifyErrorClass(err, httpStatus)),
+		attribute.String(telemetry.AttrErrorType, telemetry.ClassifyErrorClass(err, httpStatus)),
 	}
 	if httpStatus > 0 {
 		attrs = append(attrs, attribute.Int(telemetry.AttrHTTPStatus, httpStatus))

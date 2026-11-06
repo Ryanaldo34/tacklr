@@ -1,66 +1,79 @@
 package telemetry
 
-// Span names (use these; backends index span name).
+// Span names. A turn is one trace, from the client's request to the
+// answer, across every process and runtime it touches:
 //
-// Trace shape (workflow is the primary instrumentor; do not wrap these in
-// extra SDK/activity spans):
+//	session/prompt                SERVER   the protocol request (rpc.*)
+//	  invoke_agent {agent}        INTERNAL the turn (gen_ai.* invoke_agent)
+//	    chat {model}              CLIENT   one model request (gen_ai.* chat)
+//	    execute_tool {tool}       INTERNAL one tool call (gen_ai.* execute_tool)
+//	    tacklr.context.handoff    INTERNAL a plan handoff, with its model request
+//	    invoke_agent {specialist} INTERNAL a child session's turn
+//	  session/request_permission  CLIENT   a question the agent asks the client
 //
-//	tacklr.turn                 static attrs: area, runtime, agent_id, session_id, turn.kind
-//	  log: prompt.received | resume.received | turn.yielded | turn.ended
-//	  tacklr.model | tacklr.tool | tacklr.plan.install | tacklr.context.handoff
+// The span names of the turn, the model request and the tool call are the
+// OpenTelemetry GenAI semantic conventions'; the protocol request's are
+// the RPC conventions' (rpc.system jsonrpc). Each name is the operation
+// and its static target, so names stay few.
 //
-// Set static attributes at span start. Outcome and error enums at end only.
-// Dynamic values (prompt text length, retry attempt, error body) belong on
-// span-correlated logs, not as span attributes.
-// Do not use high-cardinality values as metric labels; use log events for free text.
-// Lifecycle milestones use OTel Logs SetEventName, not span.AddEvent.
+// Attributes on spans are static and searchable: identifiers, closed enums,
+// and the outcome and error.type set at the end. Values that change within
+// an operation or are free text (lengths, counts, error messages, answers)
+// go on span-correlated logs (EmitEvent, slog with the context), never on
+// spans. Metric labels are closed enums and configuration ids only: never
+// a session id.
 const (
-	SpanTurn           = "tacklr.turn"
-	SpanTool           = "tacklr.tool"
-	SpanPlanInstall    = "tacklr.plan.install"
-	SpanContextHandoff = "tacklr.context.handoff"
-	SpanModel          = "tacklr.model"
+	SpanHandoff = "tacklr.context.handoff"
 )
 
-// Span and log attribute keys (static identifiers only).
+// GenAI operation names (gen_ai.operation.name), which name their spans.
 const (
-	AttrArea       = "tacklr.area"
-	AttrSessionID  = "tacklr.session_id"
-	AttrAgentID    = "tacklr.agent_id"
-	AttrThreadID   = "tacklr.thread_id"
-	AttrTurnKind   = "tacklr.turn.kind" // prompt | resume
-	AttrRuntime    = "tacklr.runtime"   // temporal
-	AttrToolName   = "tacklr.tool.name"
-	AttrToolNS     = "tacklr.tool.namespace"
-	AttrToolStatus = "tacklr.tool.status" // success | error | interrupt | …
-	AttrOpenTodos  = "tacklr.open_todos"  // remaining todos at handoff
-	AttrOutcome    = "tacklr.outcome"     // ok | error | cancelled | fallback
+	OperationInvokeAgent = "invoke_agent"
+	OperationChat        = "chat"
+	OperationExecuteTool = "execute_tool"
+)
 
-	// Model invoke (tacklr.model) — start attrs where possible.
-	AttrModelPhase       = "tacklr.model.phase" // turn | handoff | compress
-	AttrModelSeq         = "tacklr.model.seq"
-	AttrContextMsgs      = "tacklr.context.messages"
-	AttrContextToolPairs = "tacklr.context.tool_pairs"
-	AttrHTTPStatus       = "tacklr.http.status"
-	AttrErrorCode        = "tacklr.error.code"
-	AttrErrorClass       = "tacklr.error.class" // bucketed enum
-	AttrAfterTools       = "tacklr.model.after_tools"
-
-	// OpenTelemetry GenAI semantic conventions (stable keys).
-	// https://opentelemetry.io/docs/specs/semconv/gen-ai/
+// Attribute keys of the OpenTelemetry semantic conventions.
+// https://opentelemetry.io/docs/specs/semconv/gen-ai/ and .../rpc/
+const (
 	AttrGenAIOperationName    = "gen_ai.operation.name"
 	AttrGenAIProviderName     = "gen_ai.provider.name"
 	AttrGenAIRequestModel     = "gen_ai.request.model"
+	AttrGenAIAgentName        = "gen_ai.agent.name"
+	AttrGenAIConversationID   = "gen_ai.conversation.id"
+	AttrGenAIToolName         = "gen_ai.tool.name"
+	AttrGenAIToolCallID       = "gen_ai.tool.call.id"
+	AttrGenAIToolType         = "gen_ai.tool.type"
+	AttrGenAITokenType        = "gen_ai.token.type"
 	AttrGenAIInputTokens      = "gen_ai.usage.input_tokens"
 	AttrGenAIOutputTokens     = "gen_ai.usage.output_tokens"
 	AttrGenAICachedTokens     = "gen_ai.usage.cached_tokens"
 	AttrGenAICacheWriteTokens = "gen_ai.usage.cache_write_tokens"
+	AttrErrorType             = "error.type"
+	AttrHTTPStatus            = "http.response.status_code"
+
+	AttrRPCSystem    = "rpc.system"
+	AttrRPCMethod    = "rpc.method"
+	AttrJSONRPCError = "rpc.jsonrpc.error_code"
 )
 
-// Runtime values for AttrRuntime (closed enum). Durable backends that are not
-// Temporal should pick a stable id of their own rather than overloading these.
+// Tacklr's own attribute keys (static identifiers and closed enums).
 const (
-	RuntimeTemporal = "temporal"
+	AttrTurnKind      = "tacklr.turn.kind" // prompt | resume | continue
+	AttrRuntime       = "tacklr.runtime"   // temporal | durableobject
+	AttrParentSession = "tacklr.session.parent"
+	AttrToolNS        = "tacklr.tool.namespace"
+	AttrModelPhase    = "tacklr.model.phase" // turn | handoff | compress
+	AttrInterruptKind = "tacklr.interrupt.kind"
+	AttrOutcome       = "tacklr.outcome"
+	AttrErrorCode     = "tacklr.error.code" // the provider's error code
+	AttrStopReason    = "tacklr.stop_reason"
+)
+
+// Runtime values for AttrRuntime (closed enum).
+const (
+	RuntimeTemporal      = "temporal"
+	RuntimeDurableObject = "durableobject"
 )
 
 // Model phase values for AttrModelPhase (closed enum).
@@ -70,15 +83,24 @@ const (
 	ModelPhaseCompress = "compress"
 )
 
-// GenAI operation / provider values (closed enums for low cardinality).
+// GenAI provider values (closed enum).
 const (
-	GenAIOperationChat   = "chat"
 	GenAIProviderAzure   = "azure.openai"
 	GenAIProviderOpenAI  = "openai"
 	GenAIProviderUnknown = "unknown"
 )
 
-// Error class buckets for metrics/span attrs (closed enum).
+// GenAI tool types (gen_ai.tool.type): a host's function, or a tool an MCP
+// server provides.
+const (
+	ToolTypeFunction  = "function"
+	ToolTypeExtension = "extension"
+)
+
+// RPC system of a protocol (rpc.system).
+const RPCSystemJSONRPC = "jsonrpc"
+
+// Error class buckets for error.type (closed enum).
 const (
 	ErrorClassOK          = "ok"
 	ErrorClassProvider4xx = "provider_4xx"
@@ -96,21 +118,36 @@ const (
 	HandoffOutcomeError    = "error"
 )
 
-// Log event names (OTel Logs API Record.SetEventName).
+// Log event names (OTel Logs Record.SetEventName): what happened within an
+// operation, with its dynamic values as attributes.
 const (
-	EventProviderFailed  = "provider.failed"
-	EventModelAfterTools = "model.after_tools"
-	EventFuseMount       = "vfs.fuse.mount"
-	EventFuseUnmount     = "vfs.fuse.unmount"
+	EventModelRequest   = "gen_ai.request"
+	EventProviderFailed = "provider.failed"
+	EventToolFailed     = "tool.failed"
+	EventPlanInstalled  = "plan.installed"
+	EventTurnStarted    = "turn.started"
+	EventTurnEnded      = "turn.ended"
+	EventFuseMount      = "vfs.fuse.mount"
+	EventFuseUnmount    = "vfs.fuse.unmount"
 )
 
-// Event attribute keys on log-based events.
+// Attribute keys on log events (dynamic values).
 const (
-	EventAttrOutcome    = "outcome"
-	EventAttrInputItems = "input_items"
+	EventAttrOutcome      = "outcome"
+	EventAttrInputItems   = "input_items"
+	EventAttrMessages     = "context.messages"
+	EventAttrToolPairs    = "context.tool_pairs"
+	EventAttrAfterTools   = "after_tools"
+	EventAttrSeq          = "seq"
+	EventAttrPromptLength = "prompt.length"
+	EventAttrResumes      = "resumes"
+	EventAttrTodos        = "todos"
+	EventAttrOpenTodos    = "todos.open"
+	EventAttrError        = "error"
 )
 
-// Area values for AttrArea.
+// Area values for the "area" field of Tacklr's slog records: which part of
+// Tacklr logged it.
 const (
 	AreaRuntime    = "runtime"
 	AreaHarness    = "harness"

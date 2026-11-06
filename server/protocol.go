@@ -65,6 +65,9 @@ type Handler interface {
 	// When the events stop before the Handler stops the follow, the last
 	// event is an EventError whose Error wraps ErrStreamEnded.
 	Deliver(ctx context.Context, id session.ID, ev session.Event)
+	// Closed is the end of the connection: the Handler ends what it has
+	// open (its requests' spans). The sessions' turns go on.
+	Closed(ctx context.Context)
 }
 
 // ErrStreamEnded is why a follow ended before its Handler stopped it: the

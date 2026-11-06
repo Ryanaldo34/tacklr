@@ -2,7 +2,7 @@
 
 A client (an editor, an app) talks to Tacklr through a protocol server: package `server`, with ACP built in (`server/acp`). This guide follows one turn from the user's prompt to the model's final answer, names the abstraction that owns each part, and shows what changes from one host or runtime to another. Nothing in the turn's path changes: the same protocol code runs on net/http and in a Cloudflare connection object, over Temporal or Durable Objects.
 
-For the session itself (rounds, steps, events, the runtimes), see [session.md](session.md).
+For the session itself (rounds, steps, events, the runtimes), see [session.md](session.md). The turn is also one trace, through each of these systems: see [telemetry.md](telemetry.md).
 
 ## Key abstractions
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/ryanaldo34/tacklr/message"
+	"github.com/ryanaldo34/tacklr/telemetry"
 
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/session"
@@ -127,6 +128,7 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		ClientCapsRaw:   env.Params,
 	}
 	_ = json.Unmarshal(params["mcpServers"], &pr.MCPServers)
+	pr.Trace = metaTrace(params["_meta"])
 	_ = json.Unmarshal(params["responses"], &pr.Responses)
 
 	if pr.Notification {
@@ -154,6 +156,23 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		}
 	}
 	return pr, nil
+}
+
+// metaTrace is the W3C trace context a request's _meta carries, as the
+// MCP and ACP conventions put it there; nil when it carries none.
+func metaTrace(raw json.RawMessage) telemetry.Carrier {
+	var meta map[string]any
+	_ = json.Unmarshal(raw, &meta)
+	var c telemetry.Carrier
+	for _, k := range []string{"traceparent", "tracestate", "baggage"} {
+		if v, ok := meta[k].(string); ok && v != "" {
+			if c == nil {
+				c = telemetry.Carrier{}
+			}
+			c[k] = v
+		}
+	}
+	return c
 }
 
 // parseACPPrompt maps an ACP content-block array into a user Message
@@ -492,6 +511,10 @@ type parsedRequest struct {
 
 	// Extensibility — raw _meta blob for custom fields
 	Meta json.RawMessage
+
+	// Trace is the client's trace context for the request, from its
+	// params' _meta (traceparent, tracestate, baggage).
+	Trace telemetry.Carrier
 
 	Auth session.AuthContext
 }

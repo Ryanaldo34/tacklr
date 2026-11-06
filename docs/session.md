@@ -218,15 +218,7 @@ Each non-deterministic action is one step, so a session replays safely: the runt
 
 The open round lives in workflow state (`orchestrator.State.Round`): the reply and its calls. The loop runs every call that has not run at once (`Runtime.Tools`: one `Tool` activity each on Temporal; goroutines in a simple runtime), puts the calls back in call order, starts the jobs they ask for (a job id comes from its call, so a job is started once), waits for blocking jobs' ends and runs their calls again with the results, and commits the round once each call has its result. Plan changes are replayed at Commit (`planOp`), so plan changes of calls that ran at once all land.
 
-A runtime may run a step more than once before it records it (a worker dies before the step reports). `Infer` and `Tool` change nothing a later step reads, so that is safe; a tool with external side effects uses its call id (`CallContext.CurrentToolCallID`) as the idempotency key. `Commit` is idempotent: its `base` is the revision the last Commit returned, and a Commit that finds the snapshot past it already saved and applies nothing again. A cancel does not stop a Commit. Steps carry only what changes per step; the session's identity and MCP servers are the runtime's, which builds each step's harness from them. A cancel reaches a running step on its next heartbeat reply (`worker.Config.HeartbeatThrottle` bounds how long that takes, 2 seconds by default). Tracing is the host's to set up; Tacklr changes no process-wide tracing state. To trace sessions, install Temporal's replay-safe tracer provider and add Temporal's OpenTelemetry plugin to the client you dial:
-
-```go
-otel.SetTracerProvider(temporalotel.NewReplaySafeTracerProvider( /* your exporter options */ ))
-plugin, err := temporalotel.NewPlugin(temporalotel.PluginOptions{}) // go.temporal.io/sdk/contrib/opentelemetry-v2
-c, err := temporal.Dial(client.Options{HostPort: addr, Plugins: []client.Plugin{plugin}})
-```
-
-A worker built from that client (`worker.New(c, …)`) gets the plugin too; do not add it again on the worker. A host process that only runs the client side still needs the plugin on its own client for client-side spans.
+A runtime may run a step more than once before it records it (a worker dies before the step reports). `Infer` and `Tool` change nothing a later step reads, so that is safe; a tool with external side effects uses its call id (`CallContext.CurrentToolCallID`) as the idempotency key. `Commit` is idempotent: its `base` is the revision the last Commit returned, and a Commit that finds the snapshot past it already saved and applies nothing again. A cancel does not stop a Commit. Steps carry only what changes per step; the session's identity and MCP servers are the runtime's, which builds each step's harness from them. A cancel reaches a running step on its next heartbeat reply (`worker.Config.HeartbeatThrottle` bounds how long that takes, 2 seconds by default). Tracing is the host's to set up: [telemetry.md](telemetry.md). A turn's span starts once (in a `workflow.SideEffect` on Temporal, a journal entry on Durable Objects) and each step carries its context, so the standard SDK tracer provider works and Temporal's tracing plugin is not needed.
 
 ### Harnesses
 
@@ -328,18 +320,4 @@ Do not put Temporal `workflow.Context` on `session.Client`.
 
 ## Observability
 
-The orchestrator starts `tacklr.turn`. Inference and tool steps inherit that span. Do not add extra wrapper spans around a step.
-
-Host setup: `export.Init` (package `telemetry/export`) installs the process-wide OpenTelemetry providers and, when an endpoint is set, the OTLP exporters. Temporal tracing needs a replay-safe tracer: after `Init`, call `export.ReinstallTracer` with `temporalotel.NewReplaySafeTracerProvider`, and add Temporal’s OpenTelemetry plugin to `client.Options.Plugins` before `Dial`. Postgres statement spans join the same trace: `brain/postgres.Configure` sets pgx's otelpgx tracer (`ConnConfig.Tracer`) on the host's pool config, so the brain store, `session/postgres` and `server/postgres` all emit them when they share that pool.
-
-```go
-shutdown, err := export.Init(ctx, export.Config{
-    ServiceName:  "tacklr-worker",
-    OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), // Alloy / collector
-    Insecure:     true, // local
-})
-c, err := temporal.Dial(client.Options{HostPort: temporalHost})
-w := worker.New(c, cfg)
-```
-
-Span attributes are closed enums and ids (`tacklr.runtime`, `tacklr.turn.kind`, `tacklr.agent_id`, `tacklr.outcome`). Logs carry prompt length, resume counts, retries, and error text.
+A turn is one trace, from the client's request through each system it touches to the answer: see [telemetry.md](telemetry.md) for the spans, logs and metrics, how the trace crosses each system, and how a host sets it up.

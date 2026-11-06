@@ -183,7 +183,12 @@ func (a *Harness) finishCall(c *Call, out chan session.Event, content, status st
 func (a *Harness) executeToolCall(ctx context.Context, cc *CallContext, out chan session.Event) {
 	c := &cc.call
 	tc := c.Tool
-	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
+	toolType := telemetry.ToolTypeFunction
+	if tc.Namespace != "" {
+		// A namespace is the MCP server the tool is from.
+		toolType = telemetry.ToolTypeExtension
+	}
+	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, telemetry.Tool{Name: tc.Name, Namespace: tc.Namespace, CallID: tc.CallID, Type: toolType})
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
 		toolErr := Correctionf(ErrNotFound, "%s: not found. That is not a registered tool. Use a name from the available tools", tc.Name)
@@ -208,8 +213,8 @@ func (a *Harness) executeToolCall(ctx context.Context, cc *CallContext, out chan
 			"type":        parked.TypeName(),
 			"data":        json.RawMessage(serialized),
 		})
-		telemetry.InstrumentsFromContext(ctx).RecordInterrupt(
-			toolCtx, telemetry.AgentIDFromContext(ctx), parked.TypeName(),
+		telemetry.Metrics().RecordInterrupt(
+			toolCtx, telemetry.AgentFromContext(ctx), parked.TypeName(),
 		)
 		toolSpan.Finish("interrupt", nil)
 		c.Park = &Park{InterruptID: c.Key(), Data: data}

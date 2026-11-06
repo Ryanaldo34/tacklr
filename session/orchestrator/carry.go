@@ -8,6 +8,7 @@ import (
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // ToolTimeoutMargin is what a runtime's Tool step adds to its tool's own
@@ -35,6 +36,8 @@ type Carry struct {
 	Suspended bool                  `json:"suspended,omitempty"`
 	Jobs      []Job                 `json:"jobs,omitempty"`
 	Held      []session.Wake        `json:"held,omitempty"`
+	Trace     telemetry.Carrier     `json:"trace,omitempty"`
+	Span      telemetry.Carrier     `json:"span,omitempty"`
 }
 
 // Carry is t's state for the next Run.
@@ -43,6 +46,7 @@ func (t *State) Carry() Carry {
 		Mounts: t.Mounts, MCP: t.MCP, Inbox: t.Inbox, NextMCP: t.NextMCP, State: t.State,
 		Round: t.Round, Rev: t.Rev, Result: t.Result, Terminal: t.Terminal, Yielded: t.Yielded,
 		Finished: t.Finished, Suspended: t.Suspended, Jobs: t.Jobs, Held: t.held,
+		Trace: t.Trace, Span: t.Span,
 	}
 }
 
@@ -57,6 +61,7 @@ func NewState(id session.ID, ident Identity, mcp []session.MCPServer, state map[
 		t.Mounts, t.MCP, t.Inbox, t.NextMCP, t.State = c.Mounts, c.MCP, c.Inbox, c.NextMCP, c.State
 		t.Round, t.Rev, t.Result, t.Terminal, t.Yielded = c.Round, c.Rev, c.Result, c.Terminal, c.Yielded
 		t.Finished, t.Suspended, t.Jobs, t.held = c.Finished, c.Suspended, c.Jobs, c.Held
+		t.Trace, t.Span = c.Trace, c.Span
 	}
 	return t
 }

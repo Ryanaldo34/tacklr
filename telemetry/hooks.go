@@ -4,12 +4,11 @@ import (
 	"context"
 )
 
-// BindTurnContext attaches agent/session identity so child spans and metrics
-// pick up labels from context.
-func BindTurnContext(ctx context.Context, agentID, sessionID string) context.Context {
-	ctx = ContextWithAgentID(ctx, agentID)
-	ctx = ContextWithSessionID(ctx, sessionID)
-	return ContextWithInstruments(ctx, MustInstruments(Meter()))
+// Step is the context one step of a turn runs in: the turn's span (from
+// turn, the context its runtime recorded), the session and its agent, so
+// the step's spans are children of the turn's span and carry the session.
+func Step(ctx context.Context, turn Carrier, agent, sessionID string) context.Context {
+	return ContextWithAgent(ContextWithSessionID(turn.Context(ctx), sessionID), agent)
 }
 
 // RecordCheckpointAttempt records one harness snapshot persist (ok or error).
@@ -18,5 +17,5 @@ func RecordCheckpointAttempt(ctx context.Context, err error) {
 	if err != nil {
 		outcome = OutcomeError
 	}
-	InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, outcome)
+	Metrics().RecordCheckpointSave(ctx, outcome)
 }

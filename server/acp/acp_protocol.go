@@ -8,9 +8,13 @@ import (
 	"strconv"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 const (
@@ -114,21 +118,35 @@ type nextTurn struct {
 
 // turn is a session the connection follows: the session/prompt and
 // session/resume requests its end answers (none for a turn the connection
-// joined on session/load), the requests it asked the client, by id, and
-// how to stop following it.
+// joined on session/load), the requests it asked the client, by id, how
+// to stop following it, and the context its asks' spans start in (the
+// request that followed it).
 type turn struct {
-	requests []json.RawMessage
+	requests []request
 	asks     map[string]ask
 	stop     func()
+	ctx      context.Context
+}
+
+// request is a request of the client the turn's end answers, and its span.
+type request struct {
+	id   json.RawMessage
+	span *telemetry.RPCSpan
 }
 
 // ask is a request to the client for a parked turn: the answer resumes the
-// interrupt. choices are a selection's options.
+// interrupt. choices are a selection's options. Its span lasts until the
+// answer: the time the user took.
 type ask struct {
 	interrupt string
 	choices   []tacklr.UserChoice
 	selection bool
+	span      *telemetry.RPCSpan
 }
+
+// stopDisconnected is the stop reason of a request whose client left
+// before the turn's end answered it.
+const stopDisconnected = "disconnected"
 
 // Frame implements server.Handler.
 func (c *conn) Frame(ctx context.Context, frame []byte) {
@@ -144,16 +162,29 @@ func (c *conn) Frame(ctx context.Context, frame []byte) {
 		c.reply(ctx, id, nil, err)
 		return
 	}
+	// The request's span continues the client's trace: its own
+	// (_meta.traceparent), else the connection's.
+	ctx, span := telemetry.StartRPC(pr.Trace.Context(ctx), trace.SpanKindServer, pr.Method, pr.ThreadID)
 	if pr.Notification {
 		c.notified(ctx, pr)
+		span.End(0, "")
 		return
 	}
 	if pr.Method == "session/prompt" || pr.Method == "session/resume" {
-		c.startTurn(ctx, pr)
+		c.startTurn(ctx, request{id: pr.ID, span: span}, pr)
 		return
 	}
 	result, err := c.dispatch(ctx, pr)
 	c.reply(ctx, pr.ID, result, err)
+	span.End(errorCode(err), "")
+}
+
+// errorCode is err's JSON-RPC code, zero for no error.
+func errorCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	return ErrorCode(err)
 }
 
 func (c *conn) notified(ctx context.Context, pr *parsedRequest) {
@@ -241,31 +272,34 @@ func (c *conn) requireAuthentication() error {
 }
 
 // startTurn sends a prompt or resume to the session and follows it; the
-// turn's end answers the request.
-func (c *conn) startTurn(ctx context.Context, pr *parsedRequest) {
+// turn's end answers the request and ends its span. ctx is the request's
+// span, which the session's turn continues.
+func (c *conn) startTurn(ctx context.Context, rq request, pr *parsedRequest) {
+	var err error
 	if !c.hello {
-		c.reply(ctx, pr.ID, nil, server.Errorf(server.ErrInvalidRequest, "initialize the connection before a turn"))
-		return
+		err = server.Errorf(server.ErrInvalidRequest, "initialize the connection before a turn")
 	}
-	req, err := c.bindTurn(ctx, pr)
-	if err != nil {
-		c.reply(ctx, pr.ID, nil, err)
-		return
+	var req turnRequest
+	if err == nil {
+		req, err = c.bindTurn(ctx, pr)
 	}
-	id := session.ID(req.ThreadID)
-	joined := c.turns[id] != nil
-	if err = c.follow(ctx, id, false); err == nil {
-		t := c.turns[id]
-		t.requests = append(t.requests, pr.ID)
-		if err = c.sendTurn(ctx, id, req); err != nil {
-			t.requests = slices.DeleteFunc(t.requests, func(r json.RawMessage) bool { return string(r) == string(pr.ID) })
-			if !joined && len(t.requests) == 0 {
-				c.unfollow(id)
+	if err == nil {
+		id := session.ID(req.ThreadID)
+		joined := c.turns[id] != nil
+		if err = c.follow(ctx, id, false); err == nil {
+			t := c.turns[id]
+			t.requests = append(t.requests, rq)
+			if err = c.sendTurn(ctx, id, req); err != nil {
+				t.requests = slices.DeleteFunc(t.requests, func(r request) bool { return r.span == rq.span })
+				if !joined && len(t.requests) == 0 {
+					c.unfollow(id)
+				}
 			}
 		}
 	}
 	if err != nil {
-		c.reply(ctx, pr.ID, nil, err)
+		c.reply(ctx, rq.id, nil, err)
+		rq.span.End(ErrorCode(err), "")
 	}
 }
 
@@ -306,16 +340,34 @@ func (c *conn) follow(ctx context.Context, id session.ID, parked bool) error {
 	}
 	stop, err := c.peer.Follow(ctx, id, after)
 	if err == nil {
-		c.turns[id] = &turn{asks: map[string]ask{}, stop: stop}
+		c.turns[id] = &turn{asks: map[string]ask{}, stop: stop, ctx: ctx}
 	}
 	return err
 }
 
-// unfollow stops following session id; its open asks go with it.
+// unfollow stops following session id; its open asks go with it,
+// unanswered.
 func (c *conn) unfollow(id session.ID) {
 	if t := c.turns[id]; t != nil {
+		for _, a := range t.asks {
+			a.span.End(0, "unanswered")
+		}
 		t.stop()
 		delete(c.turns, id)
+	}
+}
+
+// Closed implements server.Handler: the client left, so the requests the
+// turns' ends would answer, and the asks it was asked, end their spans.
+// The turns go on in their sessions.
+func (c *conn) Closed(context.Context) {
+	for _, t := range c.turns {
+		for _, r := range t.requests {
+			r.span.End(0, stopDisconnected)
+		}
+		for _, a := range t.asks {
+			a.span.End(0, stopDisconnected)
+		}
 	}
 }
 
@@ -332,8 +384,10 @@ func (c *conn) Deliver(ctx context.Context, id session.ID, ev session.Event) {
 		c.askInterrupt(ctx, id, ev)
 	case session.EventComplete, session.EventError:
 		// The turn's end is the response to each of its requests.
+		code, stop := endOf(ev)
 		for _, req := range c.turns[id].requests {
-			c.send(ctx, withID(frames, req)...)
+			c.send(ctx, withID(frames, req.id)...)
+			req.span.End(code, stop)
 		}
 		c.unfollow(id)
 	default:
@@ -341,12 +395,25 @@ func (c *conn) Deliver(ctx context.Context, id session.ID, ev session.Event) {
 	}
 }
 
+// endOf is how a turn's end answers its requests: a stop reason, or the
+// JSON-RPC code of an error that is not one.
+func endOf(ev session.Event) (code int, stop string) {
+	if ev.Type == session.EventComplete {
+		return 0, stopReasonEndTurn
+	}
+	if reason, ok := stopReasonFromError(ev.Error); ok {
+		return 0, reason
+	}
+	return CodeInternal, ""
+}
+
 // endTurn answers each request of session id's turn with err and stops
 // following it. The session's turn goes on.
 func (c *conn) endTurn(ctx context.Context, id session.ID, err error) {
 	if t := c.turns[id]; t != nil {
 		for _, req := range t.requests {
-			c.reply(ctx, req, nil, err)
+			c.reply(ctx, req.id, nil, err)
+			req.span.End(ErrorCode(err), "")
 		}
 	}
 	c.unfollow(id)
@@ -362,12 +429,12 @@ func (c *conn) askInterrupt(ctx context.Context, id session.ID, ev session.Event
 	case envl.Type == "tool_permission":
 		var perm tacklr.ToolPermissionInterrupt
 		_ = json.Unmarshal(envl.Data, &perm)
-		c.request(ctx, id, "session/request_permission", PermissionToACPParams(string(id), ev.MessageID, perm),
+		c.request(ctx, id, "session/request_permission", envl.Type, PermissionToACPParams(string(id), ev.MessageID, perm),
 			ask{interrupt: envl.InterruptId})
 	case envl.Type == "user_selection_choice" && c.caps.ElicitationForm:
 		var usi tacklr.UserSelectionInterrupt
 		_ = json.Unmarshal(envl.Data, &usi)
-		c.request(ctx, id, "elicitation/create", SelectionToElicitationParams(string(id), ev.MessageID, usi.Question, usi.Options),
+		c.request(ctx, id, "elicitation/create", envl.Type, SelectionToElicitationParams(string(id), ev.MessageID, usi.Question, usi.Options),
 			ask{interrupt: envl.InterruptId, choices: usi.Options, selection: true})
 	default:
 		c.endTurn(ctx, id, server.Errorf(server.ErrInvalidRequest,
@@ -376,11 +443,14 @@ func (c *conn) askInterrupt(ctx context.Context, id session.ID, ev session.Event
 }
 
 // request sends a request to the client and keeps a in session id's turn
-// for its answer.
-func (c *conn) request(ctx context.Context, id session.ID, method string, params any, a ask) {
+// for its answer. Its span is a child of the turn's request, and names the
+// kind of interrupt it asks about.
+func (c *conn) request(ctx context.Context, id session.ID, method, kind string, params any, a ask) {
 	c.asked++
 	key := strconv.FormatInt(c.asked, 10)
-	c.turns[id].asks[key] = a
+	t := c.turns[id]
+	_, a.span = telemetry.StartRPC(t.ctx, trace.SpanKindClient, method, string(id), attribute.String(telemetry.AttrInterruptKind, kind))
+	t.asks[key] = a
 	frame, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": c.asked, "method": method, "params": params})
 	c.send(ctx, frame)
 }
@@ -389,7 +459,7 @@ func (c *conn) request(ctx context.Context, id session.ID, method string, params
 // connection sent: the answer resumes the turn that waits on it, and a
 // cancel cancels it. An answer the agent cannot use ends the turn's
 // requests with an error, and the turn stays parked.
-func (c *conn) answered(ctx context.Context, frame []byte) bool {
+func (c *conn) answered(_ context.Context, frame []byte) bool {
 	var resp struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
@@ -410,6 +480,13 @@ func (c *conn) answered(ctx context.Context, frame []byte) bool {
 	}
 	var resolution []byte
 	var err error
+	code := 0
+	if resp.Error != nil {
+		code = resp.Error.Code
+	}
+	a.span.End(code, "")
+	// The resume is part of the turn's trace, and links the ask's span.
+	ctx := a.span.Context()
 	switch {
 	case resp.Error != nil:
 		err = server.Errorf(server.ErrInvalidRequest, "client rpc error %d: %s", resp.Error.Code, resp.Error.Message)

@@ -6,7 +6,9 @@
 //   "research"         -> starts the researcher specialist
 //   "find the answer"  -> (the specialist's task) calls lookup
 //   a tool's output    -> "done: " and the output (its first 40 bytes)
-// It keeps the size of each tool output it got, for the test to read.
+// It keeps the size of each tool output it got, for the test to read. It
+// is the Worker's OTLP endpoint too: it keeps each span it gets
+// (POST /v1/traces, OTLP's JSON encoding).
 
 const enc = new TextEncoder();
 const sse = (events: unknown[]) =>
@@ -51,13 +53,20 @@ function say(text: string, parts = 1) {
 const text = (content: unknown): string =>
   typeof content === "string" ? content : Array.isArray(content) ? content.map((p) => p.text ?? "").join("") : "";
 
+export type Span = { traceId: string; spanId: string; parentSpanId?: string; name: string };
+
 export function startModel() {
   const outputs: number[] = [];
+  const spans: Span[] = [];
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
       const { pathname } = new URL(req.url);
       const body = await req.json();
+      if (pathname === "/v1/traces") {
+        for (const rs of body.resourceSpans ?? []) for (const ss of rs.scopeSpans ?? []) spans.push(...(ss.spans ?? []));
+        return Response.json({});
+      }
       if (pathname.endsWith("/input_tokens")) return Response.json({ input_tokens: 100 });
       const last = [...body.input].reverse().find((i: any) => i.type === "function_call_output" || i.role === "user");
       if (last?.type === "function_call_output") {
@@ -76,5 +85,5 @@ export function startModel() {
       return say("I do not know that.");
     },
   });
-  return { url: `http://localhost:${server.port}`, outputs, stop: () => server.stop(true) };
+  return { url: `http://localhost:${server.port}`, outputs, spans, stop: () => server.stop(true) };
 }

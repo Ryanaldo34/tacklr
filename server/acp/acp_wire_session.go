@@ -57,7 +57,7 @@ func (c *conn) createSession(ctx context.Context, pr *parsedRequest) (any, error
 		return nil, err
 	}
 	sessionID := uuid.NewString()
-	telemetry.MustInstruments(telemetry.Meter()).RecordSessionCreated(ctx)
+	telemetry.Metrics().RecordSessionCreated(ctx)
 	if _, err := c.env.Client.CreateSession(ctx, session.CreateSession{
 		SessionID:  session.ID(sessionID),
 		MCPServers: pr.MCPServers,

@@ -8,10 +8,13 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// Metric names (OTel). Prometheus export sanitizes '.' → '_'.
+// Metric names. The model's and the protocol server's are the semantic
+// conventions' (gen_ai.client.*, rpc.server.*); the rest are Tacklr's.
+// Prometheus export writes '.' as '_'.
 const (
 	MetricTurnDuration    = "tacklr.turn.duration"
 	MetricTurnTotal       = "tacklr.turn.total"
+	MetricTurnActive      = "tacklr.turn.active"
 	MetricToolCalls       = "tacklr.tool.calls"
 	MetricToolDuration    = "tacklr.tool.duration"
 	MetricInterruptTotal  = "tacklr.interrupt.total"
@@ -19,31 +22,33 @@ const (
 	MetricCompressTotal   = "tacklr.context.compress.total"
 	MetricSessionCreated  = "tacklr.session.created.total"
 	MetricCheckpointSave  = "tacklr.checkpoint.save.total"
-	MetricModelDuration   = "tacklr.model.duration"
-	MetricModelTotal      = "tacklr.model.total"
-	MetricTokensInput     = "tacklr.tokens.input"
-	MetricTokensOutput    = "tacklr.tokens.output"
-	MetricTokensReasoning = "tacklr.tokens.reasoning"
 	MetricFuseMount       = "tacklr.fuse.mount.total"
+	MetricConnections     = "tacklr.server.connections"
+	MetricModelDuration   = "gen_ai.client.operation.duration"
+	MetricTokenUsage      = "gen_ai.client.token.usage"
+	MetricRPCCallDuration = "rpc.server.call.duration"
 )
 
-// Label keys (low cardinality only — closed enums / config ids, never free text).
+// Label keys: closed enums and configuration ids only, never free text or
+// a session id.
 const (
-	LabelAgentID    = "agent_id"
-	LabelTurnKind   = "turn_kind"
+	LabelAgent      = AttrGenAIAgentName
+	LabelTurnKind   = AttrTurnKind
 	LabelOutcome    = "outcome"
-	LabelTool       = "tool"
-	LabelToolNS     = "tool_namespace"
+	LabelTool       = AttrGenAIToolName
+	LabelToolNS     = AttrToolNS
 	LabelStatus     = "status"
 	LabelKind       = "kind" // interrupt kind
-	LabelModelPhase = "model_phase"
-	LabelErrorClass = "error_class"
+	LabelModelPhase = AttrModelPhase
+	LabelErrorType  = AttrErrorType
+	LabelProtocol   = "protocol"
 )
 
 // Instruments holds cached metric instruments for one Meter.
 type Instruments struct {
 	turnDuration    metric.Float64Histogram
 	turnTotal       metric.Int64Counter
+	turnActive      metric.Int64UpDownCounter
 	toolCalls       metric.Int64Counter
 	toolDuration    metric.Float64Histogram
 	interruptTotal  metric.Int64Counter
@@ -51,12 +56,11 @@ type Instruments struct {
 	compressTotal   metric.Int64Counter
 	sessionCreated  metric.Int64Counter
 	checkpointSave  metric.Int64Counter
-	modelDuration   metric.Float64Histogram
-	modelTotal      metric.Int64Counter
-	tokensInput     metric.Int64Counter
-	tokensOutput    metric.Int64Counter
-	tokensReasoning metric.Int64Counter
 	fuseMountTotal  metric.Int64Counter
+	connections     metric.Int64UpDownCounter
+	modelDuration   metric.Float64Histogram
+	tokenUsage      metric.Int64Histogram
+	rpcCallDuration metric.Float64Histogram
 }
 
 // MustInstruments builds instruments from m. Names are constants; the SDK
@@ -64,11 +68,14 @@ type Instruments struct {
 func MustInstruments(m metric.Meter) *Instruments {
 	i := &Instruments{}
 	i.turnDuration, _ = m.Float64Histogram(MetricTurnDuration,
-		metric.WithDescription("End-to-end agent turn duration"),
+		metric.WithDescription("Agent turn duration, from its start to its end or park"),
 		metric.WithUnit("s"),
 	)
 	i.turnTotal, _ = m.Int64Counter(MetricTurnTotal,
-		metric.WithDescription("Total agent turns by outcome"),
+		metric.WithDescription("Agent turns by outcome"),
+	)
+	i.turnActive, _ = m.Int64UpDownCounter(MetricTurnActive,
+		metric.WithDescription("Agent turns running now"),
 	)
 	i.toolCalls, _ = m.Int64Counter(MetricToolCalls,
 		metric.WithDescription("Tool invocations by name and status"),
@@ -87,47 +94,58 @@ func MustInstruments(m metric.Meter) *Instruments {
 		metric.WithDescription("Context window compressions under pressure"),
 	)
 	i.sessionCreated, _ = m.Int64Counter(MetricSessionCreated,
-		metric.WithDescription("Sessions created via registry"),
+		metric.WithDescription("Sessions created through a protocol server"),
 	)
 	i.checkpointSave, _ = m.Int64Counter(MetricCheckpointSave,
 		metric.WithDescription("Session checkpoint save attempts"),
 	)
-	i.modelDuration, _ = m.Float64Histogram(MetricModelDuration,
-		metric.WithDescription("Model invoke duration (turn | handoff | compress)"),
-		metric.WithUnit("s"),
-	)
-	i.modelTotal, _ = m.Int64Counter(MetricModelTotal,
-		metric.WithDescription("Model invokes by phase, outcome, and error class"),
-	)
-	i.tokensInput, _ = m.Int64Counter(MetricTokensInput,
-		metric.WithDescription("Provider-reported input tokens"),
-	)
-	i.tokensOutput, _ = m.Int64Counter(MetricTokensOutput,
-		metric.WithDescription("Provider-reported output tokens"),
-	)
-	i.tokensReasoning, _ = m.Int64Counter(MetricTokensReasoning,
-		metric.WithDescription("Provider-reported reasoning tokens when present"),
-	)
 	i.fuseMountTotal, _ = m.Int64Counter(MetricFuseMount,
 		metric.WithDescription("FUSE mount attempts by outcome (ok, error, unavailable)"),
+	)
+	i.connections, _ = m.Int64UpDownCounter(MetricConnections,
+		metric.WithDescription("Protocol connections open now"),
+	)
+	i.modelDuration, _ = m.Float64Histogram(MetricModelDuration,
+		metric.WithDescription("GenAI operation duration"),
+		metric.WithUnit("s"),
+	)
+	i.tokenUsage, _ = m.Int64Histogram(MetricTokenUsage,
+		metric.WithDescription("Provider-reported tokens of each GenAI operation"),
+		metric.WithUnit("{token}"),
+	)
+	i.rpcCallDuration, _ = m.Float64Histogram(MetricRPCCallDuration,
+		metric.WithDescription("Protocol request duration, from the request to its response"),
+		metric.WithUnit("s"),
 	)
 	return i
 }
 
-// RecordTurnOutcome increments turn totals and duration.
-func (i *Instruments) RecordTurnOutcome(ctx context.Context, agentID, turnKind, outcome string, d time.Duration) {
+// turnStarted counts a running turn.
+func (i *Instruments) turnStarted(ctx context.Context, agent, kind string) {
+	i.turnActive.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(LabelAgent, agent),
+		attribute.String(LabelTurnKind, kind),
+	))
+}
+
+// turnEnded counts a turn that ended, by outcome, and its duration.
+func (i *Instruments) turnEnded(ctx context.Context, agent, kind, outcome string, d time.Duration) {
+	i.turnActive.Add(ctx, -1, metric.WithAttributes(
+		attribute.String(LabelAgent, agent),
+		attribute.String(LabelTurnKind, kind),
+	))
 	attrs := metric.WithAttributes(
-		attribute.String(LabelAgentID, agentID),
-		attribute.String(LabelTurnKind, turnKind),
+		attribute.String(LabelAgent, agent),
+		attribute.String(LabelTurnKind, kind),
 		attribute.String(LabelOutcome, outcome),
 	)
 	i.turnTotal.Add(ctx, 1, attrs)
 	i.turnDuration.Record(ctx, d.Seconds(), attrs)
 }
 
-func (i *Instruments) RecordTool(ctx context.Context, agentID, tool, namespace, status string, d time.Duration) {
+func (i *Instruments) recordTool(ctx context.Context, agent, tool, namespace, status string, d time.Duration) {
 	attrs := metric.WithAttributes(
-		attribute.String(LabelAgentID, agentID),
+		attribute.String(LabelAgent, agent),
 		attribute.String(LabelTool, tool),
 		attribute.String(LabelToolNS, namespace),
 		attribute.String(LabelStatus, status),
@@ -136,61 +154,77 @@ func (i *Instruments) RecordTool(ctx context.Context, agentID, tool, namespace, 
 	i.toolDuration.Record(ctx, d.Seconds(), attrs)
 }
 
-func (i *Instruments) RecordInterrupt(ctx context.Context, agentID, kind string) {
+// RecordInterrupt counts a park of a tool call on an interrupt of kind.
+func (i *Instruments) RecordInterrupt(ctx context.Context, agent, kind string) {
 	i.interruptTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(LabelAgentID, agentID),
+		attribute.String(LabelAgent, agent),
 		attribute.String(LabelKind, kind),
 	))
 }
 
-// RecordHandoff records a context handoff. outcome is a closed enum
+// recordHandoff records a context handoff. outcome is a closed enum
 // (HandoffOutcomeOK | HandoffOutcomeFallback | HandoffOutcomeError).
-func (i *Instruments) RecordHandoff(ctx context.Context, agentID, outcome string) {
+func (i *Instruments) recordHandoff(ctx context.Context, agent, outcome string) {
 	i.handoffTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(LabelAgentID, agentID),
+		attribute.String(LabelAgent, agent),
 		attribute.String(LabelOutcome, outcome),
 	))
 }
 
-// RecordModel records one model invoke (duration + count). phase and errClass
-// must be closed enums (ModelPhase* / ErrorClass*).
-func (i *Instruments) RecordModel(ctx context.Context, agentID, phase, outcome, errClass string, d time.Duration) {
-	attrs := metric.WithAttributes(
-		attribute.String(LabelAgentID, agentID),
+// recordModel records one GenAI operation's duration and its tokens.
+func (i *Instruments) recordModel(ctx context.Context, agent string, id ModelIdentity, phase, errType string, d time.Duration, usage TokenUsage) {
+	attrs := []attribute.KeyValue{
+		attribute.String(AttrGenAIOperationName, OperationChat),
+		attribute.String(AttrGenAIProviderName, id.provider()),
+		attribute.String(AttrGenAIRequestModel, id.Model),
+		attribute.String(LabelAgent, agent),
 		attribute.String(LabelModelPhase, phase),
-		attribute.String(LabelOutcome, outcome),
-		attribute.String(LabelErrorClass, errClass),
-	)
-	i.modelTotal.Add(ctx, 1, attrs)
-	if d > 0 {
-		i.modelDuration.Record(ctx, d.Seconds(), attrs)
+	}
+	if errType != "" {
+		attrs = append(attrs, attribute.String(LabelErrorType, errType))
+	}
+	i.modelDuration.Record(ctx, d.Seconds(), metric.WithAttributes(attrs...))
+	for _, t := range []struct {
+		kind string
+		n    int
+	}{{"input", usage.Input}, {"output", usage.Output}, {"reasoning", usage.Reasoning}} {
+		if t.n > 0 {
+			i.tokenUsage.Record(ctx, int64(t.n), metric.WithAttributes(append(attrs, attribute.String(AttrGenAITokenType, t.kind))...))
+		}
 	}
 }
 
-// RecordTokens adds provider-reported token counts (no high-cardinality labels).
-func (i *Instruments) RecordTokens(ctx context.Context, agentID string, input, output, reasoning int) {
-	attrs := metric.WithAttributes(attribute.String(LabelAgentID, agentID))
-	if input > 0 {
-		i.tokensInput.Add(ctx, int64(input), attrs)
-	}
-	if output > 0 {
-		i.tokensOutput.Add(ctx, int64(output), attrs)
-	}
-	if reasoning > 0 {
-		i.tokensReasoning.Add(ctx, int64(reasoning), attrs)
-	}
+// RecordCompress counts a collapse of the context window.
+func (i *Instruments) RecordCompress(ctx context.Context, agent string) {
+	i.compressTotal.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelAgent, agent)))
 }
 
-func (i *Instruments) RecordCompress(ctx context.Context, agentID string) {
-	i.compressTotal.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelAgentID, agentID)))
-}
-
+// RecordSessionCreated counts a session a protocol server created.
 func (i *Instruments) RecordSessionCreated(ctx context.Context) {
 	i.sessionCreated.Add(ctx, 1)
 }
 
+// RecordCheckpointSave counts a checkpoint save by outcome.
 func (i *Instruments) RecordCheckpointSave(ctx context.Context, outcome string) {
 	i.checkpointSave.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelOutcome, outcome)))
+}
+
+// RecordConnection adds delta (1 or -1) to the open connections of
+// protocol.
+func (i *Instruments) RecordConnection(ctx context.Context, protocol string, delta int64) {
+	i.connections.Add(ctx, delta, metric.WithAttributes(attribute.String(LabelProtocol, protocol)))
+}
+
+// recordRPC records one protocol request's duration.
+func (i *Instruments) recordRPC(ctx context.Context, method, errType string, d time.Duration) {
+	attrs := []attribute.KeyValue{
+		attribute.String(AttrRPCSystem, RPCSystemJSONRPC),
+		attribute.String(AttrRPCMethod, method),
+	}
+	if errType != "" {
+		attrs = append(attrs, attribute.String(LabelErrorType, errType))
+	}
+	i.rpcCallDuration.Record(ctx, d.Seconds(), metric.WithAttributes(attrs...))
 }
 
 // Fuse mount outcomes for RecordFuseMount (closed enum).
@@ -204,32 +238,43 @@ func (i *Instruments) RecordFuseMount(ctx context.Context, outcome string) {
 	i.fuseMountTotal.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelOutcome, outcome)))
 }
 
-// agentIDContextKey carries agent_id for child instrumentation without plumbing.
-type agentIDContextKey struct{}
+// agentContextKey carries the agent's name for the spans and metrics of a
+// step without plumbing.
+type agentContextKey struct{}
 
-// ContextWithAgentID attaches agent_id for tool/handoff metrics.
-func ContextWithAgentID(ctx context.Context, agentID string) context.Context {
-	return context.WithValue(ctx, agentIDContextKey{}, agentID)
+// ContextWithAgent attaches the agent's name.
+func ContextWithAgent(ctx context.Context, agent string) context.Context {
+	return context.WithValue(ctx, agentContextKey{}, agent)
 }
 
-// AgentIDFromContext returns agent_id or "".
-func AgentIDFromContext(ctx context.Context) string {
-	s, _ := ctx.Value(agentIDContextKey{}).(string)
+// AgentFromContext is the agent's name, or "".
+func AgentFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(agentContextKey{}).(string)
 	return s
 }
 
 type sessionIDContextKey struct{}
 
-// ContextWithSessionID attaches session_id for child spans.
+// ContextWithSessionID attaches the session id (gen_ai.conversation.id).
 func ContextWithSessionID(ctx context.Context, sessionID string) context.Context {
-	if sessionID == "" {
-		return ctx
-	}
 	return context.WithValue(ctx, sessionIDContextKey{}, sessionID)
 }
 
-// SessionIDFromContext returns session_id or "".
+// SessionIDFromContext returns the session id or "".
 func SessionIDFromContext(ctx context.Context) string {
 	s, _ := ctx.Value(sessionIDContextKey{}).(string)
 	return s
+}
+
+// identity is the static attributes every span of a session carries: its
+// conversation id and its agent, when ctx has them.
+func identity(ctx context.Context) []attribute.KeyValue {
+	var attrs []attribute.KeyValue
+	if sid := SessionIDFromContext(ctx); sid != "" {
+		attrs = append(attrs, attribute.String(AttrGenAIConversationID, sid))
+	}
+	if agent := AgentFromContext(ctx); agent != "" {
+		attrs = append(attrs, attribute.String(AttrGenAIAgentName, agent))
+	}
+	return attrs
 }

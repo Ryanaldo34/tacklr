@@ -10,17 +10,20 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
+	temporallog "go.temporal.io/sdk/log"
 
 	"github.com/ryanaldo34/tacklr/openai"
 	"github.com/ryanaldo34/tacklr/session"
 	sessionpg "github.com/ryanaldo34/tacklr/session/postgres"
 	"github.com/ryanaldo34/tacklr/session/temporal"
+	"github.com/ryanaldo34/tacklr/telemetry/export"
 )
 
 // Stack is the shared part of both programs. The session events go to the
@@ -35,6 +38,8 @@ type Stack struct {
 	Model     *openai.Model
 	TaskQueue string
 	LiveKey   []byte
+	// flush sends what telemetry holds and stops it.
+	flush func(context.Context) error
 }
 
 // Open reads the environment:
@@ -47,7 +52,30 @@ type Stack struct {
 //	OPENAI_BASE_URL   an OpenAI-compatible endpoint (optional)
 //	TEMPORAL_ADDRESS  default localhost:7233
 //	TASK_QUEUE        default tacklr
-func Open(ctx context.Context) (*Stack, error) {
+//	OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_PROTOCOL
+//	                  where traces, metrics and logs go (optional)
+//
+// service names the program in its telemetry. The program's slog records
+// go to stderr and, with the trace and span of their context, to the
+// OpenTelemetry logs.
+func Open(ctx context.Context, service string) (*Stack, error) {
+	// Telemetry first: the Temporal client and the stores pick up its
+	// providers.
+	flush, err := export.Init(ctx, export.Config{ServiceName: service})
+	if err != nil {
+		return nil, err
+	}
+	slog.SetDefault(slog.New(slog.NewMultiHandler(slog.NewTextHandler(os.Stderr, nil), export.SlogHandler())))
+	st, err := open(ctx)
+	if err != nil {
+		_ = flush(ctx)
+		return nil, err
+	}
+	st.flush = flush
+	return st, nil
+}
+
+func open(ctx context.Context) (*Stack, error) {
 	seal, err := base64.StdEncoding.DecodeString(os.Getenv("SEAL_KEY"))
 	if err != nil {
 		return nil, fmt.Errorf("SEAL_KEY: %w", err)
@@ -63,7 +91,13 @@ func Open(ctx context.Context) (*Stack, error) {
 	if os.Getenv("OPENAI_API_KEY") == "" || os.Getenv("MODEL") == "" {
 		return nil, errors.New("OPENAI_API_KEY and MODEL must be set")
 	}
-	pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
+	cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
+	if err != nil {
+		return nil, fmt.Errorf("DATABASE_URL: %w", err)
+	}
+	// Each statement is a span of the turn that runs it.
+	sessionpg.Configure(cfg)
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("DATABASE_URL: %w", err)
 	}
@@ -75,7 +109,10 @@ func Open(ctx context.Context) (*Stack, error) {
 		pool.Close()
 		return nil, err
 	}
-	c, err := temporal.Dial(client.Options{HostPort: cmp.Or(os.Getenv("TEMPORAL_ADDRESS"), "localhost:7233")})
+	c, err := temporal.Dial(client.Options{
+		HostPort: cmp.Or(os.Getenv("TEMPORAL_ADDRESS"), "localhost:7233"),
+		Logger:   temporallog.NewStructuredLogger(slog.Default()),
+	})
 	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("temporal: %w", err)
@@ -96,9 +133,12 @@ func Open(ctx context.Context) (*Stack, error) {
 	}, nil
 }
 
-// Close releases the connections.
+// Close releases the connections, and sends what telemetry holds.
 func (s *Stack) Close() {
 	s.Events.Close()
 	s.Temporal.Close()
 	s.Pool.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.flush(ctx)
 }

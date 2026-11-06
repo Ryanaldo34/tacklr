@@ -53,8 +53,9 @@ Point an ACP client at `ws://localhost:8080/acp` with the header `Authorization:
 | `LIVE_URL`, `LIVE_ADDR` | worker | How hosts reach the live endpoint (default `http://localhost:8081`), and where it listens (default `:8081`). |
 | `FUSE_ROOT` | worker | Optional. A directory for FUSE. It gives the agent `run_command`, which runs in a sandbox that sees only its session's workspace. |
 | `MAX_WINDOW` | worker | Optional. The context window in tokens. The default is the model's. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL` | both | Optional. Where traces, metrics and logs go (OTLP over gRPC by default, or `http`). |
 
-Tracing is optional. To trace sessions, set up Temporal's replay-safe tracer provider in both programs (see [docs/session.md](../../docs/session.md)).
+Both programs send their telemetry to `OTEL_EXPORTER_OTLP_ENDPOINT` when it is set (for example a local Grafana LGTM stack): one trace per turn, from the client's request through the host, Temporal, the worker's steps, the model, the MCP servers and Postgres. Their logs go to stderr and, with the trace and span of each record, to the same endpoint. See [docs/telemetry.md](../../docs/telemetry.md).
 
 ## The end-to-end test
 

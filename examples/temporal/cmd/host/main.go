@@ -37,7 +37,7 @@ func run(ctx context.Context) error {
 	if token == "" {
 		return errors.New("API_TOKEN must be set")
 	}
-	st, err := stack.Open(ctx)
+	st, err := stack.Open(ctx, "tacklr-host")
 	if err != nil {
 		return err
 	}

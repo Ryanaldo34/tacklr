@@ -365,7 +365,8 @@ Custom stores can check themselves against the shared tests in `session/storetes
 
 | Doc | Covers |
 |---|---|
-| [docs/session.md](docs/session.md) | Sessions, the Temporal client and worker, questions, specialists and jobs, credentials, tracing |
+| [docs/session.md](docs/session.md) | Sessions, the Temporal client and worker, questions, specialists and jobs, credentials |
+| [docs/telemetry.md](docs/telemetry.md) | One trace per turn through every system it touches: spans, logs, metrics, setup |
 | [docs/protocol.md](docs/protocol.md) | A turn from the client's prompt to the answer: the protocol server, ACP, cancel and reconnect, and how it runs on each host |
 | [docs/context.md](docs/context.md) | The context window: what owns it, how a request is sized, collapse, cuts and handoffs |
 | [docs/tools.md](docs/tools.md) | Writing tools, `CallContext`, permissions |

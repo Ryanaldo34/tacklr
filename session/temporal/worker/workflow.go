@@ -24,7 +24,13 @@ import (
 
 // sessionWorkflow is the session wait loop, registered as
 // protocol.Workflow. New registers it; hosts use a session.Client.
-func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
+func sessionWorkflow(agent string) func(workflow.Context, protocol.Input) (string, error) {
+	return func(ctx workflow.Context, in protocol.Input) (string, error) { return runSession(ctx, in, agent) }
+}
+
+// runSession runs one session's workflow; agent is the name of the
+// worker's agent, which a specialist's or a job's name replaces.
+func runSession(ctx workflow.Context, in protocol.Input, agent string) (string, error) {
 	var carry carried
 	if len(in.Carry) > 0 {
 		if err := json.Unmarshal(in.Carry, &carry); err != nil {
@@ -47,6 +53,7 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 	state := orchestrator.NewState(in.SessionID, ident, in.MCPServers, in.State, prev)
 	rt := &workflowRuntime{
 		ctx:         ctx,
+		agent:       cmp.Or(in.Specialist, in.Worker, agent),
 		in:          in,
 		state:       state,
 		opts:        activityOptions(in),
@@ -59,7 +66,7 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 	}
 	if in.Task != "" && prev == nil {
 		// A task session's first run: its task is its first prompt.
-		rt.queue = []session.Wake{{Kind: session.WakePrompt, Prompt: session.Prompt{Text: in.Task}}}
+		rt.queue = []session.Wake{{Kind: session.WakePrompt, Prompt: session.Prompt{Text: in.Task}, Trace: in.Trace}}
 	}
 	// Queries answer from the first moment, before the route's local
 	// activity returns: a client may ask for the status at once.
@@ -145,10 +152,13 @@ type workflowRuntime struct {
 	stream    *workflowstreams.WorkflowStream
 	// newTurn says the next Commit is a new turn's first.
 	newTurn bool
-	end     func(string, error)
-	in      protocol.Input
-	state   *orchestrator.State
-	opts    workflow.ActivityOptions
+	// agent names the session's agent in its turns' spans; span is the
+	// turn's span when this run started it (a replay did not).
+	agent string
+	span  *telemetry.TurnSpan
+	in    protocol.Input
+	state *orchestrator.State
+	opts  workflow.ActivityOptions
 	// wakeCh carries host wakes, childDoneCh each job's end; both move into
 	// queue in arrival order.
 	wakeCh      workflow.ReceiveChannel
@@ -156,13 +166,23 @@ type workflowRuntime struct {
 	queue       []session.Wake
 }
 
-func (w *workflowRuntime) Begin(kind string, promptLen, resumes int) {
+// Begin starts the turn's span in a side effect: Temporal records the
+// span's context in the history, so a replay of the workflow gets the same
+// context and starts no span.
+func (w *workflowRuntime) Begin(ts orchestrator.TurnStart) telemetry.Carrier {
 	workflow.GetLogger(w.ctx).Info("turn start",
-		"kind", kind, "session_id", w.in.SessionID,
-		"prompt_len", promptLen, "resume_count", resumes,
+		"kind", ts.Kind, "session_id", w.in.SessionID,
+		"prompt_len", ts.PromptLen, "resume_count", ts.Resumes,
 	)
-	_, w.end = startTurn(w.ctx, "", w.in.SessionID, kind)
-	if kind == session.WakePrompt {
+	turn := telemetry.Turn{Agent: w.agent, Session: string(w.in.SessionID), Parent: string(w.in.Parent), Kind: ts.Kind, Runtime: telemetry.RuntimeTemporal}
+	var span telemetry.Carrier
+	_ = workflow.SideEffect(w.ctx, func(workflow.Context) any {
+		ctx, s := telemetry.StartTurn(ts.Parent.Context(context.Background()), turn, ts.Link)
+		telemetry.TurnStarted(ctx, ts.PromptLen, ts.Resumes)
+		w.span = s
+		return telemetry.Inject(ctx)
+	}).Get(&span)
+	if ts.Kind == session.WakePrompt {
 		// A new turn: the stream drops the turns before it now, and the
 		// turn's first Commit drops their outcomes and fallback events once
 		// it committed what they left open.
@@ -172,19 +192,13 @@ func (w *workflowRuntime) Begin(kind string, promptLen, resumes int) {
 			_ = w.stream.Truncate(st.BaseOffset + int64(len(st.Log)))
 		}
 	}
+	return span
 }
 
 func (w *workflowRuntime) End() {
-	outcome := telemetry.OutcomeOK
-	if w.state.Yielded {
-		outcome = telemetry.OutcomeYield
-	} else if errors.Is(w.state.Err, context.Canceled) {
-		outcome = telemetry.OutcomeCancelled
-	} else if w.state.Terminal == session.Failed {
-		outcome = telemetry.OutcomeError
-	}
-	if w.end != nil {
-		w.end(outcome, w.state.Err)
+	if w.span != nil {
+		w.span.End(w.state.Outcome(), w.state.Err)
+		w.span = nil
 	}
 }
 
@@ -295,7 +309,7 @@ func (w *workflowRuntime) Infer() (tacklr.Reply, error) {
 // stepSession is what every activity needs to build the session's harness:
 // the runtime holds it for the session, so steps do not carry it.
 func (w *workflowRuntime) stepSession() stepSession {
-	return stepSession{SessionID: w.state.SessionID, Identity: w.state.Identity, MCPServers: w.state.MCP}
+	return stepSession{SessionID: w.state.SessionID, Identity: w.state.Identity, MCPServers: w.state.MCP, Agent: w.agent, Trace: w.state.Span}
 }
 
 // Tools runs one Tool activity per call, at most MaxToolCalls at once: the
@@ -484,7 +498,7 @@ func (w *workflowRuntime) Start(s tacklr.JobStart) error {
 	if s.Specialist {
 		spec, worker = s.Name, ""
 	}
-	return startChild(w.ctx, w.in.SessionID, spec, worker, s.Task, session.ID(s.ID), w.state.Mounts, w.in)
+	return startChild(w.ctx, w.in.SessionID, spec, worker, s.Task, session.ID(s.ID), w.state.Mounts, w.in, w.state.Span)
 }
 
 // Cancel asks the job id names to stop.

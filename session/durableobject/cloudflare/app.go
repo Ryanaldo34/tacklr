@@ -3,6 +3,7 @@
 package cloudflare
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,8 +11,11 @@ import (
 	"sync"
 	"syscall/js"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/session/durableobject"
+	"github.com/ryanaldo34/tacklr/telemetry/otlpjson"
 )
 
 // App is a host's Worker: its session objects, and the protocol server
@@ -76,6 +80,8 @@ type worker struct {
 	cfg      durableobject.Config
 	server   *server.Server
 	routes   http.Handler
+	// tp is the tracer provider when the env names an OTLP endpoint.
+	tp *sdktrace.TracerProvider
 }
 
 // setup builds what the isolate serves from env, once.
@@ -91,6 +97,12 @@ func (w *worker) build(env js.Value) error {
 	}
 	w.platform = platform{ns: ns}
 	e := Env{v: env}
+	// Telemetry first, as a host process sets it up: OTLP/HTTP in JSON,
+	// which needs no exporter code too large for a Worker.
+	if endpoint := e.String("OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint != "" {
+		exporter := otlpjson.New(endpoint, otlpjson.Headers(e.String("OTEL_EXPORTER_OTLP_HEADERS")), nil)
+		w.tp = otlpjson.Install(exporter, cmp.Or(e.String("OTEL_SERVICE_NAME"), "tacklr"))
+	}
 	var err error
 	if w.cfg, err = w.app.Config(e); err != nil {
 		return err
@@ -108,11 +120,28 @@ func (w *worker) build(env js.Value) error {
 	return nil
 }
 
-// acquire is the object of the shim's host, for one request.
+// acquire is the object of the shim's host, for one request. Its release
+// sends the object's spans once it runs nothing: the platform may stop an
+// idle object, and the export's fetch keeps it alive until it is sent.
 func (w *worker) acquire(h js.Value) (*durableobject.Object, func()) {
-	return w.objects.Acquire(h.Get("id").String(), h.Get("instance").Int(), func() *durableobject.Object {
+	obj, release := w.objects.Acquire(h.Get("id").String(), h.Get("instance").Int(), func() *durableobject.Object {
 		return durableobject.NewObject(host{js: h, platform: w.platform}, w.cfg)
 	})
+	return obj, func() {
+		release()
+		go func() {
+			if obj.Idle(context.Background()) == nil {
+				w.flush()
+			}
+		}()
+	}
+}
+
+// flush sends the spans the isolate holds, when it traces.
+func (w *worker) flush() {
+	if w.tp != nil {
+		_ = w.tp.ForceFlush(context.Background())
+	}
 }
 
 // object(host, env, request) serves a request to an object over the object
@@ -141,7 +170,9 @@ func (w *worker) alarm(_ js.Value, args []js.Value) any {
 		if err := obj.Alarm(ctx); err != nil {
 			return nil, err
 		}
-		return nil, obj.Idle(ctx)
+		err := obj.Idle(ctx)
+		w.flush()
+		return nil, err
 	})
 }
 
@@ -182,6 +213,7 @@ func (w *worker) connect(_ js.Value, args []js.Value) any {
 			go func() {
 				defer s.close()
 				c.Serve(context.Background(), s)
+				w.flush()
 			}()
 			return nil
 		})

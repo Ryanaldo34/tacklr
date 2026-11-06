@@ -47,12 +47,17 @@ A connection object uses the standard WebSocket API, so it stays in memory while
 4. As an ACP client on a WebSocket, it tests these outcomes:
    - a prompt streams its answer in chunks as the model writes it;
    - a 3 MB tool result reaches the model and the client whole (its stored rows are split into parts);
+   - a turn is one trace from the client's `traceparent`, through the session's and the specialist's objects (the fake model server is the OTLP endpoint too);
    - a specialist runs in its own object, and its result reaches the parent's call;
    - a turn parked on a permission asks again after `wrangler dev` restarts (an eviction), and finishes once allowed;
    - a cancel while the agent asks for permission ends the prompt with `stopReason` `cancelled`;
    - a wrong token gets 401 at the upgrade, and a connection with no token cannot make a session.
 
 The make target then checks the program's size against the 24 MiB budget (`scripts/wasm-size.sh`).
+
+## Telemetry
+
+A turn is one trace, as on Temporal: from the client's `traceparent`, through the connection object, the session's object and each specialist's object, to the model and the MCP servers. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (and `OTEL_EXPORTER_OTLP_HEADERS` for an API key) to send the spans there, as OTLP/HTTP in JSON. See [docs/telemetry.md](../../docs/telemetry.md#cloudflare-workers).
 
 ## Not measured yet
 

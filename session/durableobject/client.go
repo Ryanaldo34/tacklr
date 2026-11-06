@@ -9,6 +9,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // Client implements session.Client over a Platform: each call goes to the
@@ -61,7 +62,7 @@ func (c *Client) Prompt(ctx context.Context, id session.ID, msg session.Prompt) 
 		return err
 	}
 	msg.State, msg.MCPServers = state, session.DurableMCPServers(msg.MCPServers)
-	return c.platform.Object(id).Wake(ctx, session.Wake{Kind: session.WakePrompt, Prompt: msg})
+	return c.wake(ctx, id, session.Wake{Kind: session.WakePrompt, Prompt: msg})
 }
 
 // Resume implements session.Client.
@@ -71,18 +72,24 @@ func (c *Client) Resume(ctx context.Context, id session.ID, resume session.Resum
 		return err
 	}
 	resume.State = state
-	return c.platform.Object(id).Wake(ctx, session.Wake{Kind: session.WakeResume, Resume: resume})
+	return c.wake(ctx, id, session.Wake{Kind: session.WakeResume, Resume: resume})
 }
 
 // Cancel implements session.Client.
 func (c *Client) Cancel(ctx context.Context, id session.ID) error {
-	return c.platform.Object(id).Wake(ctx, session.Wake{Kind: session.WakeCancel})
+	return c.wake(ctx, id, session.Wake{Kind: session.WakeCancel})
 }
 
 // Close implements session.Client: the session's object closes its jobs and
 // deletes what it saved. Closing a closed session is not an error.
 func (c *Client) Close(ctx context.Context, id session.ID) error {
-	return c.platform.Object(id).Wake(ctx, session.Wake{Kind: session.WakeClose})
+	return c.wake(ctx, id, session.Wake{Kind: session.WakeClose})
+}
+
+// wake sends w to session id's object, with the trace context of ctx.
+func (c *Client) wake(ctx context.Context, id session.ID, w session.Wake) error {
+	w.Trace = telemetry.Inject(ctx)
+	return c.platform.Object(id).Wake(ctx, w)
 }
 
 // Status implements session.Client.

@@ -151,7 +151,7 @@ func New(c client.Client, cfg Config) *Worker {
 		MaxHeartbeatThrottleInterval:       cmp.Or(cfg.HeartbeatThrottle, defaultHeartbeatThrottle),
 	}
 	shared := sdkworker.New(c, taskQueue, opts)
-	shared.RegisterWorkflowWithOptions(sessionWorkflow, workflow.RegisterOptions{Name: protocol.Workflow})
+	shared.RegisterWorkflowWithOptions(sessionWorkflow(cfg.Agent.Name), workflow.RegisterOptions{Name: protocol.Workflow})
 	shared.RegisterActivity(acts)
 	own := sdkworker.New(c, acts.queue, opts)
 	own.RegisterActivity(acts)

@@ -13,10 +13,10 @@ import (
 
 	"github.com/ryanaldo34/tacklr/session/temporal"
 	"github.com/ryanaldo34/tacklr/session/temporal/worker"
+	"github.com/ryanaldo34/tacklr/telemetry"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	oteltrace "go.opentelemetry.io/otel/trace"
-	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,19 +34,18 @@ import (
 
 var traceOnce sync.Once
 
+// Spans records every span the test binary's sessions end, through the
+// standard SDK provider and the W3C propagator a host installs
+// (export.Init).
+var Spans = tracetest.NewSpanRecorder()
+
 func trace(t testing.TB) {
 	t.Helper()
 	traceOnce.Do(func() {
 		if _, err := export.Init(context.Background(), export.Config{}); err != nil {
 			t.Fatal(err)
 		}
-		// As a host does: Temporal tracing needs its replay-safe tracer.
-		if err := export.ReinstallTracer(context.Background(), func(opts ...sdktrace.TracerProviderOption) (oteltrace.TracerProvider, func(context.Context) error) {
-			tp := temporalotel.NewReplaySafeTracerProvider(opts...)
-			return tp, tp.Shutdown
-		}); err != nil {
-			t.Fatal(err)
-		}
+		telemetry.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(Spans)))
 	})
 }
 
@@ -55,7 +54,13 @@ func trace(t testing.TB) {
 // EventLog, since the live stack turns Workflow Streams off.
 func stores(t testing.TB) (session.Store, session.EventLog, session.SecretStorage) {
 	t.Helper()
-	pool, err := pgxpool.New(context.Background(), pgtest.Conn(t))
+	cfg, err := pgxpool.ParseConfig(pgtest.Conn(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As a host does: each statement is a span of the turn that runs it.
+	sessionpg.Configure(cfg)
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,11 +91,7 @@ func Runtime(t testing.TB, agent tacklr.AgentOptions, ws workspace.Config) sessi
 		agent.MCP = mcp.Client{}
 	}
 	trace(t)
-	plugin, err := temporalotel.NewPlugin(temporalotel.PluginOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	c, err := temporal.Dial(client.Options{HostPort: temporaldocker.HostPort(t), Plugins: []client.Plugin{plugin}})
+	c, err := temporal.Dial(client.Options{HostPort: temporaldocker.HostPort(t)})
 	if err != nil {
 		t.Fatal(err)
 	}

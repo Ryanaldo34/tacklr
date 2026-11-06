@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"sync"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // Socket is one connection of text frames, both ways: a WebSocket that
@@ -23,6 +26,9 @@ type Socket interface {
 type Connection struct {
 	proto Protocol
 	env   Env
+	// trace is the trace context of the request that opened the
+	// connection: a request with none of its own continues it.
+	trace telemetry.Carrier
 }
 
 // Serve runs the connection on sock until a read from sock fails or ctx
@@ -31,9 +37,12 @@ type Connection struct {
 // The sessions' turns go on after the connection ends: a new connection
 // can load a session and follow it again.
 func (c *Connection) Serve(ctx context.Context, sock Socket) {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(c.trace.Context(ctx))
 	p := &peer{ctx: ctx, sock: sock, client: c.env.Client}
 	p.h = c.proto.Open(c.env, p)
+	metrics := telemetry.Metrics()
+	metrics.RecordConnection(ctx, c.proto.Path(), 1)
+	defer metrics.RecordConnection(ctx, c.proto.Path(), -1)
 	for {
 		frame, err := sock.Read(ctx)
 		if err != nil {
@@ -46,6 +55,9 @@ func (c *Connection) Serve(ctx context.Context, sock Socket) {
 		p.h.Frame(ctx, frame)
 		p.mu.Unlock()
 	}
+	p.mu.Lock()
+	p.h.Closed(ctx)
+	p.mu.Unlock()
 	cancel()
 	p.wg.Wait()
 }
@@ -66,9 +78,10 @@ type peer struct {
 func (p *peer) Send(ctx context.Context, frame []byte) error { return p.sock.Write(ctx, frame) }
 
 // Follow subscribes before it returns, so the events that a prompt sent
-// after it makes are not missed.
-func (p *peer) Follow(_ context.Context, id session.ID, after session.Seq) (func(), error) {
-	ctx, stop := context.WithCancel(p.ctx)
+// after it makes are not missed. The subscription's reads run in the
+// span of ctx (the request that follows the session).
+func (p *peer) Follow(ctx context.Context, id session.ID, after session.Seq) (func(), error) {
+	ctx, stop := context.WithCancel(trace.ContextWithSpanContext(p.ctx, trace.SpanContextFromContext(ctx)))
 	sub, err := p.client.Subscribe(ctx, id, after)
 	if err != nil {
 		stop()

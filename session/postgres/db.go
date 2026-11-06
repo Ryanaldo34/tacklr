@@ -15,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/ryanaldo34/tacklr/internal/pgtrace"
 )
 
 // DefaultSchema holds the tables when Options.Schema is empty. It is the
@@ -48,6 +50,14 @@ func New(pool *pgxpool.Pool, opts Options) (*DB, error) {
 		return nil, fmt.Errorf("postgres: schema %q is not a valid identifier", opts.Schema)
 	}
 	return &DB{pool: pool, schema: pgx.Identifier{name}.Sanitize(), channel: name + "_session_events"}, nil
+}
+
+// Configure sets the tracer of a host's pool config, before
+// pgxpool.NewWithConfig: a span for each statement under its caller's
+// context, so a turn's trace shows its checkpoint, call and event writes.
+// A pool that brain/postgres.Configure set up has it already.
+func Configure(cfg *pgxpool.Config) {
+	cfg.ConnConfig.Tracer = pgtrace.Tracer()
 }
 
 // sql writes the schema in place of each {s} of query.

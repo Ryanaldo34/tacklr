@@ -43,8 +43,9 @@ type runner struct {
 
 func (s *runner) run(rt Runtime) (string, error) {
 	if s.turn.Suspended {
-		// The turn the runtime suspended goes on from where it stopped.
-		rt.Begin("continue", 0, 0)
+		// The turn the runtime suspended goes on from where it stopped, in
+		// the same trace.
+		s.turn.Span = rt.Begin(TurnStart{Kind: "continue", Parent: s.turn.Trace})
 		s.turn.Suspended = false
 		s.drive(rt, nil, nil)
 		rt.End()
@@ -127,10 +128,13 @@ func (s *runner) handle(w session.Wake, rt Runtime) {
 		case s.running || t.Yielded:
 			t.Steer(w.Prompt)
 		case t.Worker != "":
+			t.Trace = w.Trace
 			s.runWorker(rt, UserMessage(w.Prompt.Text, w.Prompt.UserMessage).Content)
 		default:
 			s.applyQueued(w.Prompt)
-			s.runTurn(rt, session.WakePrompt, UserMessage(w.Prompt.Text, w.Prompt.UserMessage), nil, w.Prompt.Auth, w.Prompt.State)
+			// A prompt starts a turn, and its trace.
+			t.Trace = w.Trace
+			s.runTurn(rt, TurnStart{Kind: session.WakePrompt, Parent: w.Trace}, UserMessage(w.Prompt.Text, w.Prompt.UserMessage), nil, w.Prompt.Auth, w.Prompt.State)
 		}
 	case session.WakeResume:
 		if s.running {
@@ -138,7 +142,9 @@ func (s *runner) handle(w session.Wake, rt Runtime) {
 			return
 		}
 		t.Yielded = false
-		s.runTurn(rt, session.WakeResume, nil, w.Resume.Responses, w.Resume.Auth, w.Resume.State)
+		// A resume goes on in the turn's trace, and links the request
+		// that resumed it.
+		s.runTurn(rt, TurnStart{Kind: session.WakeResume, Parent: t.Trace, Link: w.Trace}, nil, w.Resume.Responses, w.Resume.Auth, w.Resume.State)
 	case session.WakeClose:
 		if s.running {
 			t.held = append(t.held, w)
@@ -176,12 +182,12 @@ func (s *runner) cancel(rt Runtime) {
 	rt.Emit(session.FailureEvent(context.Canceled))
 }
 
-func (s *runner) runTurn(rt Runtime, kind string, user *message.Message, resume map[string][]byte, auth session.AuthContext, extra map[string]any) {
-	n := 0
+func (s *runner) runTurn(rt Runtime, ts TurnStart, user *message.Message, resume map[string][]byte, auth session.AuthContext, extra map[string]any) {
 	if user != nil {
-		n = len(user.Content)
+		ts.PromptLen = len(user.Content)
 	}
-	rt.Begin(kind, n, len(resume))
+	ts.Resumes = len(resume)
+	s.turn.Span = rt.Begin(ts)
 	s.turn.start(user, resume, auth, extra)
 	s.drive(rt, user, resume)
 	rt.End()
@@ -203,7 +209,7 @@ func (s *runner) drive(rt Runtime, user *message.Message, resume map[string][]by
 }
 
 func (s *runner) runWorker(rt Runtime, task string) {
-	rt.Begin(session.WakePrompt, len(task), 0)
+	s.turn.Span = rt.Begin(TurnStart{Kind: session.WakePrompt, PromptLen: len(task), Parent: s.turn.Trace})
 	defer rt.End()
 	out, err := rt.Job(s.turn.Worker, task)
 	if err != nil {

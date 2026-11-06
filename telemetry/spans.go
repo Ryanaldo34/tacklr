@@ -6,95 +6,79 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/trace"
 )
 
-// ToolSpan is an in-flight tacklr.tool span. Call Finish once.
+// Tool is the static identity of one tool call's span.
+type Tool struct {
+	Name      string
+	Namespace string
+	// CallID is the model's id of the call (gen_ai.tool.call.id), to find
+	// the span of one call.
+	CallID string
+	// Type is ToolTypeFunction for a host's tool, ToolTypeExtension for an
+	// MCP server's.
+	Type string
+}
+
+// ToolSpan is an in-flight execute_tool span. Call Finish once.
 type ToolSpan struct {
 	ctx      context.Context
 	span     trace.Span
 	start    time.Time
-	name, ns string
+	tool     Tool
 	finished bool
 }
 
-// StartToolSpan starts a child tool span.
-func StartToolSpan(ctx context.Context, name, namespace string) (context.Context, *ToolSpan) {
-	start := time.Now()
-	ctx, span := Tracer().Start(ctx, SpanTool,
-		trace.WithAttributes(
-			attribute.String(AttrArea, AreaHarness),
-			attribute.String(AttrToolName, name),
-			attribute.String(AttrToolNS, namespace),
-		),
+// StartToolSpan starts the execute_tool span of one tool call.
+func StartToolSpan(ctx context.Context, t Tool) (context.Context, *ToolSpan) {
+	attrs := append(identity(ctx),
+		attribute.String(AttrGenAIOperationName, OperationExecuteTool),
+		attribute.String(AttrGenAIToolName, t.Name),
+		attribute.String(AttrGenAIToolCallID, t.CallID),
+		attribute.String(AttrGenAIToolType, t.Type),
 	)
-	return ctx, &ToolSpan{ctx: ctx, span: span, start: start, name: name, ns: namespace}
+	if t.Namespace != "" {
+		attrs = append(attrs, attribute.String(AttrToolNS, t.Namespace))
+	}
+	ctx, span := Tracer().Start(ctx, spanName(OperationExecuteTool, t.Name), trace.WithAttributes(attrs...))
+	return ctx, &ToolSpan{ctx: ctx, span: span, start: time.Now(), tool: t}
 }
 
-// Finish ends the tool span and records metrics.
-// status is success, error, interrupt, or similar.
+// Finish ends the tool span with status (success, error, interrupt) and
+// counts the call. A failure's text goes to the span's tool.failed log.
 func (t *ToolSpan) Finish(status string, err error) {
 	if t.finished {
 		return
 	}
 	t.finished = true
-	attrs := []attribute.KeyValue{
-		attribute.String(AttrToolStatus, status),
-	}
-	if err != nil || status == "error" {
-		attrs = append(attrs, attribute.String(AttrOutcome, OutcomeError))
+	outcome := OutcomeOK
+	switch {
+	case status == "interrupt":
+		outcome = OutcomeYield
+	case err != nil || status == "error":
+		outcome = OutcomeError
+		t.span.SetAttributes(attribute.String(AttrErrorType, ErrorClassOther))
+		t.span.SetStatus(codes.Error, ErrorClassOther)
 		if err != nil {
-			t.span.RecordError(err)
-			t.span.SetStatus(codes.Error, ErrorClassOther)
+			EmitEventSeverity(t.ctx, EventToolFailed, log.SeverityWarn, attribute.String(EventAttrError, err.Error()))
 		}
-	} else {
-		attrs = append(attrs, attribute.String(AttrOutcome, OutcomeOK))
-		t.span.SetStatus(codes.Ok, "")
 	}
-	t.span.SetAttributes(attrs...)
+	t.span.SetAttributes(attribute.String(AttrOutcome, outcome))
 	t.span.End()
-	InstrumentsFromContext(t.ctx).RecordTool(
-		t.ctx,
-		AgentIDFromContext(t.ctx),
-		t.name,
-		t.ns,
-		status,
-		time.Since(t.start),
-	)
+	Metrics().recordTool(t.ctx, AgentFromContext(t.ctx), t.tool.Name, t.tool.Namespace, status, time.Since(t.start))
 }
 
-// PlanInstallSpan is an in-flight tacklr.plan.install span. Call End once.
-type PlanInstallSpan struct {
-	span     trace.Span
-	finished bool
-}
-
-// StartPlanInstallSpan starts a plan-document install span.
-func StartPlanInstallSpan(ctx context.Context, sessionID string) (context.Context, *PlanInstallSpan) {
-	ctx, span := Tracer().Start(ctx, SpanPlanInstall,
-		trace.WithAttributes(
-			attribute.String(AttrArea, AreaContext),
-			attribute.String(AttrSessionID, sessionID),
-		),
-	)
-	return ctx, &PlanInstallSpan{span: span}
-}
-
-// End ends the span. err nil means ok; non-nil means error.
-func (s *PlanInstallSpan) End(err error) {
-	if s.finished {
-		return
-	}
-	s.finished = true
+// PlanInstalled logs the install of a plan document into the window, with
+// how many todos it has and how many are open.
+func PlanInstalled(ctx context.Context, todos, open int, err error) {
+	attrs := []attribute.KeyValue{attribute.Int(EventAttrTodos, todos), attribute.Int(EventAttrOpenTodos, open)}
+	severity := log.SeverityInfo
 	if err != nil {
-		s.span.RecordError(err)
-		s.span.SetStatus(codes.Error, ErrorClassOther)
-		s.span.SetAttributes(attribute.String(AttrOutcome, OutcomeError))
-	} else {
-		s.span.SetStatus(codes.Ok, "")
-		s.span.SetAttributes(attribute.String(AttrOutcome, OutcomeOK))
+		attrs, severity = append(attrs, attribute.String(EventAttrError, err.Error())), log.SeverityError
 	}
-	s.span.End()
+	EmitEventSeverity(ctx, EventPlanInstalled, severity, attrs...)
 }
 
 // HandoffSpan is an in-flight tacklr.context.handoff span. Call End once.
@@ -104,16 +88,11 @@ type HandoffSpan struct {
 	finished bool
 }
 
-// StartHandoffSpan starts a context-handoff span. openTodos is remaining work.
+// StartHandoffSpan starts a context-handoff span: the model request that
+// writes the handoff is its child. openTodos goes on its log.
 func StartHandoffSpan(ctx context.Context, openTodos int) (context.Context, *HandoffSpan) {
-	attrs := []attribute.KeyValue{
-		attribute.String(AttrArea, AreaModelTasks),
-		attribute.Int(AttrOpenTodos, openTodos),
-	}
-	if sid := SessionIDFromContext(ctx); sid != "" {
-		attrs = append(attrs, attribute.String(AttrSessionID, sid))
-	}
-	ctx, span := Tracer().Start(ctx, SpanContextHandoff, trace.WithAttributes(attrs...))
+	ctx, span := Tracer().Start(ctx, SpanHandoff, trace.WithAttributes(identity(ctx)...))
+	EmitEvent(ctx, SpanHandoff, attribute.Int(EventAttrOpenTodos, openTodos))
 	return ctx, &HandoffSpan{ctx: ctx, span: span}
 }
 
@@ -126,11 +105,10 @@ func (s *HandoffSpan) End(outcome string, err error) {
 	s.finished = true
 	if err != nil {
 		s.span.RecordError(err)
+		s.span.SetAttributes(attribute.String(AttrErrorType, ErrorClassOther))
 		s.span.SetStatus(codes.Error, ErrorClassOther)
-	} else {
-		s.span.SetStatus(codes.Ok, "")
 	}
 	s.span.SetAttributes(attribute.String(AttrOutcome, outcome))
 	s.span.End()
-	InstrumentsFromContext(s.ctx).RecordHandoff(s.ctx, AgentIDFromContext(s.ctx), outcome)
+	Metrics().recordHandoff(s.ctx, AgentFromContext(s.ctx), outcome)
 }

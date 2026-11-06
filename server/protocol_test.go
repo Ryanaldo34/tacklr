@@ -77,6 +77,8 @@ func (h *hostHandler) Deliver(ctx context.Context, id session.ID, ev session.Eve
 	h.send(ctx, out)
 }
 
+func (h *hostHandler) Closed(context.Context) {}
+
 func (h *hostHandler) send(ctx context.Context, ev hostEvent) {
 	raw, _ := json.Marshal(ev)
 	_ = h.peer.Send(ctx, raw)

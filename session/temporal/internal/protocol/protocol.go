@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 const (
@@ -74,7 +75,10 @@ type Input struct {
 	ActivityAttempts int32
 	// Task, when set, makes a task session (a child a tool started): its
 	// first prompt is Task, and the workflow completes when that turn ends.
-	Task       string
+	Task string
+	// Trace is the context of the parent turn that started a task
+	// session: the child's turn is part of the parent's trace.
+	Trace      telemetry.Carrier
 	Parent     session.ID
 	Specialist string
 	Worker     string

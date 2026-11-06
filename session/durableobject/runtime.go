@@ -15,6 +15,7 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/session/orchestrator"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // objectRuntime is the durable-object orchestrator.Runtime for one run of a session.
@@ -45,6 +46,8 @@ type objectRuntime struct {
 	armed time.Time
 	// newTurn says the next Commit is a new turn's first.
 	newTurn bool
+	// span is the turn's span when this run started it (a replay did not).
+	span *telemetry.TurnSpan
 }
 
 // entry is one journaled runtime call: its result value, its error, and
@@ -220,15 +223,44 @@ func (e *objectRuntime) status() statusRecord {
 	return statusRecord{Status: e.state.Status(), Jobs: ids}
 }
 
-// Begin implements orchestrator.Runtime. The object holds no turn-scoped resources
-// besides its harness, which it keeps across turns. A new turn drops the
-// events of the turns before it, and its first Commit their call bodies,
-// once it committed what they left open. A replay already did,
-// and a run again after a stop only deletes again.
-func (e *objectRuntime) Begin(kind string, _, _ int) {
-	if kind != session.WakePrompt || e.replaying() {
-		return
+// Begin implements orchestrator.Runtime: it starts the turn's span and
+// journals the span's context, so a replay gets the same context and
+// starts no span. The object holds no turn-scoped resources besides its
+// harness, which it keeps across turns. A new turn drops the events of the
+// turns before it, and its first Commit their call bodies, once it
+// committed what they left open. A replay already did, and a run again
+// after a stop only deletes again.
+func (e *objectRuntime) Begin(ts orchestrator.TurnStart) telemetry.Carrier {
+	var span telemetry.Carrier
+	if ok, _ := e.replay("begin", &span); ok {
+		return span
 	}
+	turn := telemetry.Turn{Agent: e.agent(), Session: string(e.init.SessionID), Parent: string(e.init.Parent), Kind: ts.Kind, Runtime: telemetry.RuntimeDurableObject}
+	// The trim goes first: a run that stops between the two trims again.
+	if ts.Kind == session.WakePrompt {
+		e.trimTurns()
+	}
+	ctx, s := telemetry.StartTurn(ts.Parent.Context(context.Background()), turn, ts.Link)
+	telemetry.TurnStarted(ctx, ts.PromptLen, ts.Resumes)
+	e.span, span = s, telemetry.Inject(ctx)
+	_ = e.write("begin", span, nil, nil)
+	return span
+}
+
+// agent names the session's agent in its spans: a specialist's or a job's
+// name, else the deployment's agent.
+func (e *objectRuntime) agent() string {
+	return cmp.Or(e.init.Specialist, e.init.Worker, e.o.cfg.Agent.Name)
+}
+
+// step is the context a step runs in: its turn's span, the session and
+// its agent.
+func (e *objectRuntime) step(ctx context.Context) context.Context {
+	return telemetry.Step(ctx, e.state.Span, e.agent(), string(e.init.SessionID))
+}
+
+// trimTurns drops the events of the turns before a new one.
+func (e *objectRuntime) trimTurns() {
 	e.newTurn = true
 	id := e.init.SessionID
 	head, err := e.o.events.Head(e.ctx, id)
@@ -240,8 +272,14 @@ func (e *objectRuntime) Begin(kind string, _, _ int) {
 	}
 }
 
-// End implements orchestrator.Runtime.
-func (e *objectRuntime) End() {}
+// End implements orchestrator.Runtime: it ends the turn's span, when this
+// run started it.
+func (e *objectRuntime) End() {
+	if e.span != nil {
+		e.span.End(e.state.Outcome(), e.state.Err)
+		e.span = nil
+	}
+}
 
 // take is the oldest mailbox wake the run has not taken.
 func (e *objectRuntime) take() (session.Wake, bool) {
@@ -335,7 +373,7 @@ func (e *objectRuntime) idle() {
 // wait runs step and waits for it, or for a cancel in the mailbox, which
 // stops it. cancelled says a cancel stopped it.
 func (e *objectRuntime) wait(step func(ctx context.Context) error) (cancelled bool, err error) {
-	ctx, cancel := context.WithCancel(e.ctx)
+	ctx, cancel := context.WithCancel(e.step(e.ctx))
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- step(ctx) }()
@@ -546,7 +584,7 @@ func (e *objectRuntime) Commit(base session.Revision, in tacklr.CommitIn) (sessi
 	}
 	e.busy()
 	st := &staged{snapshots: e.o.snapshots}
-	err := e.attempt(e.ctx, func(ctx context.Context) error {
+	err := e.attempt(e.step(e.ctx), func(ctx context.Context) error {
 		st.ops = nil
 		e.events.take()
 		var err error
@@ -614,7 +652,7 @@ func (e *objectRuntime) Start(s tacklr.JobStart) error {
 		return err
 	}
 	id, child := e.init.SessionID, session.ID(s.ID)
-	init := Init{SessionID: child, Parent: id, Task: s.Task, Mounts: e.state.Mounts}
+	init := Init{SessionID: child, Parent: id, Task: s.Task, Mounts: e.state.Mounts, Trace: e.state.Span}
 	if s.Specialist {
 		init.Specialist = s.Name
 	} else {
