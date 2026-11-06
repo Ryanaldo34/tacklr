@@ -17,7 +17,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel"
 	lognoop "go.opentelemetry.io/otel/log/noop"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/grpc"
@@ -103,7 +102,7 @@ func emit(ctx context.Context) {
 	}))
 	_, span := telemetry.Tracer().Start(parent, "export-test")
 	span.End()
-	telemetry.InstrumentsFromContext(ctx).RecordSessionCreated(ctx)
+	telemetry.Metrics().RecordSessionCreated(ctx)
 	telemetry.EmitEvent(ctx, telemetry.EventProviderFailed)
 }
 
@@ -116,20 +115,13 @@ func matches(err error, want string) bool {
 	return err != nil && strings.Contains(err.Error(), want)
 }
 
-// rebuild is a host's tracer build for ReinstallTracer: the standard SDK
-// provider on the options it gets.
-func rebuild(opts ...sdktrace.TracerProviderOption) (trace.TracerProvider, func(context.Context) error) {
-	tp := sdktrace.NewTracerProvider(opts...)
-	return tp, tp.Shutdown
-}
-
 // TestInit_exportsEachSignalToTheEndpoint: Init sends traces, metrics and
 // logs to the endpoint over OTLP/HTTP, or over gRPC by default, with the
 // endpoint and protocol from the configuration or else the environment. A
-// tracer that the host builds again from the same configuration exports
-// too, and a rebuild whose context has ended fails. A metric export that
+// metric export that
 // the endpoint refuses fails the shutdown, and so does a tracer's shutdown
-// whose context has ended when traces are the only signal. Without an
+// whose context has ended when traces are the only signal, whose spans are
+// then not sent. Without an
 // endpoint the providers export nothing and shut down cleanly.
 func TestInit_exportsEachSignalToTheEndpoint(t *testing.T) {
 	signals := []string{"/v1/logs", "/v1/metrics", "/v1/traces"}
@@ -144,13 +136,12 @@ func TestInit_exportsEachSignalToTheEndpoint(t *testing.T) {
 		refuse   string // the path the endpoint refuses
 		want     []string
 		traces   bool   // traces are the only signal, and the shutdown's context has ended
-		ended    string // the error of a rebuild whose context has ended
 		shutdown string // the shutdown's error
 	}{
-		{name: "http with a sample ratio", protocol: "HTTP", want: signals, ended: "otel trace exporter"},
+		{name: "http with a sample ratio", protocol: "HTTP", want: signals},
 		{name: "grpc from the environment", protocol: "grpc", want: methods},
-		{name: "a refused metric export", protocol: "http", refuse: "/v1/metrics", want: signals, ended: "otel trace exporter", shutdown: "400"},
-		{name: "traces only, shut down after the context ends", protocol: "http", traces: true, want: []string{"/v1/traces"}, ended: "otel trace exporter", shutdown: "context canceled"},
+		{name: "a refused metric export", protocol: "http", refuse: "/v1/metrics", want: signals, shutdown: "400"},
+		{name: "traces only, shut down after the context ends", protocol: "http", traces: true, shutdown: "context canceled"},
 		{name: "no endpoint"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -182,19 +173,13 @@ func TestInit_exportsEachSignalToTheEndpoint(t *testing.T) {
 				t.Fatal(initErr)
 			}
 			emit(t.Context())
-			rebuildErr := export.ReinstallTracer(t.Context(), rebuild)
-			emit(t.Context())
-			endedErr := export.ReinstallTracer(ended, rebuild)
 			shutdownErr := shutdown(shutdownCtx)
 
-			if rebuildErr != nil || !matches(shutdownErr, tc.shutdown) {
-				t.Fatalf("rebuild = %v, shutdown = %v, want the rebuild to succeed and shutdown %q", rebuildErr, shutdownErr, tc.shutdown)
+			if !matches(shutdownErr, tc.shutdown) {
+				t.Fatalf("shutdown = %v, want %q", shutdownErr, tc.shutdown)
 			}
 			if got := r.got(); !slices.Equal(got, tc.want) {
 				t.Fatalf("exports = %q, want %q", got, tc.want)
-			}
-			if !matches(endedErr, tc.ended) {
-				t.Fatalf("rebuild with an ended context = %v, want %q", endedErr, tc.ended)
 			}
 		})
 	}
@@ -250,7 +235,7 @@ func TestPrometheusMeterProvider_recordsIntoTheHostRegistry(t *testing.T) {
 	mp := export.PrometheusMeterProvider(reg, "", "")
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
-	telemetry.MustInstruments(telemetry.MeterFromProvider(mp)).RecordSessionCreated(t.Context())
+	telemetry.MustInstruments(mp.Meter(telemetry.InstrumentationName)).RecordSessionCreated(t.Context())
 	families, err := reg.Gather()
 
 	if err != nil {

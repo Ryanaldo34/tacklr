@@ -1,7 +1,8 @@
 //go:build js && wasm
 
 // Command cloudflare is an example Worker that runs Tacklr sessions as
-// Durable Objects. Build it with worker/build.sh and run it with wrangler;
+// Durable Objects, and serves ACP over WebSocket from a connection object
+// for each socket. Build it with worker/build.sh and run it with wrangler;
 // see README.md.
 package main
 
@@ -13,8 +14,9 @@ import (
 	"strings"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/examples/cloudflare/api"
+	"github.com/ryanaldo34/tacklr/examples/host"
 	"github.com/ryanaldo34/tacklr/openai"
+	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/durableobject"
 	"github.com/ryanaldo34/tacklr/session/durableobject/cloudflare"
@@ -22,20 +24,33 @@ import (
 
 func main() {
 	cloudflare.Serve(cloudflare.App{
-		Binding: "SESSIONS",
-		Config:  config,
-		Front: func(env cloudflare.Env, c session.Client) (http.Handler, error) {
+		Sessions:    "SESSIONS",
+		Connections: "CONNECTIONS",
+		Config:      config,
+		// The same ACP server as the Temporal example's host. Each
+		// session's object keeps its ACP wire state.
+		Server: func(env cloudflare.Env, c *durableobject.Client) (*server.Server, error) {
 			token := env.String("API_TOKEN")
 			if token == "" {
 				return nil, errors.New("API_TOKEN is not set")
 			}
-			return api.Handler(c, token), nil
+			return host.New(c, newModel(env), c.WireStore(), token), nil
 		},
 	})
 }
 
+// newModel is the model the env names.
+func newModel(env cloudflare.Env) *openai.Model {
+	model := openai.New(http.DefaultClient).WithApiKey(env.String("OPENAI_API_KEY")).WithModel(env.String("MODEL"))
+	if url := env.String("OPENAI_BASE_URL"); url != "" {
+		model = model.WithURL(url)
+	}
+	return model
+}
+
 // config is the agent every session runs: a model from the env, and
-// tools that show a turn, a park, a specialist and a large result.
+// tools that show a turn, a park, a specialist in its own object and a
+// large result.
 func config(env cloudflare.Env) (durableobject.Config, error) {
 	key, err := base64.StdEncoding.DecodeString(env.String("SEAL_KEY"))
 	if err != nil {
@@ -45,10 +60,7 @@ func config(env cloudflare.Env) (durableobject.Config, error) {
 	if err != nil {
 		return durableobject.Config{}, err
 	}
-	model := openai.New(http.DefaultClient).WithApiKey(env.String("OPENAI_API_KEY")).WithModel(env.String("MODEL"))
-	if url := env.String("OPENAI_BASE_URL"); url != "" {
-		model = model.WithURL(url)
-	}
+	model := newModel(env)
 	lookup := tacklr.NewTool(tacklr.ToolConfig{Name: "lookup", Description: "Looks up the answer.",
 		Handler: func(context.Context) (string, error) { return "42", nil }})
 	report := tacklr.NewTool(tacklr.ToolConfig{Name: "report", Description: "Writes the full report.",
@@ -64,8 +76,8 @@ func config(env cloudflare.Env) (durableobject.Config, error) {
 			MaxWindowSize: 200_000,
 			Tools:         []*tacklr.Tool{lookup, report, deploy},
 			Specialists: []*tacklr.Specialist{{
-				Name: "researcher", Description: "Researches and deploys.", Instructions: "You research.",
-				Model: model, Tools: []*tacklr.Tool{deploy},
+				Name: "researcher", Description: "Researches the answer.", Instructions: "You research.",
+				Model: model, Tools: []*tacklr.Tool{lookup},
 			}},
 		},
 		Sealer: sealer,

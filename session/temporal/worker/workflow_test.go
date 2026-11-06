@@ -418,11 +418,11 @@ func turnStatus(t *testing.T, id session.ID) string {
 	t.Helper()
 	status := ""
 	for _, sp := range spans.Ended() {
-		if sp.Name() != telemetry.SpanTurn {
+		if !strings.HasPrefix(sp.Name(), telemetry.OperationInvokeAgent) {
 			continue
 		}
 		for _, kv := range sp.Attributes() {
-			if kv.Key == telemetry.AttrSessionID && kv.Value.AsString() == string(id) {
+			if kv.Key == telemetry.AttrGenAIConversationID && kv.Value.AsString() == string(id) {
 				status = sp.Status().Description
 			}
 		}
@@ -434,7 +434,7 @@ func newTestWorkflow(t *testing.T) *testsuite.TestWorkflowEnvironment {
 	t.Helper()
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
-	env.RegisterWorkflowWithOptions(sessionWorkflow, workflow.RegisterOptions{Name: protocol.Workflow})
+	env.RegisterWorkflowWithOptions(sessionWorkflow("agent"), workflow.RegisterOptions{Name: protocol.Workflow})
 	// A job tells its parent its result by signal, the one way a result
 	// arrives; this delivers it as Temporal would. The root workflow runs
 	// under the environment's own id, not its session id, so a signal to

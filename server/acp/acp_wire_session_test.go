@@ -16,7 +16,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
-	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/session"
 )
 
@@ -36,11 +35,12 @@ func newTestMCPServer(t *testing.T, toolName string) *httptest.Server {
 	return hs
 }
 
-// TestHandleRPC_sessionResume_overridesMCPServers: the MCP servers a
+// TestACP_mcpServersOnAResumeOrALoadReplaceTheSessions: the MCP servers a
 // session/resume names replace the session's servers, so the model sees
 // the new server's tools in place of the old one's, and a call to one
-// returns the server's result to the client.
-func TestHandleRPC_sessionResume_overridesMCPServers(t *testing.T) {
+// returns the server's result to the client; the servers a session/load
+// names replace them from the next prompt on.
+func TestACP_mcpServersOnAResumeOrALoadReplaceTheSessions(t *testing.T) {
 	t.Parallel()
 	serverA := newTestMCPServer(t, "tool_a")
 	serverB := newTestMCPServer(t, "tool_b")
@@ -64,32 +64,32 @@ func TestHandleRPC_sessionResume_overridesMCPServers(t *testing.T) {
 		}
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
 	})
-	srv := acptest.NewServer(t, acptest.NewRuntime(t, model, tacklr.AgentOptions{}), server.NewMemoryWireStore())
-	sid := acptest.SessionID(t, srv.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"a","url":"`+serverA.URL+`","headers":[]}]}}`))
+	c := acptest.Open(t, acptest.NewRuntime(t, model, tacklr.AgentOptions{}))
+	sid := acptest.SessionID(t, c.Call("session/new", `{"cwd":"/tmp","mcpServers":[{"type":"http","name":"a","url":"`+serverA.URL+`","headers":[]}]}`))
 
-	prompted := stopReason(t, srv.RPC(prompt("2", sid, `[{"type":"text","text":"hi"}]`)))
-	resumed := srv.RPC(`{"jsonrpc":"2.0","id":3,"method":"session/resume","params":{"sessionId":"` + sid + `","cwd":"/tmp","mcpServers":[{"type":"http","name":"b","url":"` + serverB.URL + `","headers":[]}]}}`)
-	var result, end any
-	for _, f := range acptest.Frames(t, resumed.Body) {
-		if params, ok := f["params"].(map[string]any); ok {
-			if update := params["update"].(map[string]any); update["sessionUpdate"] == "tool_call_update" {
-				result = update["rawOutput"]
-			}
-		}
-		if res, ok := f["result"].(map[string]any); ok {
-			end = res["stopReason"]
+	prompted, _ := c.Say(sid, "hi")
+	resumed, frames := c.Until(c.Request("session/resume", `{"sessionId":"`+sid+`","cwd":"/tmp","mcpServers":[{"type":"http","name":"b","url":"`+serverB.URL+`","headers":[]}]}`), nil)
+	mu.Lock()
+	afterResume := seen[len(seen)-1]
+	mu.Unlock()
+	acptest.Result(t, c.Call("session/load", `{"sessionId":"`+sid+`","cwd":"/tmp","mcpServers":[{"type":"http","name":"a","url":"`+serverA.URL+`","headers":[]}]}`))
+	reloaded, _ := c.Say(sid, "again")
+	var result any
+	for _, update := range acptest.Updates(frames) {
+		if update["sessionUpdate"] == "tool_call_update" {
+			result = update["rawOutput"]
 		}
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if prompted != "end_turn" || end != "end_turn" || len(seen) < 2 {
-		t.Fatalf("prompt %q, resume %v, model calls %v; want two turns", prompted, end, seen)
+	if acptest.StopReason(prompted) != "end_turn" || acptest.StopReason(resumed) != "end_turn" || acptest.StopReason(reloaded) != "end_turn" {
+		t.Fatalf("prompt %v, resume %v, after the load %v; want three turns", prompted, resumed, reloaded)
 	}
 	if want := map[string]any{"output": "ok"}; !reflect.DeepEqual(result, want) {
 		t.Fatalf("tool_b result = %v, want %v", result, want)
 	}
-	if !slices.Equal(seen[0], []string{"a/tool_a"}) || !slices.Equal(seen[len(seen)-1], []string{"b/tool_b"}) {
-		t.Fatalf("MCP tools per model call %v; want a/tool_a, then b/tool_b", seen)
+	if !slices.Equal(seen[0], []string{"a/tool_a"}) || !slices.Equal(afterResume, []string{"b/tool_b"}) || !slices.Equal(seen[len(seen)-1], []string{"a/tool_a"}) {
+		t.Fatalf("MCP tools per model call %v; want a/tool_a, then b/tool_b, then a/tool_a again after the load", seen)
 	}
 }

@@ -22,9 +22,19 @@ func (s *Server) WithSecurity(service *Service, extract HTTPAttemptExtractor) *S
 	}
 	s.Security = service
 	s.HTTPAttempt = extract
-	s.allowAnonymousNetwork = false
 	s.networkPolicyConfigured = true
 	return s
+}
+
+// Policy is ErrNetworkSecurityPolicyRequired until the host chose a
+// network policy (WithSecurity or AllowAnonymousNetwork). A host that
+// serves the server on a platform's own listener checks it before it
+// serves.
+func (s *Server) Policy() error {
+	if !s.networkPolicyConfigured {
+		return ErrNetworkSecurityPolicyRequired
+	}
+	return nil
 }
 
 // AllowAnonymousNetwork explicitly enables unauthenticated network serving.
@@ -32,30 +42,28 @@ func (s *Server) WithSecurity(service *Service, extract HTTPAttemptExtractor) *S
 func (s *Server) AllowAnonymousNetwork() *Server {
 	s.Security = nil
 	s.HTTPAttempt = nil
-	s.allowAnonymousNetwork = true
 	s.networkPolicyConfigured = true
 	return s
 }
 
-func (s *Server) networkContext(ctx context.Context, r *http.Request, allowUnauthenticated bool) (*Context, int) {
+// networkContext is the security context of a request that opens a
+// connection: its principal when it carries a credential the host accepts
+// (else the status to refuse it with), an anonymous principal on a server
+// with no security, and the zero Context for a request with no credential,
+// which a protocol can authenticate later.
+func (s *Server) networkContext(ctx context.Context, r *http.Request) (Context, int) {
 	if s.Security == nil {
 		principal, _ := NewPrincipal("anonymous")
-		return &Context{
-			Principal: principal,
-			Binding:   ChannelBinding{Kind: "network"},
-		}, 0
+		return Context{Principal: principal, Binding: ChannelBinding{Kind: "network"}}, 0
 	}
 	if s.HTTPAttempt != nil {
 		if attempt, ok := s.HTTPAttempt(r); ok {
 			securityContext, err := s.Security.Authenticate(ctx, attempt)
 			if err != nil {
-				return nil, http.StatusUnauthorized
+				return Context{}, http.StatusUnauthorized
 			}
-			return &securityContext, 0
+			return securityContext, 0
 		}
 	}
-	if allowUnauthenticated {
-		return new(Context), 0
-	}
-	return nil, http.StatusUnauthorized
+	return Context{}, 0
 }

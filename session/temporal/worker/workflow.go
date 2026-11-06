@@ -18,13 +18,19 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
-	"github.com/ryanaldo34/tacklr/session/loop"
+	"github.com/ryanaldo34/tacklr/session/orchestrator"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // sessionWorkflow is the session wait loop, registered as
 // protocol.Workflow. New registers it; hosts use a session.Client.
-func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
+func sessionWorkflow(agent string) func(workflow.Context, protocol.Input) (string, error) {
+	return func(ctx workflow.Context, in protocol.Input) (string, error) { return runSession(ctx, in, agent) }
+}
+
+// runSession runs one session's workflow; agent is the name of the
+// worker's agent, which a specialist's or a job's name replaces.
+func runSession(ctx workflow.Context, in protocol.Input, agent string) (string, error) {
 	var carry carried
 	if len(in.Carry) > 0 {
 		if err := json.Unmarshal(in.Carry, &carry); err != nil {
@@ -39,16 +45,17 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 
 	wakeCh := workflow.GetSignalChannel(ctx, protocol.SignalWake)
 
-	ident := loop.Identity{Specialist: in.Specialist, Worker: in.Worker, Parent: in.Parent, Mounts: in.Mounts, Task: in.Task != ""}
-	var prev *loop.Carry
+	ident := orchestrator.Identity{Specialist: in.Specialist, Worker: in.Worker, Parent: in.Parent, Mounts: in.Mounts, Task: in.Task != ""}
+	var prev *orchestrator.Carry
 	if len(in.Carry) > 0 {
-		prev = &carry.Turn
+		prev = &carry.Carry
 	}
-	turn := loop.NewTurn(in.SessionID, ident, in.MCPServers, in.State, prev)
-	ex := &executor{
+	state := orchestrator.NewState(in.SessionID, ident, in.MCPServers, in.State, prev)
+	rt := &workflowRuntime{
 		ctx:         ctx,
+		agent:       cmp.Or(in.Specialist, in.Worker, agent),
 		in:          in,
-		turn:        turn,
+		state:       state,
 		opts:        activityOptions(in),
 		stream:      stream,
 		taskQueue:   carry.TaskQueue,
@@ -59,32 +66,32 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 	}
 	if in.Task != "" && prev == nil {
 		// A task session's first run: its task is its first prompt.
-		ex.queue = []session.Wake{{Kind: session.WakePrompt, Prompt: session.Prompt{Text: in.Task}}}
+		rt.queue = []session.Wake{{Kind: session.WakePrompt, Prompt: session.Prompt{Text: in.Task}, Trace: in.Trace}}
 	}
 	// Queries answer from the first moment, before the route's local
 	// activity returns: a client may ask for the status at once.
 	_ = workflow.SetQueryHandler(ctx, protocol.QueryLive, func() (string, error) {
-		return ex.liveURL, nil
+		return rt.liveURL, nil
 	})
 	_ = workflow.SetQueryHandler(ctx, protocol.QueryStatus, func() (session.Status, error) {
-		return turn.Status(), nil
+		return state.Status(), nil
 	})
 	_ = workflow.SetQueryHandler(ctx, protocol.QueryJobs, func() ([]session.ID, error) {
-		out := make([]session.ID, len(turn.Jobs))
-		for i, j := range turn.Jobs {
+		out := make([]session.ID, len(state.Jobs))
+		for i, j := range state.Jobs {
 			out[i] = j.ID
 		}
 		return out, nil
 	})
 	// Route now, so a client that subscribes before the first step finds
 	// the worker whose live endpoint streams the session's deltas.
-	ex.route()
-	result, err := loop.Run(ex, turn)
-	if errors.Is(err, loop.ErrSuspended) {
+	rt.route()
+	result, err := orchestrator.Run(rt, state)
+	if errors.Is(err, orchestrator.ErrSuspended) {
 		// Continue as new from the main loop, not a signal handler, once
 		// every handler finished; the stream's log and offsets carry over.
 		next := in
-		c := carried{Turn: turn.Carry(), TaskQueue: ex.taskQueue, LiveURL: ex.liveURL}
+		c := carried{Carry: state.Carry(), TaskQueue: rt.taskQueue, LiveURL: rt.liveURL}
 		return "", stream.NewContinueAsNewError(ctx, protocol.Workflow, func(state *workflowstreams.WorkflowStreamState) []any {
 			c.Stream = state
 			// The carry is plain data: it encodes.
@@ -96,17 +103,17 @@ func sessionWorkflow(ctx workflow.Context, in protocol.Input) (string, error) {
 	// child tells its parent its result, which reaches a parent that
 	// continued as new. A cancelled session still does both.
 	dctx, _ := workflow.NewDisconnectedContext(ctx)
-	ex.ctx = dctx
-	if turn.Closed {
-		if forgot := ex.forget(); err == nil {
+	rt.ctx = dctx
+	if state.Closed {
+		if forgot := rt.forget(); err == nil {
 			err = forgot
 		}
 	}
 	if in.Parent != "" {
-		done := loop.JobEnd(in.SessionID, result, err)
+		done := orchestrator.JobEnd(in.SessionID, result, err)
 		_ = workflow.SignalExternalWorkflow(dctx, string(in.Parent), "", signalChildDone, done).Get(dctx, nil)
 	}
-	ex.closeHarness()
+	rt.closeHarness()
 	return result, err
 }
 
@@ -129,12 +136,12 @@ func activityOptions(in protocol.Input) workflow.ActivityOptions {
 // (asking for its queue, closing a harness).
 const shortTimeout = 30 * time.Second
 
-// executor is the Temporal loop.Executor for one session.
+// workflowRuntime is the Temporal orchestrator.Runtime for one session.
 //
 // Every wake arrives on wakeCh and moves into queue in arrival order. Readers
 // take from the front of queue, so a cancel sent before a prompt or resume is
 // always handled before it.
-type executor struct {
+type workflowRuntime struct {
 	ctx workflow.Context
 	// taskQueue is the task queue of the worker that holds the session's
 	// harness, and liveURL its live endpoint; routed says the workflow
@@ -145,10 +152,13 @@ type executor struct {
 	stream    *workflowstreams.WorkflowStream
 	// newTurn says the next Commit is a new turn's first.
 	newTurn bool
-	end     func(string, error)
-	in      protocol.Input
-	turn    *loop.Turn
-	opts    workflow.ActivityOptions
+	// agent names the session's agent in its turns' spans; span is the
+	// turn's span when this run started it (a replay did not).
+	agent string
+	span  *telemetry.TurnSpan
+	in    protocol.Input
+	state *orchestrator.State
+	opts  workflow.ActivityOptions
 	// wakeCh carries host wakes, childDoneCh each job's end; both move into
 	// queue in arrival order.
 	wakeCh      workflow.ReceiveChannel
@@ -156,13 +166,23 @@ type executor struct {
 	queue       []session.Wake
 }
 
-func (w *executor) Begin(kind string, promptLen, resumes int) {
+// Begin starts the turn's span in a side effect: Temporal records the
+// span's context in the history, so a replay of the workflow gets the same
+// context and starts no span.
+func (w *workflowRuntime) Begin(ts orchestrator.TurnStart) telemetry.Carrier {
 	workflow.GetLogger(w.ctx).Info("turn start",
-		"kind", kind, "session_id", w.in.SessionID,
-		"prompt_len", promptLen, "resume_count", resumes,
+		"kind", ts.Kind, "session_id", w.in.SessionID,
+		"prompt_len", ts.PromptLen, "resume_count", ts.Resumes,
 	)
-	_, w.end = startTurn(w.ctx, "", w.in.SessionID, kind)
-	if kind == session.WakePrompt {
+	turn := telemetry.Turn{Agent: w.agent, Session: string(w.in.SessionID), Parent: string(w.in.Parent), Kind: ts.Kind, Runtime: telemetry.RuntimeTemporal}
+	var span telemetry.Carrier
+	_ = workflow.SideEffect(w.ctx, func(workflow.Context) any {
+		ctx, s := telemetry.StartTurn(ts.Parent.Context(context.Background()), turn, ts.Link)
+		telemetry.TurnStarted(ctx, ts.PromptLen, ts.Resumes)
+		w.span = s
+		return telemetry.Inject(ctx)
+	}).Get(&span)
+	if ts.Kind == session.WakePrompt {
 		// A new turn: the stream drops the turns before it now, and the
 		// turn's first Commit drops their outcomes and fallback events once
 		// it committed what they left open.
@@ -172,26 +192,20 @@ func (w *executor) Begin(kind string, promptLen, resumes int) {
 			_ = w.stream.Truncate(st.BaseOffset + int64(len(st.Log)))
 		}
 	}
+	return span
 }
 
-func (w *executor) End() {
-	outcome := telemetry.OutcomeOK
-	if w.turn.Yielded {
-		outcome = telemetry.OutcomeYield
-	} else if errors.Is(w.turn.Err, context.Canceled) {
-		outcome = telemetry.OutcomeCancelled
-	} else if w.turn.Terminal == session.Failed {
-		outcome = telemetry.OutcomeError
-	}
-	if w.end != nil {
-		w.end(outcome, w.turn.Err)
+func (w *workflowRuntime) End() {
+	if w.span != nil {
+		w.span.End(w.state.Outcome(), w.state.Err)
+		w.span = nil
 	}
 }
 
 // Commit runs to completion: a cancel queued meanwhile stays queued for the
 // turn. A Commit that a cancel abandoned could still save, and the turn
 // would not learn the revision the next Commit's base must be.
-func (w *executor) Commit(base session.Revision, in tacklr.CommitIn) (session.Revision, error) {
+func (w *workflowRuntime) Commit(base session.Revision, in tacklr.CommitIn) (session.Revision, error) {
 	var act *activities
 	var rev session.Revision
 	err := w.harnessStep(func(opts func(workflow.Context) workflow.Context) error {
@@ -206,7 +220,7 @@ func (w *executor) Commit(base session.Revision, in tacklr.CommitIn) (session.Re
 // harnessStep runs step on the worker that holds the session's harness, and
 // again on the worker the shared queue picks when that one is gone. step
 // applies opts to the context it runs its activity on.
-func (w *executor) harnessStep(step func(opts func(workflow.Context) workflow.Context) error) error {
+func (w *workflowRuntime) harnessStep(step func(opts func(workflow.Context) workflow.Context) error) error {
 	for {
 		if err := step(w.harnessCtx); !w.lostWorker(err) {
 			return err
@@ -216,7 +230,7 @@ func (w *executor) harnessStep(step func(opts func(workflow.Context) workflow.Co
 
 // sharedCtx is ctx for a step that needs no harness: any worker on the shared
 // queue runs it.
-func (w *executor) sharedCtx(ctx workflow.Context) workflow.Context {
+func (w *workflowRuntime) sharedCtx(ctx workflow.Context) workflow.Context {
 	return workflow.WithActivityOptions(ctx, w.opts)
 }
 
@@ -224,7 +238,7 @@ func (w *executor) sharedCtx(ctx workflow.Context) workflow.Context {
 // worker that holds it. The first such step asks a worker on the shared
 // queue for its own queue; until a worker answers, steps use the shared
 // queue.
-func (w *executor) harnessCtx(ctx workflow.Context) workflow.Context {
+func (w *workflowRuntime) harnessCtx(ctx workflow.Context) workflow.Context {
 	w.route()
 	opts := w.opts
 	if w.taskQueue != "" {
@@ -237,7 +251,7 @@ func (w *executor) harnessCtx(ctx workflow.Context) workflow.Context {
 // route asks a worker on the shared queue for its route, unless the
 // session has one. A local activity: it runs on the worker running this
 // workflow task, which polls the shared queue, and records only a marker.
-func (w *executor) route() {
+func (w *workflowRuntime) route() {
 	if w.routed {
 		return
 	}
@@ -251,7 +265,7 @@ func (w *executor) route() {
 // lostWorker reports whether err is a step that never started because the
 // worker holding the session's harness is gone. The step runs again on the
 // worker the shared queue picks, which builds the harness.
-func (w *executor) lostWorker(err error) bool {
+func (w *workflowRuntime) lostWorker(err error) bool {
 	var timeout *temporal.TimeoutError
 	if errors.As(err, &timeout) && timeout.TimeoutType() == enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START {
 		w.routed, w.liveURL = false, ""
@@ -262,28 +276,28 @@ func (w *executor) lostWorker(err error) bool {
 
 // forget deletes what the harnesses of this closed session and of its jobs
 // saved. It runs on any worker: it needs no harness.
-func (w *executor) forget() error {
-	ids := make([]session.ID, 0, len(w.turn.Jobs)+1)
-	for _, j := range w.turn.Jobs {
+func (w *workflowRuntime) forget() error {
+	ids := make([]session.ID, 0, len(w.state.Jobs)+1)
+	for _, j := range w.state.Jobs {
 		ids = append(ids, j.ID)
 	}
 	var act *activities
 	ctx := workflow.WithActivityOptions(w.ctx, w.opts)
-	return workflow.ExecuteActivity(ctx, act.Forget, append(ids, w.turn.SessionID)).Get(w.ctx, nil)
+	return workflow.ExecuteActivity(ctx, act.Forget, append(ids, w.state.SessionID)).Get(w.ctx, nil)
 }
 
 // closeHarness closes the session's harness on its worker when the session
 // ends. A worker that is gone closed it already.
-func (w *executor) closeHarness() {
+func (w *workflowRuntime) closeHarness() {
 	if !w.routed {
 		return
 	}
 	var act *activities
 	ctx := workflow.WithStartToCloseTimeout(workflow.WithHeartbeatTimeout(w.harnessCtx(w.ctx), 0), shortTimeout)
-	_ = workflow.ExecuteActivity(ctx, act.CloseHarness, w.turn.SessionID).Get(w.ctx, nil)
+	_ = workflow.ExecuteActivity(ctx, act.CloseHarness, w.state.SessionID).Get(w.ctx, nil)
 }
 
-func (w *executor) Infer() (tacklr.Reply, error) {
+func (w *workflowRuntime) Infer() (tacklr.Reply, error) {
 	var act *activities
 	var out tacklr.Reply
 	err := w.harnessStep(func(opts func(workflow.Context) workflow.Context) error {
@@ -294,14 +308,14 @@ func (w *executor) Infer() (tacklr.Reply, error) {
 
 // stepSession is what every activity needs to build the session's harness:
 // the runtime holds it for the session, so steps do not carry it.
-func (w *executor) stepSession() stepSession {
-	return stepSession{SessionID: w.turn.SessionID, Identity: w.turn.Identity, MCPServers: w.turn.MCP}
+func (w *workflowRuntime) stepSession() stepSession {
+	return stepSession{SessionID: w.state.SessionID, Identity: w.state.Identity, MCPServers: w.state.MCP, Agent: w.agent, Trace: w.state.Span}
 }
 
 // Tools runs one Tool activity per call, at most MaxToolCalls at once: the
 // rest start as earlier ones finish. It returns each call as its run left
 // it, in order. A queued cancel stops the ones still running.
-func (w *executor) Tools(calls []tacklr.Call) []tacklr.Call {
+func (w *workflowRuntime) Tools(calls []tacklr.Call) []tacklr.Call {
 	var act *activities
 	cctx, cancelAct := workflow.WithCancel(w.ctx)
 	defer cancelAct()
@@ -310,7 +324,7 @@ func (w *executor) Tools(calls []tacklr.Call) []tacklr.Call {
 	futs := make([]workflow.Future, len(runs))
 	start := func(i int) {
 		runs[i].MaxJobs = cmp.Or(w.in.MaxChildren, defaultMaxChildren)
-		ctx := workflow.WithStartToCloseTimeout(w.harnessCtx(cctx), max(w.opts.StartToCloseTimeout, runs[i].Timeout+loop.ToolTimeoutMargin))
+		ctx := workflow.WithStartToCloseTimeout(w.harnessCtx(cctx), max(w.opts.StartToCloseTimeout, runs[i].Timeout+orchestrator.ToolTimeoutMargin))
 		futs[i] = workflow.ExecuteActivity(ctx, act.Tool, toolInput{stepSession: sess, Call: runs[i]})
 	}
 	limit := cmp.Or(w.in.MaxToolCalls, defaultMaxToolCalls)
@@ -370,7 +384,7 @@ func (w *executor) Tools(calls []tacklr.Call) []tacklr.Call {
 	return results
 }
 
-func (w *executor) Emit(ev session.Event) {
+func (w *workflowRuntime) Emit(ev session.Event) {
 	var act *activities
 	// The turn already chose its outcome, so a cancel does not stop the
 	// event that reports it; the cancel stays queued for the session. A
@@ -378,7 +392,7 @@ func (w *executor) Emit(ev session.Event) {
 	_ = workflow.ExecuteActivity(w.sharedCtx(w.ctx), act.EmitEvent, emitEventInput{SessionID: w.in.SessionID, Event: ev}).Get(w.ctx, nil)
 }
 
-func (w *executor) Job(name, task string) (string, error) {
+func (w *workflowRuntime) Job(name, task string) (string, error) {
 	var act *activities
 	var out string
 	err := w.waitActivity(w.sharedCtx, act.RunJob, runJobInput{Name: name, Task: task}, &out)
@@ -387,7 +401,7 @@ func (w *executor) Job(name, task string) (string, error) {
 
 // waitActivity runs one activity on opts and waits for it, or for a cancel,
 // which stops it.
-func (w *executor) waitActivity(opts func(workflow.Context) workflow.Context, activity any, in, out any) error {
+func (w *workflowRuntime) waitActivity(opts func(workflow.Context) workflow.Context, activity any, in, out any) error {
 	cctx, cancelAct := workflow.WithCancel(w.ctx)
 	defer cancelAct()
 	fut := workflow.ExecuteActivity(opts(cctx), activity, in)
@@ -417,7 +431,7 @@ func (w *executor) waitActivity(opts func(workflow.Context) workflow.Context, ac
 
 // stepErr is a step's error as the turn sees it: a cancel is
 // context.Canceled, and a failure its message.
-func (w *executor) stepErr(err error) error {
+func (w *workflowRuntime) stepErr(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -441,7 +455,7 @@ func (w *executor) stepErr(err error) error {
 // its history is long. Running children carry over by id. Every child end
 // and child-waiting signal already delivered is taken first, so none is
 // lost.
-func (w *executor) continueAsNew() bool {
+func (w *workflowRuntime) continueAsNew() bool {
 	info := workflow.GetInfo(w.ctx)
 	if n := w.in.ContinueAsNewEvents; n > 0 {
 		if info.GetCurrentHistoryLength() < n {
@@ -457,7 +471,7 @@ func (w *executor) continueAsNew() bool {
 // waits for one, or suspends a parent whose history is long (continue as
 // new) once nothing is queued, so no wake is lost; without, it returns a
 // zero Wake when none is queued.
-func (w *executor) Next(block bool) session.Wake {
+func (w *workflowRuntime) Next(block bool) session.Wake {
 	for {
 		w.fill()
 		if len(w.queue) > 0 {
@@ -479,16 +493,16 @@ func (w *executor) Next(block bool) session.Wake {
 
 // Start starts the job s names as a child session. A job already started
 // under its id runs on: it is not started again.
-func (w *executor) Start(s tacklr.JobStart) error {
+func (w *workflowRuntime) Start(s tacklr.JobStart) error {
 	spec, worker := "", s.Name
 	if s.Specialist {
 		spec, worker = s.Name, ""
 	}
-	return startChild(w.ctx, w.in.SessionID, spec, worker, s.Task, session.ID(s.ID), w.turn.Mounts, w.in)
+	return startChild(w.ctx, w.in.SessionID, spec, worker, s.Task, session.ID(s.ID), w.state.Mounts, w.in, w.state.Span)
 }
 
 // Cancel asks the job id names to stop.
-func (w *executor) Cancel(id session.ID) {
+func (w *workflowRuntime) Cancel(id session.ID) {
 	// Disconnected: a cancel goes out even when the session's own run was
 	// cancelled, as at its end.
 	ctx, _ := workflow.NewDisconnectedContext(w.ctx)
@@ -497,7 +511,7 @@ func (w *executor) Cancel(id session.ID) {
 
 // fill moves every wake already delivered on wakeCh into the queue, in
 // arrival order.
-func (w *executor) fill() {
+func (w *workflowRuntime) fill() {
 	var wake session.Wake
 	for w.wakeCh.ReceiveAsync(&wake) {
 		w.queue = append(w.queue, wake)
@@ -512,7 +526,7 @@ func (w *executor) fill() {
 
 // listen adds to sel a receive for each mailbox channel that queues what
 // arrives; then, when set, runs after.
-func (w *executor) listen(sel workflow.Selector, after func()) {
+func (w *workflowRuntime) listen(sel workflow.Selector, after func()) {
 	sel.AddReceive(w.wakeCh, func(c workflow.ReceiveChannel, more bool) {
 		w.receive(c)
 		if after != nil {
@@ -527,7 +541,7 @@ func (w *executor) listen(sel workflow.Selector, after func()) {
 }
 
 // receive queues one wake from c. Selectors call it when wakeCh is ready.
-func (w *executor) receive(c workflow.ReceiveChannel) {
+func (w *workflowRuntime) receive(c workflow.ReceiveChannel) {
 	var wake session.Wake
 	c.Receive(w.ctx, &wake)
 	w.queue = append(w.queue, wake)
@@ -536,8 +550,8 @@ func (w *executor) receive(c workflow.ReceiveChannel) {
 // takeCancel reports whether a cancel is queued and removes the first one,
 // together with the prompts queued before it: those were steering for the
 // turn the cancel ends. Wakes queued after the cancel stay, in order.
-func (w *executor) takeCancel() bool {
-	kept, _, ok := loop.TakeCancel(w.queue)
+func (w *workflowRuntime) takeCancel() bool {
+	kept, _, ok := orchestrator.TakeCancel(w.queue)
 	w.queue = kept
 	return ok
 }
@@ -547,4 +561,4 @@ func turnCanceled(ctx workflow.Context, err error) bool {
 	return ctx.Err() != nil || temporal.IsCanceledError(err) || errors.Is(err, workflow.ErrCanceled) || errors.Is(err, workflow.ErrSessionFailed)
 }
 
-var _ loop.Executor = (*executor)(nil)
+var _ orchestrator.Runtime = (*workflowRuntime)(nil)

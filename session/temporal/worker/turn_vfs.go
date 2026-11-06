@@ -28,13 +28,13 @@ func openWorkspace(ctx context.Context, threadID string, ws workspace.Config, bi
 	if fuseRoot == "" {
 		return ms, nil, nil
 	}
-	instruments := telemetry.InstrumentsFromContext(ctx)
+	instruments := telemetry.Metrics()
 	srv, err := fuse.Mount(ms, filepath.Join(fuseRoot, strings.ReplaceAll(threadID, "/", "_")))
 	if err != nil {
 		instruments.RecordFuseMount(ctx, telemetry.FuseMountOutcomeError)
 		return nil, nil, err
 	}
-	telemetry.EmitEvent(ctx, telemetry.EventFuseMount, attribute.String(telemetry.AttrSessionID, threadID))
+	telemetry.EmitEvent(ctx, telemetry.EventFuseMount, attribute.String(telemetry.AttrGenAIConversationID, threadID))
 	instruments.RecordFuseMount(ctx, telemetry.FuseMountOutcomeOK)
 	return ms, srv, nil
 }

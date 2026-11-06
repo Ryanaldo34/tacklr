@@ -4,37 +4,30 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"log/slog"
-	"net/http"
 	"slices"
+	"strconv"
 	"strings"
-	"sync"
 
-	"github.com/ryanaldo34/tacklr/server"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ryanaldo34/tacklr"
-
-	"github.com/coder/websocket"
-
+	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 const (
-	// HeaderConnectionID is set on the WebSocket 101 response.
-	HeaderConnectionID = "Acp-Connection-Id"
-
 	methodVFSBind    = "_tacklr/vfs/bind"
 	methodVFSRefresh = "_tacklr/vfs/refresh"
 	methodVFSUnbind  = "_tacklr/vfs/unbind"
 )
 
-// acpProtocol is the native server.Protocol implementation for the Agent Client server.Protocol.
-// Wire session state (cwd, mcp, config) lives here — not on session.Store.
+// acpProtocol is the native server.Protocol implementation for the Agent
+// Client Protocol. It is shared by every connection and holds no state of
+// theirs: what ACP owns of each session (its cwd and owner) is in wire.
 type acpProtocol struct {
-	mu       sync.Mutex
-	sessions map[string]*acpWireSession
-	wire     server.ProtocolWireStore
+	wire server.ProtocolWireStore
 
 	authMethods []ACPAuthMethod
 	logout      bool
@@ -78,195 +71,188 @@ func NewWithAuth(wire server.ProtocolWireStore, methods []ACPAuthMethod, logout 
 		}
 		seen[methods[i].ID] = struct{}{}
 	}
-	return &acpProtocol{
-		sessions:    make(map[string]*acpWireSession),
-		wire:        wire,
-		authMethods: methods,
-		logout:      logout,
+	return &acpProtocol{wire: wire, authMethods: methods, logout: logout}
+}
+
+// Path implements server.Protocol: ACP connections open at /acp.
+func (p *acpProtocol) Path() string { return "/acp" }
+
+// Open implements server.Protocol.
+func (p *acpProtocol) Open(env server.Env, peer server.Peer) server.Handler {
+	return &conn{
+		p:        p,
+		env:      env,
+		peer:     peer,
+		security: env.Caller,
+		next:     map[session.ID]*nextTurn{},
+		turns:    map[session.ID]*turn{},
 	}
 }
 
-func (p *acpProtocol) HTTPRoutes() []server.HTTPRoute {
-	return []server.HTTPRoute{
-		{Method: http.MethodGet, Pattern: "/acp", AllowUnauthenticated: true, Handler: p.handleACPGet},
-	}
+// conn is one ACP connection. It owns what the connection knows, each
+// part in one place: the client's hello, its security context, what the
+// client gave for each session's next turn, and the turns it follows.
+// Each session's wire state (cwd, owner) is the wire store's, and
+// everything else about a session is the runtime's.
+type conn struct {
+	p    *acpProtocol
+	env  server.Env
+	peer server.Peer
+
+	hello    bool
+	caps     ClientCapabilities
+	security server.Context
+	next     map[session.ID]*nextTurn
+	// asked is the id of the last request the connection sent the client.
+	asked int64
+	turns map[session.ID]*turn
 }
 
-func isWebSocketUpgrade(r *http.Request) bool {
-	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+// nextTurn is what the client gave for a session's next turn: the VFS
+// credentials it bound, which go with each turn, and the MCP servers it
+// named on session/load, which the next turn gives the session.
+type nextTurn struct {
+	creds      server.CredentialBag
+	mcpServers []session.MCPServer
 }
 
-func (p *acpProtocol) handleACPGet(env server.ProtocolEnv, w http.ResponseWriter, r *http.Request) {
-	if !isWebSocketUpgrade(r) {
-		http.Error(w, "WebSocket upgrade required", http.StatusUpgradeRequired)
+// turn is a session the connection follows: the session/prompt and
+// session/resume requests its end answers (none for a turn the connection
+// joined on session/load), the requests it asked the client, by id, how
+// to stop following it, and the context its asks' spans start in (the
+// request that followed it).
+type turn struct {
+	requests []request
+	asks     map[string]ask
+	stop     func()
+	ctx      context.Context
+}
+
+// request is a request of the client the turn's end answers, and its span.
+type request struct {
+	id   json.RawMessage
+	span *telemetry.RPCSpan
+}
+
+// ask is a request to the client for a parked turn: the answer resumes the
+// interrupt. choices are a selection's options. Its span lasts until the
+// answer: the time the user took.
+type ask struct {
+	interrupt string
+	choices   []tacklr.UserChoice
+	selection bool
+	span      *telemetry.RPCSpan
+}
+
+// stopDisconnected is the stop reason of a request whose client left
+// before the turn's end answered it.
+const stopDisconnected = "disconnected"
+
+// Frame implements server.Handler.
+func (c *conn) Frame(ctx context.Context, frame []byte) {
+	if c.answered(ctx, frame) {
 		return
 	}
-	p.handleACPWebSocket(env, w, r)
-}
-
-// handleACPWebSocket serves a full-duplex ACP JSON-RPC connection over WebSocket.
-func (p *acpProtocol) handleACPWebSocket(env server.ProtocolEnv, w http.ResponseWriter, r *http.Request) {
-	// Register before Accept so Acp-Connection-Id is on the 101 response (RFD).
-	// Bridge/writer are filled in after the socket is open.
-	acpConn := env.Connections.Create(nil)
-	if env.Conn != nil && env.Conn.Security != nil {
-		acpConn.SetSecurityContext(*env.Conn.Security)
-	}
-	w.Header().Set(HeaderConnectionID, acpConn.ID)
-
-	c, err := websocket.Accept(w, r, nil)
+	pr, err := validateACPRequest(frame)
 	if err != nil {
-		env.Connections.Remove(acpConn.ID)
-		slog.Warn("acp websocket accept failed", "error", err)
+		var id json.RawMessage
+		if pr != nil {
+			id = pr.ID
+		}
+		c.reply(ctx, id, nil, err)
 		return
 	}
-	defer c.Close(websocket.StatusNormalClosure, "")
-
-	ctx := acpConn.Context()
-	mw := &jsonRPCWSMessageWriter{ctx: ctx, c: c}
-	bridge := NewClientBridge(mw)
-	acpConn.Writer = mw
-	defer env.Connections.Remove(acpConn.ID)
-
-	var wg sync.WaitGroup
-	dispatch := func(body []byte) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			securityContext := acpConn.SecurityContext()
-			reqConn := &server.Conn{
-				Writer:      mw,
-				Ask:         bridge,
-				Security:    &securityContext,
-				SetSecurity: acpConn.SetSecurityContext,
-			}
-			reqEnv := env
-			reqEnv.Conn = reqConn
-			if err := p.HandleInbound(ctx, reqEnv, body); err != nil {
-				slog.Debug("acp websocket inbound", "error", err, "connection_id", acpConn.ID)
-			}
-		}()
-	}
-
-	// Read loop: demux client RPC responses vs agent method requests.
-	for {
-		_, data, err := c.Read(r.Context())
-		if err != nil {
-			break
-		}
-		if len(data) == 0 {
-			continue
-		}
-		if bridge.TryCompleteResponse(data) {
-			continue
-		}
-		dispatch(data)
-	}
-	// Socket is gone: cancel in-flight Prompt/Resume before waiting for them.
-	env.Connections.Remove(acpConn.ID)
-	wg.Wait()
-}
-
-func (p *acpProtocol) HandleInbound(ctx context.Context, env server.ProtocolEnv, body []byte) error {
-	if err := ctx.Err(); err != nil {
-		return reply(env.Conn.Writer, nil, nil, err)
-	}
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		return reply(env.Conn.Writer, nil, nil, err)
-	}
+	// The request's span continues the client's trace: its own
+	// (_meta.traceparent), else the connection's.
+	ctx, span := telemetry.StartRPC(pr.Trace.Context(ctx), trace.SpanKindServer, pr.Method, pr.ThreadID)
 	if pr.Notification {
-		p.handleNotification(ctx, env, pr)
-		return nil
+		c.notified(ctx, pr)
+		span.End(0, "")
+		return
 	}
 	if pr.Method == "session/prompt" || pr.Method == "session/resume" {
-		return p.handleSessionTurn(ctx, env, pr)
+		c.startTurn(ctx, request{id: pr.ID, span: span}, pr)
+		return
 	}
-	result, err := p.dispatch(ctx, env, pr)
-	return reply(env.Conn.Writer, pr.ID, result, err)
+	result, err := c.dispatch(ctx, pr)
+	c.reply(ctx, pr.ID, result, err)
+	span.End(errorCode(err), "")
 }
 
-func (p *acpProtocol) handleNotification(ctx context.Context, env server.ProtocolEnv, pr *parsedRequest) {
+// errorCode is err's JSON-RPC code, zero for no error.
+func errorCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	return ErrorCode(err)
+}
+
+func (c *conn) notified(ctx context.Context, pr *parsedRequest) {
 	if pr.Method != "session/cancel" || pr.ThreadID == "" {
 		return
 	}
-	if _, err := p.resolveOwnedWireSession(ctx, env, pr.ThreadID, actionSessionPrompt); err == nil {
-		_ = env.Client.Cancel(ctx, session.ID(pr.ThreadID))
+	if _, err := c.ownedSession(ctx, pr.ThreadID, actionSessionPrompt); err == nil {
+		_ = c.env.Client.Cancel(ctx, session.ID(pr.ThreadID))
 	}
 }
 
-func (p *acpProtocol) dispatch(ctx context.Context, env server.ProtocolEnv, pr *parsedRequest) (any, error) {
+func (c *conn) dispatch(ctx context.Context, pr *parsedRequest) (any, error) {
 	switch pr.Method {
 	case "initialize":
-		if env.Conn.Ask != nil {
-			env.Conn.Ask.NoteHello(pr.ClientCapsRaw)
-		}
-		return InitializeResult(env.Agent, pr.ProtocolVersion, p.authMethods, p.logout), nil
+		c.hello, c.caps = true, ParseClientCapabilities(pr.ClientCapsRaw)
+		return InitializeResult(c.env.Agent, pr.ProtocolVersion, c.p.authMethods, c.p.logout), nil
 	case "authenticate":
-		if err := p.authenticate(ctx, env, pr.AuthMethodID); err != nil {
+		if err := c.authenticate(ctx, pr.AuthMethodID); err != nil {
 			return nil, err
 		}
 		return map[string]any{}, nil
 	case "logout":
-		env.Conn.EstablishSecurity(server.Context{})
+		c.security = server.Context{}
 		return map[string]any{}, nil
 	case "session/new":
-		if err := p.requireAuthentication(env); err != nil {
+		if err := c.requireAuthentication(); err != nil {
 			return nil, err
 		}
-		_, result, err := p.createSession(ctx, env, pr)
-		return result, err
+		return c.createSession(ctx, pr)
 	case "session/load":
-		return p.loadSession(ctx, env, pr)
+		return c.loadSession(ctx, pr)
 	case "session/set_config_option":
-		return p.setConfig(ctx, env, pr.ThreadID, pr.ConfigID)
+		return c.setConfig(ctx, pr.ThreadID, pr.ConfigID)
 	case "session/close":
-		if err := p.closeSession(ctx, env, pr.ThreadID); err != nil {
+		if err := c.closeSession(ctx, pr.ThreadID); err != nil {
 			return nil, err
 		}
 		return map[string]any{}, nil
 	case "session/cancel":
-		if _, err := p.resolveOwnedWireSession(ctx, env, pr.ThreadID, actionSessionPrompt); err != nil {
+		if _, err := c.ownedSession(ctx, pr.ThreadID, actionSessionPrompt); err != nil {
 			return nil, err
 		}
-		_ = env.Client.Cancel(ctx, session.ID(pr.ThreadID))
+		_ = c.env.Client.Cancel(ctx, session.ID(pr.ThreadID))
 		return map[string]any{}, nil
 	case methodVFSBind:
-		return p.handleVFSBind(ctx, env, pr)
+		return c.handleVFSBind(ctx, pr)
 	case methodVFSRefresh:
-		return p.handleVFSRefresh(ctx, env, pr)
+		return c.handleVFSRefresh(ctx, pr)
 	case methodVFSUnbind:
-		return p.handleVFSUnbind(ctx, env, pr)
+		return c.handleVFSUnbind(ctx, pr)
 	default:
 		return nil, server.Errorf(server.ErrMethodNotFound, "method not found")
 	}
 }
 
-func (p *acpProtocol) authenticate(ctx context.Context, env server.ProtocolEnv, methodID string) error {
-	var method *ACPAuthMethod
-	for i := range p.authMethods {
-		if p.authMethods[i].ID == methodID {
-			method = &p.authMethods[i]
-			break
-		}
-	}
-	if method == nil {
+func (c *conn) authenticate(ctx context.Context, methodID string) error {
+	i := slices.IndexFunc(c.p.authMethods, func(m ACPAuthMethod) bool { return m.ID == methodID })
+	if i < 0 {
 		return server.Errorf(server.ErrInvalidRequest, "authentication method %q was not advertised", methodID)
 	}
-	if env.Security == nil {
+	if c.env.Security == nil {
 		return server.Errorf(server.ErrAuthenticationRequired, "authentication required")
 	}
-	binding := server.ChannelBinding{Kind: "acp"}
-	if env.Conn.Security != nil {
-		binding = env.Conn.Security.Binding
-		if binding.Kind == "" {
-			binding.Kind = "acp"
-		}
+	binding := c.security.Binding
+	if binding.Kind == "" {
+		binding.Kind = "acp"
 	}
-	securityContext, err := env.Security.Authenticate(ctx, server.Attempt{
-		Scheme:  method.Scheme,
-		Binding: binding,
-	})
+	securityContext, err := c.env.Security.Authenticate(ctx, server.Attempt{Scheme: c.p.authMethods[i].Scheme, Binding: binding})
 	if err != nil {
 		sent := server.ErrAuthenticationRequired
 		if errors.Is(err, server.ErrAuthenticationFailed) {
@@ -274,152 +260,338 @@ func (p *acpProtocol) authenticate(ctx context.Context, env server.ProtocolEnv, 
 		}
 		return server.ErrorCause(sent, err, "%s", sent.Error())
 	}
-	env.Conn.EstablishSecurity(securityContext)
+	c.security = securityContext
 	return nil
 }
 
-func (p *acpProtocol) requireAuthentication(env server.ProtocolEnv) error {
-	if len(p.authMethods) == 0 {
-		return nil
-	}
-	if env.Conn.Security != nil && env.Conn.Security.Authenticated() {
+func (c *conn) requireAuthentication() error {
+	if len(c.p.authMethods) == 0 || c.security.Authenticated() {
 		return nil
 	}
 	return server.Errorf(server.ErrAuthenticationRequired, "authentication required")
 }
 
-func (p *acpProtocol) handleSessionTurn(ctx context.Context, env server.ProtocolEnv, pr *parsedRequest) error {
-	if env.Conn.Ask != nil {
-		if err := env.Conn.Ask.Ready(ctx); err != nil {
-			return reply(env.Conn.Writer, pr.ID, nil, err)
+// startTurn sends a prompt or resume to the session and follows it; the
+// turn's end answers the request and ends its span. ctx is the request's
+// span, which the session's turn continues.
+func (c *conn) startTurn(ctx context.Context, rq request, pr *parsedRequest) {
+	var err error
+	if !c.hello {
+		err = server.Errorf(server.ErrInvalidRequest, "initialize the connection before a turn")
+	}
+	var req turnRequest
+	if err == nil {
+		req, err = c.bindTurn(ctx, pr)
+	}
+	if err == nil {
+		id := session.ID(req.ThreadID)
+		joined := c.turns[id] != nil
+		if err = c.follow(ctx, id, false); err == nil {
+			t := c.turns[id]
+			t.requests = append(t.requests, rq)
+			if err = c.sendTurn(ctx, id, req); err != nil {
+				t.requests = slices.DeleteFunc(t.requests, func(r request) bool { return r.span == rq.span })
+				if !joined && len(t.requests) == 0 {
+					c.unfollow(id)
+				}
+			}
 		}
 	}
-	req, err := p.bindTurn(ctx, env, pr)
 	if err != nil {
-		return reply(env.Conn.Writer, pr.ID, nil, err)
+		c.reply(ctx, rq.id, nil, err)
+		rq.span.End(ErrorCode(err), "")
 	}
-	turn := server.PromptOrResume{Prompt: session.Prompt{
+}
+
+// sendTurn sends req to session id: a resume when it carries responses,
+// else a prompt.
+func (c *conn) sendTurn(ctx context.Context, id session.ID, req turnRequest) error {
+	if len(req.Responses) > 0 {
+		resume := session.Resume{Auth: req.Auth, Responses: make(map[string][]byte, len(req.Responses))}
+		for id, payload := range req.Responses {
+			resume.Responses[id] = []byte(payload)
+		}
+		return c.env.Client.Resume(ctx, id, resume)
+	}
+	err := c.env.Client.Prompt(ctx, id, session.Prompt{
 		Text:        req.Prompt,
 		UserMessage: req.UserMessage,
 		MCPServers:  req.MCPServers,
 		Auth:        req.Auth,
-	}}
-	if len(req.Responses) > 0 {
-		resume := &session.Resume{Auth: req.Auth, Responses: make(map[string][]byte, len(req.Responses))}
-		for id, payload := range req.Responses {
-			resume.Responses[id] = []byte(payload)
-		}
-		turn.Resume = resume
+	})
+	if err == nil {
+		// The session has the servers a load named now.
+		c.nextOf(id).mcpServers = nil
 	}
-	err = server.RunTurn(ctx, env, p, req.ThreadID, pr.ID, turn)
-	if err == nil || errors.Is(err, context.Canceled) {
-		return err
-	}
-	return reply(env.Conn.Writer, pr.ID, nil, err)
+	return err
 }
 
-func (p *acpProtocol) OnEvent(ctx context.Context, env server.ProtocolEnv, threadID string, ev session.Event, reqID json.RawMessage) server.StreamControl {
-	if ev.Type == session.EventInterrupt && env.Conn != nil && env.Conn.Ask != nil {
-		resume, err := resolveInterruptViaACP(ctx, env, threadID, &ev)
-		if err != nil {
-			frames := injectReqID(presentationToACP(threadID, session.Event{
-				Type:  session.EventError,
-				Error: err,
-			}), reqID, true)
-			return server.StreamControl{Frames: frames, Finished: true}
-		}
-		if resume != nil {
-			return server.StreamControl{Resume: resume}
-		}
-	}
-
-	if ev.Type == session.EventError && errors.Is(ev.Error, context.Canceled) {
-		if env.Conn != nil && env.Conn.Writer != nil && len(reqID) > 0 {
-			_ = env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
-		}
-		return server.StreamControl{Finished: true}
-	}
-	frames := presentationToACP(threadID, ev)
-	terminal := ev.Type == session.EventComplete || ev.Type == session.EventError
-	park := ev.Type == session.EventInterrupt
-	frames = injectReqID(frames, reqID, terminal)
-	if park && len(reqID) > 0 && env.Conn != nil && env.Conn.Writer != nil {
-		_ = env.Conn.Writer.WriteError(reqID, server.Errorf(server.ErrInvalidRequest,
-			"turn requires user input but client cannot resolve interrupts mid-turn"))
-	}
-	return server.StreamControl{Frames: frames, Finished: terminal || park}
-}
-
-func (p *acpProtocol) OnStreamClosed(ctx context.Context, env server.ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error {
-	if !cancelled || env.Conn == nil || env.Conn.Writer == nil {
+// follow follows session id from its head, unless the connection follows
+// it already. With parked, it starts one event before the head: a parked
+// turn's last event is its interrupt, which the client is asked again.
+func (c *conn) follow(ctx context.Context, id session.ID, parked bool) error {
+	if c.turns[id] != nil {
 		return nil
 	}
-	return env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
+	// A session with no head yet follows from its start.
+	after, _ := c.env.Client.Head(ctx, id)
+	if parked && after > 0 {
+		after--
+	}
+	stop, err := c.peer.Follow(ctx, id, after)
+	if err == nil {
+		c.turns[id] = &turn{asks: map[string]ask{}, stop: stop, ctx: ctx}
+	}
+	return err
 }
 
-func injectReqID(frames [][]byte, reqID json.RawMessage, terminal bool) [][]byte {
-	if !terminal || len(reqID) == 0 {
-		return frames
+// unfollow stops following session id; its open asks go with it,
+// unanswered.
+func (c *conn) unfollow(id session.ID) {
+	if t := c.turns[id]; t != nil {
+		for _, a := range t.asks {
+			a.span.End(0, "unanswered")
+		}
+		t.stop()
+		delete(c.turns, id)
 	}
+}
+
+// Closed implements server.Handler: the client left, so the requests the
+// turns' ends would answer, and the asks it was asked, end their spans.
+// The turns go on in their sessions.
+func (c *conn) Closed(context.Context) {
+	for _, t := range c.turns {
+		for _, r := range t.requests {
+			r.span.End(0, stopDisconnected)
+		}
+		for _, a := range t.asks {
+			a.span.End(0, stopDisconnected)
+		}
+	}
+}
+
+// Deliver implements server.Handler.
+func (c *conn) Deliver(ctx context.Context, id session.ID, ev session.Event) {
+	if ev.Type == session.EventError && errors.Is(ev.Error, server.ErrStreamEnded) {
+		c.endTurn(ctx, id, ev.Error)
+		return
+	}
+	frames := presentationToACP(string(id), ev)
+	switch ev.Type {
+	case session.EventInterrupt:
+		// An interrupt shows as the request that asks the client.
+		c.askInterrupt(ctx, id, ev)
+	case session.EventComplete, session.EventError:
+		// The turn's end is the response to each of its requests.
+		code, stop := endOf(ev)
+		for _, req := range c.turns[id].requests {
+			c.send(ctx, withID(frames, req.id)...)
+			req.span.End(code, stop)
+		}
+		c.unfollow(id)
+	default:
+		c.send(ctx, frames...)
+	}
+}
+
+// endOf is how a turn's end answers its requests: a stop reason, or the
+// JSON-RPC code of an error that is not one.
+func endOf(ev session.Event) (code int, stop string) {
+	if ev.Type == session.EventComplete {
+		return 0, stopReasonEndTurn
+	}
+	if reason, ok := stopReasonFromError(ev.Error); ok {
+		return 0, reason
+	}
+	return CodeInternal, ""
+}
+
+// endTurn answers each request of session id's turn with err and stops
+// following it. The session's turn goes on.
+func (c *conn) endTurn(ctx context.Context, id session.ID, err error) {
+	if t := c.turns[id]; t != nil {
+		for _, req := range t.requests {
+			c.reply(ctx, req.id, nil, err)
+			req.span.End(ErrorCode(err), "")
+		}
+	}
+	c.unfollow(id)
+}
+
+// askInterrupt asks the client to answer a parked turn's interrupt. A park
+// the client has no form for ends the turn's requests: the client answers
+// it with session/resume.
+func (c *conn) askInterrupt(ctx context.Context, id session.ID, ev session.Event) {
+	var envl InterruptEventEnvelope
+	_ = json.Unmarshal(ev.Data, &envl)
+	switch {
+	case envl.Type == "tool_permission":
+		var perm tacklr.ToolPermissionInterrupt
+		_ = json.Unmarshal(envl.Data, &perm)
+		c.request(ctx, id, "session/request_permission", envl.Type, PermissionToACPParams(string(id), ev.MessageID, perm),
+			ask{interrupt: envl.InterruptId})
+	case envl.Type == "user_selection_choice" && c.caps.ElicitationForm:
+		var usi tacklr.UserSelectionInterrupt
+		_ = json.Unmarshal(envl.Data, &usi)
+		c.request(ctx, id, "elicitation/create", envl.Type, SelectionToElicitationParams(string(id), ev.MessageID, usi.Question, usi.Options),
+			ask{interrupt: envl.InterruptId, choices: usi.Options, selection: true})
+	default:
+		c.endTurn(ctx, id, server.Errorf(server.ErrInvalidRequest,
+			"turn requires user input but client cannot resolve interrupts mid-turn"))
+	}
+}
+
+// request sends a request to the client and keeps a in session id's turn
+// for its answer. Its span is a child of the turn's request, and names the
+// kind of interrupt it asks about.
+func (c *conn) request(ctx context.Context, id session.ID, method, kind string, params any, a ask) {
+	c.asked++
+	key := strconv.FormatInt(c.asked, 10)
+	t := c.turns[id]
+	_, a.span = telemetry.StartRPC(t.ctx, trace.SpanKindClient, method, string(id), attribute.String(telemetry.AttrInterruptKind, kind))
+	t.asks[key] = a
+	frame, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": c.asked, "method": method, "params": params})
+	c.send(ctx, frame)
+}
+
+// answered handles frame when it is a response, to a request the
+// connection sent: the answer resumes the turn that waits on it, and a
+// cancel cancels it. An answer the agent cannot use ends the turn's
+// requests with an error, and the turn stays parked.
+func (c *conn) answered(_ context.Context, frame []byte) bool {
+	var resp struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(frame, &resp) != nil || resp.Method != "" || resp.Result == nil && resp.Error == nil {
+		return false
+	}
+	// A response to no open ask (its turn ended first, as after a
+	// session/cancel) has nothing to resume. A response gets no answer.
+	id, a, ok := c.ask(string(resp.ID))
+	if !ok {
+		return true
+	}
+	var resolution []byte
+	var err error
+	code := 0
+	if resp.Error != nil {
+		code = resp.Error.Code
+	}
+	a.span.End(code, "")
+	// The resume is part of the turn's trace, and links the ask's span.
+	ctx := a.span.Context()
+	switch {
+	case resp.Error != nil:
+		err = server.Errorf(server.ErrInvalidRequest, "client rpc error %d: %s", resp.Error.Code, resp.Error.Message)
+	case a.selection:
+		resolution, err = selectionAnswer(resp.Result, a.choices)
+	default:
+		resolution, err = permissionAnswer(resp.Result)
+	}
+	switch {
+	case errors.Is(err, errCancelled):
+		// The turn's end answers its requests: stopReason cancelled.
+		err = c.env.Client.Cancel(ctx, id)
+	case err == nil:
+		err = c.env.Client.Resume(ctx, id, session.Resume{
+			Responses: map[string][]byte{a.interrupt: resolution},
+			Auth:      c.nextOf(id).creds.Take(),
+		})
+	}
+	if err != nil {
+		c.endTurn(ctx, id, err)
+	}
+	return true
+}
+
+// errCancelled is an answer that cancels its turn: a permission with
+// outcome cancelled, or an elicitation with action cancel.
+var errCancelled = errors.New("the client cancelled the turn")
+
+// ask takes the open ask whose request has id key, and its session.
+func (c *conn) ask(key string) (session.ID, ask, bool) {
+	for id, t := range c.turns {
+		if a, ok := t.asks[key]; ok {
+			delete(t.asks, key)
+			return id, a, true
+		}
+	}
+	return "", ask{}, false
+}
+
+// permissionAnswer is the resolution a session/request_permission answer
+// gives.
+func permissionAnswer(raw json.RawMessage) ([]byte, error) {
+	resolution, cancelled, err := RequestPermissionResultToPayload(raw)
+	switch {
+	case err != nil:
+		return nil, server.ErrorCause(server.ErrInvalidRequest, err, "%s", err.Error())
+	case cancelled:
+		return nil, errCancelled
+	}
+	return resolution, nil
+}
+
+// selectionAnswer is the resolution an elicitation/create answer gives.
+func selectionAnswer(raw json.RawMessage, choices []tacklr.UserChoice) ([]byte, error) {
+	action, resolution, err := ElicitationResultToSelectionPayload(raw, choices)
+	switch {
+	case err != nil:
+		return nil, server.ErrorCause(server.ErrInvalidRequest, err, "%s", err.Error())
+	case action == "cancel":
+		return nil, errCancelled
+	case action != "accept":
+		return nil, server.Errorf(server.ErrInvalidRequest, "elicitation %s", action)
+	}
+	return resolution, nil
+}
+
+// nextOf is what the client gave for session id's next turn.
+func (c *conn) nextOf(id session.ID) *nextTurn {
+	n := c.next[id]
+	if n == nil {
+		n = &nextTurn{}
+		c.next[id] = n
+	}
+	return n
+}
+
+// send writes frames to the client. A write fails only when the client
+// left, which ends the connection.
+func (c *conn) send(ctx context.Context, frames ...[]byte) {
+	for _, f := range frames {
+		_ = c.peer.Send(ctx, f)
+	}
+}
+
+// reply answers request id with result, or with err.
+func (c *conn) reply(ctx context.Context, id json.RawMessage, result any, err error) {
+	var frame []byte
+	if err != nil {
+		frame, _ = json.Marshal(ErrorBody(id, err))
+	} else {
+		frame, _ = json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+	}
+	c.send(ctx, frame)
+}
+
+// withID is frames with the id of request req: the turn's end answers it.
+func withID(frames [][]byte, req json.RawMessage) [][]byte {
 	out := make([][]byte, len(frames))
 	for i, frame := range frames {
 		var msg map[string]any
 		_ = json.Unmarshal(frame, &msg)
-		msg["id"] = reqID
+		msg["id"] = req
 		out[i], _ = json.Marshal(msg)
 	}
 	return out
-}
-
-// resolveInterruptViaACP handles mid-turn interrupts over client RPC.
-// Returns (nil, nil) when this interrupt kind cannot be resolved mid-turn
-// (caller parks the turn). Returns (events, nil) on successful resume.
-func resolveInterruptViaACP(ctx context.Context, env server.ProtocolEnv, threadID string, ev *session.Event) (map[string][]byte, error) {
-	var envl InterruptEventEnvelope
-	_ = json.Unmarshal(ev.Data, &envl)
-	switch envl.Type {
-	case "tool_permission":
-		return resolvePermissionViaRequest(ctx, env, threadID, envl, ev.MessageID)
-	case "user_selection_choice":
-		if !connElicitationForm(env.Conn) {
-			return nil, nil
-		}
-		return resolveSelectionViaElicitation(ctx, env, threadID, envl, ev.MessageID)
-	default:
-		return nil, nil
-	}
-}
-
-// connElicitationForm reports form-mode elicitation support from the live RPC
-// bridge. No snapshot: initialize writes caps on the bridge.
-func connElicitationForm(c *server.Conn) bool {
-	return c != nil && c.Ask != nil && c.Ask.FormSupported()
-}
-
-func resolvePermissionViaRequest(ctx context.Context, env server.ProtocolEnv, threadID string, envl InterruptEventEnvelope, messageID string) (map[string][]byte, error) {
-	var perm tacklr.ToolPermissionInterrupt
-	_ = json.Unmarshal(envl.Data, &perm)
-	resolution, cancelled, err := env.Conn.Ask.Permission(ctx, threadID, messageID, perm)
-	if err != nil {
-		return nil, err
-	}
-	if cancelled {
-		return nil, fmt.Errorf("permission request cancelled")
-	}
-	return map[string][]byte{envl.InterruptId: resolution}, nil
-}
-
-func resolveSelectionViaElicitation(ctx context.Context, env server.ProtocolEnv, threadID string, envl InterruptEventEnvelope, messageID string) (map[string][]byte, error) {
-	var usi tacklr.UserSelectionInterrupt
-	_ = json.Unmarshal(envl.Data, &usi)
-	action, resolution, err := env.Conn.Ask.Elicit(ctx, threadID, messageID, usi.Question, usi.Options)
-	if err != nil {
-		return nil, err
-	}
-	if action != "accept" {
-		return nil, fmt.Errorf("elicitation %s", action)
-	}
-	return map[string][]byte{envl.InterruptId: resolution}, nil
 }
 
 // Prompt baseline (no capability bits): Text + ResourceLink are always accepted.

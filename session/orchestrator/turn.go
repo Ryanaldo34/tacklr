@@ -1,4 +1,4 @@
-package loop
+package orchestrator
 
 import (
 	"context"
@@ -12,9 +12,10 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-// Executor is how one runtime runs a session: its steps, its mailbox and
+// Runtime is how one runtime runs a session: its steps, its mailbox and
 // its children. Every runtime implements it; Run is the same for all of
 // them.
 //
@@ -46,11 +47,10 @@ import (
 //
 // Mailbox. Next is the one read of the mailbox: prompts, resumes,
 // cancels, closes, and job ends, in the order they arrived. With block it
-// waits for one; without, it returns a zero Wake when none is queued. The
-// session loop (Run) decides what each does. A step that runs while
+// waits for one; without, it returns a zero Wake when none is queued. // orchestrator (Run) decides what each does. A step that runs while
 // a cancel is queued stops early; the cancel keeps its place.
 //
-// Jobs. The session owns each job's lifecycle (Turn.Jobs): it starts a
+// Jobs. The session owns each job's lifecycle (State.Jobs): it starts a
 // job by its deterministic id, records the call that waits on it, cancels
 // it by id, and turns its end into that call's result or an inbox message.
 // The runtime only runs it: Start starts the job (a job already started
@@ -61,8 +61,14 @@ import (
 // restart the session from the same state (on Temporal, continue-as-new),
 // while idle or while a turn waits on jobs. The running jobs carry over
 // with the turn.
-type Executor interface {
-	Begin(kind string, promptLen, resumes int)
+type Runtime interface {
+	// Begin starts a turn, or the part of one that a resume or a restart
+	// runs: the runtime starts its span (telemetry.StartTurn) once, records
+	// the span's context durably, and returns it; a replay of the turn
+	// returns the recorded context and starts nothing. Each step of the
+	// turn runs in that context.
+	Begin(TurnStart) telemetry.Carrier
+	// End ends the turn's span, when this run started it.
 	End()
 	Commit(base session.Revision, in tacklr.CommitIn) (session.Revision, error)
 	Infer() (tacklr.Reply, error)
@@ -76,11 +82,11 @@ type Executor interface {
 	Cancel(id session.ID)
 }
 
-// Turn is one session's scheduler state. The snapshot holds what committed;
+// State is one session's scheduler state. The snapshot holds what committed;
 // Round is the reply whose calls do not all have results yet, rebuilt from
 // recorded step results on replay. Run drives it: a turn is one prompt or
 // resume, and ends when it parks, finishes, or fails.
-type Turn struct {
+type State struct {
 	SessionID session.ID
 	Identity
 
@@ -114,6 +120,27 @@ type Turn struct {
 	// held are the wakes that wait for the running turn to end (a resume,
 	// a close). They carry over a suspend.
 	held []session.Wake
+	// Trace is the trace of the turn that runs or is parked: the context
+	// of the request that sent its prompt. A resume, a restart or a
+	// continue-as-new goes on in the same trace.
+	Trace telemetry.Carrier
+	// Span is the context of the turn's running span (Begin's): each step
+	// and each job the turn starts runs in it.
+	Span telemetry.Carrier
+}
+
+// TurnStart is what Begin starts: the turn's kind (prompt, resume, or
+// continue for a turn a runtime restarted), the prompt's length and the
+// answers it resumes with, for its log, and its trace. Parent is the
+// context of the turn's trace (the request that sent its prompt, or the
+// parent session's turn); Link is the request that resumed it, which the
+// span links to.
+type TurnStart struct {
+	Kind      string
+	PromptLen int
+	Resumes   int
+	Parent    telemetry.Carrier
+	Link      telemetry.Carrier
 }
 
 // Job is one job the session started, by a deterministic id. Call is the
@@ -129,7 +156,7 @@ type Job struct {
 
 // jobEnded records end: the waiting call's result, or for a background job
 // an inbox message. A job the session no longer runs (cancelled) is gone.
-func (t *Turn) jobEnded(end session.JobEnd) {
+func (t *State) jobEnded(end session.JobEnd) {
 	i := slices.IndexFunc(t.Jobs, func(j Job) bool { return j.ID == end.ID })
 	if i < 0 {
 		return
@@ -153,17 +180,17 @@ func jobMessage(j Job, res session.JobResult) *message.Message {
 }
 
 // cancelJobs stops every job the session runs and forgets them.
-func (t *Turn) cancelJobs(d Executor) {
+func (t *State) cancelJobs(rt Runtime) {
 	for _, j := range t.Jobs {
 		if !j.Ended {
-			d.Cancel(j.ID)
+			rt.Cancel(j.ID)
 		}
 	}
 	t.Jobs = nil
 }
 
 // jobIDs are the running jobs' ids, in start order.
-func (t *Turn) jobIDs() []string {
+func (t *State) jobIDs() []string {
 	ids := make([]string, len(t.Jobs))
 	for i, j := range t.Jobs {
 		ids[i] = string(j.ID)
@@ -172,7 +199,7 @@ func (t *Turn) jobIDs() []string {
 }
 
 // start opens one turn: user is the prompt; resume, the answers to a park.
-func (t *Turn) start(user *message.Message, resume map[string][]byte, auth session.AuthContext, extra map[string]any) {
+func (t *State) start(user *message.Message, resume map[string][]byte, auth session.AuthContext, extra map[string]any) {
 	t.queueState(extra)
 	t.Mounts = adapter.ApplyAuth(t.Mounts, auth)
 	t.Terminal = ""
@@ -186,16 +213,16 @@ func (t *Turn) start(user *message.Message, resume map[string][]byte, auth sessi
 // drive runs the turn until it parks, finishes, fails, or is suspended.
 // pump hands the session the wakes that come in meanwhile (blocking when
 // the turn waits on jobs); a cancel or suspend among them stops the turn.
-func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte, pump func(block bool)) {
+func (t *State) drive(rt Runtime, user *message.Message, resume map[string][]byte, pump func(block bool)) {
 	fail := func(err error) {
 		t.Err = err
 		t.Terminal = session.Failed
 		if errors.Is(err, context.Canceled) {
 			t.Inbox = nil
 			t.NextMCP = nil
-			t.cancelJobs(d)
+			t.cancelJobs(rt)
 		}
-		d.Emit(session.FailureEvent(err))
+		rt.Emit(session.FailureEvent(err))
 	}
 	// stopped takes the wakes queued now (or waits for one) and reports
 	// whether they stopped the turn.
@@ -210,7 +237,7 @@ func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte
 	}
 	commit := func(in tacklr.CommitIn) bool {
 		in.State = t.State
-		rev, err := d.Commit(t.Rev, in)
+		rev, err := rt.Commit(t.Rev, in)
 		if err != nil {
 			fail(err)
 			return false
@@ -262,13 +289,13 @@ func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte
 				// The round waits on its parked call.
 				t.Yielded = true
 				park := r.Calls[r.Parked()].Park
-				d.Emit(session.Event{Type: session.EventInterrupt, MessageID: park.InterruptID, Data: park.Data})
+				rt.Emit(session.Event{Type: session.EventInterrupt, MessageID: park.InterruptID, Data: park.Data})
 				return
 			}
 			for i := range runs {
 				runs[i].Jobs = t.jobIDs()
 			}
-			if err := t.record(r, d.Tools(runs), d); err != nil {
+			if err := t.record(r, rt.Tools(runs), rt); err != nil {
 				fail(err)
 				return
 			}
@@ -288,7 +315,7 @@ func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte
 		if t.Finished {
 			if len(t.Jobs) == 0 {
 				t.Terminal = session.Complete
-				d.Emit(session.Event{Type: session.EventComplete})
+				rt.Emit(session.Event{Type: session.EventComplete})
 				return
 			}
 			// The model is done; the turn waits for its jobs, whose results
@@ -298,7 +325,7 @@ func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte
 			}
 			continue
 		}
-		reply, err := d.Infer()
+		reply, err := rt.Infer()
 		if errors.Is(err, session.ErrContextLength) && !refit {
 			// The provider refused the window as too long, though its
 			// count or bound was under: it collapses, and the model is
@@ -329,7 +356,7 @@ func (t *Turn) drive(d Executor, user *message.Message, resume map[string][]byte
 // parked nothing else runs; once resume answers it, it runs with every call
 // that has not run yet (a call whose park another call's park deferred).
 // An answer to no parked call is an error.
-func (t *Turn) runs(r *tacklr.Round, resume map[string][]byte) ([]tacklr.Call, error) {
+func (t *State) runs(r *tacklr.Round, resume map[string][]byte) ([]tacklr.Call, error) {
 	parked, id := r.Parked(), ""
 	if parked >= 0 {
 		id = r.Calls[parked].Park.InterruptID
@@ -366,13 +393,13 @@ func unknownAnswer(resume map[string][]byte, id string) error {
 }
 
 // waits reports whether a call of r waits on a job.
-func (t *Turn) waits(r *tacklr.Round) bool {
+func (t *State) waits(r *tacklr.Round) bool {
 	return slices.ContainsFunc(r.Calls, tacklr.Call.Waits)
 }
 
 // jobRuns gives each call of r whose job ended the job's result, in call
 // order, and drops those jobs.
-func (t *Turn) jobRuns(r *tacklr.Round) []tacklr.Call {
+func (t *State) jobRuns(r *tacklr.Round) []tacklr.Call {
 	var runs []tacklr.Call
 	for _, c := range r.Calls {
 		k := slices.IndexFunc(t.Jobs, func(j Job) bool { return j.Ended && j.Call == c.Key() })
@@ -391,7 +418,7 @@ func (t *Turn) jobRuns(r *tacklr.Round) []tacklr.Call {
 // jobs each one asks for. A turn parks on one interrupt: a call that parks
 // after the first, in call order, counts for nothing and runs again after
 // resume. Every call is kept before a step error fails the turn.
-func (t *Turn) record(r *tacklr.Round, calls []tacklr.Call, d Executor) error {
+func (t *State) record(r *tacklr.Round, calls []tacklr.Call, rt Runtime) error {
 	var errs []error
 	for _, c := range calls {
 		if c.Err != nil {
@@ -404,7 +431,7 @@ func (t *Turn) record(r *tacklr.Round, calls []tacklr.Call, d Executor) error {
 			continue
 		}
 		r.Calls[i] = c
-		if err := t.startJobs(c, d); err != nil {
+		if err := t.startJobs(c, rt); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -414,10 +441,10 @@ func (t *Turn) record(r *tacklr.Round, calls []tacklr.Call, d Executor) error {
 // startJobs cancels and starts the jobs c asks for; the job c waits on is
 // marked with c's key. Each start is new: a call's run starts only jobs the
 // session does not run (tacklr.CallContext sees them as Call.Jobs).
-func (t *Turn) startJobs(c tacklr.Call, d Executor) error {
+func (t *State) startJobs(c tacklr.Call, rt Runtime) error {
 	for _, id := range c.Cancels {
 		if i := slices.IndexFunc(t.Jobs, func(j Job) bool { return j.ID == session.ID(id) }); i >= 0 {
-			d.Cancel(t.Jobs[i].ID)
+			rt.Cancel(t.Jobs[i].ID)
 			t.Jobs = slices.Delete(t.Jobs, i, i+1)
 		}
 	}
@@ -429,7 +456,7 @@ func (t *Turn) startJobs(c tacklr.Call, d Executor) error {
 		// The job is the session's while its start runs, so the step that
 		// starts it reports it too.
 		t.Jobs = append(t.Jobs, Job{ID: session.ID(s.ID), Name: s.Name, Call: call})
-		if err := d.Start(s); err != nil {
+		if err := rt.Start(s); err != nil {
 			t.Jobs = t.Jobs[:len(t.Jobs)-1]
 			return err
 		}
@@ -438,7 +465,7 @@ func (t *Turn) startJobs(c tacklr.Call, d Executor) error {
 }
 
 // Steer queues a prompt onto this turn with its auth and state.
-func (t *Turn) Steer(p session.Prompt) {
+func (t *State) Steer(p session.Prompt) {
 	msg := p.UserMessage
 	if msg == nil {
 		msg = &message.Message{Role: message.RoleUser, Content: p.Text}
@@ -453,7 +480,7 @@ func (t *Turn) Steer(p session.Prompt) {
 
 // queueState adds host values for the next step to send; a later value for
 // a key wins.
-func (t *Turn) queueState(state map[string]any) {
+func (t *State) queueState(state map[string]any) {
 	if len(state) == 0 {
 		return
 	}

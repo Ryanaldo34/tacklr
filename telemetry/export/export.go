@@ -7,12 +7,14 @@ package export
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
@@ -27,7 +29,6 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
@@ -46,9 +47,11 @@ type Config struct {
 }
 
 // Init installs the process-wide TracerProvider, MeterProvider,
-// LoggerProvider, and W3C propagator. The tracer is the standard SDK
-// provider. A durable backend that needs a different provider replaces it
-// from this same configuration.
+// LoggerProvider, and the W3C propagator (trace context and baggage), so
+// a turn's trace crosses every process and system it touches. With no
+// endpoint the tracer still makes spans, which give the trace's context to
+// the next process, and exports nothing. It returns the shutdown of the
+// providers, which flushes them.
 func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) {
 	endpoint := strings.TrimSpace(cfg.OTLPEndpoint)
 	if endpoint == "" {
@@ -100,13 +103,6 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 	}
 
 	otel.SetTracerProvider(tp)
-	traces.mu.Lock()
-	traces.cfg = cfg
-	traces.endpoint = endpoint
-	traces.protocol = protocol
-	traces.set = true
-	traces.shutdown = tp.Shutdown
-	traces.mu.Unlock()
 	if endpoint == "" {
 		telemetry.SetMeterProvider(nil)
 		otel.SetLoggerProvider(lognoop.NewLoggerProvider())
@@ -117,63 +113,24 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 	if lp != nil {
 		otel.SetLoggerProvider(lp)
 	}
-	return traces.shutdownAll(mp, lp), nil
-}
-
-type traceSlot struct {
-	mu       sync.Mutex
-	set      bool
-	cfg      Config
-	endpoint string
-	protocol string
-	shutdown func(context.Context) error
-}
-
-var traces traceSlot
-
-func (s *traceSlot) shutdownAll(mp *sdkmetric.MeterProvider, lp *sdklog.LoggerProvider) func(context.Context) error {
 	return func(ctx context.Context) error {
-		var first error
+		var errs []error
 		if lp != nil {
-			first = lp.Shutdown(ctx)
+			errs = append(errs, lp.Shutdown(ctx))
 		}
 		if mp != nil {
-			if err := mp.Shutdown(ctx); err != nil && first == nil {
-				first = err
-			}
+			errs = append(errs, mp.Shutdown(ctx))
 		}
-		s.mu.Lock()
-		fn := s.shutdown
-		s.mu.Unlock()
-		if fn != nil {
-			if err := fn(ctx); err != nil && first == nil {
-				first = err
-			}
-		}
-		return first
-	}
+		return errors.Join(append(errs, tp.Shutdown(ctx))...)
+	}, nil
 }
 
-// ReinstallTracer rebuilds the process tracer from the last Init configuration.
-// build owns the provider type. The previous tracer is shut down.
-func ReinstallTracer(ctx context.Context, build func(opts ...sdktrace.TracerProviderOption) (trace.TracerProvider, func(context.Context) error)) error {
-	traces.mu.Lock()
-	defer traces.mu.Unlock()
-	if !traces.set {
-		return fmt.Errorf("otel: Init was not called")
-	}
-	opts, err := traceProviderOptions(ctx, traces.cfg, traces.endpoint, traces.protocol)
-	if err != nil {
-		return err
-	}
-	tp, shutdown := build(opts...)
-	otel.SetTracerProvider(tp)
-	old := traces.shutdown
-	traces.shutdown = shutdown
-	if old != nil {
-		_ = old(context.Background())
-	}
-	return nil
+// SlogHandler is a slog.Handler that sends each record to the process-wide
+// LoggerProvider as an OpenTelemetry log, with the trace and span of its
+// context: a host installs it (slog.SetDefault(slog.New(...))) so Tacklr's
+// logs, which carry each operation's dynamic values, join its spans.
+func SlogHandler() slog.Handler {
+	return otelslog.NewHandler(telemetry.InstrumentationName)
 }
 
 func traceProviderOptions(ctx context.Context, cfg Config, endpoint, protocol string) ([]sdktrace.TracerProviderOption, error) {
@@ -191,10 +148,9 @@ func traceProviderOptions(ctx context.Context, cfg Config, endpoint, protocol st
 	if ratio <= 0 || ratio > 1 {
 		ratio = 1
 	}
-	sampler := sdktrace.AlwaysSample()
-	if ratio < 1 {
-		sampler = sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
-	}
+	// Parent-based: a turn's spans follow the sampling decision of the
+	// trace they join, in every process, so a trace is whole or absent.
+	sampler := sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
 	return []sdktrace.TracerProviderOption{
 		sdktrace.WithBatcher(exp, sdktrace.WithBatchTimeout(2*time.Second)),
 		sdktrace.WithResource(res),

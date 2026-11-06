@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -23,7 +24,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
-	"github.com/ryanaldo34/tacklr/session/loop"
+	"github.com/ryanaldo34/tacklr/session/orchestrator"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs/fuse"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
@@ -44,7 +45,7 @@ func activityError(ctx context.Context, err error) error {
 		return temporal.NewCanceledError(err.Error())
 	}
 	// A failure a client acts on crosses the boundary typed with its kind,
-	// which the workflow maps back to the sentinel (executor.stepErr).
+	// which the workflow maps back to the sentinel (workflowRuntime.stepErr).
 	switch kind := session.KindOf(err); kind {
 	case session.FailRefused:
 		return temporal.NewApplicationErrorWithCause(err.Error(), string(kind), err)
@@ -81,8 +82,12 @@ type activities struct {
 // workflow holds it for the session; the generic steps do not carry it.
 type stepSession struct {
 	SessionID  session.ID
-	Identity   loop.Identity
+	Identity   orchestrator.Identity
 	MCPServers []session.MCPServer
+	// Agent names the session's agent in the step's spans, and Trace is
+	// the turn's span the step's spans are children of.
+	Agent string            `json:",omitempty"`
+	Trace telemetry.Carrier `json:",omitempty"`
 }
 
 // toolInput is one Tool activity: one run of one call.
@@ -92,7 +97,7 @@ type toolInput struct {
 }
 
 // commitInput is one Commit activity. Base is the revision the previous
-// Commit returned (see loop.Executor).
+// Commit returned (see orchestrator.Runtime).
 type commitInput struct {
 	stepSession
 	Base session.Revision
@@ -111,13 +116,15 @@ type runJobInput struct {
 // workflow's cancel), turn telemetry, and the event stream; a retry is
 // logged and published on the retry topic. A stream that cannot open fails
 // the step, so its events are never dropped.
-func (a *activities) begin(ctx context.Context, id session.ID, name string) (context.Context, *workflowstreams.Client, func(), error) {
+func (a *activities) begin(ctx context.Context, s stepSession, name string) (context.Context, *workflowstreams.Client, func(), error) {
+	id := s.SessionID
 	stream, err := a.openStream(ctx)
 	if err != nil {
 		return ctx, nil, func() {}, activityError(ctx, err)
 	}
 	stopBeat := startHeartbeat(ctx)
-	ctx = telemetry.BindTurnContext(ctx, a.Agent.Name, string(id))
+	// The step runs in its turn's span, so its spans are the turn's.
+	ctx = telemetry.Step(ctx, s.Trace, cmp.Or(s.Agent, a.Agent.Name), string(id))
 	if activity.IsActivity(ctx) {
 		if attempt := activity.GetInfo(ctx).Attempt; attempt > 1 {
 			slog.WarnContext(ctx, name+" retry", "area", telemetry.AreaRuntime, "session_id", id, "agent_id", a.Agent.Name, "attempt", attempt)
@@ -133,7 +140,7 @@ func (a *activities) begin(ctx context.Context, id session.ID, name string) (con
 // Inference is one model request on the committed window. It saves
 // nothing: the reply commits once its calls have their results.
 func (a *activities) Inference(ctx context.Context, in stepSession) (tacklr.Reply, error) {
-	ctx, stream, end, err := a.begin(ctx, in.SessionID, "inference")
+	ctx, stream, end, err := a.begin(ctx, in, "inference")
 	defer end()
 	if err != nil {
 		return tacklr.Reply{}, err
@@ -162,7 +169,7 @@ func (a *activities) Inference(ctx context.Context, in stepSession) (tacklr.Repl
 // is stored, as a reference Subscribe resolves.
 func (a *activities) Tool(ctx context.Context, in toolInput) (tacklr.Call, error) {
 	c := in.Call
-	ctx, stream, end, err := a.begin(ctx, in.SessionID, "tool")
+	ctx, stream, end, err := a.begin(ctx, in.stepSession, "tool")
 	defer end()
 	if err != nil {
 		return c, err
@@ -205,7 +212,7 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (tacklr.Call, error
 
 // Commit is the only activity that saves the snapshot.
 func (a *activities) Commit(ctx context.Context, in commitInput) (session.Revision, error) {
-	ctx, stream, end, err := a.begin(ctx, in.SessionID, "commit")
+	ctx, stream, end, err := a.begin(ctx, in.stepSession, "commit")
 	defer end()
 	if err != nil {
 		return "", err
@@ -422,14 +429,11 @@ func publishContext(ctx context.Context) context.Context {
 // the step has no stream. With call set, the stream carries ev without
 // its content; the fallback log, which is not history, gets it whole.
 func (a *activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID session.ID, topic string, ev session.Event, call string, force bool) error {
-	if ev.Error != nil && ev.Fail == "" {
-		ev.Fail = ev.Error.Error()
-	}
 	pubCtx := publishContext(ctx)
 	if stream != nil {
 		item := protocol.StreamItem{Event: ev, Call: call}
 		if call != "" {
-			item.Content = ""
+			item.Event.Content = ""
 		}
 		stream.Topic(topic).Publish(item, force)
 		if force {

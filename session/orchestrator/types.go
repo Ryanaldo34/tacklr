@@ -1,4 +1,4 @@
-package loop
+package orchestrator
 
 import (
 	"github.com/ryanaldo34/tacklr/session"

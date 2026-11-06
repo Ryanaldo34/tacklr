@@ -3,19 +3,14 @@ package acp_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"sync"
 	"testing"
-	"time"
-
-	"github.com/coder/websocket"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/message"
-	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/session"
 )
 
@@ -33,12 +28,14 @@ func init() { tacklr.RegisterInterrupt(func() tacklr.Interrupt { return &plainIn
 // TestACP_interruptOutcomes: when a turn parks and the client can answer,
 // the agent asks it mid-turn: an allowed permission runs the tool (a tool
 // whose title is empty is shown by its name), and an accepted choice
-// resumes the turn with it, to end_turn. An answer the
-// agent cannot use, or an error from the client, ends the prompt with an
-// error, and a client that hangs up while asked cancels the turn. A park
-// the client cannot answer (no form support, an interrupt with no ACP
-// form, or a client on HTTP) ends the prompt with an error that the turn
-// needs user input.
+// resumes the turn with it, to end_turn. A cancelled permission or choice
+// cancels the turn, also when the client cancelled the turn first. An
+// answer the agent cannot use, or an error from the client, ends the
+// prompt with an error. A park the
+// client cannot answer (no form support, or an interrupt with no ACP form)
+// ends the prompt with an error that the turn needs user input. A client
+// that hangs up while asked is asked again when it loads the session on a
+// new connection, and its answer finishes the turn.
 func TestACP_interruptOutcomes(t *testing.T) {
 	t.Parallel()
 	askUser := tacklr.NewTool(tacklr.ToolConfig{
@@ -85,9 +82,9 @@ func TestACP_interruptOutcomes(t *testing.T) {
 		}}
 	})
 	r := acptest.NewRuntime(t, model, tacklr.AgentOptions{Tools: []*tacklr.Tool{askUser, sensitive, untitled, waitChild}})
-	hs, srv := startACPWSServer(t, r)
-	form := dial(t, hs, `{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{},"url":null}}}`)
-	plain := dial(t, hs, `{"protocolVersion":1,"clientCapabilities":{"_meta":{"tacklr":{"vfs":{"tokenRefresh":true}}}}}`)
+	url := acptest.Listen(t, acptest.Server(r, nil))
+	form := acptest.Connect(t, url, `{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{},"url":null}}}`)
+	plain := acptest.Connect(t, url, `{"protocolVersion":1,"clientCapabilities":{"_meta":{"tacklr":{"vfs":{"tokenRefresh":true}}}}}`)
 	reply := func(result any) func(map[string]any) any {
 		return func(req map[string]any) any {
 			return map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": result}
@@ -99,48 +96,55 @@ func TestACP_interruptOutcomes(t *testing.T) {
 
 	for _, c := range []struct {
 		name   string
-		client *wsClient
+		client *acptest.Client
 		tool   string
 		answer func(map[string]any) any
-		// want is the tool's result for a turn that ends; else a part of
-		// the error the prompt ends with ("" for any error).
+		// stop is how the prompt ends, "" for an error. want is a part of
+		// what came before an end_turn, or of the error ("" for any).
+		stop string
 		want string
-		ends bool
 	}{
-		{"allowedPermission", plain, "sensitive", permission(map[string]any{"outcome": "selected", "optionId": "allow-once"}), "approved", true},
+		{"allowedPermission", plain, "sensitive", permission(map[string]any{"outcome": "selected", "optionId": "allow-once"}), "end_turn", "approved"},
 		{"untitledPermissionShowsTheToolName", plain, "untitled", func(req map[string]any) any {
 			if req["params"].(map[string]any)["toolCall"].(map[string]any)["title"] != "untitled" {
 				return permission(map[string]any{"outcome": "cancelled"})(req)
 			}
 			return permission(map[string]any{"outcome": "selected", "optionId": "allow-once"})(req)
-		}, "approved untitled", true},
-		{"acceptedChoice", form, "ask_user", reply(map[string]any{"action": "accept", "content": map[string]any{"choice": "A"}}), "selected: A", true},
-		{"cancelledPermission", plain, "sensitive", permission(map[string]any{"outcome": "cancelled"}), "cancelled", false},
-		{"unknownPermissionOutcome", plain, "sensitive", permission(map[string]any{"outcome": "nope"}), "", false},
-		{"permissionWithNoOption", plain, "sensitive", permission(map[string]any{"outcome": "selected"}), "", false},
-		{"permissionNotAnObject", plain, "sensitive", reply("not-an-object"), "", false},
+		}, "end_turn", "approved untitled"},
+		{"acceptedChoice", form, "ask_user", reply(map[string]any{"action": "accept", "content": map[string]any{"choice": "A"}}), "end_turn", "selected: A"},
+		{"cancelledPermission", plain, "sensitive", permission(map[string]any{"outcome": "cancelled"}), "cancelled", ""},
+		{"cancelledChoice", form, "ask_user", reply(map[string]any{"action": "cancel"}), "cancelled", ""},
+		// The client cancels the turn, then answers what it was asked
+		// with cancelled, as ACP asks.
+		{"cancelWhileAsked", plain, "sensitive", func(req map[string]any) any {
+			plain.Send(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"` + req["params"].(map[string]any)["sessionId"].(string) + `"}}`)
+			return permission(map[string]any{"outcome": "cancelled"})(req)
+		}, "cancelled", ""},
+		{"unknownPermissionOutcome", plain, "sensitive", permission(map[string]any{"outcome": "nope"}), "", ""},
+		{"permissionWithNoOption", plain, "sensitive", permission(map[string]any{"outcome": "selected"}), "", ""},
+		{"permissionNotAnObject", plain, "sensitive", reply("not-an-object"), "", ""},
 		{"clientError", plain, "sensitive", func(req map[string]any) any {
 			return map[string]any{"jsonrpc": "2.0", "id": req["id"], "error": map[string]any{"code": -32000, "message": "nope"}}
-		}, "", false},
+		}, "", ""},
 		{"clientErrorOnChoice", form, "ask_user", func(req map[string]any) any {
 			return map[string]any{"jsonrpc": "2.0", "id": req["id"], "error": map[string]any{"code": -32000, "message": "nope"}}
-		}, "", false},
-		{"declinedChoice", form, "ask_user", reply(map[string]any{"action": "decline"}), "", false},
-		{"unknownChoice", form, "ask_user", reply(map[string]any{"action": "accept", "content": map[string]any{"choice": "nope"}}), "", false},
-		{"noChoice", form, "ask_user", reply(map[string]any{"action": "accept", "content": map[string]any{}}), "", false},
-		{"unknownElicitationAction", form, "ask_user", reply(map[string]any{"action": "nope"}), "", false},
-		{"elicitationNotAnObject", form, "ask_user", reply("not-an-object"), "", false},
-		{"noFormSupport", plain, "ask_user", nil, "user input", false},
-		{"interruptWithNoForm", form, "wait_child", nil, "user input", false},
+		}, "", ""},
+		{"declinedChoice", form, "ask_user", reply(map[string]any{"action": "decline"}), "", ""},
+		{"unknownChoice", form, "ask_user", reply(map[string]any{"action": "accept", "content": map[string]any{"choice": "nope"}}), "", ""},
+		{"noChoice", form, "ask_user", reply(map[string]any{"action": "accept", "content": map[string]any{}}), "", ""},
+		{"unknownElicitationAction", form, "ask_user", reply(map[string]any{"action": "nope"}), "", ""},
+		{"elicitationNotAnObject", form, "ask_user", reply("not-an-object"), "", ""},
+		{"noFormSupport", plain, "ask_user", nil, "", "user input"},
+		{"interruptWithNoForm", form, "wait_child", nil, "", "user input"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			c.client.t = t
-			end, frames := c.client.until(c.client.prompt(c.client.newSession(), c.tool), c.answer)
+			client := c.client.Use(t)
+			end, frames := client.Until(client.Prompt(client.NewSession("/tmp"), `[{"type":"text","text":"`+c.tool+`"}]`), c.answer)
 
-			if c.ends {
+			if c.stop != "" {
 				blob, _ := json.Marshal(frames)
-				if res, _ := end["result"].(map[string]any); res["stopReason"] != "end_turn" || !strings.Contains(string(blob), c.want) {
-					t.Fatalf("prompt ended with %v after %s; want end_turn after %q", end, blob, c.want)
+				if acptest.StopReason(end) != c.stop || !strings.Contains(string(blob), c.want) {
+					t.Fatalf("prompt ended with %v after %s; want %s after %q", end, blob, c.stop, c.want)
 				}
 				return
 			}
@@ -151,42 +155,45 @@ func TestACP_interruptOutcomes(t *testing.T) {
 	}
 
 	t.Run("hangUpWhileAsked", func(t *testing.T) {
-		h := dial(t, hs, `{"protocolVersion":1}`)
-		sid := h.newSession()
-		h.prompt(sid, "sensitive")
-		for h.frame()["method"] != "session/request_permission" {
+		gone := acptest.Connect(t, url, `{"protocolVersion":1}`)
+		sid := gone.NewSession("/tmp")
+		gone.Prompt(sid, `[{"type":"text","text":"sensitive"}]`)
+		for gone.Frame()["method"] != "session/request_permission" {
 			continue
 		}
-		_ = h.conn.Close(websocket.StatusNormalClosure, "")
-		ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
-		defer cancel()
-		sub, err := r.Client.Subscribe(ctx, session.ID(sid), 0)
-		if err != nil {
-			t.Fatal(err)
+		gone.Close()
+		back := acptest.Connect(t, url, `{"protocolVersion":1}`)
+		loaded := back.Request("session/load", `{"sessionId":"`+sid+`","cwd":"/tmp"}`)
+		var asked, result any
+		var rest []map[string]any
+		for result == nil || asked == nil {
+			frame := back.Frame()
+			switch {
+			case frame["method"] == "session/request_permission":
+				asked = frame["params"].(map[string]any)["sessionId"]
+				back.Send(`{"jsonrpc":"2.0","id":` + string(mustJSON(frame["id"])) + `,"result":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}`)
+			case frame["id"] == float64(loaded):
+				result = frame["result"]
+			}
 		}
-		defer func() { _ = sub.Close() }()
-
-		var end error
-		for ev := range sub.Events() {
-			if ev.Type == session.EventError {
-				end = ev.Error
-				break
+		for done := false; !done; {
+			frame := back.Frame()
+			rest = append(rest, frame)
+			for _, u := range acptest.Updates([]map[string]any{frame}) {
+				done = done || u["sessionUpdate"] == "agent_message_chunk"
 			}
 		}
 
-		if !errors.Is(end, context.Canceled) {
-			t.Fatalf("turn of a client that hung up while asked ended with %v, want it cancelled", end)
+		blob, _ := json.Marshal(rest)
+		if asked != sid || !strings.Contains(string(blob), "approved") {
+			t.Fatalf("asked for %v, load = %v, then %s; want the permission asked again and the tool run once allowed", asked, result, blob)
 		}
 	})
+}
 
-	t.Run("httpClient", func(t *testing.T) {
-		proto := srv.Protocols[0]
-		sid := acptest.SessionID(t, acptest.Serve(t, r, proto, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
-		rec := acptest.Serve(t, r, proto, prompt("2", sid, `[{"type":"text","text":"ask_user"}]`))
-		if !strings.Contains(rec.Body.String(), "user input") {
-			t.Fatalf("park on HTTP = %s, want an error that the turn needs user input", rec.Body.String())
-		}
-	})
+func mustJSON(v any) []byte {
+	raw, _ := json.Marshal(v)
+	return raw
 }
 
 // TestACP_sessionCheckpoint_secondPromptContinuesPlan: create_plan + complete_todo
@@ -225,19 +232,20 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 		}
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "turn2 continued", IsComplete: true}
 	})
-	srv := acptest.NewServer(t, acptest.NewRuntime(t, strategy, tacklr.AgentOptions{}), server.NewMemoryWireStore())
-	sid := acptest.SessionID(t, srv.RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
+	c := acptest.Open(t, acptest.NewRuntime(t, strategy, tacklr.AgentOptions{}))
+	sid := c.NewSession("/tmp")
 
-	turn1 := srv.RPC(prompt("2", sid, `[{"type":"text","text":"do the plan"}]`))
+	turn1, _ := c.Say(sid, "do the plan")
 	mu.Lock()
 	phase = "turn2"
 	mu.Unlock()
-	turn2 := srv.RPC(prompt("3", sid, `[{"type":"text","text":"continue"}]`))
+	end2, turn2 := c.Say(sid, "continue")
 
-	if stopReason(t, turn1) != "end_turn" {
-		t.Fatalf("turn1 = %s", turn1.Body.String())
+	if acptest.StopReason(turn1) != "end_turn" {
+		t.Fatalf("turn1 = %v", turn1)
 	}
-	out := turn2.Body.String()
+	blob, _ := json.Marshal(append(turn2, end2))
+	out := string(blob)
 	for _, want := range []string{"Alpha", "completed", "Beta", "turn2 continued"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("second turn should list the restored plan (Alpha completed, Beta left) and end; missing %q in %s", want, out)

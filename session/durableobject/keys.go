@@ -26,6 +26,9 @@ const (
 	kindChild       = "child"
 	kindOutbox      = "outbox"
 	kindCall        = "call"
+	// kindWire holds the wire state a protocol server keeps with the
+	// session (Ref.Wire).
+	kindWire = "wire"
 )
 
 // statusKey holds what Status and Jobs answer, so a cold object answers

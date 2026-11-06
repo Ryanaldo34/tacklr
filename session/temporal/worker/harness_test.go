@@ -22,7 +22,7 @@ import (
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
-	"github.com/ryanaldo34/tacklr/session/loop"
+	"github.com/ryanaldo34/tacklr/session/orchestrator"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 	"github.com/ryanaldo34/tacklr/workspace"
@@ -234,10 +234,10 @@ func TestActivities_aChildUsesItsParentsSecretsAndAStepFailsOnWhatItCannotRead(t
 		}
 		return open(ctx, sessionID, req)
 	}}
-	child := stepSession{SessionID: "child", Identity: loop.Identity{Parent: "parent", Mounts: adapter.ApplyAuth(nil, parentAuth)}}
+	child := stepSession{SessionID: "child", Identity: orchestrator.Identity{Parent: "parent", Mounts: adapter.ApplyAuth(nil, parentAuth)}}
 	locked := stepSession{SessionID: "locked"}
-	lockedChild := stepSession{SessionID: "locked-child", Identity: loop.Identity{Parent: "locked"}}
-	unknown := stepSession{SessionID: "unknown", Identity: loop.Identity{Specialist: "nobody"}}
+	lockedChild := stepSession{SessionID: "locked-child", Identity: orchestrator.Identity{Parent: "locked"}}
+	unknown := stepSession{SessionID: "unknown", Identity: orchestrator.Identity{Specialist: "nobody"}}
 	dropTable(t, pool, schema, "session_event_heads")
 	log := db.EventLog()
 	t.Cleanup(log.Close)

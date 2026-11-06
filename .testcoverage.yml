@@ -40,7 +40,7 @@ override:
     threshold: 94
   - path: ^session/internal$
     threshold: 98
-  - path: ^session/loop$
+  - path: ^session/orchestrator$
     threshold: 98
   - path: ^session/postgres$
     threshold: 99

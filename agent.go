@@ -228,9 +228,9 @@ func (a *Harness) applyEffect(ctx context.Context, effect ToolResultEffect) erro
 	if effect == EffectHandoff {
 		return a.handoff(ctx)
 	}
-	_, span := telemetry.StartPlanInstallSpan(ctx, a.sessionId)
+	plan := a.session.Plan.Get()
 	err := a.window.InstallPlan(a.session.Plan.Document())
-	span.End(err)
+	telemetry.PlanInstalled(ctx, len(plan), openTodos(plan), err)
 	return err
 }
 

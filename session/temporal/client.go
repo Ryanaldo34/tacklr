@@ -24,6 +24,7 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // Client implements session.Client with one Temporal workflow per session.
@@ -182,6 +183,7 @@ func (r *Client) wake(ctx context.Context, id session.ID, wake session.Wake) err
 	if wake.Kind != session.WakeClose && r.isClosed(id) {
 		return session.ErrNotFound
 	}
+	wake.Trace = telemetry.Inject(ctx)
 	return missing(r.client.SignalWorkflow(ctx, string(id), "", protocol.SignalWake, wake))
 }
 
@@ -372,9 +374,6 @@ func (r *Client) resolve(ctx context.Context, id session.ID, it protocol.StreamI
 }
 
 func deliver(ctx context.Context, ch chan<- session.Event, ev session.Event) bool {
-	if ev.Error == nil && ev.Fail != "" {
-		ev.Error = ev.FailKind.Err(ev.Fail)
-	}
 	select {
 	case ch <- ev:
 		return true

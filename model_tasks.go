@@ -98,16 +98,22 @@ func (a *Harness) request(msgs []*message.Message) ModelRequest {
 	return ModelRequest{Messages: msgs, Tools: a.tools, SystemPrompt: a.constructSystemPrompt(), CacheKey: a.sessionId}
 }
 
-// handoff hands off the remaining todos: the window becomes the goal, the
-// plan document and a handoff the model writes (handoffText).
-func (a *Harness) handoff(ctx context.Context) error {
-	plan, planDoc := a.session.Plan.Get(), a.session.Plan.Document()
+// openTodos is how many todos of plan are not completed.
+func openTodos(plan []Todo) int {
 	open := 0
 	for i := range plan {
 		if plan[i].Status != TodoStatusCompleted {
 			open++
 		}
 	}
+	return open
+}
+
+// handoff hands off the remaining todos: the window becomes the goal, the
+// plan document and a handoff the model writes (handoffText).
+func (a *Harness) handoff(ctx context.Context) error {
+	plan, planDoc := a.session.Plan.Get(), a.session.Plan.Document()
+	open := openTodos(plan)
 	ctx, span := telemetry.StartHandoffSpan(ctx, open)
 	usedFallback := false
 	err := a.window.HandOff(ctx, planDoc, open > 0, func(ctx context.Context, window []*message.Message) (string, error) {
@@ -131,7 +137,7 @@ func (a *Harness) handoff(ctx context.Context) error {
 // the live system prompt stay so the request prefix matches a normal turn;
 // tool_choice=none prevents calls.
 func (a *Harness) summarize(ctx context.Context, window []*message.Message) (string, error) {
-	telemetry.InstrumentsFromContext(ctx).RecordCompress(ctx, telemetry.AgentIDFromContext(ctx))
+	telemetry.Metrics().RecordCompress(ctx, telemetry.AgentFromContext(ctx))
 	a.modelSeq++
 	invokeMsgs := slices.Concat(window, []*message.Message{{Role: message.RoleDeveloper, Content: summaryInstruction}})
 	mctx, mspan := telemetry.StartModelSpan(a.modelIdentity(ctx), telemetry.ModelPhaseCompress, a.modelSeq, windowShape(invokeMsgs))

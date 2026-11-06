@@ -2,192 +2,81 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"net/http"
 
 	"github.com/ryanaldo34/tacklr"
-
 	"github.com/ryanaldo34/tacklr/session"
 )
 
-// Ask is how the active protocol reaches the program on the other end of the
-// connection during a turn. That program belongs to the caller. This package
-// does not implement it. A nil Ask cannot answer mid-turn.
-type Ask interface {
-	Ready(ctx context.Context) error
-	NoteHello(params json.RawMessage)
-	FormSupported() bool
-	Permission(ctx context.Context, sessionID, messageID string, perm tacklr.ToolPermissionInterrupt) (resolution []byte, cancelled bool, err error)
-	Elicit(ctx context.Context, sessionID, messageID, question string, opts []tacklr.UserChoice) (action string, resolution []byte, err error)
+// Protocol is a wire protocol over session.Client: the Server admits its
+// connections at Path, and each connection gets a Handler from Open.
+//
+// A connection is event-driven. The host calls the Handler once for each
+// frame from the peer and once for each event of a session the Handler
+// follows, one call at a time. The Handler keeps no goroutine and does not
+// wait for the peer: it sends its own requests and handles the answers as
+// frames. So the same protocol runs on a host that holds the socket in a
+// process (net/http, a Durable Object) and on one where the platform holds
+// it and calls the host once for each frame.
+//
+// The ACP built-in is package server/acp.
+type Protocol interface {
+	// Path is where the protocol's connections open, such as "/acp".
+	Path() string
+	// Open is the protocol's side of a new connection.
+	Open(env Env, peer Peer) Handler
 }
 
-// Conn is one connection for the turn that is running now.
-type Conn struct {
-	Writer      MessageWriter
-	Ask         Ask
-	Security    *Context
-	SetSecurity func(Context)
-}
-
-// EstablishSecurity stores the authenticated context and notifies SetSecurity.
-func (c *Conn) EstablishSecurity(securityContext Context) {
-	c.Security = &securityContext
-	if c.SetSecurity != nil {
-		c.SetSecurity(securityContext)
-	}
-}
-
-// ProtocolEnv is the domain + connection context passed into protocol handlers.
-type ProtocolEnv struct {
+// Env is what a connection serves with.
+type Env struct {
 	Client session.Client
 	Agent  tacklr.AgentOptions
-	// Workspace says the runtime mounts a workspace (Server.Workspace), so
-	// clients may bind backends to it.
+	// Workspace says the runtime mounts a workspace for the sessions
+	// (Server.Workspace), so clients may bind backends to it.
 	Workspace bool
-	Conn      *Conn
-	// Security is protocol-neutral. Implementations map wire credentials into
-	// this service and store the resulting Context on Conn.
+	// Security is the host's authentication and authorization. Nil allows
+	// every operation.
 	Security *Service
-	// Connections is optional connection tracking (ACP WebSocket uses it).
-	// Custom protocols may leave it unused.
-	Connections *ConnectionRegistry
+	// Caller is the security context of the request that opened the
+	// connection: its principal when the request carried a credential the
+	// host accepted, else the zero Context.
+	Caller Context
 }
 
-// StreamControl is the protocol's decision after observing one harness event.
-type StreamControl struct {
-	Frames   [][]byte
-	Resume   map[string][]byte
-	Finished bool
-	Err      error
+// Peer is a connection as its Handler sees it: the host sends the frames
+// and delivers the events of the sessions the Handler follows.
+type Peer interface {
+	// Send writes one frame to the peer.
+	Send(ctx context.Context, frame []byte) error
+	// Follow delivers the events of session id after after to
+	// Handler.Deliver, until the Handler calls stop or the connection
+	// ends. stop does not wait. The Handler owns its follows: the host
+	// keeps none it would have to match.
+	Follow(ctx context.Context, id session.ID, after session.Seq) (stop func(), err error)
 }
 
-// HTTPRoute is one HTTP endpoint owned by a Protocol.
-type HTTPRoute struct {
-	Method               string // e.g. "POST"
-	Pattern              string // e.g. "/acp"
-	AllowUnauthenticated bool
-	Handler              func(env ProtocolEnv, w http.ResponseWriter, r *http.Request)
+// Handler is a protocol's side of one connection. The host calls it one
+// call at a time, so it needs no lock, and each call returns without
+// waiting for the peer.
+type Handler interface {
+	// Frame handles one frame from the peer.
+	Frame(ctx context.Context, frame []byte)
+	// Deliver handles one event of session id, which the Handler follows.
+	// When the events stop before the Handler stops the follow, the last
+	// event is an EventError whose Error wraps ErrStreamEnded.
+	Deliver(ctx context.Context, id session.ID, ev session.Event)
+	// Closed is the end of the connection: the Handler ends what it has
+	// open (its requests' spans). The sessions' turns go on.
+	Closed(ctx context.Context)
 }
 
-// Protocol is the host extension point for streaming and delivery over session.Client.
-//
-// The ACP built-in is package server/acp. Hosts implement Protocol to
-// define their own wire: HTTP/WebSocket routes, frame encoding, and HITL resume.
-// The kernel does not import protocol types. Parse wire credentials into
-// vfs.Binding values and store them on a session.CredentialBag. Put bag.Take()
-// on Prompt or Resume. Call RunTurn to pump Client.Subscribe through OnEvent.
-type Protocol interface {
-	// HandleInbound decodes one connection-oriented body (WebSocket).
-	// HTTP-route-only protocols may return nil.
-	HandleInbound(ctx context.Context, env ProtocolEnv, body []byte) error
-	HTTPRoutes() []HTTPRoute
+// ErrStreamEnded is why a follow ended before its Handler stopped it: the
+// session's event stream broke, or the session closed.
+var ErrStreamEnded = errors.New("server: the session's event stream ended")
 
-	OnEvent(ctx context.Context, env ProtocolEnv, threadID string, ev session.Event, reqID json.RawMessage) StreamControl
-	OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error
-}
-
-// RunTurn pumps Runtime.Prompt or Resume, then Subscribe, through proto's stream policy.
-func RunTurn(
-	ctx context.Context,
-	env ProtocolEnv,
-	proto Protocol,
-	threadID string,
-	reqID json.RawMessage,
-	prompt PromptOrResume,
-) error {
-	id := session.ID(threadID)
-	after := prompt.After
-	if seq, err := env.Client.Head(ctx, id); err == nil {
-		after = seq
-	}
-
-	writeFrames := func(frames [][]byte) error {
-		if env.Conn == nil || env.Conn.Writer == nil || len(frames) == 0 {
-			return nil
-		}
-		for _, f := range frames {
-			if err := env.Conn.Writer.WriteFrame(f); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	// Subscribe before Prompt/Resume so a fast-finishing turn cannot land in
-	// the log before the pump is attached.
-	sub, err := env.Client.Subscribe(ctx, id, after)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = sub.Close() }()
-
-	if prompt.Resume != nil {
-		if err := env.Client.Resume(ctx, id, *prompt.Resume); err != nil {
-			return err
-		}
-	} else {
-		if err := env.Client.Prompt(ctx, id, prompt.Prompt); err != nil {
-			return err
-		}
-	}
-
-	end := func(cancelled bool) error {
-		_ = proto.OnStreamClosed(ctx, env, threadID, reqID, cancelled)
-		if cancelled {
-			return context.Canceled
-		}
-		return nil
-	}
-
-	streamed := map[string]int{}
-	for {
-		var ev session.Event
-		ok := true
-		select {
-		case <-ctx.Done():
-		case ev, ok = <-sub.Events():
-		}
-		// The caller left: the subscription can end for the same reason,
-		// so the context decides first.
-		if ctx.Err() != nil {
-			_ = env.Client.Cancel(context.Background(), id)
-			return end(true)
-		}
-		if !ok {
-			if err := sub.Err(); err != nil {
-				return fmt.Errorf("server: turn stream: %w", err)
-			}
-			return errors.New("server: turn stream ended without a result")
-		}
-		ctrl := proto.OnEvent(ctx, env, threadID, noteStreamed(streamed, ev), reqID)
-		if err := writeFrames(ctrl.Frames); err != nil {
-			_ = env.Client.Cancel(context.Background(), id)
-			return err
-		}
-		if ctrl.Err != nil {
-			_ = env.Client.Cancel(context.Background(), id)
-			return ctrl.Err
-		}
-		if len(ctrl.Resume) > 0 {
-			if err := env.Client.Resume(ctx, id, session.Resume{
-				Responses: ctrl.Resume,
-				Auth:      prompt.Prompt.Auth,
-			}); err != nil {
-				return err
-			}
-			continue
-		}
-		if ctrl.Finished {
-			return end(false)
-		}
-	}
-}
-
-// noteStreamed counts the text of each message the turn streamed as
-// deltas, and sets a complete event's Streamed to what its reader already
-// has. Subscribe sends a message's deltas in order without gaps.
+// noteStreamed counts the text of each message a follow got as deltas,
+// and sets a complete event's Streamed to what its reader already has.
+// Subscribe sends a message's deltas in order without gaps.
 func noteStreamed(streamed map[string]int, ev session.Event) session.Event {
 	if ev.Type != session.EventMessage && ev.Type != session.EventReasoning {
 		return ev
@@ -200,20 +89,4 @@ func noteStreamed(streamed map[string]int, ev session.Event) session.Event {
 	ev.Streamed = min(streamed[k], len(ev.Content))
 	delete(streamed, k)
 	return ev
-}
-
-// PromptOrResume is one protocol turn against Runtime.
-type PromptOrResume struct {
-	Prompt session.Prompt
-	Resume *session.Resume
-	After  session.Seq
-}
-
-// MessageWriter is the sink a Protocol uses for results and streamed frames.
-// Each protocol supplies an implementation for its own wire.
-type MessageWriter interface {
-	WriteResult(id json.RawMessage, result any) error
-	// WriteError writes a failure. Implementations must not leak internal details.
-	WriteError(id json.RawMessage, err error) error
-	WriteFrame(data []byte) error
 }

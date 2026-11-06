@@ -14,12 +14,13 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
-	"github.com/ryanaldo34/tacklr/session/loop"
+	"github.com/ryanaldo34/tacklr/session/orchestrator"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-// executor is the durable-object loop.Executor for one run of a session.
+// objectRuntime is the durable-object orchestrator.Runtime for one run of a session.
 //
-// Every call that loop.Run makes is one journal entry. A run first replays:
+// Every call that orchestrator.Run makes is one journal entry. A run first replays:
 // each call returns its entry instead of acting, until the journal ends;
 // from then on each call acts and journals its result. Each call writes
 // once: its entry, the mailbox wakes it took, the durable events it made,
@@ -27,11 +28,11 @@ import (
 // write, so they land together or not at all. The journal holds one turn:
 // when the session would wait with a journal, it suspends instead, and
 // goes on from its carry with an empty one.
-type executor struct {
-	o    *Object
-	init Init
-	turn *loop.Turn
-	ctx  context.Context
+type objectRuntime struct {
+	o     *Object
+	init  Init
+	state *orchestrator.State
+	ctx   context.Context
 
 	journal []entry
 	pos     int
@@ -45,9 +46,11 @@ type executor struct {
 	armed time.Time
 	// newTurn says the next Commit is a new turn's first.
 	newTurn bool
+	// span is the turn's span when this run started it (a replay did not).
+	span *telemetry.TurnSpan
 }
 
-// entry is one journaled executor call: its result value, its error, and
+// entry is one journaled runtime call: its result value, its error, and
 // the mailbox wakes it took.
 type entry struct {
 	Kind  string          `json:"kind"`
@@ -121,11 +124,11 @@ func (b *buffer) take() []storedEvent {
 	return evs
 }
 
-// newExecutor reads the session's journal; the mailbox wakes its entries
+// newObjectRuntime reads the session's journal; the mailbox wakes its entries
 // took are not the session's to take again. A storage failure stops the
 // run.
-func newExecutor(o *Object, init Init, turn *loop.Turn) *executor {
-	e := &executor{o: o, init: init, turn: turn, ctx: o.ctx}
+func newObjectRuntime(o *Object, init Init, state *orchestrator.State) *objectRuntime {
+	e := &objectRuntime{o: o, init: init, state: state, ctx: o.ctx}
 	taken := map[uint64]bool{}
 	err := scanAll(o.host, prefix(kindJournal, init.SessionID), func(raw Entry) error {
 		var en entry
@@ -150,13 +153,13 @@ func newExecutor(o *Object, init Init, turn *loop.Turn) *executor {
 
 // replaying reports whether the journal has entries the run has not
 // returned yet.
-func (e *executor) replaying() bool { return e.pos < len(e.journal) }
+func (e *objectRuntime) replaying() bool { return e.pos < len(e.journal) }
 
 // replay returns the next journal entry for a call of kind, decoded into
 // out. ok is false once the journal ended: the call acts. An entry of
 // another kind means the session did not run as it did before, and stops
 // the run.
-func (e *executor) replay(kind string, out any) (ok bool, err error) {
+func (e *objectRuntime) replay(kind string, out any) (ok bool, err error) {
 	if !e.replaying() {
 		return false, nil
 	}
@@ -178,7 +181,7 @@ func (e *executor) replay(kind string, out any) (ok bool, err error) {
 // letters for other objects. It returns the error as the journal keeps
 // it, so a live call and its replay see the same error. A failed write
 // stops the run.
-func (e *executor) write(kind string, value any, err error, ops []Op, letters ...letter) error {
+func (e *objectRuntime) write(kind string, value any, err error, ops []Op, letters ...letter) error {
 	if cerr := e.o.ctx.Err(); cerr != nil {
 		fail(cerr)
 	}
@@ -212,23 +215,52 @@ func (e *executor) write(kind string, value any, err error, ops []Op, letters ..
 }
 
 // status is what Status and Jobs answer now.
-func (e *executor) status() statusRecord {
-	ids := make([]session.ID, len(e.turn.Jobs))
-	for i, j := range e.turn.Jobs {
+func (e *objectRuntime) status() statusRecord {
+	ids := make([]session.ID, len(e.state.Jobs))
+	for i, j := range e.state.Jobs {
 		ids[i] = j.ID
 	}
-	return statusRecord{Status: e.turn.Status(), Jobs: ids}
+	return statusRecord{Status: e.state.Status(), Jobs: ids}
 }
 
-// Begin implements loop.Executor. The object holds no turn-scoped resources
-// besides its harness, which it keeps across turns. A new turn drops the
-// events of the turns before it, and its first Commit their call bodies,
-// once it committed what they left open. A replay already did,
-// and a run again after a stop only deletes again.
-func (e *executor) Begin(kind string, _, _ int) {
-	if kind != session.WakePrompt || e.replaying() {
-		return
+// Begin implements orchestrator.Runtime: it starts the turn's span and
+// journals the span's context, so a replay gets the same context and
+// starts no span. The object holds no turn-scoped resources besides its
+// harness, which it keeps across turns. A new turn drops the events of the
+// turns before it, and its first Commit their call bodies, once it
+// committed what they left open. A replay already did, and a run again
+// after a stop only deletes again.
+func (e *objectRuntime) Begin(ts orchestrator.TurnStart) telemetry.Carrier {
+	var span telemetry.Carrier
+	if ok, _ := e.replay("begin", &span); ok {
+		return span
 	}
+	turn := telemetry.Turn{Agent: e.agent(), Session: string(e.init.SessionID), Parent: string(e.init.Parent), Kind: ts.Kind, Runtime: telemetry.RuntimeDurableObject}
+	// The trim goes first: a run that stops between the two trims again.
+	if ts.Kind == session.WakePrompt {
+		e.trimTurns()
+	}
+	ctx, s := telemetry.StartTurn(ts.Parent.Context(context.Background()), turn, ts.Link)
+	telemetry.TurnStarted(ctx, ts.PromptLen, ts.Resumes)
+	e.span, span = s, telemetry.Inject(ctx)
+	_ = e.write("begin", span, nil, nil)
+	return span
+}
+
+// agent names the session's agent in its spans: a specialist's or a job's
+// name, else the deployment's agent.
+func (e *objectRuntime) agent() string {
+	return cmp.Or(e.init.Specialist, e.init.Worker, e.o.cfg.Agent.Name)
+}
+
+// step is the context a step runs in: its turn's span, the session and
+// its agent.
+func (e *objectRuntime) step(ctx context.Context) context.Context {
+	return telemetry.Step(ctx, e.state.Span, e.agent(), string(e.init.SessionID))
+}
+
+// trimTurns drops the events of the turns before a new one.
+func (e *objectRuntime) trimTurns() {
 	e.newTurn = true
 	id := e.init.SessionID
 	head, err := e.o.events.Head(e.ctx, id)
@@ -240,11 +272,17 @@ func (e *executor) Begin(kind string, _, _ int) {
 	}
 }
 
-// End implements loop.Executor.
-func (e *executor) End() {}
+// End implements orchestrator.Runtime: it ends the turn's span, when this
+// run started it.
+func (e *objectRuntime) End() {
+	if e.span != nil {
+		e.span.End(e.state.Outcome(), e.state.Err)
+		e.span = nil
+	}
+}
 
 // take is the oldest mailbox wake the run has not taken.
-func (e *executor) take() (session.Wake, bool) {
+func (e *objectRuntime) take() (session.Wake, bool) {
 	e.o.mu.Lock()
 	defer e.o.mu.Unlock()
 	for _, q := range e.o.mail {
@@ -257,8 +295,8 @@ func (e *executor) take() (session.Wake, bool) {
 }
 
 // takeCancel reports whether a cancel is queued and takes the first one,
-// with the prompts queued before it (loop.TakeCancel).
-func (e *executor) takeCancel() bool {
+// with the prompts queued before it (orchestrator.TakeCancel).
+func (e *objectRuntime) takeCancel() bool {
 	e.o.mu.Lock()
 	defer e.o.mu.Unlock()
 	var open []queued
@@ -271,20 +309,20 @@ func (e *executor) takeCancel() bool {
 	for i, q := range open {
 		wakes[i] = q.wake
 	}
-	_, taken, ok := loop.TakeCancel(wakes)
+	_, taken, ok := orchestrator.TakeCancel(wakes)
 	for _, i := range taken {
 		e.pending = append(e.pending, open[i].seq)
 	}
 	return ok
 }
 
-// Next implements loop.Executor: the oldest wake in the mailbox. With block
+// Next implements orchestrator.Runtime: the oldest wake in the mailbox. With block
 // and none queued, the session suspends instead of waiting: its run ends,
 // its state is its carry, and the next wake starts a run from there with an
 // empty journal. So no goroutine waits, and the journal holds one turn.
 // Taking a job's end closes the job's object, which the session no longer
 // needs.
-func (e *executor) Next(block bool) session.Wake {
+func (e *objectRuntime) Next(block bool) session.Wake {
 	var w session.Wake
 	if ok, _ := e.replay("next", &w); ok {
 		return w
@@ -307,7 +345,7 @@ func (e *executor) Next(block bool) session.Wake {
 
 // busy sets the watchdog alarm while a step runs, so a platform that stops
 // the object mid-step restarts it. It sets it again once half of it passed.
-func (e *executor) busy() {
+func (e *objectRuntime) busy() {
 	now := time.Now()
 	if !e.armed.IsZero() && now.Sub(e.armed) < e.o.cfg.Watchdog/2 {
 		return
@@ -321,7 +359,7 @@ func (e *executor) busy() {
 
 // idle clears the watchdog: the session waits for a wake, which restarts
 // it.
-func (e *executor) idle() {
+func (e *objectRuntime) idle() {
 	if e.armed.IsZero() {
 		return
 	}
@@ -334,8 +372,8 @@ func (e *executor) idle() {
 
 // wait runs step and waits for it, or for a cancel in the mailbox, which
 // stops it. cancelled says a cancel stopped it.
-func (e *executor) wait(step func(ctx context.Context) error) (cancelled bool, err error) {
-	ctx, cancel := context.WithCancel(e.ctx)
+func (e *objectRuntime) wait(step func(ctx context.Context) error) (cancelled bool, err error) {
+	ctx, cancel := context.WithCancel(e.step(e.ctx))
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- step(ctx) }()
@@ -360,7 +398,7 @@ func (e *executor) wait(step func(ctx context.Context) error) (cancelled bool, e
 // attempt runs step until it succeeds, fails for good, or ran
 // StepAttempts times. A network failure, a stale snapshot and a refusal
 // (a content filter often clears) run again after a backoff.
-func (e *executor) attempt(ctx context.Context, step func(ctx context.Context) error) error {
+func (e *objectRuntime) attempt(ctx context.Context, step func(ctx context.Context) error) error {
 	delay := e.o.cfg.RetryBackoff
 	for n := 1; ; n++ {
 		err := step(ctx)
@@ -380,7 +418,7 @@ func (e *executor) attempt(ctx context.Context, step func(ctx context.Context) e
 // emitter sends the harness's events: a live one to the subscribers that
 // listen now, a durable one to b, for its step's write. The turn's end
 // events are Emit's.
-func (e *executor) emitter(b *buffer) func(session.Event) {
+func (e *objectRuntime) emitter(b *buffer) func(session.Event) {
 	return func(ev session.Event) {
 		switch {
 		case ev.Type == session.EventComplete, ev.Type == session.EventInterrupt, ev.Type == session.EventError:
@@ -392,8 +430,8 @@ func (e *executor) emitter(b *buffer) func(session.Event) {
 	}
 }
 
-// Infer implements loop.Executor.
-func (e *executor) Infer() (tacklr.Reply, error) {
+// Infer implements orchestrator.Runtime.
+func (e *objectRuntime) Infer() (tacklr.Reply, error) {
 	var reply tacklr.Reply
 	if ok, err := e.replay("infer", &reply); ok {
 		return reply, err
@@ -419,12 +457,12 @@ func (e *executor) Infer() (tacklr.Reply, error) {
 	return reply, e.write("infer", reply, err, nil)
 }
 
-// Tools implements loop.Executor: one goroutine per call, at most
+// Tools implements orchestrator.Runtime: one goroutine per call, at most
 // MaxToolCalls at once. A call writes its body, its result event and itself
 // in one write when its run ends, so a step that runs again runs only the
 // calls that did not end. A cancel stops the calls still running, and each
 // of them reports the cancel.
-func (e *executor) Tools(calls []tacklr.Call) []tacklr.Call {
+func (e *objectRuntime) Tools(calls []tacklr.Call) []tacklr.Call {
 	var stored []journaledCall
 	if ok, _ := e.replay("tools", &stored); ok {
 		out := make([]tacklr.Call, len(stored))
@@ -485,13 +523,13 @@ func (e *executor) Tools(calls []tacklr.Call) []tacklr.Call {
 }
 
 // callKey is where a call of this step keeps itself once its run ended.
-func (e *executor) callKey(c tacklr.Call) string {
+func (e *objectRuntime) callKey(c tacklr.Call) string {
 	return prefix(kindCall, e.init.SessionID) + url.PathEscape(c.Key())
 }
 
 // ended is c as its run left it, when a run of this step before a stop
 // ended it.
-func (e *executor) ended(c tacklr.Call) (tacklr.Call, bool, error) {
+func (e *objectRuntime) ended(c tacklr.Call) (tacklr.Call, bool, error) {
 	raw, ok, err := e.o.host.Get(e.callKey(c))
 	if err != nil || !ok {
 		return c, false, err
@@ -505,12 +543,12 @@ func (e *executor) ended(c tacklr.Call) (tacklr.Call, bool, error) {
 // cancelled it meanwhile, writes the call's body, its result event and the
 // call in one write. ended is false for a call the turn cancelled, which
 // reports the cancel, not what its tool returned.
-func (e *executor) runCall(ctx context.Context, h *tacklr.Harness, c tacklr.Call) (ran tacklr.Call, ended bool, err error) {
+func (e *objectRuntime) runCall(ctx context.Context, h *tacklr.Harness, c tacklr.Call) (ran tacklr.Call, ended bool, err error) {
 	turnCtx := ctx
 	c.MaxJobs = e.o.cfg.MaxChildren
 	if c.Timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.Timeout+loop.ToolTimeoutMargin)
+		ctx, cancel = context.WithTimeout(ctx, c.Timeout+orchestrator.ToolTimeoutMargin)
 		defer cancel()
 	}
 	st := &staged{snapshots: e.o.snapshots}
@@ -535,18 +573,18 @@ func (e *executor) runCall(ctx context.Context, h *tacklr.Harness, c tacklr.Call
 	return ran, true, e.o.events.commit(e.init.SessionID, b.take(), append(st.ops, put(e.callKey(ran), raw))...)
 }
 
-// Commit implements loop.Executor. It runs to completion: a cancel queued
+// Commit implements orchestrator.Runtime. It runs to completion: a cancel queued
 // meanwhile stays queued for the turn. The checkpoint's changed rows, its
 // events and the entry are one write; a new turn's first Commit also drops
 // the call bodies of the turns before it, which it committed.
-func (e *executor) Commit(base session.Revision, in tacklr.CommitIn) (session.Revision, error) {
+func (e *objectRuntime) Commit(base session.Revision, in tacklr.CommitIn) (session.Revision, error) {
 	var rev session.Revision
 	if ok, err := e.replay("commit", &rev); ok {
 		return rev, err
 	}
 	e.busy()
 	st := &staged{snapshots: e.o.snapshots}
-	err := e.attempt(e.ctx, func(ctx context.Context) error {
+	err := e.attempt(e.step(e.ctx), func(ctx context.Context) error {
 		st.ops = nil
 		e.events.take()
 		var err error
@@ -572,9 +610,9 @@ func (e *executor) Commit(base session.Revision, in tacklr.CommitIn) (session.Re
 	return rev, werr
 }
 
-// Emit implements loop.Executor: the turn's end event and the entry, in one
+// Emit implements orchestrator.Runtime: the turn's end event and the entry, in one
 // write.
-func (e *executor) Emit(ev session.Event) {
+func (e *objectRuntime) Emit(ev session.Event) {
 	if ok, _ := e.replay("emit", nil); ok {
 		return
 	}
@@ -582,8 +620,8 @@ func (e *executor) Emit(ev session.Event) {
 	_ = e.write("emit", nil, nil, nil)
 }
 
-// Job implements loop.Executor: the named job's handler, in this object.
-func (e *executor) Job(name, task string) (string, error) {
+// Job implements orchestrator.Runtime: the named job's handler, in this object.
+func (e *objectRuntime) Job(name, task string) (string, error) {
 	var out string
 	if ok, err := e.replay("job", &out); ok {
 		return out, err
@@ -606,15 +644,15 @@ func (e *executor) Job(name, task string) (string, error) {
 	return out, e.write("job", out, err, nil)
 }
 
-// Start implements loop.Executor: a letter that starts the job's own
+// Start implements orchestrator.Runtime: a letter that starts the job's own
 // object with this session's credentials, sealed for the job, and a record
 // of the job, so the session's close reaches it.
-func (e *executor) Start(s tacklr.JobStart) error {
+func (e *objectRuntime) Start(s tacklr.JobStart) error {
 	if ok, err := e.replay("start", nil); ok {
 		return err
 	}
 	id, child := e.init.SessionID, session.ID(s.ID)
-	init := Init{SessionID: child, Parent: id, Task: s.Task, Mounts: e.turn.Mounts}
+	init := Init{SessionID: child, Parent: id, Task: s.Task, Mounts: e.state.Mounts, Trace: e.state.Span}
 	if s.Specialist {
 		init.Specialist = s.Name
 	} else {
@@ -632,9 +670,9 @@ func (e *executor) Start(s tacklr.JobStart) error {
 	return e.write("start", nil, nil, []Op{put(childKey(id, child), nil)}, letter{To: child, Create: &init, Auth: sealed})
 }
 
-// Cancel implements loop.Executor: a letter that asks the job's object to
+// Cancel implements orchestrator.Runtime: a letter that asks the job's object to
 // stop.
-func (e *executor) Cancel(id session.ID) {
+func (e *objectRuntime) Cancel(id session.ID) {
 	if ok, _ := e.replay("cancel", nil); ok {
 		return
 	}
@@ -644,13 +682,13 @@ func (e *executor) Cancel(id session.ID) {
 // suspend keeps the session's state as its carry and drops the journal and
 // the wakes it took, in one write: the next run starts from the carry. The
 // journal holds at least the suspend, which Next took.
-func (e *executor) suspend() {
+func (e *objectRuntime) suspend() {
 	id := e.init.SessionID
 	var ops []Op
 	err := scanAll(e.o.host, prefix(kindJournal, id), func(raw Entry) error {
 		ops = append(ops, del(raw.Key))
 		var en entry
-		_ = json.Unmarshal(raw.Value, &en) // newExecutor or write wrote it
+		_ = json.Unmarshal(raw.Value, &en) // newObjectRuntime or write wrote it
 		for _, n := range en.Taken {
 			ops = append(ops, del(seqKey(kindMailbox, id, n)))
 		}
@@ -659,7 +697,7 @@ func (e *executor) suspend() {
 	if err != nil {
 		fail(err)
 	}
-	raw, err := json.Marshal(e.turn.Carry())
+	raw, err := json.Marshal(e.state.Carry())
 	if err != nil {
 		fail(err)
 	}
@@ -672,13 +710,13 @@ func (e *executor) suspend() {
 	e.o.mu.Unlock()
 }
 
-// finish ends the session after loop.Run returned (which stopped its
+// finish ends the session after orchestrator.Run returned (which stopped its
 // running jobs): it tells its parent how it ended, and keeps only its final
 // status. A closed session also closes its jobs, forgets its messages in
 // the brain and deletes what it saved. It is one write, and its letters go
 // out after.
-func (e *executor) finish(result string, runErr error) {
-	id, t := e.init.SessionID, e.turn
+func (e *objectRuntime) finish(result string, runErr error) {
+	id, t := e.init.SessionID, e.state
 	e.o.harness.close()
 	var letters []letter
 	if t.Closed {
@@ -693,7 +731,7 @@ func (e *executor) finish(result string, runErr error) {
 		}
 	}
 	if parent := e.init.Parent; parent != "" {
-		end := loop.JobEnd(id, result, runErr)
+		end := orchestrator.JobEnd(id, result, runErr)
 		letters = append(letters, letter{To: parent, Wake: &session.Wake{Kind: session.WakeJob, Job: end}})
 	}
 	o := e.o
@@ -726,4 +764,4 @@ func (e *executor) finish(result string, runErr error) {
 	o.sendLocked()
 }
 
-var _ loop.Executor = (*executor)(nil)
+var _ orchestrator.Runtime = (*objectRuntime)(nil)

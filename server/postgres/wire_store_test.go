@@ -44,7 +44,7 @@ func wireStore(t *testing.T, protocol string) *wirepg.WireStore {
 // TestWireStore_putGetDelete: a put envelope reads back, a second put
 // replaces it, an empty envelope reads back as an empty object, and after
 // a delete, as for an id never put, it is not found; a store whose pool is
-// closed cannot set up its table.
+// closed cannot set up its table or delete.
 func TestWireStore_putGetDelete(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -84,34 +84,35 @@ func TestWireStore_putGetDelete(t *testing.T) {
 	}
 	_, deleted := ws.Get(ctx, "sess-1")
 	setupErr := wirepg.NewWireStore(closed, "").Setup(ctx)
+	deleteErr := wirepg.NewWireStore(closed, "").Delete(ctx, "sess-empty")
 
 	if first != "/proj" || second != "/other" || emptyErr != nil || string(empty) != "{}" {
 		t.Fatalf("cwd %q, then %q, empty envelope %q %v; want /proj, then /other, then {}", first, second, empty, emptyErr)
 	}
-	if setupErr == nil {
-		t.Fatal("setup on a closed pool: nil, want a failure")
+	if setupErr == nil || deleteErr == nil {
+		t.Fatalf("on a closed pool: setup = %v, delete = %v; want both to fail", setupErr, deleteErr)
 	}
 	if !errors.Is(missing, server.ErrSessionNotFound) || !errors.Is(deleted, server.ErrSessionNotFound) {
 		t.Fatalf("missing = %v, deleted = %v; want not found", missing, deleted)
 	}
 }
 
-// TestWireStore_acpLoadAfterRestart: a new ACP protocol on the same
-// Postgres wire store loads a session another one made, and prompts it;
-// the stored envelope holds the session's cwd, owner and MCP topology, but
-// not the MCP server's credentials.
+// TestWireStore_acpLoadAfterRestart: a new ACP server on the same Postgres
+// wire store loads a session another one made, and prompts it; the stored
+// envelope holds what ACP owns of the session, its cwd and owner, and none
+// of what the session owns (its MCP servers and their credentials).
 func TestWireStore_acpLoadAfterRestart(t *testing.T) {
 	t.Parallel()
 	wire := wireStore(t, "acp")
 	r := acptest.NewRuntime(t, testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok", IsComplete: true}
 	}), tacklr.AgentOptions{})
-	sessionID := acptest.SessionID(t, acptest.NewServer(t, r, wire).RPC(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj",`+
-		`"mcpServers":[{"type":"http","name":"api","url":"http://127.0.0.1:1/mcp","headers":[{"name":"Authorization","value":"Bearer never-store"}]}]}}`))
+	sessionID := acptest.SessionID(t, acptest.Connect(t, acptest.Listen(t, acptest.Server(r, wire)), `{"protocolVersion":1}`).Call("session/new", `{"cwd":"/proj",`+
+		`"mcpServers":[{"type":"http","name":"api","url":"http://127.0.0.1:1/mcp","headers":[{"name":"Authorization","value":"Bearer never-store"}]}]}`))
 
-	restarted := acptest.NewServer(t, r, wire)
-	loaded := acptest.Result(t, restarted.RPC(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sessionID+`","cwd":"/proj"}}`))
-	prompted := restarted.RPC(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`)
+	restarted := acptest.Connect(t, acptest.Listen(t, acptest.Server(r, wire)), `{"protocolVersion":1}`)
+	loaded := acptest.Result(t, restarted.Call("session/load", `{"sessionId":"`+sessionID+`","cwd":"/proj"}`))
+	prompted, _ := restarted.Say(sessionID, "hi")
 	raw, err := wire.Get(t.Context(), sessionID)
 	if err != nil {
 		t.Fatal(err)
@@ -121,19 +122,10 @@ func TestWireStore_acpLoadAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var stop any
-	for _, f := range acptest.Frames(t, prompted.Body) {
-		if res, ok := f["result"].(map[string]any); ok {
-			stop = res["stopReason"]
-		}
-	}
-	if loaded["sessionId"] != sessionID || stop != "end_turn" {
+	if stop := acptest.StopReason(prompted); loaded["sessionId"] != sessionID || stop != "end_turn" {
 		t.Fatalf("load = %v, prompt stopReason = %v; want the session, then end_turn", loaded, stop)
 	}
-	want := map[string]any{
-		"cwd": "/proj", "owner": "local",
-		"mcpServers": []any{map[string]any{"type": "http", "name": "api", "url": "http://127.0.0.1:1/mcp"}},
-	}
+	want := map[string]any{"cwd": "/proj", "owner": "anonymous"}
 	if !reflect.DeepEqual(envelope, want) {
 		t.Fatalf("envelope = %v, want %v", envelope, want)
 	}

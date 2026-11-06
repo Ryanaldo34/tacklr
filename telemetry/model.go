@@ -11,34 +11,37 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// WindowShape is a low-cardinality snapshot of the context window for model spans.
+// WindowShape is a snapshot of the context window a model request sends.
+// It changes with each request, so its model.request log carries it.
 type WindowShape struct {
 	Messages  int
 	ToolPairs int
 }
 
-// ModelIdentity is static request identity for GenAI span attrs (set at span start).
+// ModelIdentity is the static identity of a model's requests.
 type ModelIdentity struct {
 	// Provider is a closed enum: azure.openai | openai | unknown.
 	Provider string
-	// Model is the deployment/model id (treat as low-cardinality config).
+	// Model is the deployment or model id (configuration, low cardinality).
 	Model string
-	// Operation defaults to GenAIOperationChat when empty.
-	Operation string
 }
 
 // NewModelIdentity builds GenAI identity from deployment config (model id + API base URL).
 func NewModelIdentity(model, baseURL string) ModelIdentity {
-	return ModelIdentity{
-		Provider:  inferProviderName(baseURL),
-		Model:     model,
-		Operation: GenAIOperationChat,
+	return ModelIdentity{Provider: inferProviderName(baseURL), Model: model}
+}
+
+func (id ModelIdentity) provider() string {
+	if id.Provider == "" {
+		return GenAIProviderUnknown
 	}
+	return id.Provider
 }
 
 type modelAfterToolsKey struct{}
 
-// ContextWithAfterTools marks the next model span as after a tool batch (harness use).
+// ContextWithAfterTools marks the next model request as the one after a
+// reply's tool calls.
 func ContextWithAfterTools(ctx context.Context) context.Context {
 	return context.WithValue(ctx, modelAfterToolsKey{}, true)
 }
@@ -50,7 +53,7 @@ func afterToolsFromContext(ctx context.Context) bool {
 
 type modelIdentityKey struct{}
 
-// ContextWithModelIdentity attaches static GenAI identity for model spans.
+// ContextWithModelIdentity attaches the model's identity for its spans.
 func ContextWithModelIdentity(ctx context.Context, id ModelIdentity) context.Context {
 	return context.WithValue(ctx, modelIdentityKey{}, id)
 }
@@ -118,114 +121,87 @@ type TokenUsage struct {
 	CacheWrite int
 }
 
-// ModelSpan is an in-flight tacklr.model span. Call End once.
+// ModelSpan is an in-flight chat span. Call End once.
 type ModelSpan struct {
 	ctx      context.Context
 	span     trace.Span
+	id       ModelIdentity
 	phase    string
 	started  time.Time
 	finished bool
 }
 
-// StartModelSpan starts a model span. Emits model.after_tools when ContextWithAfterTools is set.
+// StartModelSpan starts the chat span of one model request (the GenAI
+// semantic conventions' client span, chat {model}), and logs the request's
+// dynamic shape: its sequence in the session, the window it sends, and
+// whether it follows a reply's tool calls.
 func StartModelSpan(ctx context.Context, phase string, seq int, shape WindowShape) (context.Context, *ModelSpan) {
 	id := modelIdentityFromContext(ctx)
-	op := id.Operation
-	if op == "" {
-		op = GenAIOperationChat
-	}
-	provider := id.Provider
-	if provider == "" {
-		provider = GenAIProviderUnknown
-	}
-	afterTools := afterToolsFromContext(ctx)
-	if afterTools {
-		EmitEvent(ctx, EventModelAfterTools, attribute.Bool(AttrAfterTools, true))
-	}
-
-	attrs := []attribute.KeyValue{
-		attribute.String(AttrArea, AreaModelTasks),
+	attrs := append(identity(ctx),
+		attribute.String(AttrGenAIOperationName, OperationChat),
+		attribute.String(AttrGenAIProviderName, id.provider()),
 		attribute.String(AttrModelPhase, phase),
-		attribute.Int(AttrContextMsgs, shape.Messages),
-		attribute.Int(AttrContextToolPairs, shape.ToolPairs),
-		attribute.String(AttrGenAIOperationName, op),
-		attribute.String(AttrGenAIProviderName, provider),
-		attribute.Bool(AttrAfterTools, afterTools),
-	}
+	)
 	if id.Model != "" {
 		attrs = append(attrs, attribute.String(AttrGenAIRequestModel, id.Model))
 	}
-	if seq > 0 {
-		attrs = append(attrs, attribute.Int(AttrModelSeq, seq))
-	}
-
 	started := time.Now()
-	ctx, span := Tracer().Start(ctx, SpanModel, trace.WithAttributes(attrs...))
-	return ctx, &ModelSpan{ctx: ctx, span: span, phase: phase, started: started}
+	ctx, span := Tracer().Start(ctx, spanName(OperationChat, id.Model), trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
+	EmitEvent(ctx, EventModelRequest,
+		attribute.Int(EventAttrSeq, seq),
+		attribute.Int(EventAttrMessages, shape.Messages),
+		attribute.Int(EventAttrToolPairs, shape.ToolPairs),
+		attribute.Bool(EventAttrAfterTools, afterToolsFromContext(ctx)),
+	)
+	return ctx, &ModelSpan{ctx: ctx, span: span, id: id, phase: phase, started: started}
 }
 
-// End ends the model span with outcome, usage, and metrics.
-// HTTP status and code come from err when it implements ProviderStatus.
+// End ends the chat span with its outcome and, on failure, error.type (a
+// closed class), the provider's HTTP status and error code; it records the
+// provider-reported usage on the span and in the GenAI metrics.
 func (m *ModelSpan) End(err error, usage TokenUsage) {
 	if m.finished {
 		return
 	}
 	m.finished = true
 
-	httpStatus, errorCode := 0, ""
+	outcome, errType := OutcomeOK, ""
+	attrs := []attribute.KeyValue{}
 	if err != nil {
+		httpStatus, errorCode := 0, ""
 		var ps ProviderStatus
 		if errors.As(err, &ps) {
-			httpStatus = ps.ProviderHTTPStatus()
-			errorCode = ps.ProviderErrorCode()
+			httpStatus, errorCode = ps.ProviderHTTPStatus(), ps.ProviderErrorCode()
 		}
-	}
-
-	outcome := OutcomeOK
-	errClass := ErrorClassOK
-	if err != nil {
-		errClass = ClassifyErrorClass(err, httpStatus)
-		if errClass == ErrorClassCancelled || errors.Is(err, context.Canceled) {
+		errType = ClassifyErrorClass(err, httpStatus)
+		outcome = OutcomeError
+		if errType == ErrorClassCancelled {
 			outcome = OutcomeCancelled
-		} else {
-			outcome = OutcomeError
+		}
+		attrs = append(attrs, attribute.String(AttrErrorType, errType))
+		if httpStatus > 0 {
+			attrs = append(attrs, attribute.Int(AttrHTTPStatus, httpStatus))
+		}
+		if errorCode != "" {
+			attrs = append(attrs, attribute.String(AttrErrorCode, errorCode[:min(len(errorCode), 64)]))
 		}
 		m.span.RecordError(err)
-		m.span.SetStatus(codes.Error, errClass)
-	} else {
-		m.span.SetStatus(codes.Ok, "")
+		m.span.SetStatus(codes.Error, errType)
 	}
-
-	endAttrs := []attribute.KeyValue{
-		attribute.String(AttrOutcome, outcome),
-		attribute.String(AttrErrorClass, errClass),
-		attribute.Int(AttrHTTPStatus, httpStatus),
-	}
-	if errorCode != "" {
-		if len(errorCode) > 64 {
-			errorCode = errorCode[:64]
+	for _, u := range []struct {
+		key string
+		n   int
+	}{
+		{AttrGenAIInputTokens, usage.Input},
+		{AttrGenAIOutputTokens, usage.Output},
+		{AttrGenAICachedTokens, usage.Cached},
+		{AttrGenAICacheWriteTokens, usage.CacheWrite},
+	} {
+		if u.n > 0 {
+			attrs = append(attrs, attribute.Int(u.key, u.n))
 		}
-		endAttrs = append(endAttrs, attribute.String(AttrErrorCode, errorCode))
 	}
-	if usage.Input > 0 {
-		endAttrs = append(endAttrs, attribute.Int(AttrGenAIInputTokens, usage.Input))
-	}
-	if usage.Output > 0 {
-		endAttrs = append(endAttrs, attribute.Int(AttrGenAIOutputTokens, usage.Output))
-	}
-	if usage.Cached > 0 {
-		endAttrs = append(endAttrs, attribute.Int(AttrGenAICachedTokens, usage.Cached))
-	}
-	if usage.CacheWrite > 0 {
-		endAttrs = append(endAttrs, attribute.Int(AttrGenAICacheWriteTokens, usage.CacheWrite))
-	}
-	m.span.SetAttributes(endAttrs...)
+	m.span.SetAttributes(append(attrs, attribute.String(AttrOutcome, outcome))...)
 	m.span.End()
-
-	inst := InstrumentsFromContext(m.ctx)
-	agentID := AgentIDFromContext(m.ctx)
-	inst.RecordModel(m.ctx, agentID, m.phase, outcome, errClass, time.Since(m.started))
-	if usage.Input > 0 || usage.Output > 0 || usage.Reasoning > 0 {
-		inst.RecordTokens(m.ctx, agentID, usage.Input, usage.Output, usage.Reasoning)
-	}
+	Metrics().recordModel(m.ctx, AgentFromContext(m.ctx), m.id, m.phase, errType, time.Since(m.started), usage)
 }

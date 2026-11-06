@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // httpError conveys a non-2xx HTTP response from an MCP server.
@@ -43,10 +44,13 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// buildHTTPClient is the client of an MCP server over HTTP: its requests
+// carry the server's headers and the trace context of the tool call, so
+// the MCP server continues the turn's trace.
 func buildHTTPClient(cfg session.MCPServer) *http.Client {
 	return &http.Client{
 		Transport: &headerTransport{
-			base:    http.DefaultTransport,
+			base:    telemetry.Transport(http.DefaultTransport),
 			headers: cfg.Headers,
 		},
 	}

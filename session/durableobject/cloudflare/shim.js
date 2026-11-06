@@ -7,11 +7,15 @@
 //
 //   const app = tacklr(wasm);
 //   export class Session extends app.Session {}
+//   export class Connection extends app.Connection {}
 //   export default { fetch: app.fetch };
 //
 // The program starts once per isolate and serves every object in it. Each
-// object keeps its storage in one SQLite table; a value larger than a row
-// can hold is split into parts in the same transaction.
+// session object keeps its storage in one SQLite table; a value larger than
+// a row can hold is split into parts in the same transaction. Each
+// WebSocket to the Worker goes to a new connection object, which holds the
+// socket while it is open (the standard WebSocket API, so the object stays
+// in memory) and serves it with the program's protocol server.
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -61,10 +65,29 @@ export function tacklr(wasm) {
     }
   }
 
+  class Connection extends DurableObject {
+    async fetch(request) {
+      const go = await program();
+      const admitted = await go.connect(this.env, await fromRequest(request));
+      if (admitted.status !== 101) {
+        return new Response(null, { status: admitted.status });
+      }
+      const [client, server] = Object.values(new WebSocketPair());
+      server.accept();
+      admitted.serve(server);
+      return new Response(null, { status: 101, webSocket: client });
+    }
+  }
+
   return {
     Session,
+    Connection,
     async fetch(request, env) {
       const go = await program();
+      if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+        const ns = env[go.connections];
+        return ns.get(ns.newUniqueId()).fetch(request);
+      }
       return toResponse(await go.front(env, await fromRequest(request)));
     },
   };

@@ -20,7 +20,7 @@ This guide tells how Tacklr keeps the model's context window under its limit. It
 | `ModelRequest` | One request: messages, tools, system prompt, cache key. | Itself to its encoded size in bytes (`encodedSize`). |
 | `Model` (for example `openai`) | The provider's wire format. | A `ModelRequest` to the provider's request. The provider's stream to `LLMResponseChunk`s, with the reported input tokens. A provider error to a sentinel error (`ErrCannotCount`, `session.ErrContextLength`). |
 | `Reply`, `Round`, `Call` | One reply and its calls with their results, from the model request to the commit. A `Reply` carries the provider's count of its request (`InputTokens`). | They are the data between steps. A runtime keeps them as JSON in its journal. |
-| `loop.Turn` | The order of the steps. One retry after a refused request. | A step's error to the turn's `FailKind`. |
+| `orchestrator.State` | The order of the steps. One retry after a refused request. | A step's error to the turn's `FailKind`. |
 | Brain | The messages that left the window (session messages). | Messages to searchable `SessionMessage`s. |
 | Overflow | The full text of results that were cut. | A result to a file at `<OverflowPath>/<session>/<call id>.txt`. |
 

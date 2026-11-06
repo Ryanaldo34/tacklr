@@ -7,12 +7,13 @@ import (
 
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // startChild starts the job childID as a child session and waits until it
 // started. A child already started under childID runs on: starting it
 // again is not an error.
-func startChild(ctx workflow.Context, parent session.ID, specialist, worker, task string, childID session.ID, mounts []session.MountRecipe, in protocol.Input) error {
+func startChild(ctx workflow.Context, parent session.ID, specialist, worker, task string, childID session.ID, mounts []session.MountRecipe, in protocol.Input, trace telemetry.Carrier) error {
 	cctx := workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 		WorkflowID: string(childID),
 		// Abandon: a parent's continue-as-new applies the close policy, and
@@ -26,6 +27,7 @@ func startChild(ctx workflow.Context, parent session.ID, specialist, worker, tas
 		Specialist:         specialist,
 		Worker:             worker,
 		Task:               task,
+		Trace:              trace,
 		Mounts:             mounts,
 		WorkerQueueTimeout: in.WorkerQueueTimeout,
 		ActivityTimeout:    in.ActivityTimeout,

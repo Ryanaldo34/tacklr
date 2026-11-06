@@ -3,7 +3,7 @@ package worker
 import (
 	"go.temporal.io/sdk/contrib/workflowstreams"
 
-	"github.com/ryanaldo34/tacklr/session/loop"
+	"github.com/ryanaldo34/tacklr/session/orchestrator"
 )
 
 const (
@@ -14,9 +14,9 @@ const (
 )
 
 // carried is a session's state across continue-as-new: the turn's carry
-// (loop.Carry), the worker that holds its harness, and its event stream.
+// (orchestrator.Carry), the worker that holds its harness, and its event stream.
 type carried struct {
-	Turn      loop.Carry
+	Carry     orchestrator.Carry
 	TaskQueue string
 	LiveURL   string
 	Stream    *workflowstreams.WorkflowStreamState

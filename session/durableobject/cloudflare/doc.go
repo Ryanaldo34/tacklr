@@ -15,6 +15,10 @@
 // and durableobject.Remote) through Durable Object stubs, inside
 // Cloudflare's network. A host's routes are the only way in from outside.
 //
+// When the Worker's env names OTEL_EXPORTER_OTLP_ENDPOINT, the program
+// sends its spans there (package telemetry/otlpjson), so a Worker's turn is
+// part of its client's trace.
+//
 // This package and a host's main package are the only Tacklr code with a
 // build tag: everything they run is plain Go, tested on Linux.
 package cloudflare

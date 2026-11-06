@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 const (
@@ -74,7 +75,10 @@ type Input struct {
 	ActivityAttempts int32
 	// Task, when set, makes a task session (a child a tool started): its
 	// first prompt is Task, and the workflow completes when that turn ends.
-	Task       string
+	Task string
+	// Trace is the context of the parent turn that started a task
+	// session: the child's turn is part of the parent's trace.
+	Trace      telemetry.Carrier
 	Parent     session.ID
 	Specialist string
 	Worker     string
@@ -95,8 +99,9 @@ type Input struct {
 
 // StreamItem is one event on a session's workflow stream. A tool result's
 // content stays in the session.Store, out of history: Call is the key of
-// the call whose body holds it, and Subscribe puts it back.
+// the call whose body holds it, and Subscribe puts it back. The event is a
+// named field: embedded, its UnmarshalJSON would decode the whole item.
 type StreamItem struct {
-	session.Event
-	Call string `json:"call,omitempty"`
+	Event session.Event `json:"event"`
+	Call  string        `json:"call,omitempty"`
 }
