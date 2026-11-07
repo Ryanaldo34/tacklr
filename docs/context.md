@@ -1,114 +1,56 @@
 # Context window
 
-This guide tells how Tacklr keeps the model's context window under its limit. It covers the data, the parts that own the data, and each step from a prompt to a saved checkpoint.
-
-**Related:** [session.md](session.md) (rounds, steps and runtimes), [knowledge.md](knowledge.md) (the Brain that keeps the history that leaves the window).
+This guide explains how Tacklr keeps each model request inside the model's context window: how a request is sized, and what happens when the window is full.
 
 ## Rules
 
-- The window holds **complete rounds** only. A round is one user message, or one model reply and a result for each call that it made. The model never sees a call without its result.
-- The window changes only when a round commits, or when a plan install or a handoff replaces it. A model request (`Infer`) does not change it.
+- The window holds **complete rounds** only. A round is a user message, or a model reply and a result for each of its tool calls.
+- The window changes only when a round commits, or when a plan or a hand-off replaces it. A model request does not change it.
 - The size of a request comes from the provider. Tacklr does not count tokens with a local tokenizer.
-- The window is the only owner of its messages. Other parts read a copy, or tell the window to change.
-
-## Parts and what they own
-
-| Part | Owns | Converts |
-|------|------|----------|
-| `window` (`window.go`) | The committed messages. The **count**: the provider's input token count of the last request, and how many messages that request carried. The rules: the size (`MaxWindowSize`), the pressure (85% of the size), the protected prefix (the first user message and the plan document), and whether the provider can count. | Messages to checkpoint rows, and back. Messages and the count to the size of a request. |
-| `Harness` | The parts of a request that are not messages: the system prompt, the tools and the cache key. The model tasks that write a summary or a handoff. It is the window's host (`windowHost`). | Messages to a `ModelRequest` (`request`). Messages that leave the window to session messages (`archive`). A full tool result to an Overflow file (`keep`). |
-| `ModelRequest` | One request: messages, tools, system prompt, cache key. | Itself to its encoded size in bytes (`encodedSize`). |
-| `Model` (for example `openai`) | The provider's wire format. | A `ModelRequest` to the provider's request. The provider's stream to `LLMResponseChunk`s, with the reported input tokens. A provider error to a sentinel error (`ErrCannotCount`, `session.ErrContextLength`). |
-| `Reply`, `Round`, `Call` | One reply and its calls with their results, from the model request to the commit. A `Reply` carries the provider's count of its request (`InputTokens`). | They are the data between steps. A runtime keeps them as JSON in its journal. |
-| `orchestrator.State` | The order of the steps. One retry after a refused request. | A step's error to the turn's `FailKind`. |
-| Brain | The messages that left the window (session messages). | Messages to searchable `SessionMessage`s. |
-| Overflow | The full text of results that were cut. | A result to a file at `<OverflowPath>/<session>/<call id>.txt`. |
-
-The window uses the host for three things that it cannot own: the parts of a request that are not messages, model calls, and the stores for data that leaves it. The host does not change the window.
-
-## Flow
-
-```
-prompt ──► Commit{Users} ──► window.Fit ──► window
-                                               │
-   Infer ◄── Harness.request(window) ──────────┘
-     │          └─► Model: the provider's request ──► provider
-     │                                                   │
-     │  ◄── chunks: deltas, items, input tokens ◄────────┘
-     ├─ deltas ──► live readers (not stored)
-     └─ Reply (messages, calls, InputTokens)
-           └─► Round ──► one Tool step for each call
-                            └─► Commit{Round} ──► window.Fit(round, InputTokens)
-                                                     or a window effect
-                                                         │
-                       window.rows() ◄───────────────────┘
-                            └─► checkpoint rows ──► Snapshot diff ──► session.Store
-```
-
-1. **A prompt commits.** `Commit` gives the user message to `window.Fit` as a round of its own.
-2. **The model is asked.** `Infer` asks `Harness.request` for a request on the window. The `Model` converts it to the provider's format and sends it. As the reply streams back, deltas go to the readers that listen now, and each complete item becomes a message. The provider's input token count goes on the `Reply`. The window does not change.
-3. **The calls run.** Each call runs as a Tool step, and its result goes on its `Call`.
-4. **The round commits.** When each call has a result, `Commit` applies each tool's state writes in call order. Then it gives the round and the reply's `InputTokens` to `window.Fit`. The count is of the request on the window as it is before the round, so the window keeps it with that message count.
-5. **The checkpoint is saved.** The runtime saves the checkpoint rows that changed. The window gives its own rows: one row for each message, keyed by its position, and one row for the count. An append writes only the new rows.
 
 ## Size of a request
 
-The window uses three sources, in this order:
+Before a round is added, the window estimates the next request's size from three sources, in this order:
 
-1. **The bound.** The window adds the count to the encoded size in bytes of the messages after the ones it counted. When there is no count, the bound is the encoded size of the full request (`ModelRequest.encodedSize`). A byte-level tokenizer gives each token one byte or more, so the bound is never less than the real count. When the bound is under the pressure, the round is appended, and the provider is not asked.
-2. **The provider's count.** Over the pressure, `Model.CountTokens` asks the provider for an exact count (for `openai`, `POST /responses/input_tokens`).
-3. **The bound alone.** When `CountTokens` fails with `tacklr.ErrCannotCount` (for `openai`, a provider without the count endpoint, for example Azure OpenAI or a local server), the window stops asking and uses the bound for the rest of the harness's life. The bound is high for text (about four bytes for each token), so such a window collapses and cuts results earlier.
+1. **A bound.** The window keeps the provider's count of the last request. It adds the size in bytes of the messages that came after it. A token is at least one byte, so the bound is never below the real count. When the bound is under the pressure (85% of the window), the round is added and the provider is not asked.
+2. **The provider's count.** Over the pressure, the window asks the provider for an exact count (`Model.CountTokens`).
+3. **The bound alone.** When the provider cannot count (`CountTokens` returns `tacklr.ErrCannotCount`), the window uses the bound for the rest of the session. The bound is high for text (about four bytes for each token), so such a window collapses earlier.
 
-The count stays valid while the window only grows, because the request that it counted is the start of each next request. A collapse, a plan install or a handoff replaces the window, and the window forgets the count.
+The window's size is `AgentOptions.MaxWindowSize`. Zero uses the model's `MaxContextWindow`.
 
-## Fit
+## When the window is full
 
-`window.Fit` puts a round into the window:
+Over the pressure, the window makes room in this order:
 
-1. **Append.** When the bound is under the pressure, the round is appended.
-2. **Collapse.** When the size is over the pressure, everything after the protected prefix (an earlier summary also) leaves the window. The host archives it, then the model writes one summary of it. The summary replaces it, and the round goes after the summary. With a Brain, the summary tells the agent that `search` finds the earlier messages and that `open` reads one. The window is then small, so the next rounds append without a model call.
-3. **Cut.** When the round is still over `MaxWindowSize`, its largest tool results are cut on a rune boundary until the request fits. Before the first cut of a result, the host keeps its full text in Overflow, when there is one. The cut result ends with a note that tells how much is left, and the path to `read` with `start` and `end`, or that the full text was not kept. A round with no result to cut fails the commit.
+1. **Collapse.** Everything after the user's first message and the plan becomes one summary that the model writes. The new round goes after the summary. Reasoning in the messages that stay is dropped, because it was about messages that the summary replaced.
+2. **Cut.** When the round alone is still larger than the window, its largest tool results are cut until it fits. Each cut result ends with a note that says how much was kept. With `AgentOptions.Overflow` (the workspace's `OverflowPath`), the full result is kept in a file first, and the note gives the path to `read`.
 
-A commit that fails (a count, the archive, the summary request, the Overflow write, or a round that cannot fit) fails its step, and the step saves nothing.
+A round with nothing to cut fails the commit. When any part of a commit fails (a count, the summary, a save), the commit saves nothing, and the window stays as it was.
 
-## Window effects
+With a knowledge store, the messages a collapse removes are saved as the session's searchable messages, and the summary tells the agent that `search` finds them.
 
-A round with a window effect goes in as it is, without a fit, because the effect then replaces the window:
+## Plans and hand-offs
 
-- **Plan install** (`create_plan`): the window becomes the first user message and the plan document.
-- **Handoff** (`complete_todo` while todos are open): the host archives the window after the first user message. The model writes a handoff of the window. The window becomes the first user message, the plan document, the handoff, and a nudge to continue. When the model call fails or writes nothing, the handoff is made from the plan.
+These replace the window, so the round that asks for them goes in without a fit:
 
-## A request that the provider refuses
+- **A plan** (`create_plan`): the window becomes the user's first message and the plan.
+- **A hand-off** (`complete_todo` while other to-dos are open): the model writes a hand-off of the window, and the window becomes the first message, the plan, the hand-off, and a note to continue. When the model fails or writes nothing, the hand-off is built from the plan.
 
-The bound can be low when a message has content that is larger in tokens than in bytes, for example a file reference. When the provider refuses a request as over its context window (`session.ErrContextLength`):
+## A request the provider refuses
 
-1. The turn commits a collapse (`CommitIn{Collapse: true}`, which runs `window.Refit`).
-2. `Refit` summarizes the messages after the protected prefix that the last counted request carried. The provider accepted that request, so the summary request fits. The messages after them stay. When there is no count, `Refit` summarizes everything after the prefix.
-3. The model is asked again, one time.
+The bound can be too low, for example when a message refers to a file that is larger in tokens than in bytes. When the provider refuses a request as too long (`session.ErrContextLength`):
 
-A second refusal, or a window with nothing to collapse, fails the turn with `FailKind` `context_length`. `ErrContextLength` is also `ErrMaxTokens`, so a client that checks for the token limit also finds it.
+1. The turn collapses the window. The summary covers the messages that the last counted request carried, which the provider accepted, so the summary request fits.
+2. The model is asked again, once.
 
-## Checkpoint and restore
+A second refusal, or a window with nothing to collapse, fails the turn with `session.ErrContextLength`.
 
-- The window is in the checkpoint as `message` rows and one `count` row (schema version 7).
-- `RestoreCheckpoint` gives the window its rows, and the window loads its messages and count from them. A restored session, for example a Durable Object after eviction, sizes its next commit from the saved count.
-- A runtime builds a new harness when the session's MCP servers change. The system prompt and the tools are therefore fixed for the life of one harness, and the part of the count that they make stays correct.
-- The round in progress (the reply and its calls) is not in the checkpoint. The runtime keeps it in its journal, with the reply's count.
+## Checkpoints
 
-## What a provider client does
+The window is saved in the session's checkpoint: one row for each message, and one row for the last count. A save writes only the rows that changed, so adding a round writes only its messages. A restored session, such as a Durable Object after eviction, sizes its next request from the saved count.
 
-A `Model` must:
+The system prompt and the tools stay the same for the life of a session's harness, so the provider's prompt cache and the saved count stay valid. A harness is built again only when the session's MCP servers or credentials change.
 
-- Count a request with the provider's API in `CountTokens`, or fail with an error that wraps `tacklr.ErrCannotCount`.
-- Report each response's input tokens on a chunk (`LLMResponseChunk.InputTokens`).
-- Report a request that the provider refused as over the context window with `session.ErrContextLength`.
+## What a model must do
 
-It must not count with a local tokenizer.
-
-## Configuration
-
-| Option | Effect |
-|--------|--------|
-| `AgentOptions.MaxWindowSize` | The window's size in tokens. Zero uses the model's `MaxContextWindow`. |
-| `AgentOptions.Brain` | Keeps the messages that leave the window as session messages, which this session can search. |
-| `AgentOptions.Overflow` | Keeps the full text of results that are cut (the workspace's `workspace.Config.OverflowPath`). |
+A `tacklr.Model` takes part in sizing. It counts with the provider's API, reports the input tokens of each response, and reports a request that is too long as `session.ErrContextLength`. See [Models](models.md#write-your-own-model).

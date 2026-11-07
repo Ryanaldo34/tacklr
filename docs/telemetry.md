@@ -1,8 +1,8 @@
 # Telemetry
 
-A turn is one trace. It starts at the client's request and ends with the answer, and it goes through every system the turn touches: the protocol server, the session's runtime (Temporal or Durable Objects), each worker or object that runs a step, the model provider, the MCP servers, Postgres, and each specialist's own session. Tacklr follows the OpenTelemetry conventions: GenAI for the agent, model and tool spans, RPC for the protocol, and the database conventions for Postgres (otelpgx).
+Each turn is one OpenTelemetry trace, from the client's request to the answer. The trace goes through every system the turn touches: the protocol server, the runtime (Temporal or Durable Objects), each worker or object that runs a step, the model provider, the MCP servers, Postgres, and each specialist's session.
 
-Span attributes are static and searchable: identifiers, closed enums, and the outcome and `error.type` that a span sets when it ends. What changes within an operation (lengths, counts, error text, the user's answers) goes on span-correlated logs. Metric labels are closed enums and configuration names, never a session id.
+Tacklr follows the OpenTelemetry conventions: GenAI for the agent, model, and tool spans, RPC for the protocol, and the database conventions for Postgres. Span attributes are identifiers and closed enums. Values that change (lengths, counts, error text) go on logs that are linked to the span. Metric labels never include a session id.
 
 ## The trace of a turn
 
@@ -52,7 +52,7 @@ There are no other spans. A step has no span of its own: its model requests and 
 | Protocol server → session | `session.Wake.Trace`: each `session.Client` writes the context of the call into the wake it sends (a Temporal signal, a Durable Object mailbox entry) |
 | Turn → its steps | The orchestrator keeps the turn's trace in `orchestrator.State` (and its `Carry`, across a park, a crash, a continue-as-new or an eviction). `Runtime.Begin` starts the turn's span once and records its context: on Temporal in a `workflow.SideEffect`, on Durable Objects as a journal entry, so a replay reuses it and starts no span. Each step's input carries it (a Temporal activity's input; on Durable Objects, the step's context) |
 | Turn → specialist or job | The child's start carries the turn's context (`protocol.Input.Trace`, `durableobject.Init.Trace`), and the child's first prompt starts its turn in it |
-| Step → model provider, MCP server | `telemetry.Transport` writes the `traceparent` header on each request (the OpenAI client and MCP over HTTP use it), so a gateway or an MCP server continues the trace. It starts no span: `chat` and `execute_tool` are the client spans |
+| Step → model provider, MCP server | `telemetry.Transport` writes the `traceparent` header on each request (both model clients and MCP over HTTP use it), so a gateway or an MCP server continues the trace. It starts no span: `chat` and `execute_tool` are the client spans |
 | Step → Postgres | otelpgx: a span for each statement under the step's context, on a pool configured with `session/postgres.Configure` or `brain/postgres.Configure` |
 
 Sampling is parent-based in every process (`export.Init`), so each process follows the decision of the trace it joins: a trace is whole or absent.
@@ -122,4 +122,4 @@ On Workers only traces are exported: metrics and logs stay on Workers' own obser
 
 ## For contributors
 
-The `telemetry` package depends only on the OpenTelemetry API, so it builds anywhere the harness does, wasm included. `telemetry/export` installs the SDK and exporters for a host process. Start Tacklr's spans only through the package's starters (`StartTurn`, `StartModelSpan`, `StartToolSpan`, `StartRPC`, `StartHandoffSpan`), and carry a trace across a boundary with `telemetry.Inject` and `Carrier.Context`. `server/acp`'s `TestACP_aTurnIsOneTraceThroughEverySystemItTouches` checks the whole trace on both runtimes.
+Package `telemetry` depends only on the OpenTelemetry API, so it builds for WebAssembly. `telemetry/export` installs the SDK and the exporters in a host process. Start spans only with the package's starters (`StartTurn`, `StartModelSpan`, `StartToolSpan`, `StartRPC`, `StartHandoffSpan`), and carry a trace across a boundary with `telemetry.Inject` and `Carrier.Context`. `TestACP_aTurnIsOneTraceThroughEverySystemItTouches` in `server/acp` checks the whole trace on both runtimes.
