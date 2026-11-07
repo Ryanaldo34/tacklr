@@ -20,7 +20,7 @@ type WindowShape struct {
 
 // ModelIdentity is the static identity of a model's requests.
 type ModelIdentity struct {
-	// Provider is a closed enum: azure.openai | openai | unknown.
+	// Provider is a closed enum: anthropic | azure.openai | openai | unknown.
 	Provider string
 	// Model is the deployment or model id (configuration, low cardinality).
 	Model string

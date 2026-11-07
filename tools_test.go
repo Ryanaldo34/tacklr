@@ -81,15 +81,14 @@ func TestNewTool_runsAHandlerOfEachShape(t *testing.T) {
 	}
 }
 
-// TestToolsAsJson_describesEachToolAsAStrictFunction: each tool is a
-// strict function named by its qualified name; its arguments' schema names
-// each field with its type, description and enum, lists every field as
-// required, makes an optional field nullable, flattens an embedded struct,
-// treats a time as a string, and stops a recursive type at a fixed depth.
-// A tool without arguments takes an empty object, and no tools are [].
-// TypeToJSONSchema, for structured output, keeps an optional field
-// optional.
-func TestToolsAsJson_describesEachToolAsAStrictFunction(t *testing.T) {
+// TestNewTool_describesItsArgumentsAsAStrictSchema: a tool is named by
+// its qualified name, and its arguments' schema names each field with its
+// type, description and enum, lists every field as required, makes an
+// optional field nullable, flattens an embedded struct, treats a time as a
+// string, and stops a recursive type at a fixed depth. A tool without
+// arguments takes an empty object. TypeToJSONSchema, for structured
+// output, keeps an optional field optional.
+func TestNewTool_describesItsArgumentsAsAStrictSchema(t *testing.T) {
 	t.Parallel()
 	type Inner struct {
 		Value string `json:"value"`
@@ -111,22 +110,22 @@ func TestToolsAsJson_describesEachToolAsAStrictFunction(t *testing.T) {
 		When     time.Time      `json:"when"`
 		Tree     node           `json:"tree"`
 	}
-	raw := tacklr.ToolsAsJson([]*tacklr.Tool{
-		tacklr.NewTool(tacklr.ToolConfig{Name: "get", Description: "Get it", Handler: func(context.Context, args) (string, error) { return "", nil }}),
-		tacklr.NewTool(tacklr.ToolConfig{Name: "greet", Namespace: "ado", Handler: func(context.Context) (string, error) { return "", nil }}),
-	})
-	var defs []struct {
-		Type, Name, Description string
-		Strict                  bool
-		Parameters              schema
+	get := tacklr.NewTool(tacklr.ToolConfig{Name: "get", Description: "Get it", Handler: func(context.Context, args) (string, error) { return "", nil }})
+	greet := tacklr.NewTool(tacklr.ToolConfig{Name: "greet", Namespace: "ado", Handler: func(context.Context) (string, error) { return "", nil }})
+	asSchema := func(tool *tacklr.Tool) schema {
+		raw, _ := json.Marshal(tool.Parameters())
+		var s schema
+		if err := json.Unmarshal(raw, &s); err != nil {
+			t.Fatal(err)
+		}
+		return s
 	}
 
-	err := json.Unmarshal([]byte(raw), &defs)
+	p, empty := asSchema(get), asSchema(greet)
 
-	if err != nil || len(defs) != 2 || defs[0].Type != "function" || defs[0].Name != "get" || defs[0].Description != "Get it" || !defs[0].Strict || defs[1].Name != "ado__greet" {
-		t.Fatalf("tools = %s %v, want two strict functions by qualified name", raw, err)
+	if get.QualifiedName() != "get" || get.Description() != "Get it" || !get.Strict() || greet.QualifiedName() != "ado__greet" {
+		t.Fatalf("tools %q %q (strict %v), want get and ado__greet, strict", get.QualifiedName(), greet.QualifiedName(), get.Strict())
 	}
-	p := defs[0].Parameters
 	want := []string{"Plain", "field_name", "items", "lookup", "optional", "tree", "value", "when"}
 	if got := slices.Sorted(maps.Keys(p.Properties)); !slices.Equal(got, want) || !slices.Equal(slices.Sorted(slices.Values(p.Required)), want) || p.AdditionalProperties != false {
 		t.Fatalf("properties %v, required %v, want %v for both", got, p.Required, want)
@@ -145,8 +144,8 @@ func TestToolsAsJson_describesEachToolAsAStrictFunction(t *testing.T) {
 	if depth == 0 || depth > 10 {
 		t.Fatalf("recursive depth = %d, want nested objects that stop", depth)
 	}
-	if g := defs[1].Parameters; g.Type != "object" || len(g.Properties) != 0 || tacklr.ToolsAsJson(nil) != "[]" {
-		t.Fatalf("no arguments = %+v, want an empty object; no tools %s", g, tacklr.ToolsAsJson(nil))
+	if empty.Type != "object" || len(empty.Properties) != 0 {
+		t.Fatalf("no arguments = %+v, want an empty object", empty)
 	}
 	type hostOut struct {
 		Title string  `json:"title"`

@@ -293,6 +293,8 @@ func TestHandoff_failsAndKeepsTheWindowWhenItsContextEnds(t *testing.T) {
 // the input tokens the last response reported, plus the size of what was
 // added since. A round that takes the window over pressure collapses it
 // into a summary, and a result too large for the window is cut to fit.
+// The round's reasoning was about the window the summary replaced, so the
+// round keeps only its call and result.
 func TestCommit_sizesTheWindowFromUsageWhenTheProviderCannotCount(t *testing.T) {
 	t.Parallel()
 	// Arrange
@@ -300,7 +302,8 @@ func TestCommit_sizesTheWindowFromUsageWhenTheProviderCannotCount(t *testing.T) 
 	big := tacklr.NewTool(tacklr.ToolConfig{Name: "big", Handler: func(context.Context) (string, error) {
 		return strings.Repeat("x", 2*window), nil
 	}})
-	p := &provider{replies: [][]tacklr.LLMResponseChunk{{text("reading")}, {text("summary")}}}
+	thought := tacklr.LLMResponseChunk{Type: session.EventReasoning, Content: "read it all", IsComplete: true}
+	p := &provider{replies: [][]tacklr.LLMResponseChunk{{text("reading")}, {thought, calls(call("b1", "big", "{}"))}, {text("summary")}}}
 	model := testkit.UncountedHTTPModel(t, p.respond, windowTokens)
 	h := newHarness(t, "uncounted", tacklr.AgentOptions{Model: model, MaxWindowSize: window, Tools: []*tacklr.Tool{big}})
 	prompt(t, h, "go")
@@ -314,12 +317,20 @@ func TestCommit_sizesTheWindowFromUsageWhenTheProviderCannotCount(t *testing.T) 
 	}
 
 	// Act
-	_, err = runRound(t, h, call("b1", "big", "{}"))
+	big1, err := h.Infer(t.Context(), out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := tacklr.NewRound(big1)
+	if r.Calls[0], err = h.RunCall(t.Context(), tacklr.NewCall(big1.Calls[0], 0), out); err != nil {
+		t.Fatal(err)
+	}
+	err = h.Commit(t.Context(), tacklr.CommitIn{Round: r}, out)
 
 	// Assert
 	got := checkpoint(t, h).window
 	cut := got[len(got)-1].Content
-	if err != nil || len(got) != 4 || !strings.HasPrefix(got[1].Content, "CONVERSATION SUMMARY") || !strings.Contains(cut, "[Output truncated to fit the context window") || len(cut) >= window {
+	if err != nil || len(got) != 4 || !strings.HasPrefix(got[1].Content, "CONVERSATION SUMMARY") || len(got[2].ToolCalls) != 1 || !strings.Contains(cut, "[Output truncated to fit the context window") || len(cut) >= window {
 		t.Fatalf("window = %d messages (%v), last %d bytes; want the goal, a summary, the call and its result cut under the window", len(got), err, len(cut))
 	}
 }

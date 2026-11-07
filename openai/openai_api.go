@@ -9,39 +9,12 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/telemetry"
+	"github.com/ryanaldo34/tacklr/internal/provider"
 )
 
-var _ telemetry.ProviderStatus = (*APIStatusError)(nil)
-
-// APIStatusError conveys an HTTP error response from an upstream LLM API.
-// Use errors.As to extract structured status/body details from a wrapped chain.
-type APIStatusError struct {
-	Status int
-	Body   string
-	Code   string
-}
-
-func (e *APIStatusError) Error() string {
-	msg := strings.TrimSpace(e.Body)
-	if msg == "" {
-		msg = "no error body"
-	}
-	if e.Code != "" {
-		return fmt.Sprintf("provider HTTP %d (%s): %s", e.Status, e.Code, msg)
-	}
-	return fmt.Sprintf("provider HTTP %d: %s", e.Status, msg)
-}
-
-// ProviderHTTPStatus implements telemetry.ProviderStatus.
-func (e *APIStatusError) ProviderHTTPStatus() int {
-	return e.Status
-}
-
-// ProviderErrorCode implements telemetry.ProviderStatus.
-func (e *APIStatusError) ProviderErrorCode() string {
-	return e.Code
-}
+// APIStatusError is an HTTP error answer from the provider. Find it in a
+// wrapped chain with errors.As.
+type APIStatusError = provider.APIStatusError
 
 type apiErrorDetail struct {
 	Code    string `json:"code"`
@@ -87,7 +60,7 @@ func classifyAPIStatus(apiErr *APIStatusError, errType string) error {
 	if isMaxTokensSignal(lower) {
 		return fmt.Errorf("%w: %w", session.ErrMaxTokens, apiErr)
 	}
-	if apiErr.Status == http.StatusRequestTimeout || apiErr.Status == http.StatusTooManyRequests || apiErr.Status >= 500 {
+	if provider.Retryable(apiErr.Status) {
 		return tacklr.Network(apiErr)
 	}
 	return apiErr
@@ -138,6 +111,24 @@ func isMaxTokensSignal(lower string) bool {
 		strings.Contains(lower, "max_tokens") ||
 		strings.Contains(lower, "token limit") ||
 		(strings.Contains(lower, "finish_reason") && strings.Contains(lower, "length"))
+}
+
+// functionTool is a Responses function tool. A namespaced tool is named
+// namespace__name: the API rejects '.' in a name.
+type functionTool struct {
+	Type        string         `json:"type"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Strict      bool           `json:"strict"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+func functionTools(tools []*tacklr.Tool) []functionTool {
+	defs := make([]functionTool, len(tools))
+	for i, t := range tools {
+		defs[i] = functionTool{Type: "function", Name: t.QualifiedName(), Description: t.Description(), Strict: t.Strict(), Parameters: t.Parameters()}
+	}
+	return defs
 }
 
 type countTokensRequest struct {

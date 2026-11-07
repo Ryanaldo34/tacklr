@@ -1,8 +1,6 @@
 package openai
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,10 +14,8 @@ import (
 
 	"github.com/ryanaldo34/tacklr/message"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/log"
-
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/provider"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -41,10 +37,10 @@ type Model struct {
 }
 
 var (
-	// ErrIncompleteStream means a provider closed without a terminal response event.
-	ErrIncompleteStream = errors.New("incomplete provider stream")
-	// ErrMalformedStream means a provider emitted invalid SSE event JSON.
-	ErrMalformedStream = errors.New("malformed provider stream")
+	// ErrIncompleteStream is a stream that closed before its terminal event.
+	ErrIncompleteStream = provider.ErrIncompleteStream
+	// ErrMalformedStream is a stream event that is not valid JSON.
+	ErrMalformedStream = provider.ErrMalformedStream
 
 	_ tacklr.Model = (*Model)(nil)
 )
@@ -157,16 +153,9 @@ func (s *Model) CountTokens(ctx context.Context, req tacklr.ModelRequest) (int, 
 		Tools: toolsJSON,
 	})
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.baseURL, "/")+"/responses/input_tokens", bytes.NewReader(body))
+	httpResp, err := provider.Post(ctx, s.httpClient, strings.TrimRight(s.baseURL, "/")+"/responses/input_tokens", s.header(), body)
 	if err != nil {
-		return 0, fmt.Errorf("build token-count request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+s.apiKey)
-
-	httpResp, err := s.httpClient.Do(httpReq)
-	if err != nil {
-		return 0, tacklr.Network(fmt.Errorf("token-count request failed: %w", err))
+		return 0, fmt.Errorf("count tokens: %w", err)
 	}
 	defer httpResp.Body.Close()
 
@@ -231,48 +220,15 @@ func (s *Model) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tackl
 	body, _ := json.Marshal(reqBody)
 	inputSummary := summarizeInputItems(items)
 
-	events := make(chan tacklr.LLMResponseChunk, 10)
-
-	// sendChunk delivers a chunk unless ctx is already cancelled (avoids blocking
-	// the HTTP goroutine after session/cancel when the consumer has stopped).
-	sendChunk := func(chunk tacklr.LLMResponseChunk) {
-		if ctx.Err() != nil {
-			return
-		}
-		select {
-		case <-ctx.Done():
-		case events <- chunk:
-		}
-	}
-	sendErr := func(err error) {
-		sendChunk(tacklr.LLMResponseChunk{
-			Type:       session.EventError,
-			Content:    err.Error(),
-			Error:      err,
-			IsComplete: true,
-		})
-	}
-
+	chunks := provider.NewChunks(ctx)
 	go func() {
-		defer close(events)
-
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.baseURL, "/")+"/responses", bytes.NewReader(body))
+		defer close(chunks.C)
+		header := s.header()
+		cache.headers(header)
+		httpResp, err := provider.Post(ctx, s.httpClient, strings.TrimRight(s.baseURL, "/")+"/responses", header, body)
 		if err != nil {
-			err = fmt.Errorf("build provider request: %w", err)
-			slog.ErrorContext(ctx, "failed to build model provider request", "error", err)
-			sendErr(err)
-			return
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+s.apiKey)
-		cache.headers(httpReq.Header)
-
-		httpResp, err := s.httpClient.Do(httpReq)
-		if err != nil {
-			err = tacklr.Network(fmt.Errorf("model provider request failed: %w", err))
 			slog.ErrorContext(ctx, "model provider request failed", "error", err)
-			// Surface transport failures as stream errors (no silent channel close).
-			sendErr(err)
+			chunks.Fail(err)
 			return
 		}
 		defer httpResp.Body.Close()
@@ -283,15 +239,20 @@ func (s *Model) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tackl
 				slog.WarnContext(ctx, "could not read provider error body", "error", readErr, "http_status", httpResp.StatusCode)
 			}
 			classified := classifyProviderFailure(httpResp.StatusCode, respBody)
-			emitProviderFailed(ctx, classified, httpResp.StatusCode, inputSummary, string(respBody))
-			sendErr(classified)
+			provider.EmitFailed(ctx, classified, httpResp.StatusCode, inputSummary)
+			chunks.Fail(classified)
 			return
 		}
 
-		s.parseSSEResponse(ctx, httpResp.Body, events, inputSummary)
+		s.parseSSEResponse(ctx, httpResp.Body, chunks, inputSummary)
 	}()
 
-	return events, nil
+	return chunks.C, nil
+}
+
+// header authorizes a request with the API key.
+func (s *Model) header() http.Header {
+	return http.Header{"Authorization": {"Bearer " + s.apiKey}}
 }
 
 // requestInput is req's Responses input items, the items as one JSON array,
@@ -301,43 +262,31 @@ func requestInput(req tacklr.ModelRequest, cache promptCache) (items []json.RawM
 	items = marshalMessagesToInput(req.Messages, req.SystemPrompt, cache.breakpoints())
 	input, _ = json.Marshal(items)
 	if len(req.Tools) > 0 {
-		tools = json.RawMessage(tacklr.ToolsAsJson(req.Tools))
+		tools, _ = json.Marshal(functionTools(req.Tools))
 	}
 	return items, input, tools
 }
 
-func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, events chan<- tacklr.LLMResponseChunk, inputSummary string) {
+func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, chunks provider.Chunks, inputSummary string) {
 	// Match main-branch classification: output_text is always a message chunk.
 	// DeepSeek on Foundry streams thinking inside output_text (e.g. <think> tags);
 	// reclassifying those deltas as session.EventReasoning broke ACP clients that
 	// already handled thinking correctly from agent_message_chunk on main.
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+	sse := provider.NewSSE(body)
 	var currentItemID string
 	terminal := false
-	emitFailure := func(err error, detail string) {
-		emitProviderFailed(ctx, err, http.StatusOK, inputSummary, detail)
-		events <- tacklr.LLMResponseChunk{
-			Type:       session.EventError,
-			Content:    err.Error(),
-			Error:      err,
-			IsComplete: true,
-		}
+	emitFailure := func(err error) {
+		provider.EmitFailed(ctx, err, http.StatusOK, inputSummary)
+		chunks.Fail(err)
 	}
-	for scanner.Scan() {
-		if err := ctx.Err(); err != nil {
-			return
+	for {
+		data, ok := sse.Next()
+		if !ok || ctx.Err() != nil {
+			break
 		}
-		line := scanner.Text()
-
-		const prefix = "data: "
-		if !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		data := line[len(prefix):]
 		if data == "[DONE]" {
 			if !terminal {
-				emitFailure(ErrIncompleteStream, "provider sent [DONE] before a terminal response event")
+				emitFailure(ErrIncompleteStream)
 			}
 			return
 		}
@@ -350,7 +299,7 @@ func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, events cha
 			Error  *apiErrorDetail `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(data), &evt); err != nil {
-			emitFailure(fmt.Errorf("%w: %w", ErrMalformedStream, err), "")
+			emitFailure(fmt.Errorf("%w: %w", ErrMalformedStream, err))
 			return
 		}
 
@@ -369,57 +318,35 @@ func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, events cha
 			}
 		case "response.output_text.delta":
 			if evt.Delta != "" {
-				events <- tacklr.LLMResponseChunk{
-					Type:       session.EventMessage,
-					MessageId:  msgID,
-					Content:    evt.Delta,
-					IsComplete: false,
-				}
+				chunks.Send(tacklr.LLMResponseChunk{Type: session.EventMessage, MessageId: msgID, Content: evt.Delta})
 			}
 		case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
 			// Explicit reasoning channels (OpenAI/Azure o-series style) → thought.
 			// Keep summary as additive; do not invent reclassification of output_text.
 			if evt.Delta != "" {
-				events <- tacklr.LLMResponseChunk{
-					Type:       session.EventReasoning,
-					MessageId:  msgID,
-					Content:    evt.Delta,
-					IsComplete: false,
-				}
+				chunks.Send(tacklr.LLMResponseChunk{Type: session.EventReasoning, MessageId: msgID, Content: evt.Delta})
 			}
 		case "response.output_item.done":
 			if evt.Item != nil {
-				s.emitOutputItemComplete(evt.Item, events)
+				s.emitOutputItemComplete(evt.Item, chunks)
 			}
 		case "error":
 			// Azure mid-stream errors often use type=error with HTTP 200.
 			// An error event is always terminal and always classified.
 			_, classified := classifyTerminalSSE("error", data)
-			emitProviderFailed(ctx, classified, 200, inputSummary, data)
-			events <- tacklr.LLMResponseChunk{
-				Type:       session.EventError,
-				Content:    classified.Error(),
-				Error:      classified,
-				IsComplete: true,
-			}
+			emitFailure(classified)
 			return
 		case "response.incomplete", "response.failed", "response.completed":
 			// Terminal incomplete/failed, or completed-with-bad-status (some Azure builds).
 			if terminal, classified := classifyTerminalSSE(evt.Type, data); terminal {
-				emitProviderFailed(ctx, classified, 200, inputSummary, data)
-				events <- tacklr.LLMResponseChunk{
-					Type:       session.EventError,
-					Content:    classified.Error(),
-					Error:      classified,
-					IsComplete: true,
-				}
+				emitFailure(classified)
 				return
 			}
 			// Successful response.completed: surface token usage for model spans/metrics.
 			if evt.Type == "response.completed" {
 				terminal = true
 				if u, ok := parseResponseUsage(data); ok {
-					events <- tacklr.LLMResponseChunk{
+					chunks.Send(tacklr.LLMResponseChunk{
 						Type:             session.EventComplete,
 						IsComplete:       true,
 						InputTokens:      u.Input,
@@ -427,7 +354,7 @@ func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, events cha
 						ReasoningTokens:  u.Reasoning,
 						CachedTokens:     u.Cached,
 						CacheWriteTokens: u.CacheWrite,
-					}
+					})
 				}
 			}
 		}
@@ -435,12 +362,12 @@ func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, events cha
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	if err := scanner.Err(); err != nil {
-		emitFailure(tacklr.Network(fmt.Errorf("%w: %w", ErrIncompleteStream, err)), "")
+	if err := sse.Err(); err != nil {
+		emitFailure(tacklr.Network(fmt.Errorf("%w: %w", ErrIncompleteStream, err)))
 		return
 	}
 	if !terminal {
-		emitFailure(tacklr.Network(ErrIncompleteStream), "provider stream closed before a terminal response event")
+		emitFailure(tacklr.Network(ErrIncompleteStream))
 	}
 }
 
@@ -589,29 +516,7 @@ func truncateForLog(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// emitProviderFailed records a span-correlated OTel log event and a clear slog line.
-func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputItems, body string) {
-	code := ""
-	if err != nil {
-		var api *APIStatusError
-		if errors.As(err, &api) {
-			code = api.Code
-		}
-	}
-	attrs := []attribute.KeyValue{
-		attribute.String(telemetry.EventAttrInputItems, inputItems),
-		attribute.String(telemetry.AttrErrorType, telemetry.ClassifyErrorClass(err, httpStatus)),
-	}
-	if httpStatus > 0 {
-		attrs = append(attrs, attribute.Int(telemetry.AttrHTTPStatus, httpStatus))
-	}
-	if code != "" {
-		attrs = append(attrs, attribute.String(telemetry.AttrErrorCode, code))
-	}
-	telemetry.EmitEventSeverity(ctx, telemetry.EventProviderFailed, log.SeverityError, attrs...)
-}
-
-func (s *Model) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
+func (s *Model) emitOutputItemComplete(raw json.RawMessage, chunks provider.Chunks) {
 	var typeHolder struct {
 		Type string `json:"type"`
 	}
@@ -635,13 +540,7 @@ func (s *Model) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr
 		if isRefusalMessage(msg.Content) {
 			text := refusalText(msg.Content)
 			err := fmt.Errorf("%w: %s", session.ErrModelRefused, text)
-			events <- tacklr.LLMResponseChunk{
-				Type:       session.EventError,
-				MessageId:  msg.ID,
-				Content:    err.Error(),
-				Error:      err,
-				IsComplete: true,
-			}
+			chunks.Send(tacklr.LLMResponseChunk{Type: session.EventError, MessageId: msg.ID, Content: err.Error(), Error: err, IsComplete: true})
 			return
 		}
 		var text strings.Builder
@@ -650,16 +549,11 @@ func (s *Model) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr
 				text.WriteString(c.Text)
 			}
 		}
-		events <- tacklr.LLMResponseChunk{
-			Type:       session.EventMessage,
-			MessageId:  msg.ID,
-			Content:    text.String(),
-			IsComplete: true,
-		}
+		chunks.Send(tacklr.LLMResponseChunk{Type: session.EventMessage, MessageId: msg.ID, Content: text.String(), IsComplete: true})
 	case "function_call":
-		s.emitFunctionCallChunk(raw, events)
+		s.emitFunctionCallChunk(raw, chunks)
 	case "reasoning":
-		s.emitReasoningChunk(raw, events)
+		s.emitReasoningChunk(raw, chunks)
 	}
 }
 
@@ -698,7 +592,7 @@ func refusalText(parts []struct {
 	return "model refused"
 }
 
-func (s *Model) emitFunctionCallChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
+func (s *Model) emitFunctionCallChunk(raw json.RawMessage, chunks provider.Chunks) {
 	var fc struct {
 		ID        string `json:"id"`
 		CallID    string `json:"call_id"`
@@ -724,7 +618,7 @@ func (s *Model) emitFunctionCallChunk(raw json.RawMessage, events chan<- tacklr.
 	if callID == "" {
 		callID = id
 	}
-	events <- tacklr.LLMResponseChunk{
+	chunks.Send(tacklr.LLMResponseChunk{
 		Type: session.EventFunctionCall,
 		ToolCalls: []message.ToolCall{{
 			ID:        id,
@@ -736,10 +630,10 @@ func (s *Model) emitFunctionCallChunk(raw json.RawMessage, events chan<- tacklr.
 			Status:    fc.Status,
 		}},
 		IsComplete: fc.Status == "completed",
-	}
+	})
 }
 
-func (s *Model) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
+func (s *Model) emitReasoningChunk(raw json.RawMessage, chunks provider.Chunks) {
 	var reasoning struct {
 		ID               string `json:"id"`
 		EncryptedContent string `json:"encrypted_content"`
@@ -775,13 +669,13 @@ func (s *Model) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLM
 			}
 		}
 	}
-	events <- tacklr.LLMResponseChunk{
+	chunks.Send(tacklr.LLMResponseChunk{
 		Type:             session.EventReasoning,
 		MessageId:        reasoning.ID,
 		Content:          text.String(),
 		EncryptedContent: reasoning.EncryptedContent,
 		IsComplete:       true,
-	}
+	})
 }
 
 func marshalMessagesToInput(messages []*message.Message, systemPrompt string, stampBreakpoints bool) []json.RawMessage {

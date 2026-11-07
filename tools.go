@@ -189,7 +189,7 @@ func NewTool(cfg ToolConfig) *Tool {
 		}
 	}
 	if argsType != nil {
-		// strict:true tools require every properties key in required (OpenAI / DeepSeek).
+		// A strict schema lists every property as required.
 		t.parameters = typeToJSONSchema(argsType, 0, true)
 	} else {
 		t.parameters = map[string]any{
@@ -346,20 +346,18 @@ func (t *Tool) invokeRaw(ctx context.Context, argsJson string, cc *CallContext) 
 	}
 }
 
-// AsJson returns the OpenAI-style function tool definition for this tool.
-// parameters is never nil on the returned map.
-func (t *Tool) AsJson() map[string]any {
-	return map[string]any{
-		"type":        "function",
-		"name":        t.name,
-		"description": t.description,
-		"strict":      t.strict,
-		"parameters":  t.parameters,
-	}
-}
+// Description tells the model what the tool does.
+func (t *Tool) Description() string { return t.description }
+
+// Parameters is the JSON Schema of the tool's arguments. It is never nil.
+func (t *Tool) Parameters() map[string]any { return t.parameters }
+
+// Strict reports whether Parameters lists every property as required, with
+// an optional field typed as nullable, so a provider can enforce it.
+func (t *Tool) Strict() bool { return t.strict }
 
 // typeToJSONSchema builds a JSON Schema for rt.
-// When strict is true (OpenAI/DeepSeek function tools), every property name is
+// When strict is true, every property name is
 // listed in required, and omitempty/pointer fields are typed as T|null so the
 // model may pass null for unused optionals.
 func typeToJSONSchema(rt reflect.Type, depth int, strict bool) map[string]any {
@@ -497,22 +495,15 @@ func TypeToJSONSchema(v any) (map[string]any, error) {
 	return typeToJSONSchema(rt, 0, false), nil
 }
 
-// ToolsAsJson serializes tool definitions for model requests. An empty catalog
-// is "[]". Namespaced tools are "namespace__name" (OpenAI rejects '.').
-func ToolsAsJson(tools []*Tool) string {
-	if len(tools) == 0 {
-		return "[]"
-	}
-
-	defs := make([]map[string]any, 0, len(tools))
+// toolsSize is the size in bytes of the tools' names, descriptions and
+// argument schemas as JSON, which a provider's definitions of them hold.
+func toolsSize(tools []*Tool) int {
+	n := 0
 	for _, t := range tools {
-		def := t.AsJson()
-		def["name"] = t.QualifiedName()
-		defs = append(defs, def)
+		params, _ := json.Marshal(t.parameters)
+		n += len(t.QualifiedName()) + len(t.description) + len(params)
 	}
-
-	b, _ := json.Marshal(defs)
-	return string(b)
+	return n
 }
 
 // ToolResultEffect changes the window when the round of the call that asked

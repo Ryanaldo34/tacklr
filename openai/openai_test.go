@@ -160,7 +160,7 @@ func TestCountTokens_reportsWhatTheProviderAnswers(t *testing.T) {
 		}},
 		"a provider that is gone": {handler: answer(http.StatusOK, "", 0), gone: true, want: func(_ int, err error) bool { return errors.Is(err, tacklr.ErrNetwork) }},
 		"a base URL that does not parse": {handler: answer(http.StatusOK, "", 0), url: "http://bad\x7f", want: func(_ int, err error) bool {
-			return err != nil && strings.Contains(err.Error(), "build token-count request")
+			return err != nil && strings.Contains(err.Error(), "build provider request")
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -303,7 +303,7 @@ func TestInvoke_sendsTheConversationAsResponsesInput(t *testing.T) {
 		`{"call_id":"call_3","output":[{"prompt_cache_breakpoint":{"mode":"explicit"},"text":"ok3","type":"input_text"}],"status":"completed","type":"function_call_output"},` +
 		`{"encrypted_content":"gAAAAABcipher","id":"rs_store","summary":[{"text":"plan","type":"summary_text"}],"type":"reasoning"},` +
 		`{"summary":[{"text":"after","type":"summary_text"}],"type":"reasoning"}]`
-	if string(input) != want || !strings.Contains(string(tools), `"name":"ado__greet"`) {
+	if string(input) != want || !strings.HasPrefix(string(tools), `[{"description":"","name":"ado__greet","parameters":{`) || !strings.HasSuffix(string(tools), `"strict":true,"type":"function"}]`) {
 		t.Errorf("input = %s\nwant    %s\ntools = %s", input, want, tools)
 	}
 }

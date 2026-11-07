@@ -72,5 +72,5 @@
 //	_ = file.WriteDocument(ctx, text)
 //	_ = rev // tools compare expected rev before WriteDocument
 //
-// Longer guide: docs/vfs.md in the repo root.
+// Longer guide: docs/workspace.md in the repo root.
 package vfs

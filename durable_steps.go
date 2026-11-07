@@ -110,12 +110,17 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 		}
 		inputTokens = cmp.Or(chunk.InputTokens, inputTokens)
 		asm.AddDelta(chunk)
-		if chunk.IsComplete {
-			toolCalls = append(toolCalls, chunk.ToolCalls...)
-			if chunk.Type == session.EventMessage || chunk.Type == session.EventReasoning {
-				msg := asm.MessageFromComplete(chunk)
-				reply = append(reply, msg)
-			}
+		if !chunk.IsComplete {
+			continue
+		}
+		toolCalls = append(toolCalls, chunk.ToolCalls...)
+		// Each item keeps its place in the stream: a provider can put
+		// reasoning between the calls of one reply, and replays it in order.
+		switch {
+		case isText(chunk.Type):
+			reply = append(reply, asm.MessageFromComplete(chunk))
+		case len(chunk.ToolCalls) > 0:
+			reply = append(reply, &message.Message{Role: message.RoleAssistant, ToolCalls: slices.Clone(chunk.ToolCalls)})
 		}
 	}
 	r := Reply{Messages: reply, Calls: toolCalls, InputTokens: inputTokens}
@@ -133,9 +138,7 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 				r.Result = m.Content
 			}
 		}
-		return r, nil
 	}
-	r.Messages = append(r.Messages, &message.Message{Role: message.RoleAssistant, ToolCalls: slices.Clone(toolCalls)})
 	return r, nil
 }
 

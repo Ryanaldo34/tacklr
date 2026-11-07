@@ -135,9 +135,9 @@ type Message struct {
 	// response items.
 	MessageID string `json:"message_id,omitempty"`
 
-	// EncryptedContent is the Responses API reasoning ciphertext
-	// (include=reasoning.encrypted_content). Required to replay a reasoning
-	// item by id without a provider store lookup.
+	// EncryptedContent is the provider's opaque data for a reasoning
+	// message. The provider client that wrote it replays it on later
+	// requests; nothing else reads it.
 	EncryptedContent string `json:"encrypted_content,omitempty"`
 
 	ContentParts     []ContentPart `json:"content_parts,omitempty"`

@@ -11,7 +11,7 @@ editor ──ACP over WebSocket──► Worker ──► connection object ─�
 ## Files
 
 - `main.go`: the Go program (`GOOS=js GOARCH=wasm`). It calls `cloudflare.Serve` with:
-  - the agent, with an OpenAI model from the env;
+  - the agent, with a model from the env (Claude with `ANTHROPIC_API_KEY`, else OpenAI-compatible);
   - three tools: `lookup`, `report` (a 3 MB result) and `deploy` (asks for permission);
   - a `researcher` specialist, which runs in its own object;
   - the ACP server (`host.New`), whose wire store is the session objects (`durableobject.Client.WireStore`).
@@ -28,7 +28,7 @@ You need Go 1.27, Bun and Node 22.
 ```sh
 cd examples/cloudflare/worker
 bun install
-cp .dev.vars.example .dev.vars   # set API_TOKEN, SEAL_KEY (openssl rand -base64 32), OPENAI_API_KEY
+cp .dev.vars.example .dev.vars   # set API_TOKEN, SEAL_KEY (openssl rand -base64 32), MODEL, and a model key
 bun run dev
 ```
 

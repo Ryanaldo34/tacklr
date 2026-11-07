@@ -74,12 +74,12 @@ type ModelRequest struct {
 }
 
 // encodedSize is the size in bytes of what req sends: its system prompt,
-// its tools as their definitions (ToolsAsJson) and its messages as JSON.
+// its tools' definitions (toolsSize) and its messages as JSON.
 // A byte-level tokenizer gives every token at least one byte, and the
 // encoding is larger than a message's framing tokens, so it bounds req's
 // input tokens from above.
 func (req ModelRequest) encodedSize() int {
-	return len(req.SystemPrompt) + len(ToolsAsJson(req.Tools)) + messagesSize(req.Messages)
+	return len(req.SystemPrompt) + toolsSize(req.Tools) + messagesSize(req.Messages)
 }
 
 // Model is the model provider interface used by the harness.
@@ -105,8 +105,8 @@ type Model interface {
 type toolChoiceNoneKey struct{}
 
 // ContextWithToolChoiceNone asks the provider to keep tool definitions on the
-// wire but not call them (Responses tool_choice=none). Handoff and compress
-// use this so the cached tools prefix matches a normal turn.
+// wire but not call them. Handoff and compress use this so the cached tools
+// prefix matches a normal turn.
 func ContextWithToolChoiceNone(ctx context.Context) context.Context {
 	return context.WithValue(ctx, toolChoiceNoneKey{}, true)
 }

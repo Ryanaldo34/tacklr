@@ -11,7 +11,8 @@
 //     are the store and graph adapters.
 //   - vfs owns virtual filesystem mounts and the backend constructors;
 //     vfs/mount holds the mount bindings a client sends.
-//   - openai is the model client; web holds optional host tools.
+//   - anthropic and openai are the model clients (Claude, and OpenAI-compatible
+//     endpoints); web holds optional host tools.
 //   - mcp owns MCP connection configuration.
 //
 // Process-wide registrations (built-in interrupts, common VFS codecs) run

@@ -126,6 +126,7 @@ func (w *window) Fit(ctx context.Context, round []*message.Message, counted int)
 			return err
 		}
 		count = requestCount{}
+		round = withoutReasoning(round)
 		if n, err = w.measure(ctx, count, msgs, round); err != nil {
 			return err
 		}
@@ -225,7 +226,14 @@ func (w *window) collapse(ctx context.Context, msgs []*message.Message, end int)
 	if kept {
 		content += "\n\n" + searchableHistoryNote
 	}
-	return slices.Concat(msgs[:keep], []*message.Message{{Role: message.RoleDeveloper, Content: content}}, msgs[end:]), nil
+	return slices.Concat(msgs[:keep], []*message.Message{{Role: message.RoleDeveloper, Content: content}}, withoutReasoning(msgs[end:])), nil
+}
+
+// withoutReasoning is msgs without their reasoning. A collapse drops the
+// reasoning of the messages it keeps: that reasoning is about messages
+// the summary replaced, which the model no longer sees.
+func withoutReasoning(msgs []*message.Message) []*message.Message {
+	return slices.DeleteFunc(slices.Clone(msgs), func(m *message.Message) bool { return m != nil && m.Role == message.RoleReasoning })
 }
 
 // bound is an upper bound on the input tokens of a request with msgs and

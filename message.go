@@ -51,8 +51,9 @@ type LLMResponseChunk struct {
 	CachedTokens     int
 	CacheWriteTokens int
 
-	// EncryptedContent is Responses reasoning.encrypted_content. Provider parse
-	// only; copied onto Message so the next turn can replay the item statelessly.
+	// EncryptedContent is the provider's opaque data for a reasoning item,
+	// which only the provider client reads. It is copied onto the Message so
+	// a later request can replay the item without provider-side storage.
 	EncryptedContent string
 }
 

@@ -85,9 +85,10 @@ const (
 
 // GenAI provider values (closed enum).
 const (
-	GenAIProviderAzure   = "azure.openai"
-	GenAIProviderOpenAI  = "openai"
-	GenAIProviderUnknown = "unknown"
+	GenAIProviderAnthropic = "anthropic"
+	GenAIProviderAzure     = "azure.openai"
+	GenAIProviderOpenAI    = "openai"
+	GenAIProviderUnknown   = "unknown"
 )
 
 // GenAI tool types (gen_ai.tool.type): a host's function, or a tool an MCP

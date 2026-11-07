@@ -297,8 +297,7 @@ func TestWebConstructors_offerOnlyTheAgentsArgumentsAndPanicWithoutAClient(t *te
 			return false
 		}()
 		tool := tc.build(NewExa("k"))
-		params, _ := tool.AsJson()["parameters"].(map[string]any)
-		props, _ := params["properties"].(map[string]any)
+		props, _ := tool.Parameters()["properties"].(map[string]any)
 
 		if got := slices.Sorted(maps.Keys(props)); tool.Name() != name || !slices.Equal(got, tc.args) || !panicked {
 			t.Errorf("%s: tool %q with arguments %v, panicked without a client %v, want %v and a panic", name, tool.Name(), got, panicked, tc.args)

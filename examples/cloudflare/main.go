@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/anthropic"
 	"github.com/ryanaldo34/tacklr/examples/host"
 	"github.com/ryanaldo34/tacklr/openai"
 	"github.com/ryanaldo34/tacklr/server"
@@ -39,8 +40,16 @@ func main() {
 	})
 }
 
-// newModel is the model the env names.
-func newModel(env cloudflare.Env) *openai.Model {
+// newModel is the model the env names: a Claude model with
+// ANTHROPIC_API_KEY, else an OpenAI-compatible one with OPENAI_API_KEY.
+func newModel(env cloudflare.Env) tacklr.Model {
+	if key := env.String("ANTHROPIC_API_KEY"); key != "" {
+		model := anthropic.New(http.DefaultClient).WithApiKey(key).WithModel(env.String("MODEL"))
+		if url := env.String("ANTHROPIC_BASE_URL"); url != "" {
+			model = model.WithURL(url)
+		}
+		return model
+	}
 	model := openai.New(http.DefaultClient).WithApiKey(env.String("OPENAI_API_KEY")).WithModel(env.String("MODEL"))
 	if url := env.String("OPENAI_BASE_URL"); url != "" {
 		model = model.WithURL(url)

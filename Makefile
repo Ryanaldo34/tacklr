@@ -3,7 +3,7 @@
 
 # The harness core builds for WebAssembly (GOOS=js GOARCH=wasm) so a host can
 # run it outside a Linux worker, for example in a Cloudflare Durable Object.
-WASM_CORE = . ./message ./session ./session/orchestrator ./brain ./skills ./vfs/mount ./telemetry ./telemetry/otlpjson ./openai ./web ./server ./server/acp ./session/durableobject
+WASM_CORE = . ./message ./session ./session/orchestrator ./brain ./skills ./vfs/mount ./telemetry ./telemetry/otlpjson ./openai ./anthropic ./web ./server ./server/acp ./session/durableobject
 
 # The whole suite. It needs Linux, FUSE and Docker: Testcontainers starts
 # Postgres (pgvector), Helix and Temporal. -covermode=atomic is required with -race.

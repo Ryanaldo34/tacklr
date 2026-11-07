@@ -33,7 +33,7 @@ docker run -d --name tacklr-pg -e POSTGRES_PASSWORD=tacklr -p 5432:5432 pgvector
 
 export DATABASE_URL=postgres://postgres:tacklr@localhost:5432/postgres
 export SEAL_KEY=$(openssl rand -base64 32) LIVE_KEY=$(openssl rand -base64 32)
-export OPENAI_API_KEY=... MODEL=gpt-5-mini
+export ANTHROPIC_API_KEY=... MODEL=claude-opus-5-5   # or OPENAI_API_KEY=... MODEL=gpt-5-mini
 
 WORKSPACE_DIR=$PWD/work go run ./examples/temporal/cmd/worker &
 API_TOKEN=dev-token go run ./examples/temporal/cmd/host
@@ -46,7 +46,7 @@ Point an ACP client at `ws://localhost:8080/acp` with the header `Authorization:
 | `DATABASE_URL` | both | Postgres. The programs create their tables on start. |
 | `SEAL_KEY` | both | 32 bytes in base64. It seals the credentials users send. |
 | `LIVE_KEY` | both | base64. It signs the hosts' requests for live deltas. |
-| `OPENAI_API_KEY`, `MODEL`, `OPENAI_BASE_URL` | both | The model. The host uses it only to refuse content the model cannot read. |
+| `MODEL`, and `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | both | The model: a Claude model with `ANTHROPIC_API_KEY`, else an OpenAI-compatible one. `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` set the endpoint. The host uses the model only to refuse content it cannot read. |
 | `TEMPORAL_ADDRESS`, `TASK_QUEUE` | both | Default `localhost:7233` and `tacklr`. |
 | `API_TOKEN`, `ADDR` | host | The bearer token, and the address (default `:8080`). |
 | `WORKSPACE_DIR` | worker | The directory that holds each session's `/workspace/work`. |

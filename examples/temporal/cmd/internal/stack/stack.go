@@ -19,6 +19,8 @@ import (
 	"go.temporal.io/sdk/client"
 	temporallog "go.temporal.io/sdk/log"
 
+	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/anthropic"
 	"github.com/ryanaldo34/tacklr/openai"
 	"github.com/ryanaldo34/tacklr/session"
 	sessionpg "github.com/ryanaldo34/tacklr/session/postgres"
@@ -35,7 +37,7 @@ type Stack struct {
 	Store     session.Store
 	Secrets   session.SecretStorage
 	Events    *sessionpg.EventLog
-	Model     *openai.Model
+	Model     tacklr.Model
 	TaskQueue string
 	LiveKey   []byte
 	// flush sends what telemetry holds and stops it.
@@ -47,9 +49,11 @@ type Stack struct {
 //	DATABASE_URL      Postgres (required)
 //	SEAL_KEY          32 bytes in base64: seals users' tokens (required)
 //	LIVE_KEY          base64: signs live delta streams (required)
-//	OPENAI_API_KEY    the model's key (required)
 //	MODEL             the model id (required)
-//	OPENAI_BASE_URL   an OpenAI-compatible endpoint (optional)
+//	ANTHROPIC_API_KEY the key of a Claude model, or
+//	OPENAI_API_KEY    the key of an OpenAI-compatible model (one is required)
+//	ANTHROPIC_BASE_URL, OPENAI_BASE_URL
+//	                  the model's endpoint (optional)
 //	TEMPORAL_ADDRESS  default localhost:7233
 //	TASK_QUEUE        default tacklr
 //	OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_PROTOCOL
@@ -88,8 +92,9 @@ func open(ctx context.Context) (*Stack, error) {
 	if err != nil || len(live) == 0 {
 		return nil, errors.New("LIVE_KEY must be set, in base64")
 	}
-	if os.Getenv("OPENAI_API_KEY") == "" || os.Getenv("MODEL") == "" {
-		return nil, errors.New("OPENAI_API_KEY and MODEL must be set")
+	model, err := newModel()
+	if err != nil {
+		return nil, err
 	}
 	cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
 	if err != nil {
@@ -117,10 +122,6 @@ func open(ctx context.Context) (*Stack, error) {
 		pool.Close()
 		return nil, fmt.Errorf("temporal: %w", err)
 	}
-	model := openai.New(&http.Client{Timeout: 5 * time.Minute}).WithApiKey(os.Getenv("OPENAI_API_KEY")).WithModel(os.Getenv("MODEL"))
-	if url := os.Getenv("OPENAI_BASE_URL"); url != "" {
-		model = model.WithURL(url)
-	}
 	return &Stack{
 		Temporal:  c,
 		Pool:      pool,
@@ -141,4 +142,28 @@ func (s *Stack) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = s.flush(ctx)
+}
+
+// newModel is the model the environment names: a Claude model with
+// ANTHROPIC_API_KEY, else an OpenAI-compatible one with OPENAI_API_KEY.
+func newModel() (tacklr.Model, error) {
+	id := os.Getenv("MODEL")
+	httpClient := &http.Client{Timeout: 5 * time.Minute}
+	switch {
+	case id == "":
+		return nil, errors.New("MODEL must be set")
+	case os.Getenv("ANTHROPIC_API_KEY") != "":
+		m := anthropic.New(httpClient).WithApiKey(os.Getenv("ANTHROPIC_API_KEY")).WithModel(id)
+		if url := os.Getenv("ANTHROPIC_BASE_URL"); url != "" {
+			m = m.WithURL(url)
+		}
+		return m, nil
+	case os.Getenv("OPENAI_API_KEY") != "":
+		m := openai.New(httpClient).WithApiKey(os.Getenv("OPENAI_API_KEY")).WithModel(id)
+		if url := os.Getenv("OPENAI_BASE_URL"); url != "" {
+			m = m.WithURL(url)
+		}
+		return m, nil
+	}
+	return nil, errors.New("ANTHROPIC_API_KEY or OPENAI_API_KEY must be set")
 }
