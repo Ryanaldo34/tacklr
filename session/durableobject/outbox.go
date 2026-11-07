@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/session"
+	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -164,7 +165,7 @@ func (o *Object) deliver(l letter) error {
 		}
 		return nil
 	}
-	return o.cfg.Agent.Brain.DeleteSessionMessages(ctx, o.cfg.Agent.SearchNamespace, string(l.Forget))
+	return adapter.ForgetMessages(ctx, o.cfg.Agent, l.Forget)
 }
 
 // armLocked sets the platform's one alarm to the earliest of what needs

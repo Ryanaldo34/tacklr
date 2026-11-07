@@ -227,6 +227,31 @@ func TestSessionWorkflow_badWorkspaceBindingFailsTurn(t *testing.T) {
 	}
 }
 
+// TestSessionWorkflow_anOverflowPathOnAReadOnlyMountFailsTheTurn: the
+// workspace cannot keep cut results on a read-only mount, so building the
+// session's harness fails, and the turn fails with why.
+func TestSessionWorkflow_anOverflowPathOnAReadOnlyMountFailsTheTurn(t *testing.T) {
+	t.Parallel()
+	env := newTestWorkflow(t)
+	model := testkit.HTTPModel(t, func(_ context.Context, _ []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
+	})
+	acts, log := registerSession(env, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
+	acts.Workspace = workspace.Config{
+		Open:         vfs.Tree(vfs.At("docs", vfs.Local(t.TempDir())).ReadOnly()),
+		OverflowPath: "/workspace/docs/.overflow",
+	}
+	id := session.ID("sess-read-only-overflow")
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "hello"}})
+	signalAt(env, 80*time.Millisecond, session.Wake{Kind: session.WakeClose})
+
+	got := visibleText(finishSession(t, env, log, id))
+
+	if !strings.Contains(got, "is on a read-only mount") {
+		t.Fatalf("session events = %q, want the turn to fail on the read-only overflow path", got)
+	}
+}
+
 // TestSessionWorkflow_grandchildResultReachesParent: a blocking specialist
 // of a blocking specialist answers, and its answer reaches the root
 // session through its parent.
@@ -1148,6 +1173,108 @@ func TestSessionWorkflow_jobsFromEarlierRepliesAreListedAndCancelled(t *testing.
 	}
 	if !slices.Equal(forgot, []string{string(id)}) {
 		t.Errorf("brain deletes = %v, want the session's messages deleted", forgot)
+	}
+}
+
+// scopedBrain is an engine with one note in each of two tenants, the
+// namespace of each session-message delete it audits, and a SessionScope
+// that gives session "sess-acme" the acme tenant and fails for any other.
+func scopedBrain(t *testing.T) (*brain.Engine, func(context.Context, string) (brain.Scope, error), *[]string) {
+	t.Helper()
+	var forgot []string
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithAudit(func(_ context.Context, ev brain.AuditEvent) error {
+		if ev.Op == brain.AuditSessionDelete {
+			forgot = append(forgot, ev.Namespace.String())
+		}
+		return nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenants := map[string]brain.Namespace{}
+	for _, org := range []string{"acme", "globex"} {
+		ns, err := brain.ParseNamespace("org", org)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tenants[org] = ns
+		if _, err := eng.Save(t.Context(), brain.Scope{Namespace: ns}, brain.Object{Kind: "Note", Title: org + " renewal"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scope := func(_ context.Context, id string) (brain.Scope, error) {
+		if id != "sess-acme" {
+			return brain.Scope{}, fmt.Errorf("no tenant for %s", id)
+		}
+		return brain.Scope{Namespace: tenants["acme"]}, nil
+	}
+	return eng, scope, &forgot
+}
+
+// searchThenEcho is a model that searches the brain, then answers with the
+// search's result.
+func searchThenEcho(t *testing.T) tacklr.Model {
+	return testkit.HTTPModel(t, func(_ context.Context, msgs []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		if last := lastMsg(msgs); last != nil && last.Role == message.RoleTool {
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: last.Content, IsComplete: true}
+			return
+		}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true,
+			ToolCalls: []message.ToolCall{{ID: "fc_search", CallID: "call_search", Name: "search", Arguments: `{"query":"renewal"}`}}}
+	})
+}
+
+// TestSessionWorkflow_aSessionSearchesAndForgetsInTheScopeItsHostGivesIt:
+// the agent's SessionScope replaces its SearchNamespace for the session, so
+// the session's search finds its own tenant's note, and its close deletes
+// its messages in that tenant.
+func TestSessionWorkflow_aSessionSearchesAndForgetsInTheScopeItsHostGivesIt(t *testing.T) {
+	t.Parallel()
+	env := newTestWorkflow(t)
+	eng, scope, forgot := scopedBrain(t)
+	acme, err := brain.ParseNamespace("org", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	globex, err := brain.ParseNamespace("org", "globex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, log := registerSession(env, tacklr.AgentOptions{Model: searchThenEcho(t), MaxWindowSize: 8192,
+		Brain: eng, SearchNamespace: globex, SessionScope: scope})
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "find renewals"}})
+	signalAt(env, 100*time.Millisecond, session.Wake{Kind: session.WakeClose})
+
+	got := visibleText(finishSession(t, env, log, "sess-acme"))
+
+	if !strings.Contains(got, "acme renewal") {
+		t.Errorf("session events = %q, want the acme note the session's scope reaches", got)
+	}
+	if !slices.Equal(*forgot, []string{acme.String()}) {
+		t.Errorf("session-message deletes = %v, want one in the session's own tenant", *forgot)
+	}
+}
+
+// TestSessionWorkflow_aSessionWhoseScopeFailsFailsItsTurnAndItsClose: a
+// SessionScope error fails the step that builds the session's harness, so
+// the turn fails with it, and the close that deletes the session's messages
+// fails with it too.
+func TestSessionWorkflow_aSessionWhoseScopeFailsFailsItsTurnAndItsClose(t *testing.T) {
+	t.Parallel()
+	env := newTestWorkflow(t)
+	eng, scope, _ := scopedBrain(t)
+	_, log := registerSession(env, tacklr.AgentOptions{Model: searchThenEcho(t), MaxWindowSize: 8192, Brain: eng, SessionScope: scope})
+	id := session.ID("sess-unknown")
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "find renewals"}})
+	signalAt(env, 100*time.Millisecond, session.Wake{Kind: session.WakeClose})
+
+	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: id})
+
+	if err := env.GetWorkflowError(); err == nil || !strings.Contains(err.Error(), "no tenant for sess-unknown") {
+		t.Errorf("session error = %v, want the close to fail on the scope", err)
+	}
+	if got := visibleText(drainLog(t, log, id)); !strings.Contains(got, "no tenant for sess-unknown") {
+		t.Errorf("session events = %q, want the turn to fail on the scope", got)
 	}
 }
 

@@ -286,13 +286,14 @@ func (a *activities) harness(ctx context.Context, in stepSession) (harnessSpec, 
 	}{in.Identity.Specialist, bindings, in.MCPServers, jobs})
 	sum := sha256.Sum256(key)
 	return harnessSpec{ID: in.SessionID, Key: hex.EncodeToString(sum[:]), Build: func(ctx context.Context) (*tacklr.Harness, *fuse.Server, error) {
-		spec := a.Agent
+		spec, err := adapter.ForSession(ctx, a.Agent, in.SessionID)
+		if err != nil {
+			return nil, nil, err
+		}
 		if in.Identity.Specialist != "" {
-			over, err := adapter.OverlaySpecialist(spec, in.Identity.Specialist)
-			if err != nil {
+			if spec, err = adapter.OverlaySpecialist(spec, in.Identity.Specialist); err != nil {
 				return nil, nil, err
 			}
-			spec = over
 		}
 		return constructTurn(ctx, spec, a.Workspace, a.FuseRoot, string(in.SessionID), bindings, in.MCPServers, jobs)
 	}}, nil
@@ -309,12 +310,9 @@ func (a *activities) WorkerQueue(context.Context) (protocol.Route, error) {
 // saved: their messages in the agent's brain. An agent without a brain
 // saved none.
 func (a *activities) Forget(ctx context.Context, ids []session.ID) error {
-	if a.Agent.Brain == nil {
-		return nil
-	}
 	errs := make([]error, 0, len(ids))
 	for _, id := range ids {
-		errs = append(errs, a.Agent.Brain.DeleteSessionMessages(ctx, a.Agent.SearchNamespace, string(id)))
+		errs = append(errs, adapter.ForgetMessages(ctx, a.Agent, id))
 	}
 	return errors.Join(errs...)
 }

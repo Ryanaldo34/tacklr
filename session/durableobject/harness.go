@@ -87,13 +87,14 @@ func (hs *harnessState) closeLocked() {
 // the session's MCP servers and the deployment's job names. A durable
 // object has no workspace.
 func (e *objectRuntime) build(ctx context.Context) (*tacklr.Harness, error) {
-	spec := e.o.cfg.Agent
+	spec, err := adapter.ForSession(ctx, e.o.cfg.Agent, e.init.SessionID)
+	if err != nil {
+		return nil, err
+	}
 	if s := e.state.Specialist; s != "" {
-		over, err := adapter.OverlaySpecialist(spec, s)
-		if err != nil {
+		if spec, err = adapter.OverlaySpecialist(spec, s); err != nil {
 			return nil, err
 		}
-		spec = over
 	}
 	opts := tacklr.BindTurn(spec, string(e.init.SessionID), slices.Sorted(maps.Keys(e.o.cfg.Jobs)))
 	if len(e.state.MCP) > 0 {

@@ -75,10 +75,11 @@ deal := brain.KindSpec{
 
 Every record belongs to a **namespace**: an ordered list of named values, such as `org=acme, team=west`.
 
-- `AgentOptions.SearchNamespace` is the widest namespace the session can read or write. It is required with `Brain`. A tool call can narrow it, but cannot widen it.
+- `AgentOptions.SearchNamespace` is the widest namespace the session can read or write. It is required with `Brain`, unless `SessionScope` is set. A tool call can narrow it, but cannot widen it.
+- `AgentOptions.SessionScope` gives each session its own namespace and principals, for an agent that serves many tenants or users. The runtime calls it with the session's id when it builds the session's harness and when it deletes the session's messages. A child session's id starts with its parent's id, so the host can give a child its parent's scope.
 - The first value is the **tenant**. A search reaches only records with the same tenant. Every store enforces the tenant with an index, so one tenant's data never ranks in another's search.
 - A record from another namespace looks like a record that does not exist.
-- A record with `Readers` is visible only to callers whose `AgentOptions.SearchPrincipals` (the user's and groups' ids) include one of them. Indexed files get their readers from the source's sharing, with `workspace.Config.IndexReaders`.
+- A record with `Readers` is visible only to callers whose `AgentOptions.SearchPrincipals` (the user's and groups' ids, or the principals `SessionScope` gives) include one of them. Indexed files get their readers from the source's sharing, with `workspace.Config.IndexReaders`.
 
 ## The agent's tools
 

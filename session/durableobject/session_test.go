@@ -529,6 +529,55 @@ func TestSession_aJobRunsInItsOwnObjectAndCloseDeletesBoth(t *testing.T) {
 	}
 }
 
+// TestSession_eachSessionSearchesInTheScopeItsHostGivesIt: the agent's
+// SessionScope replaces its SearchNamespace for each session, so a session
+// finds its own tenant's note, and a session the scope refuses fails its
+// turn with the scope's error.
+func TestSession_eachSessionSearchesInTheScopeItsHostGivesIt(t *testing.T) {
+	t.Parallel()
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenants := map[string]brain.Namespace{}
+	for _, org := range []string{"acme", "globex"} {
+		if tenants[org], err = brain.ParseNamespace("org", org); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := eng.Save(t.Context(), brain.Scope{Namespace: tenants[org]}, brain.Object{Kind: "Note", Title: org + " renewal"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := newFixture(t, callThenAnswer("search", `{"query":"renewal"}`), nil, func(cfg *durableobject.Config) {
+		cfg.Agent.Brain, cfg.Agent.SearchNamespace = eng, tenants["globex"]
+		cfg.Agent.SessionScope = func(_ context.Context, id string) (brain.Scope, error) {
+			if id != "sess-acme" {
+				return brain.Scope{}, fmt.Errorf("no tenant for %s", id)
+			}
+			return brain.Scope{Namespace: tenants["acme"]}, nil
+		}
+	})
+	ctx := t.Context()
+	turns := map[session.ID][]session.Event{}
+	for _, id := range []session.ID{"sess-acme", "sess-unknown"} {
+		if _, err := f.c.CreateSession(ctx, session.CreateSession{SessionID: id}); err != nil {
+			t.Fatal(err)
+		}
+		sub := f.subscribe(t, id)
+		if err := f.c.Prompt(ctx, id, session.Prompt{Text: "find renewals"}); err != nil {
+			t.Fatal(err)
+		}
+		turns[id] = untilEnd(t, sub)
+	}
+
+	if got := toolResult(turns["sess-acme"]); last(turns["sess-acme"]).Type != session.EventComplete || !strings.Contains(got, "acme renewal") {
+		t.Errorf("acme session's search = %q (end %+v), want the acme note its scope reaches", got, last(turns["sess-acme"]))
+	}
+	if end := last(turns["sess-unknown"]); end.Type != session.EventError || !strings.Contains(end.Fail, "no tenant for sess-unknown") {
+		t.Errorf("unknown session's end = %+v, want the turn to fail on the scope", end)
+	}
+}
+
 // driveAuth is a prompt's credentials for one Drive folder.
 func driveAuth(token string) session.AuthContext {
 	return session.AuthContext{Bindings: []mount.Binding{{

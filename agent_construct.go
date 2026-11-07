@@ -66,15 +66,25 @@ type AgentOptions struct {
 	// as its kind choices. Empty: no save tool. Register them with
 	// brain.WithKinds or ApplyKinds. Ignored when Brain is nil.
 	BrainWriteKinds []string
-	// SearchNamespace is the host ceiling for brain tools (session-owned, checkpointed):
-	// the widest namespace this session may read or write. Each tool call may add
-	// attrs to narrow it; it cannot change ceiling values. Required when Brain is
-	// set. Workers get a copy at spawn.
+	// SearchNamespace is the host ceiling for brain tools: the widest
+	// namespace a session may read or write. Each tool call may add attrs
+	// to narrow it; it cannot change ceiling values. Required when Brain is
+	// set, unless SessionScope gives each session its own. Specialists get
+	// a copy.
 	SearchNamespace brain.Namespace
 	// SearchPrincipals are the caller's identities (user and group ids) checked
 	// against object Readers, so search only returns source files the caller can
-	// open at the source. Set them from the host's identity provider each turn.
+	// open at the source.
 	SearchPrincipals []string
+	// SessionScope, when set, gives each session its own brain scope. The
+	// runtime calls it with the session's id when it builds the session's
+	// harness and when it deletes the session's messages. The scope's
+	// Namespace and Principals replace SearchNamespace and SearchPrincipals
+	// for that session. Use it when one agent serves many tenants or users.
+	// A child session's id starts with its parent's id (ChildID), so the
+	// host can give a child its parent's scope. An error fails the step
+	// that asked.
+	SessionScope func(ctx context.Context, sessionID string) (brain.Scope, error)
 	// skipPlanningLock is set only by WithSpecialist. The parent session always
 	// gates write tools on an active plan.
 	skipPlanningLock bool
