@@ -52,7 +52,10 @@
 //
 // Related returns a record's children (or a part's parent and nearby parts)
 // and, with a graph, the records its relations reach, each tagged with how
-// it is related. Open reads one object in full with its kind's fields.
+// it is related. The graph filters the walk before it fills a page, and Next
+// continues the walk from a cursor, so every neighbor is reachable; Count
+// reports the totals. Search with Near ranks only the records a walk
+// reaches. Open reads one object in full with its kind's fields.
 //
 // # Kind schemas (host migrations)
 //

@@ -103,6 +103,7 @@ The agent usually works in this order: `search` to find candidates, `search` wit
 - **A record id** returns that record.
 - **A kind or filters with no query** lists the matching records, newest first.
 - **`within`** searches only the parts of one record or indexed file.
+- **`near`** searches only the records linked to one record, up to `depth` links away, for example "what in this deal's neighborhood mentions the budget". It needs a graph.
 
 A file's matching chunks do not appear as results of their own. They are attached to their file's record as **evidence**: a snippet with its line numbers or heading, so the agent can `read` that part of the file.
 
@@ -123,6 +124,12 @@ Filters test the record. The filter keys are `kind`, `title`, `created_after`, `
 
 - **Containment**: a record's parts, its parent, and the parts near a part (`child`, `parent`, `sibling`).
 - **Links**: labeled edges in the graph, such as `Deal has_contact Person`, each with an optional note. `related` follows them up to 4 hops, and each result says which record it came through.
+
+The agent can narrow a walk with `relations`, `direction` (`out` or `in`), `kind`, and a link `status`. The graph applies every condition before it fills a page, so a page holds only matching records. Results come nearest first, then newest first. `more` pages through the whole neighborhood, also after the session restarts, and `counts` give the total and the number for each relation, so the agent knows how much a page leaves out.
+
+One hop follows at most `EngineConfig.FrontierK` records (default 1,000) to the next hop. When a hop reaches more, the result says `truncated`, and the agent should narrow the walk.
+
+Hosts call `Engine.Related` with the same options and more: `Edges` filters links by status, role, confidence, and update time, and `Filters` takes every search filter.
 
 `link` needs both records to exist in the namespace. It cannot link parts, and a file must be indexed before it can be linked. A link's note is indexed, so `search` finds the link by what the note says. With Helix, list the relation in `EdgeRelations` for its notes to rank.
 

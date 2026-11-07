@@ -11,7 +11,7 @@ import (
 
 // listChildren pages through id's children, in order.
 func listChildren(ctx context.Context, eng *brain.Engine, scope brain.Scope, id uuid.UUID) ([]brain.RichObject, error) {
-	page, err := eng.Related(ctx, scope, brain.RelatedRequest{ID: id, Relation: "contains", Limit: 50})
+	page, err := eng.Related(ctx, scope, brain.RelatedRequest{ID: id, Relations: []string{"contains"}, Limit: 50})
 	if err != nil {
 		return nil, err
 	}

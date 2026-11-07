@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -66,58 +67,166 @@ var markers = map[string][]float32{"veca": {1, 0}, "vecb": {0.6, 0.8}, "vecc": {
 // Run runs the contract. newGraph returns the graph a case writes to, which
 // embeds with emb (nil: text only).
 func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Graph) {
-	t.Run("neighborhood walks the relations and direction asked for, nearest first, once per object", func(t *testing.T) {
+	t.Run("a walk pages what its relations, direction and filters reach, nearest and newest first, each object once", func(t *testing.T) {
 		t.Parallel()
 		ctx, g := t.Context(), newGraph(t, nil)
 		ns := namespace()
-		a, b, c, d := node(t, g, ns, ""), node(t, g, ns, ""), node(t, g, ns, ""), node(t, g, ns, "")
-		link(t, g, ns, a, b, "references", brain.EdgeMeta{})
+		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		at := func(minute int, kind string) uuid.UUID {
+			return put(t, g, brain.Object{Kind: kind, Title: "node", Namespace: ns, CreatedAt: base.Add(time.Duration(minute) * time.Minute)}, "")
+		}
+		a := at(0, "Document")
+		// Seven records a links to, newest last. The Notes' edges are
+		// active, primary, confident and recent; three other edges each
+		// miss one of those.
+		recent := base.Add(24 * time.Hour)
+		weighed := brain.EdgeMeta{Status: "active", Role: "primary", Confidence: 0.9, UpdatedAt: recent}
+		var linked []uuid.UUID
+		for i := range 7 {
+			kind, meta := "Document", brain.EdgeMeta{}
+			switch i {
+			case 0:
+				meta = brain.EdgeMeta{Role: "cc", Confidence: 0.9, UpdatedAt: recent}
+			case 2:
+				meta = brain.EdgeMeta{Role: "primary", Confidence: 0.2, UpdatedAt: recent}
+			case 4:
+				meta = brain.EdgeMeta{Role: "primary", Confidence: 0.9, UpdatedAt: base}
+			case 1, 3, 5:
+				kind, meta = "Note", weighed
+			}
+			b := at(10+i, kind)
+			link(t, g, ns, a, b, "references", meta)
+			linked = append(linked, b)
+		}
+		c, d1, d2 := at(5, "Document"), at(1, "Document"), at(2, "Document")
 		link(t, g, ns, c, a, "references", brain.EdgeMeta{})
-		link(t, g, ns, a, b, "depends_on", brain.EdgeMeta{})
-		link(t, g, ns, b, d, "references", brain.EdgeMeta{})
-		walk := func(rels []string, dir string, hops, limit int) []brain.GraphNeighbor {
-			got, err := g.Neighborhood(ctx, brain.NeighborhoodQuery{Namespace: ns, ObjectID: a, Relations: rels, Direction: dir, MaxHops: hops, Limit: limit})
-			must(t, err)
-			return shape(got)
+		link(t, g, ns, a, linked[0], "depends_on", brain.EdgeMeta{})
+		link(t, g, ns, linked[0], d1, "references", brain.EdgeMeta{})
+		link(t, g, ns, linked[0], d2, "references", brain.EdgeMeta{})
+		out := func(id uuid.UUID, rel string, depth int, via uuid.UUID) brain.GraphNeighbor {
+			return brain.GraphNeighbor{ObjectID: id, SourceID: via, RelationType: rel, Direction: brain.DirectionOut, Depth: depth}
+		}
+		newestFirst := func(rel string, ids ...uuid.UUID) []brain.GraphNeighbor {
+			var want []brain.GraphNeighbor
+			for _, id := range slices.Backward(ids) {
+				want = append(want, out(id, rel, 1, a))
+			}
+			return want
+		}
+		every := newestFirst("references", linked...)
+		notes := newestFirst("references", linked[1], linked[3], linked[5])
+		cIn := brain.GraphNeighbor{ObjectID: c, SourceID: a, RelationType: "references", Direction: brain.DirectionIn, Depth: 1}
+		// Pages of 2 put a cursor inside the second depth.
+		deeper := []brain.GraphNeighbor{out(d2, "references", 2, linked[0]), out(d1, "references", 2, linked[0])}
+		query := func(rels []string, dir string, hops int) brain.NeighborhoodQuery {
+			return brain.NeighborhoodQuery{Walk: brain.Walk{Namespace: ns, ObjectID: a, Relations: rels, Direction: dir, MaxHops: hops, FrontierK: 100}, Limit: 2}
 		}
 		refs := []string{"references"}
-		bOut := brain.GraphNeighbor{ObjectID: b, SourceID: a, RelationType: "references", Direction: brain.DirectionOut, Depth: 1}
-		cIn := brain.GraphNeighbor{ObjectID: c, SourceID: a, RelationType: "references", Direction: brain.DirectionIn, Depth: 1}
-		dOut := brain.GraphNeighbor{ObjectID: d, SourceID: b, RelationType: "references", Direction: brain.DirectionOut, Depth: 2}
+		active, picky, noteKind := query(refs, brain.DirectionOut, 1), query(refs, brain.DirectionOut, 1), query(refs, brain.DirectionOut, 1)
+		active.Edges, active.Limit = brain.EdgeFilter{Status: "active"}, 1
+		picky.Edges, picky.Limit = brain.EdgeFilter{Role: "primary", MinConfidence: 0.5, UpdatedAfter: base.Add(time.Hour)}, 1
+		noteKind.Filters, noteKind.Limit = brain.Filter{Kind: brain.StringMatch{Eq: "Note"}}, 1
+		both := query([]string{"depends_on", "references"}, brain.DirectionBoth, 1)
+		firstRelation := slices.Clone(every)
+		firstRelation[len(firstRelation)-1].RelationType = "depends_on"
 
 		cases := map[string]struct{ got, want []brain.GraphNeighbor }{
-			"one hop, both ways":         {walk(refs, brain.DirectionBoth, 1, 10), []brain.GraphNeighbor{bOut, cIn}},
-			"two hops, both ways":        {walk(refs, brain.DirectionBoth, 2, 10), []brain.GraphNeighbor{bOut, cIn, dOut}},
-			"two hops, outbound":         {walk(refs, brain.DirectionOut, 2, 10), []brain.GraphNeighbor{bOut, dOut}},
-			"two hops, inbound":          {walk(refs, brain.DirectionIn, 2, 10), []brain.GraphNeighbor{cIn}},
-			"two relations, b only once": {walk([]string{"references", "depends_on"}, brain.DirectionBoth, 1, 10), []brain.GraphNeighbor{bOut, cIn}},
-			"limit 1":                    {walk(refs, brain.DirectionBoth, 2, 1), []brain.GraphNeighbor{bOut}},
-			"other relation":             {walk([]string{"depends_on"}, brain.DirectionBoth, 1, 10), []brain.GraphNeighbor{{ObjectID: b, SourceID: a, RelationType: "depends_on", Direction: brain.DirectionOut, Depth: 1}}},
+			"one hop out, in pages of 2":    {walkAll(t, g, query(refs, brain.DirectionOut, 1)), every},
+			"one hop, both ways":            {walkAll(t, g, query(refs, brain.DirectionBoth, 1)), append(slices.Clone(every), cIn)},
+			"two hops out":                  {walkAll(t, g, query(refs, brain.DirectionOut, 2)), append(slices.Clone(every), deeper...)},
+			"two hops in":                   {walkAll(t, g, query(refs, brain.DirectionIn, 2)), []brain.GraphNeighbor{cIn}},
+			"an edge status, pages of 1":    {walkAll(t, g, active), notes},
+			"role, confidence and recency":  {walkAll(t, g, picky), notes},
+			"a record filter, pages of 1":   {walkAll(t, g, noteKind), notes},
+			"two relations, the first wins": {walkAll(t, g, both), append(firstRelation, cIn)},
+			"an unknown object":             {walkAll(t, g, brain.NeighborhoodQuery{Walk: brain.Walk{Namespace: ns, ObjectID: uuid.New(), MaxHops: 1, FrontierK: 100}, Limit: 2}), nil},
 		}
 		for name, tc := range cases {
-			if !slices.Equal(tc.got, tc.want) {
-				t.Errorf("%s = %v, want %v", name, tc.got, tc.want)
+			if got := shape(tc.got); !slices.Equal(got, tc.want) {
+				t.Errorf("%s = %v, want %v", name, got, tc.want)
 			}
 		}
-		if got, err := g.Neighborhood(ctx, brain.NeighborhoodQuery{Namespace: ns, ObjectID: uuid.New(), Relations: refs, Direction: brain.DirectionBoth, MaxHops: 1, Limit: 10}); err != nil || len(got) != 0 {
-			t.Errorf("unknown object = %v %v, want none", got, err)
+
+		// A record linked between two pages shows only when its key falls
+		// after the first page: here the oldest does, and the newest does not.
+		first, err := g.Neighborhood(ctx, query(refs, brain.DirectionOut, 1))
+		must(t, err)
+		newest, oldest := at(60, "Document"), at(-60, "Document")
+		link(t, g, ns, a, newest, "references", brain.EdgeMeta{})
+		link(t, g, ns, a, oldest, "references", brain.EdgeMeta{})
+		rest := query(refs, brain.DirectionOut, 1)
+		rest.After = first.Next
+		got := append(shape(first.Neighbors), shape(walkAll(t, g, rest))...)
+		if want := append(slices.Clone(every), out(oldest, "references", 1, a)); !slices.Equal(got, want) {
+			t.Errorf("pages around two new links = %v, want %v", got, want)
 		}
-		every := walk(nil, brain.DirectionBoth, 2, 10)
-		depths := map[uuid.UUID]int{}
-		for _, n := range every {
-			depths[n.ObjectID] = n.Depth
-			if !slices.Contains([]string{"references", "depends_on"}, n.RelationType) {
-				t.Errorf("every relation: %s reached by %q, want the edge's relation", n.ObjectID, n.RelationType)
+		for name, q := range map[string]brain.NeighborhoodQuery{
+			"after a bad cursor": {Walk: rest.Walk, After: "not a cursor", Limit: 2},
+			"with a bad filter":  {Walk: rest.Walk, Filters: brain.Filter{UpdatedAfter: "yesterday"}, Limit: 2},
+		} {
+			if _, err := g.Neighborhood(ctx, q); !errors.Is(err, brain.ErrInvalid) {
+				t.Errorf("a walk %s = %v, want ErrInvalid", name, err)
 			}
 		}
-		if len(every) != 3 || depths[b] != 1 || depths[c] != 1 || depths[d] != 2 {
-			t.Errorf("every relation, two hops = %v, want b and c at 1 and d at 2", every)
+	})
+
+	t.Run("counts and reach cover what a walk reaches, and a hop past FrontierK is truncated", func(t *testing.T) {
+		t.Parallel()
+		ctx, g := t.Context(), newGraph(t, nil)
+		ns := namespace()
+		word := searchWord()
+		a := node(t, g, ns, "")
+		b1, b2 := node(t, g, ns, word), put(t, g, brain.Object{Kind: "Note", Title: "node", Namespace: ns}, "")
+		d1, d2 := node(t, g, ns, word), node(t, g, ns, word)
+		link(t, g, ns, a, b1, "references", brain.EdgeMeta{})
+		link(t, g, ns, a, b2, "references", brain.EdgeMeta{})
+		link(t, g, ns, a, b1, "depends_on", brain.EdgeMeta{})
+		link(t, g, ns, b1, d1, "references", brain.EdgeMeta{})
+		link(t, g, ns, b2, d2, "references", brain.EdgeMeta{})
+		walk := brain.Walk{Namespace: ns, ObjectID: a, MaxHops: 2, FrontierK: 10}
+		counts := func(w brain.Walk, filters brain.Filter) brain.NeighborPage {
+			page, err := g.Neighborhood(ctx, brain.NeighborhoodQuery{Walk: w, Filters: filters, Limit: 1, Count: true})
+			must(t, err)
+			return page
+		}
+		reach := func(w brain.Walk) brain.Reached {
+			got, err := g.Reach(ctx, w)
+			must(t, err)
+			got.IDs = sortedIDs(got.IDs)
+			return got
+		}
+		narrow := walk
+		narrow.FrontierK = 1
+		named := walk
+		named.Relations = []string{"references", "depends_on"}
+
+		all, notes, byName, cut := counts(walk, brain.Filter{}), counts(walk, brain.Filter{Kind: brain.StringMatch{Eq: "Note"}}), counts(named, brain.Filter{}), counts(narrow, brain.Filter{})
+		whole, part := reach(walk), reach(narrow)
+		near := ids(findObjects(t, g, brain.ObjectSearch{Namespace: ns, Query: word, IDs: []uuid.UUID{b1, d2}, Limit: 10}))
+
+		wantAll := brain.Counts{Total: 4, ByRelation: map[string]int{"references": 4, "depends_on": 1}}
+		for name, page := range map[string]brain.NeighborPage{"every relation": all, "named relations": byName} {
+			if page.Counts == nil || page.Counts.Total != wantAll.Total || !maps.Equal(page.Counts.ByRelation, wantAll.ByRelation) || page.Truncated {
+				t.Errorf("counts of %s = %+v (truncated %v), want %+v", name, page.Counts, page.Truncated, wantAll)
+			}
+		}
+		if notes.Counts == nil || notes.Counts.Total != 1 || !maps.Equal(notes.Counts.ByRelation, map[string]int{"references": 1}) {
+			t.Errorf("counts of the notes = %+v, want the one note", notes.Counts)
+		}
+		if !cut.Truncated || !part.Truncated || len(part.IDs) != 2 {
+			t.Errorf("a frontier of 1: walk truncated %v, reach %+v, want both truncated and one record per hop", cut.Truncated, part)
+		}
+		if whole.Truncated || !slices.Equal(whole.IDs, sortedIDs([]uuid.UUID{b1, b2, d1, d2})) {
+			t.Errorf("reach = %+v, want the four records two hops away", whole)
+		}
+		if !slices.Equal(sortedIDs(near), sortedIDs([]uuid.UUID{b1, d2})) {
+			t.Errorf("object search among ids = %v, want only the matching ones among them", near)
 		}
 	})
 
 	t.Run("neighborhood neither returns nor walks through objects the namespace does not cover", func(t *testing.T) {
 		t.Parallel()
-		ctx, g := t.Context(), newGraph(t, nil)
+		g := newGraph(t, nil)
 		tenant := namespace()
 		teamX := append(tenant.Clone(), brain.Attr{Name: "team", Value: "x"})
 		teamY := append(tenant.Clone(), brain.Attr{Name: "team", Value: "y"})
@@ -128,9 +237,7 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 		link(t, g, teamX, a, mid, "references", brain.EdgeMeta{})
 		link(t, g, teamX, mid, leaf, "references", brain.EdgeMeta{})
 		walk := func(ns brain.Namespace) []uuid.UUID {
-			got, err := g.Neighborhood(ctx, brain.NeighborhoodQuery{Namespace: ns, ObjectID: a, Relations: []string{"references"}, Direction: brain.DirectionBoth, MaxHops: 2, Limit: 10})
-			must(t, err)
-			return sortedIDs(neighborIDs(got))
+			return sortedIDs(neighborIDs(walkAll(t, g, brain.NeighborhoodQuery{Walk: brain.Walk{Namespace: ns, ObjectID: a, Relations: []string{"references"}, Direction: brain.DirectionBoth, MaxHops: 2, FrontierK: 10}, Limit: 10})))
 		}
 
 		if got, want := walk(teamX), sortedIDs([]uuid.UUID{mid, leaf}); !slices.Equal(got, want) {
@@ -147,7 +254,7 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 		ns := namespace()
 		a, b := node(t, g, ns, ""), node(t, g, ns, "")
 		evidence := uuid.New()
-		at := time.Date(2026, 1, 2, 3, 4, 5, 6, time.UTC)
+		at := time.Date(2026, 1, 2, 3, 4, 5, 6_000_000, time.UTC) // times keep milliseconds
 		first := brain.EdgeMeta{Note: "first note", Status: "active", Role: "primary", Confidence: 0.75, EvidenceID: &evidence, CreatedAt: at, UpdatedAt: at.Add(time.Hour)}
 		link(t, g, ns, a, b, "references", first)
 		before := neighbors(t, g, ns, a, "references")
@@ -234,10 +341,21 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 			must(t, err)
 			return edgeEnds(hits)
 		}
+		readerWalk := func(principals []string) brain.Walk {
+			return brain.Walk{Namespace: ns, Principals: principals, ObjectID: open, Relations: []string{"references"}, Direction: brain.DirectionOut, MaxHops: 2, FrontierK: 10}
+		}
 		walk := func(principals []string) []uuid.UUID {
-			got, err := g.Neighborhood(ctx, brain.NeighborhoodQuery{Namespace: ns, Principals: principals, ObjectID: open, Relations: []string{"references"}, Direction: brain.DirectionOut, MaxHops: 2, Limit: 10})
+			return sortedIDs(neighborIDs(walkAll(t, g, brain.NeighborhoodQuery{Walk: readerWalk(principals), Limit: 10})))
+		}
+		reached := func(principals []string) []uuid.UUID {
+			got, err := g.Reach(ctx, readerWalk(principals))
 			must(t, err)
-			return sortedIDs(neighborIDs(got))
+			return sortedIDs(got.IDs)
+		}
+		counted := func(principals []string) int {
+			page, err := g.Neighborhood(ctx, brain.NeighborhoodQuery{Walk: readerWalk(principals), Limit: 1, Count: true})
+			must(t, err)
+			return page.Counts.Total
 		}
 		toMid, toSecret := [2]uuid.UUID{open, mid}, [2]uuid.UUID{open, secret}
 
@@ -247,6 +365,10 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 			"search by kind, an outsider":    {objects(nil, brain.Filter{Kind: brain.StringMatch{Eq: "Document"}}, 1), []uuid.UUID{open}},
 			"walk, an outsider":              {walk(nil), sortedIDs([]uuid.UUID{mid, mid2})},
 			"walk, a reader":                 {walk(legal), sortedIDs([]uuid.UUID{secret, beyond, mid, mid2})},
+			"reach, an outsider":             {reached(nil), sortedIDs([]uuid.UUID{mid, mid2})},
+		}
+		if outsider, reader := counted(nil), counted(legal); outsider != 2 || reader != 4 {
+			t.Errorf("counted: an outsider %d, a reader %d, want 2 and 4", outsider, reader)
 		}
 		for name, tc := range cases {
 			if !slices.Equal(tc.got, tc.want) {
@@ -476,7 +598,8 @@ func Run(t *testing.T, newGraph func(t *testing.T, emb brain.Embedder) brain.Gra
 			"link":   g.Link(cancelled, edge),
 			"unlink": g.Unlink(cancelled, a, b, "references"),
 		}
-		_, stopped["neighborhood"] = g.Neighborhood(cancelled, brain.NeighborhoodQuery{Namespace: ns, ObjectID: a, Relations: []string{"references"}, Direction: brain.DirectionBoth, MaxHops: 1, Limit: 10})
+		_, stopped["neighborhood"] = g.Neighborhood(cancelled, brain.NeighborhoodQuery{Walk: brain.Walk{Namespace: ns, ObjectID: a, MaxHops: 1, FrontierK: 10}, Limit: 10})
+		_, stopped["reach"] = g.Reach(cancelled, brain.Walk{Namespace: ns, ObjectID: a, MaxHops: 1, FrontierK: 10})
 		_, stopped["object search"] = g.FindObjects(cancelled, brain.ObjectSearch{Namespace: ns, Query: "q", Limit: 10})
 		_, stopped["edge search"] = g.FindLinks(cancelled, brain.LinkSearch{Namespace: ns, RelationType: EdgeSearchLabel, Query: "q", Limit: 10})
 		left := neighbors(t, g, ns, a, "references")
@@ -538,9 +661,25 @@ func findObjects(t *testing.T, g brain.Graph, q brain.ObjectSearch) []brain.Scor
 // neighbors is the one-hop neighborhood of id on rels.
 func neighbors(t *testing.T, g brain.Graph, ns brain.Namespace, id uuid.UUID, rels ...string) []brain.GraphNeighbor {
 	t.Helper()
-	got, err := g.Neighborhood(t.Context(), brain.NeighborhoodQuery{Namespace: ns, ObjectID: id, Relations: rels, Direction: brain.DirectionBoth, MaxHops: 1, Limit: 10})
-	must(t, err)
-	return got
+	return walkAll(t, g, brain.NeighborhoodQuery{Walk: brain.Walk{Namespace: ns, ObjectID: id, Relations: rels, Direction: brain.DirectionBoth, MaxHops: 1, FrontierK: 10}, Limit: 10})
+}
+
+// walkAll is every page of q, in order. A page longer than q.Limit fails.
+func walkAll(t *testing.T, g brain.Graph, q brain.NeighborhoodQuery) []brain.GraphNeighbor {
+	t.Helper()
+	var all []brain.GraphNeighbor
+	for {
+		page, err := g.Neighborhood(t.Context(), q)
+		must(t, err)
+		if len(page.Neighbors) > q.Limit {
+			t.Fatalf("a page of %d, want at most %d", len(page.Neighbors), q.Limit)
+		}
+		all = append(all, page.Neighbors...)
+		if page.Next == "" {
+			return all
+		}
+		q.After = page.Next
+	}
 }
 
 func edgeEnds(hits []brain.EdgeSearchHit) [][2]uuid.UUID {

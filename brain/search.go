@@ -14,7 +14,8 @@ import (
 
 // SearchRequest is one search: free text, an optional kind, and filters on
 // the records' fields. Without a query, a kind or filters list the matching
-// records. Within limits the search to the parts of one record.
+// records. Within limits the search to the parts of one record, and Near to
+// the records a graph walk reaches.
 type SearchRequest struct {
 	Query   string
 	Kind    string // optional; with registered kinds, one of them
@@ -22,7 +23,18 @@ type SearchRequest struct {
 	// Within is a record, or a part (meaning its record); the results are
 	// that record's parts that match the query.
 	Within uuid.UUID
+	Near   *Near
 	Limit  int
+}
+
+// Near limits a search to the records within Depth graph hops of ID over
+// Relations: the ones a related call on ID would walk to.
+type Near struct {
+	ID        uuid.UUID
+	Relations []string // graph relations; empty follows every relation
+	Direction string   // DirectionOut, DirectionIn or DirectionBoth (the default)
+	Depth     int      // default 1, capped by MaxExpandHops
+	Edges     EdgeFilter
 }
 
 // Search ranks records for a query in one list: the store's records and
@@ -40,6 +52,9 @@ type SearchRequest struct {
 // With no query, a kind or filters list the matching records newest first,
 // from the store. Within searches only the store, for that record's parts:
 // the graph's objects and links are other records, so they do not apply.
+// Near asks the graph for the records the walk reaches, at most FrontierK
+// of each hop (Page.Truncated when a hop had more), and ranks the store's
+// records and the graph's objects among them only; links do not rank.
 func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest) (Page, error) {
 	if err := checkScope(ctx, scope.Namespace); err != nil {
 		return Page{}, err
@@ -51,6 +66,10 @@ func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest) (Pa
 		return Page{}, fmt.Errorf("%w: within needs a query; related lists a record's parts", ErrInvalid)
 	case query == "" && !narrowed:
 		return Page{}, fmt.Errorf("%w: give a query, or a kind or filters to list records", ErrInvalid)
+	case req.Near != nil && query == "":
+		return Page{}, fmt.Errorf("%w: near needs a query; related lists a record's neighborhood", ErrInvalid)
+	case req.Near != nil && req.Within != uuid.Nil:
+		return Page{}, fmt.Errorf("%w: give within or near, not both", ErrInvalid)
 	}
 	filters, err := e.searchFilters(req.Kind, req.Filters)
 	if err != nil {
@@ -71,9 +90,16 @@ func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest) (Pa
 	if req.Within != uuid.Nil {
 		return e.searchWithin(ctx, scope, req.Within, text, exact, filters, limit)
 	}
-	// Links rank only when the caller narrowed nothing: filters describe records.
-	withLinks := strings.TrimSpace(req.Kind) == "" && req.Filters.empty()
-	sources, err := e.searchSources(ctx, scope, text, exact, withLinks, filters)
+	var near Reached
+	if req.Near != nil {
+		if near, err = e.reach(ctx, scope, *req.Near); err != nil || len(near.IDs) == 0 {
+			return Page{Results: Results{}, Truncated: near.Truncated}, err
+		}
+	}
+	// Links rank only when the caller narrowed nothing: filters describe
+	// records, and near describes where they are.
+	withLinks := strings.TrimSpace(req.Kind) == "" && req.Filters.empty() && req.Near == nil
+	sources, err := e.searchSources(ctx, scope, text, exact, withLinks, filters, near.IDs)
 	if err != nil {
 		return Page{}, err
 	}
@@ -81,7 +107,28 @@ func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest) (Pa
 	if err != nil {
 		return Page{}, err
 	}
-	return e.page(ctx, scope, Rest{refs: refs[:min(len(refs), e.cfg.MaxResultSetSize)], filter: filters}, limit)
+	rest := Rest{refs: refs[:min(len(refs), e.cfg.MaxResultSetSize)], filter: filters, truncated: near.Truncated}
+	return e.page(ctx, scope, rest, limit)
+}
+
+// reach is the records near asks for. It walks the graph only, so it
+// needs a graph, and a containment relation is not one.
+func (e *Engine) reach(ctx context.Context, scope Scope, near Near) (Reached, error) {
+	if e.graph == nil {
+		return Reached{}, fmt.Errorf("%w: near needs a graph", ErrUnsupported)
+	}
+	w, children, err := e.walkFrom(near.ID, near.Relations, near.Direction, near.Depth, near.Edges)
+	switch {
+	case err != nil:
+		return Reached{}, err
+	case children && len(near.Relations) > 0:
+		return Reached{}, fmt.Errorf("%w: near follows graph relations; within searches a record's parts", ErrInvalid)
+	}
+	reached, err := e.graph.Reach(ctx, e.walk(scope, w))
+	if err != nil {
+		return Reached{}, fmt.Errorf("brain: graph walk: %w", err)
+	}
+	return reached, nil
 }
 
 // list pages the records filters match, newest first.
@@ -114,16 +161,17 @@ func (e *Engine) searchWithin(ctx context.Context, scope Scope, within uuid.UUID
 }
 
 // searchSources runs the store and, with a graph, its object and link
-// searches at once, and returns their ranked lists. A graph error is
-// logged and its list left empty, unless FailOnGraphError is set.
-func (e *Engine) searchSources(ctx context.Context, scope Scope, text string, exact, withLinks bool, filters Filter) ([][]ref, error) {
+// searches at once, and returns their ranked lists; ids, when set, are the
+// only records they rank. A graph error is logged and its list left empty,
+// unless FailOnGraphError is set.
+func (e *Engine) searchSources(ctx context.Context, scope Scope, text string, exact, withLinks bool, filters Filter, ids []uuid.UUID) ([][]ref, error) {
 	sources := make([][]ref, 3)
 	errs := make([]error, 3)
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		storeScope := scope
 		storeScope.SessionID = sessionSearchID(scope, filters)
-		hits, err := e.store.Search(ctx, storeScope, RecordSearch{Query: text, Filters: filters, Exact: exact, Limit: e.cfg.CandidateK})
+		hits, err := e.store.Search(ctx, storeScope, RecordSearch{Query: text, Filters: filters, Exact: exact, IDs: ids, Limit: e.cfg.CandidateK})
 		if err != nil {
 			errs[0] = fmt.Errorf("brain: store search: %w", err)
 			return
@@ -137,7 +185,7 @@ func (e *Engine) searchSources(ctx context.Context, scope Scope, text string, ex
 	})
 	if e.graph != nil && !exact {
 		wg.Go(func() {
-			hits, err := e.graph.FindObjects(ctx, ObjectSearch{Namespace: scope.Namespace, Principals: scope.Principals, Query: text, Filters: filters, Limit: e.cfg.CandidateK})
+			hits, err := e.graph.FindObjects(ctx, ObjectSearch{Namespace: scope.Namespace, Principals: scope.Principals, Query: text, Filters: filters, IDs: ids, Limit: e.cfg.CandidateK})
 			if err != nil {
 				errs[1] = fmt.Errorf("brain: graph object search: %w", err)
 				return
