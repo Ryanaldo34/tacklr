@@ -116,11 +116,9 @@ func NewChunks(ctx context.Context) Chunks {
 	return Chunks{ctx: ctx, C: make(chan tacklr.LLMResponseChunk, 10)}
 }
 
-// Send delivers chunk. It is false when the context ended first.
+// Send delivers chunk, or gives up when the context ends while the
+// reader does not take it. It is false when it gave up.
 func (c Chunks) Send(chunk tacklr.LLMResponseChunk) bool {
-	if c.ctx.Err() != nil {
-		return false
-	}
 	select {
 	case <-c.ctx.Done():
 		return false

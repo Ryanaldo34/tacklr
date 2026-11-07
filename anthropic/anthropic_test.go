@@ -488,13 +488,24 @@ func TestCountTokens_reportsWhatTheAPIAnswers(t *testing.T) {
 	}
 }
 
+// full waits until ch's buffer is full: the stream's next send waits for a
+// reader.
+func full(t *testing.T, ch chan tacklr.LLMResponseChunk) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); len(ch) < cap(ch); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the stream did not fill its buffer")
+		}
+	}
+}
+
 // TestInvoke_aCancelledCallEndsTheStream: cancelling the caller's context
-// closes the stream, both while sent events wait to be read and while the
-// call waits for the API.
+// closes the stream, both while a reader that stopped reading leaves the
+// stream full and while the call waits for the API.
 func TestInvoke_aCancelledCallEndsTheStream(t *testing.T) {
 	t.Parallel()
 	delta := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}`
-	for name, burst := range map[string]int{"with events still to read": 100, "while it waits for the API": 1} {
+	for name, burst := range map[string]int{"while the reader stopped reading": 100, "while it waits for the API": 1} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			srv := testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -506,7 +517,11 @@ func TestInvoke_aCancelledCallEndsTheStream(t *testing.T) {
 			m := anthropic.New(srv.Client()).WithApiKey("k").WithModel("claude-opus-5-5").WithURL(srv.URL)
 			ctx, cancel := context.WithCancel(t.Context())
 			ch := must(m.Invoke(ctx, hello()))
-			<-ch
+			if burst > 1 {
+				full(t, ch)
+			} else {
+				<-ch
+			}
 
 			cancel()
 
