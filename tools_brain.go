@@ -86,8 +86,15 @@ type searchArgs struct {
 	Kind    string         `json:"kind,omitempty" desc:"Optional kind of record to find."`
 	Within  string         `json:"within,omitempty" desc:"Optional: UUID or indexed file path of one record (or one of its parts). Searches only that record's parts, for where in it the query matches."`
 	Filters map[string]any `json:"filters,omitempty" desc:"Optional filters on the records: title, created_after, created_before, updated_after, updated_before, or a kind's fields. The facets of a result and open show the fields and values that exist."`
+	Near    *nearArg       `json:"near,omitempty" desc:"Optional: search only the records linked to one record, up to depth links away."`
 	Limit   int            `json:"limit,omitempty" desc:"Max results (default 10, max 50)."`
 	More    bool           `json:"more,omitempty" desc:"Return the next page of the previous search instead of searching again."`
+}
+
+type nearArg struct {
+	Ref       string   `json:"ref" desc:"UUID or indexed file path of the record to search around."`
+	Relations []string `json:"relations,omitempty" desc:"Optional: follow only these relations. Omit for every relation."`
+	Depth     int      `json:"depth,omitempty" desc:"Links to follow (default 1)."`
 }
 
 func (b brainTools) newSearchTool() *Tool {
@@ -96,7 +103,7 @@ func (b brainTools) newSearchTool() *Tool {
 		DisplayName: "Search knowledge: {query}",
 		Description: `Search saved records, indexed files, links between records, and earlier messages of this session. Call when you need facts for the task.
 
-Returns one ranked list. Each result is an object (with evidence snippets when its parts matched, and vfs_path for a file) or a link whose note matched (with both ends). With within, each result is a part of that record with the snippet that matched. Without a query, a kind or filters list the matching records, newest first. facets count the kinds and field values among the results: narrow a second search with them. more is true when another page exists. Fails on an unknown kind or filter, with the valid choices.`,
+Returns one ranked list. Each result is an object (with evidence snippets when its parts matched, and vfs_path for a file) or a link whose note matched (with both ends). With within, each result is a part of that record with the snippet that matched. With near, the results are only records linked to that record: use it instead of a broad search to ask what a record's neighborhood says about something. Without a query, a kind or filters list the matching records, newest first. facets count the kinds and field values among the results: narrow a second search with them. more is true when another page exists. Fails on an unknown kind or filter, with the valid choices.`,
 		Category: message.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -116,6 +123,13 @@ Returns one ranked list. Each result is an object (with evidence snippets when i
 					if req.Within, err = b.ref(ctx, scope, args.Within, "within"); err != nil {
 						return brain.Page{}, err
 					}
+				}
+				if args.Near != nil {
+					id, err := b.ref(ctx, scope, args.Near.Ref, "near.ref")
+					if err != nil {
+						return brain.Page{}, err
+					}
+					req.Near = &brain.Near{ID: id, Relations: args.Near.Relations, Depth: args.Near.Depth}
 				}
 				return b.engine.Search(ctx, scope, req)
 			})
@@ -165,20 +179,23 @@ Returns the object with its content, its kind (with the fields a search can filt
 
 type relatedArgs struct {
 	namespaceArg
-	Ref      string `json:"ref" desc:"UUID of a record or part, or the virtual path of an indexed file."`
-	Relation string `json:"relation,omitempty" desc:"Optional: only this relation (\"contains\" for children only). Omit for children and every relation."`
-	Depth    int    `json:"depth,omitempty" desc:"Relation hops to follow (default 1)."`
-	Limit    int    `json:"limit,omitempty" desc:"Max results (default 10, max 50)."`
-	More     bool   `json:"more,omitempty" desc:"Return the next page of the previous related call."`
+	Ref       string   `json:"ref" desc:"UUID of a record or part, or the virtual path of an indexed file."`
+	Relations []string `json:"relations,omitempty" desc:"Optional: only these relations (\"contains\" for children). Omit for children and every relation."`
+	Direction string   `json:"direction,omitempty" desc:"Optional: out for links from this record, in for links to it. Omit for both." enum:"out,in,both"`
+	Depth     int      `json:"depth,omitempty" desc:"Relation hops to follow (default 1)."`
+	Kind      string   `json:"kind,omitempty" desc:"Optional: only records of this kind."`
+	Status    string   `json:"status,omitempty" desc:"Optional: follow only links with this status, e.g. active."`
+	Limit     int      `json:"limit,omitempty" desc:"Max results (default 10, max 50)."`
+	More      bool     `json:"more,omitempty" desc:"Return the next page of the previous related call."`
 }
 
 func (b brainTools) newRelatedTool() *Tool {
-	return NewTool(ToolConfig{
+	t := NewTool(ToolConfig{
 		Name:        "related",
 		DisplayName: "Related to {ref}",
 		Description: `List what is related to one record: its children (or a part's parent and nearby parts) and the records its links reach. Call when you have a record and need its context.
 
-Returns one list; each result's relation says how it is related (child, parent, sibling, or a link's relation, direction, depth and note). more is true when another page exists. Fails if ref is not visible in this session.`,
+Returns one list, newest links first within each depth; each result's relation says how it is related (child, parent, sibling, or a link's relation, direction, depth and note). counts give the total and the number per relation, so you know how much a page leaves out; more is true when another page exists, and more pages reach every result. truncated means a hop reached too many records to follow them all: narrow with relations, kind or status. Fails if ref is not visible in this session.`,
 		Category: message.ToolCategoryFetch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -193,7 +210,14 @@ Returns one list; each result's relation says how it is related (child, parent, 
 				if err != nil {
 					return brain.Page{}, err
 				}
-				return b.engine.Related(ctx, scope, brain.RelatedRequest{ID: id, Relation: args.Relation, Depth: args.Depth, Limit: args.Limit})
+				req := brain.RelatedRequest{
+					ID: id, Relations: args.Relations, Direction: args.Direction, Depth: args.Depth,
+					Edges: brain.EdgeFilter{Status: strings.TrimSpace(args.Status)}, Limit: args.Limit, Count: true,
+				}
+				if kind := strings.TrimSpace(args.Kind); kind != "" {
+					req.Filters.Kind = brain.StringMatch{Eq: kind}
+				}
+				return b.engine.Related(ctx, scope, req)
 			})
 			if err != nil {
 				return "", fmt.Errorf("related: %w", err)
@@ -201,6 +225,8 @@ Returns one list; each result's relation says how it is related (child, parent, 
 			return out, nil
 		},
 	})
+	setEnum(t, "kind", b.engine.Catalog().RecordKinds())
+	return t
 }
 
 type saveArgs struct {

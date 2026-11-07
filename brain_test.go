@@ -206,7 +206,9 @@ func TestRunCall_aSearchCursorCarriesToTheNextStepThroughCommit(t *testing.T) {
 
 // TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote: records link by
 // id, an indexed file by its path (an unindexed one cannot be an end), the
-// note makes the link searchable, and remove takes it away.
+// note makes the link searchable, and remove takes it away. related pages
+// past 50 links, also after a checkpoint, counts them, and narrows by kind
+// and link status; search near a record finds only its linked records.
 func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -228,6 +230,26 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 55 contacts, the first 5 on active links, and one that is not linked.
+	var contacts []uuid.UUID
+	for i := range 55 {
+		contact, err := eng.Save(ctx, scope, brain.Object{Kind: "Person", Title: "contact", Content: "account contact"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		status := ""
+		if i < 5 {
+			status = "active"
+		}
+		if err := eng.Link(ctx, scope, brain.LinkRequest{From: deal.ID, To: contact.ID, Relation: "has_contact", Meta: brain.EdgeMeta{Status: status}}); err != nil {
+			t.Fatal(err)
+		}
+		contacts = append(contacts, contact.ID)
+	}
+	outsider, err := eng.Save(ctx, scope, brain.Object{Kind: "Person", Title: "contact", Content: "account contact"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir()))).WithCodecs(adapters.Codecs()...)(ctx, "link-graph", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
@@ -236,7 +258,8 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 		t.Fatal(err)
 	}
 	model, _ := scripted(t)
-	h := planned(t, "link-graph", tacklr.AgentOptions{Model: model, MaxWindowSize: 100000, Brain: eng, SearchNamespace: ns}, tacklr.Todo{Title: "link"})
+	opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 100000, Brain: eng, SearchNamespace: ns}
+	h := planned(t, "link-graph", opts, tacklr.Todo{Title: "link"})
 	run := func(name, args string) string { return result(t, h, call("l", name, args)) }
 	link := func(from, to, extra string) string {
 		return run("link", `{"from":"`+from+`","to":"`+to+`","relation":"about"`+extra+`}`)
@@ -245,16 +268,25 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 
 	linked := link(deal.ID.String(), person.ID.String(), `,"note":"signs the renewal contract"`)
 	found := run("search", `{"query":"signs the renewal contract"}`)
-	related := run("related", `{"ref":"`+deal.ID.String()+`","relation":"about"}`)
+	related := run("related", `{"ref":"`+deal.ID.String()+`","relations":["about"]}`)
+	dealRef := `"ref":"` + deal.ID.String() + `"`
+	firstContacts := page(t, committedResult(t, h, "related", `{`+dealRef+`,"relations":["has_contact"],"direction":"out","limit":50}`))
+	rows, _ := h.Checkpoint()
+	reloaded := newHarness(t, "link-graph", opts)
+	restoreErr := reloaded.RestoreCheckpoint(rows)
+	moreContacts := page(t, result(t, reloaded, call("r2", "related", `{"more":true}`)))
+	active := page(t, run("related", `{`+dealRef+`,"kind":"Person","status":"active"}`))
+	near := page(t, run("search", `{"query":"account contact","limit":50,"near":{`+dealRef+`,"relations":["has_contact"]}}`))
+	nearBadRef := run("search", `{"query":"contact","near":{"ref":"not a path"}}`)
 	unindexed := link(docPath, deal.ID.String(), "")
 	indexer := &vfsindex.MountIndexer{VFS: ms, Brain: eng, Scope: scope}
 	if _, err := indexer.IndexPath(ctx, docPath); err != nil {
 		t.Fatal(err)
 	}
 	byPath := link(docPath, deal.ID.String(), "")
-	relatedByPath := run("related", `{"ref":"`+docPath+`","relation":"about"}`)
+	relatedByPath := run("related", `{"ref":"`+docPath+`","relations":["about"]}`)
 	removed := link(deal.ID.String(), person.ID.String(), `,"remove":true`)
-	after := run("related", `{"ref":"`+deal.ID.String()+`","relation":"about"}`)
+	after := run("related", `{"ref":"`+deal.ID.String()+`","relations":["about"]}`)
 	noTo := link(deal.ID.String(), "", "")
 	noRelation := run("link", `{"from":"`+deal.ID.String()+`","to":"`+person.ID.String()+`","relation":" "}`)
 	reserved := `,"namespace":[{"name":"session","value":"x"}]`
@@ -270,7 +302,20 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	if !strings.Contains(removed, `"linked": false`) || strings.Contains(after, person.ID.String()) {
 		t.Errorf("remove = %s, then related %s, want the person gone", removed, after)
 	}
-	for got, want := range map[string]string{noTo: "to is required", noRelation: "relation are required", linkReserved: "reserved", openReserved: "reserved"} {
+	allContacts := append(slices.Collect(firstContacts.Results.Objects()), slices.Collect(moreContacts.Results.Objects())...)
+	if c := firstContacts.Counts; c == nil || c.Total != 55 || c.ByRelation["has_contact"] != 55 || len(slices.Collect(firstContacts.Results.Objects())) != 50 || !firstContacts.More {
+		t.Errorf("related contacts = %d results, more %v, counts %+v, want 50 of 55 and more", len(slices.Collect(firstContacts.Results.Objects())), firstContacts.More, c)
+	}
+	if got := idsOfRich(allContacts); restoreErr != nil || moreContacts.More || !slices.Equal(slices.Sorted(slices.Values(uuidStrings(got))), slices.Sorted(slices.Values(uuidStrings(contacts)))) {
+		t.Errorf("related contacts over two pages and a checkpoint = %d (more %v, %v), want each of the 55 once", len(got), moreContacts.More, restoreErr)
+	}
+	if c := active.Counts; c == nil || c.Total != 5 || len(active.Results) == 0 {
+		t.Errorf("related active contacts = %+v, want 5 counted", c)
+	}
+	if got := idsOfRich(slices.Collect(near.Results.Objects())); len(got) == 0 || slices.Contains(got, outsider.ID) || !slices.Contains(contacts, got[0]) {
+		t.Errorf("search near the deal = %v, want its contacts only", got)
+	}
+	for got, want := range map[string]string{noTo: "to is required", noRelation: "relation are required", linkReserved: "reserved", openReserved: "reserved", nearBadRef: "neither a UUID nor a path"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("result = %q, want %q", got, want)
 		}
@@ -306,4 +351,20 @@ func TestWithSpecialist_aWorkerSharesTheBrainAndSkipsThePlanLock(t *testing.T) {
 	if spec == nil || !strings.Contains(opened, "worker-visible") || !strings.Contains(found, doc.ID.String()) || !strings.Contains(saved, "from the worker") {
 		t.Errorf("worker open = %s, search = %s, save = %s; want the parent's record and a write without a plan", opened, found, saved)
 	}
+}
+
+func idsOfRich(objs []brain.RichObject) []uuid.UUID {
+	out := make([]uuid.UUID, len(objs))
+	for i, o := range objs {
+		out[i] = o.ID
+	}
+	return out
+}
+
+func uuidStrings(ids []uuid.UUID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
 }

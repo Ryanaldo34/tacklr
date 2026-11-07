@@ -424,7 +424,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		}
 	})
 
-	t.Run("within keeps one record's parts, and an empty query lists the filtered records newest first", func(t *testing.T) {
+	t.Run("within keeps one record's parts, ids keep their records' rows, and an empty query lists the filtered records newest first", func(t *testing.T) {
 		t.Parallel()
 		ctx, s, f := arrange(t, newStore, nil)
 		hour := time.Hour
@@ -433,7 +433,8 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		older.Properties = map[string]any{"stage": "open"}
 		newer.Properties = map[string]any{"stage": "open"}
 		closed.Properties = map[string]any{"stage": "closed"}
-		_, err := s.PutTree(ctx, f.scopeA, indexed(older), parts(newChunk(older, "shared roadmap text", 0)))
+		olderChunk := newChunk(older, "shared roadmap text", 0)
+		_, err := s.PutTree(ctx, f.scopeA, indexed(older), parts(olderChunk))
 		must(t, err)
 		for _, doc := range []brain.Object{newer, closed} {
 			_, err := s.Put(ctx, f.scopeA, indexed(doc))
@@ -452,6 +453,8 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		byPart, byPartErr := s.Search(ctx, f.scopeA, brain.RecordSearch{Query: "roadmap", Within: f.chunkA, Limit: 10})
 		listed, listErr := s.Search(ctx, f.scopeA, brain.RecordSearch{Filters: open, Limit: 10})
 		newest, newestErr := s.Search(ctx, f.scopeA, brain.RecordSearch{Filters: all, Limit: 2})
+		among, amongErr := s.Search(ctx, session, brain.RecordSearch{Query: "roadmap", IDs: []uuid.UUID{older.ID}, Limit: 10})
+		listedAmong, listedAmongErr := s.Search(ctx, f.scopeA, brain.RecordSearch{Filters: open, IDs: []uuid.UUID{older.ID, closed.ID}, Limit: 10})
 
 		for name, tc := range map[string]struct {
 			got  []brain.ScoredID
@@ -463,6 +466,8 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 			"search within a part of doc a": {byPart, byPartErr, []uuid.UUID{f.chunkA}},
 			"list the open records":         {listed, listErr, []uuid.UUID{newer.ID, older.ID}},
 			"list the newest two records":   {newest, newestErr, []uuid.UUID{f.docA, closed.ID}},
+			"search among ids":              {among, amongErr, []uuid.UUID{olderChunk.ID}},
+			"list the open records of ids":  {listedAmong, listedAmongErr, []uuid.UUID{older.ID}},
 		} {
 			if tc.err != nil || !slices.Equal(scoredIDs(tc.got), tc.want) {
 				t.Errorf("%s = %v %v, want %v", name, scoredIDs(tc.got), tc.err, tc.want)

@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"testing"
 
@@ -15,9 +16,10 @@ import (
 )
 
 // TestRelated_listsARecordsChildrenOrAPartsParentAndNearbyParts: Related lists
-// a record's parts in order and in pages, or a part's record and the parts
-// next to it; a graph relation with no graph lists nothing; an unknown id is
-// not found, no id is invalid, and a cancelled call stops.
+// a record's parts in order, counted and in pages, or a part's record and the
+// parts next to it, which a filter narrows; a graph relation with no graph
+// lists nothing; an unknown id is not found, no id, an empty relation, an
+// unknown direction or a bad filter is invalid, and a cancelled call stops.
 func TestRelated_listsARecordsChildrenOrAPartsParentAndNearbyParts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -36,18 +38,28 @@ func TestRelated_listsARecordsChildrenOrAPartsParentAndNearbyParts(t *testing.T)
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
 
-	children, childrenErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID})
-	first, firstErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relation: "contains", Limit: 3})
+	children, childrenErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Count: true})
+	first, firstErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relations: []string{"contains"}, Limit: 3})
 	rest, restErr := eng.Next(ctx, scope, first.Rest, 10)
 	around, aroundErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: parts[3].ID})
-	byRelation, relationErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relation: "references"})
+	parentOnly, parentErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: parts[3].ID, Filters: brain.Filter{Kind: brain.StringMatch{Eq: "Document"}}})
+	byRelation, relationErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relations: []string{"references"}})
 	_, missing := eng.Related(ctx, scope, brain.RelatedRequest{ID: uuid.New()})
 	_, noID := eng.Related(ctx, scope, brain.RelatedRequest{})
+	_, emptyRelation := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relations: []string{" "}})
+	_, sideways := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Direction: "sideways"})
+	_, badFilter := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Filters: brain.Filter{UpdatedAfter: "yesterday"}})
 	_, stopped := eng.Related(cancelled, scope, brain.RelatedRequest{ID: doc.ID})
 
 	got := slices.Collect(children.Results.Objects())
 	if childrenErr != nil || !slices.Equal(idsOf(got), idsOf(objectsOfParts(parts))) || got[0].Relation.Type != brain.RelationChild {
 		t.Errorf("children = %v %v, want the 7 parts in order, tagged child", titlesOf(got), childrenErr)
+	}
+	if c := children.Counts; c == nil || c.Total != 7 || !maps.Equal(c.ByRelation, map[string]int{brain.RelationChild: 7}) {
+		t.Errorf("children counted = %+v, want 7 children", c)
+	}
+	if got := idsOf(slices.Collect(parentOnly.Results.Objects())); parentErr != nil || !slices.Equal(got, []uuid.UUID{doc.ID}) {
+		t.Errorf("around a part, only Documents = %v %v, want its record", got, parentErr)
 	}
 	if firstErr != nil || restErr != nil || !first.More || len(slices.Collect(first.Results.Objects())) != 3 || len(slices.Collect(rest.Results.Objects())) != 4 || rest.More {
 		t.Errorf("children in pages of 3 = %d then %d (more %v %v), want 3 then 4", len(slices.Collect(first.Results.Objects())), len(slices.Collect(rest.Results.Objects())), first.More, rest.More)
@@ -62,8 +74,13 @@ func TestRelated_listsARecordsChildrenOrAPartsParentAndNearbyParts(t *testing.T)
 	if relationErr != nil || len(byRelation.Results) != 0 {
 		t.Errorf("a graph relation without a graph = %+v %v, want nothing", byRelation.Results, relationErr)
 	}
-	if !errors.Is(missing, brain.ErrNotFound) || !errors.Is(noID, brain.ErrInvalid) || !errors.Is(stopped, context.Canceled) {
-		t.Errorf("missing %v, no id %v, cancelled %v", missing, noID, stopped)
+	if !errors.Is(missing, brain.ErrNotFound) || !errors.Is(stopped, context.Canceled) {
+		t.Errorf("missing %v, cancelled %v", missing, stopped)
+	}
+	for name, err := range map[string]error{"no id": noID, "an empty relation": emptyRelation, "an unknown direction": sideways, "a bad filter": badFilter} {
+		if !errors.Is(err, brain.ErrInvalid) {
+			t.Errorf("related with %s = %v, want ErrInvalid", name, err)
+		}
 	}
 }
 

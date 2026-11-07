@@ -40,7 +40,10 @@ type RecordSearch struct {
 	// Within, when set, keeps only the parts of that record (a part names
 	// its record), and leaves out session messages. The store resolves it.
 	Within uuid.UUID
-	Limit  int
+	// IDs, when set, keeps only these records and their parts, and leaves
+	// out session messages.
+	IDs   []uuid.UUID
+	Limit int
 }
 
 // Store is the knowledge store Engine runs on: the source of truth for

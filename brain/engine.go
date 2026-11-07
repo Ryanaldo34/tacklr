@@ -22,7 +22,7 @@ type EngineConfig struct {
 	DefaultLimit     int
 	MaxLimit         int
 	SiblingRadius    int
-	GraphNeighborK   int // max neighbors one graph walk returns (default 50)
+	FrontierK        int // max records one hop of a graph walk continues from (default 1000)
 	MaxExpandHops    int // max Depth on Related (default 4)
 	MaxResultSetSize int
 	FailOnGraphError bool
@@ -39,7 +39,7 @@ func DefaultEngineConfig() EngineConfig {
 		DefaultLimit:     10,
 		MaxLimit:         50,
 		SiblingRadius:    5,
-		GraphNeighborK:   50,
+		FrontierK:        1000,
 		MaxExpandHops:    4,
 		MaxResultSetSize: 1000,
 		Now:              func() time.Time { return time.Now().UTC() },
@@ -54,7 +54,7 @@ func (c EngineConfig) withDefaults() EngineConfig {
 	c.DefaultLimit = cmp.Or(c.DefaultLimit, d.DefaultLimit)
 	c.MaxLimit = cmp.Or(c.MaxLimit, d.MaxLimit)
 	c.SiblingRadius = cmp.Or(c.SiblingRadius, d.SiblingRadius)
-	c.GraphNeighborK = cmp.Or(c.GraphNeighborK, d.GraphNeighborK)
+	c.FrontierK = cmp.Or(c.FrontierK, d.FrontierK)
 	c.MaxExpandHops = cmp.Or(c.MaxExpandHops, d.MaxExpandHops)
 	c.MaxResultSetSize = cmp.Or(c.MaxResultSetSize, d.MaxResultSetSize)
 	if c.Now == nil {

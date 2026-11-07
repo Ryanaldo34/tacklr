@@ -280,11 +280,14 @@ func TestSearch_aRerankerReordersAndDropsTheTopResults(t *testing.T) {
 	}
 }
 
-// TestSearch_listsAKindNewestFirstAndSearchesWithinOneRecord: a search with
-// only a kind lists it newest first, a search within a record or one of its
-// parts returns that record's matching parts, and a search with nothing to
-// match is invalid.
-func TestSearch_listsAKindNewestFirstAndSearchesWithinOneRecord(t *testing.T) {
+// TestSearch_listsAKindNewestFirstAndSearchesWithinOrNearOneRecord: a search
+// with only a kind lists it newest first, a search within a record or one of
+// its parts returns that record's matching parts, and a search near a record
+// ranks only the records linked to it (none for a record without links). A
+// search with nothing to match, or a near search without a query, with
+// within, from no record or over containment is invalid, and one without a
+// graph is unsupported.
+func TestSearch_listsAKindNewestFirstAndSearchesWithinOrNearOneRecord(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
@@ -297,6 +300,11 @@ func TestSearch_listsAKindNewestFirstAndSearchesWithinOneRecord(t *testing.T) {
 	docWithParts(t, eng, scope, "other", nil, "penalty for another deal")
 	first := save(t, eng, scope, brain.Object{Kind: "Note", Title: "first"})
 	second := save(t, eng, scope, brain.Object{Kind: "Note", Title: "second penalty"})
+	link(t, eng, scope, contract.ID, second.ID, "references", "")
+	noGraph, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
 	partsTree, err := store.GetTree(ctx, scope, contract.ID, 0)
 	parts := partsTree.Parts
 	if err != nil {
@@ -318,6 +326,19 @@ func TestSearch_listsAKindNewestFirstAndSearchesWithinOneRecord(t *testing.T) {
 	byPart, partErr := within(parts[1].ID)
 	_, nothing := eng.Search(ctx, scope, brain.SearchRequest{})
 	_, withinNothing := eng.Search(ctx, scope, brain.SearchRequest{Kind: "Note", Within: contract.ID})
+	near := func(e *brain.Engine, req brain.SearchRequest) (brain.Page, error) {
+		if req.Query == "" && req.Kind == "" {
+			req.Query = "penalty"
+		}
+		return e.Search(ctx, scope, req)
+	}
+	nearContract, nearErr := near(eng, brain.SearchRequest{Near: &brain.Near{ID: contract.ID}})
+	nearFirst, nearFirstErr := near(eng, brain.SearchRequest{Near: &brain.Near{ID: first.ID}})
+	_, nearNothing := near(eng, brain.SearchRequest{Kind: "Note", Near: &brain.Near{ID: contract.ID}})
+	_, nearWithin := near(eng, brain.SearchRequest{Within: contract.ID, Near: &brain.Near{ID: contract.ID}})
+	_, nearNoID := near(eng, brain.SearchRequest{Near: &brain.Near{}})
+	_, nearParts := near(eng, brain.SearchRequest{Near: &brain.Near{ID: contract.ID, Relations: []string{"contains"}}})
+	_, nearNoGraph := near(noGraph, brain.SearchRequest{Near: &brain.Near{ID: contract.ID}})
 
 	newest := func(p brain.Page) string {
 		for o := range p.Results.Objects() {
@@ -332,10 +353,26 @@ func TestSearch_listsAKindNewestFirstAndSearchesWithinOneRecord(t *testing.T) {
 	if recordErr != nil || partErr != nil || !slices.Equal(byRecord, want) || !slices.Equal(byPart, want) {
 		t.Errorf("search within the contract = %v %v, within one of its parts = %v %v, want its two penalty parts", byRecord, recordErr, byPart, partErr)
 	}
+	if got := idsOf(slices.Collect(nearContract.Results.Objects())); nearErr != nil || !slices.Equal(got, []uuid.UUID{second.ID}) {
+		t.Errorf("search near the contract = %v %v, want only the note it links to", got, nearErr)
+	}
+	if nearFirstErr != nil || len(nearFirst.Results) != 0 {
+		t.Errorf("search near a record without links = %+v %v, want nothing", nearFirst.Results, nearFirstErr)
+	}
+	if !errors.Is(nearNoGraph, brain.ErrUnsupported) {
+		t.Errorf("search near without a graph = %v, want ErrUnsupported", nearNoGraph)
+	}
 	for name, tc := range map[string]struct {
 		err  error
 		want string
-	}{"no query, kind or filters": {nothing, "kind or filters"}, "within with no query": {withinNothing, "related"}} {
+	}{
+		"no query, kind or filters": {nothing, "kind or filters"},
+		"within with no query":      {withinNothing, "related"},
+		"near with no query":        {nearNothing, "related"},
+		"near and within":           {nearWithin, "not both"},
+		"near no record":            {nearNoID, "object id"},
+		"near over containment":     {nearParts, "graph relations"},
+	} {
 		if !errors.Is(tc.err, brain.ErrInvalid) || !strings.Contains(tc.err.Error(), tc.want) {
 			t.Errorf("%s = %v, want ErrInvalid naming %q", name, tc.err, tc.want)
 		}

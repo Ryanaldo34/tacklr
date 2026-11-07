@@ -27,8 +27,18 @@ const (
 	DirectionBoth = "both"
 )
 
-// NeighborhoodQuery asks for the objects within MaxHops edges of ObjectID.
-type NeighborhoodQuery struct {
+// EdgeFilter keeps the edges a walk follows. Each set field must match; the
+// zero filter follows every edge.
+type EdgeFilter struct {
+	Status        string    `json:"status,omitempty"`
+	Role          string    `json:"role,omitempty"`
+	MinConfidence float64   `json:"min_confidence,omitempty"`
+	UpdatedAfter  time.Time `json:"updated_after,omitzero"` // the edge's UpdatedAt is at or after it
+}
+
+// Walk is a breadth-first walk of the graph from ObjectID: up to MaxHops
+// edges of Relations in Direction that pass Edges.
+type Walk struct {
 	// Namespace and Principals limit the walk as Scope.CanRead does: a node
 	// they cannot read is neither returned nor walked through.
 	Namespace  Namespace
@@ -37,7 +47,50 @@ type NeighborhoodQuery struct {
 	Relations  []string // edge labels to follow; empty follows every relation
 	Direction  string   // DirectionOut, DirectionIn or DirectionBoth (the default)
 	MaxHops    int
-	Limit      int
+	Edges      EdgeFilter
+	// FrontierK is the most objects of one hop the next hop starts from: the
+	// first FrontierK by object id. A hop that reaches more is truncated.
+	FrontierK int
+}
+
+// NeighborhoodQuery asks for one page of the objects a walk reaches.
+type NeighborhoodQuery struct {
+	Walk
+	// Filters apply to the objects returned, before the limit. The walk
+	// still goes through objects that fail them.
+	Filters Filter
+	// After is the Next of the previous page; empty starts the walk.
+	After string
+	Limit int
+	// Count asks for NeighborPage.Counts.
+	Count bool
+}
+
+// NeighborPage is one page of a walk.
+type NeighborPage struct {
+	Neighbors []GraphNeighbor
+	// Next continues the walk after this page; empty when it is done.
+	Next string
+	// Counts is what the whole walk reaches that passes the filters, when
+	// the query asked for it.
+	Counts *Counts
+	// Truncated reports a hop that reached more than FrontierK objects, so
+	// the walk's later hops did not start from all of them.
+	Truncated bool
+}
+
+// Counts are the objects a walk reaches. Total counts each object once;
+// ByRelation counts each object under every relation that reached it at
+// its depth, so the values can sum to more than Total.
+type Counts struct {
+	Total      int            `json:"total"`
+	ByRelation map[string]int `json:"by_relation,omitempty"`
+}
+
+// Reached is every object a walk reaches, at most FrontierK per hop.
+type Reached struct {
+	IDs       []uuid.UUID
+	Truncated bool // a hop reached more than FrontierK objects
 }
 
 // GraphNeighbor is one object a neighborhood walk reached.
@@ -70,7 +123,9 @@ type ObjectSearch struct {
 	// Filters (with Kind holding the requested kinds) apply before ranking,
 	// so a node that fails them takes no slot.
 	Filters Filter
-	Limit   int
+	// IDs, when set, ranks only these objects.
+	IDs   []uuid.UUID
+	Limit int
 }
 
 // LinkSearch is one edge search. Query matches the edge note.
@@ -138,11 +193,18 @@ type Graph interface {
 	// FindLinks returns the readable edges of q.RelationType (every indexed
 	// relation when it is empty), best first, at most q.Limit.
 	FindLinks(ctx context.Context, q LinkSearch) ([]EdgeSearchHit, error)
-	// Neighborhood walks breadth-first from q.ObjectID. Each object appears
-	// once, at its smallest depth; the start never appears. Results are
-	// ordered by depth, then relation (request order), then outbound first.
-	// Empty Relations follows every relation.
-	Neighborhood(ctx context.Context, q NeighborhoodQuery) ([]GraphNeighbor, error)
+	// Neighborhood returns one page of the walk q describes, at most
+	// q.Limit objects that pass q.Filters. Each object appears once, at its
+	// smallest depth, with one edge that reached it (the first relation in
+	// request order, then outbound first); the start never appears. Pages
+	// are ordered by depth, then the newest object first (CreatedAt), then
+	// object id, and Next continues after the last key, which never
+	// changes: an object written between pages appears only if its key
+	// falls after the page, and no other object repeats or is skipped.
+	Neighborhood(ctx context.Context, q NeighborhoodQuery) (NeighborPage, error)
+	// Reach returns every object the walk reaches, at most FrontierK of
+	// each hop, so a search can rank within them.
+	Reach(ctx context.Context, w Walk) (Reached, error)
 }
 
 // isContainment reports whether rel names containment (contains / part_of).

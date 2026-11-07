@@ -613,10 +613,12 @@ func (g *Graph) Unlink(ctx context.Context, from, to uuid.UUID, rel string) erro
 	return g.exec(ctx, req, nil, helix.WriterOnly())
 }
 
+// edgeProps are an edge's metadata properties. Its times are Unix
+// milliseconds, as a node's are, so a walk filters on them.
 func edgeProps(meta brain.EdgeMeta) helix.Props {
 	props := helix.Props{
-		helix.Prop(propEdgeCreatedAt, meta.CreatedAt.UTC().Format(time.RFC3339Nano)),
-		helix.Prop(propEdgeUpdatedAt, meta.UpdatedAt.UTC().Format(time.RFC3339Nano)),
+		helix.Prop(propEdgeCreatedAt, meta.CreatedAt.UnixMilli()),
+		helix.Prop(propEdgeUpdatedAt, meta.UpdatedAt.UnixMilli()),
 	}
 	for name, value := range map[string]string{propEdgeNote: meta.Note, propEdgeStatus: meta.Status, propEdgeRole: meta.Role} {
 		if value != "" {
@@ -639,8 +641,8 @@ type edgeRow struct {
 	Role       string   `json:"role"`
 	Confidence *float64 `json:"confidence"`
 	EvidenceID string   `json:"evidence_id"`
-	CreatedAt  string   `json:"created_at"`
-	UpdatedAt  string   `json:"updated_at"`
+	CreatedAt  int64    `json:"created_at"`
+	UpdatedAt  int64    `json:"updated_at"`
 }
 
 func (r edgeRow) meta() brain.EdgeMeta {
@@ -651,16 +653,15 @@ func (r edgeRow) meta() brain.EdgeMeta {
 	if id, err := uuid.Parse(r.EvidenceID); err == nil {
 		meta.EvidenceID = &id
 	}
-	meta.CreatedAt, _ = time.Parse(time.RFC3339Nano, r.CreatedAt)
-	meta.UpdatedAt, _ = time.Parse(time.RFC3339Nano, r.UpdatedAt)
+	meta.CreatedAt, meta.UpdatedAt = time.UnixMilli(r.CreatedAt).UTC(), time.UnixMilli(r.UpdatedAt).UTC()
 	return meta
 }
 
 // FindObjects implements brain.Graph in one request: a text and, with an
-// Embedder, a vector ranking over the readable nodes that pass q.Filters,
-// fused with the graph's Ranking. A tenant-wide scope with no filters ranks
-// from the index (see visiblePlan); otherwise Helix ranks within the
-// readable candidates that pass the filters.
+// Embedder, a vector ranking over the readable nodes that pass q.Filters
+// (and are among q.IDs when set), fused with the graph's Ranking. A
+// tenant-wide scope with no filters or ids ranks from the index (see
+// visiblePlan); otherwise Helix ranks within the readable candidates.
 func (g *Graph) FindObjects(ctx context.Context, sq brain.ObjectSearch) ([]brain.ScoredID, error) {
 	extra, err := filterPredicates(sq.Filters)
 	if err != nil {
@@ -670,7 +671,17 @@ func (g *Graph) FindObjects(ctx context.Context, sq brain.ObjectSearch) ([]brain
 	q := helix.ReadQuery("brain_find_objects")
 	scope := newScopeFilter(q.ParamString, sq.Namespace, sq.Principals)
 	candidates := func() *helix.Traversal { return helix.G().NWithLabelWhere(nodeLabel, scope.nodes(extra...)) }
-	p := g.planVisible(q, "", scope, sq.Limit, len(sq.Namespace) > 1 || len(extra) > 0,
+	if len(sq.IDs) > 0 {
+		ids := make([]string, len(sq.IDs))
+		for i, id := range sq.IDs {
+			ids[i] = id.String()
+		}
+		in := q.ParamArray("ids", ids, helix.ParamTypeString())
+		candidates = func() *helix.Traversal {
+			return helix.G().NWhere(helix.SourceIsInExpr(propObjectID, in.Expr())).Where(scope.nodes(extra...))
+		}
+	}
+	p := g.planVisible(q, "", scope, sq.Limit, len(sq.Namespace) > 1 || len(extra) > 0 || len(sq.IDs) > 0,
 		func(bounded *helix.Traversal) *helix.Traversal { return bounded },
 		func(name string) *helix.Traversal { return helix.G().N(helix.NodeVar(name)) })
 	project := func(rank string) []helix.Projection {
@@ -835,107 +846,4 @@ func edgeHits(rel string, rows []edgeHitRow) []brain.EdgeSearchHit {
 		out = append(out, brain.EdgeSearchHit{FromID: row.From, ToID: row.To, RelationType: rel, Meta: row.meta(), Score: row.value()})
 	}
 	return out
-}
-
-// Neighborhood implements brain.Graph in one request. Hop d starts
-// from the frontier node set of hop d-1; each (relation, direction) of a hop
-// is one projection of source, edge and peer. Only nodes the namespace
-// covers are returned or join a frontier. Each projection and frontier holds
-// at most q.Limit rows. No relations follows every edge label, and each hit
-// carries its edge's label.
-func (g *Graph) Neighborhood(ctx context.Context, nq brain.NeighborhoodQuery) ([]brain.GraphNeighbor, error) {
-	// Each step follows one label set: no labels follows every relation.
-	labels := [][]string{nil}
-	if len(nq.Relations) > 0 {
-		labels = make([][]string, len(nq.Relations))
-		for i, rel := range nq.Relations {
-			labels[i] = []string{rel}
-		}
-	}
-	dirs := []string{brain.DirectionOut, brain.DirectionIn}
-	if nq.Direction != brain.DirectionBoth {
-		dirs = []string{nq.Direction}
-	}
-	q := helix.ReadQuery("brain_neighborhood")
-	scope := newScopeFilter(q.ParamString, nq.Namespace, nq.Principals)
-	k := q.ParamI64("limit", int64(nq.Limit))
-	q = q.VarAs("f0", helix.G().NWhere(helix.SourceEq(propObjectID, q.ParamString("object_id", nq.ObjectID.String()))))
-	type entry struct {
-		name, dir string
-		depth     int
-	}
-	var entries []entry
-	for depth := 1; depth <= nq.MaxHops; depth++ {
-		prev := helix.NodeVar(fmt.Sprintf("f%d", depth-1))
-		var steps []helix.SubTraversal
-		for i, label := range labels {
-			for _, dir := range dirs {
-				name := fmt.Sprintf("h%d_%d_%s", depth, i, dir)
-				edges := helix.G().N(prev).Bind("src").OutE(label...)
-				step := helix.Sub().Out(label...)
-				if dir == brain.DirectionIn {
-					edges = helix.G().N(prev).Bind("src").InE(label...)
-					step = helix.Sub().In(label...)
-				}
-				steps = append(steps, step)
-				q = q.VarAs(name, edges.Bind("e").OtherN().Where(scope.nodes()).Limit(k).ProjectBindings(neighborProjections()...))
-				entries = append(entries, entry{name: name, dir: dir, depth: depth})
-			}
-		}
-		if depth < nq.MaxHops {
-			// Union needs two branches; one relation in one direction steps directly.
-			next := helix.G().N(prev)
-			switch {
-			case len(steps) > 1:
-				next = next.Union(steps...)
-			case dirs[0] == brain.DirectionOut:
-				next = next.Out(labels[0]...)
-			default:
-				next = next.In(labels[0]...)
-			}
-			q = q.VarAs(fmt.Sprintf("f%d", depth), next.Where(scope.nodes()).Dedup().Limit(k))
-		}
-	}
-	names := make([]string, len(entries))
-	for i, e := range entries {
-		names[i] = e.name
-	}
-	var out map[string][]neighborRow
-	if err := g.exec(ctx, q.Returning(names...), &out); err != nil {
-		return nil, err
-	}
-	seen := map[uuid.UUID]struct{}{nq.ObjectID: {}}
-	var hits []brain.GraphNeighbor
-	for _, e := range entries {
-		for _, row := range out[e.name] {
-			if _, ok := seen[row.ID]; ok {
-				continue
-			}
-			seen[row.ID] = struct{}{}
-			hits = append(hits, brain.GraphNeighbor{ObjectID: row.ID, SourceID: row.Source, RelationType: row.Label, Direction: e.dir, Depth: e.depth, Meta: row.meta()})
-			if len(hits) == nq.Limit {
-				return hits, nil
-			}
-		}
-	}
-	return hits, nil
-}
-
-type neighborRow struct {
-	edgeRow
-	Source uuid.UUID `json:"source"`
-	ID     uuid.UUID `json:"id"`
-	Label  string    `json:"label"`
-}
-
-func neighborProjections() []helix.BindingProjection {
-	projections := []helix.BindingProjection{
-		helix.ProjectNamedBinding("src", propObjectID, "source"),
-		helix.ProjectCurrentBinding(propObjectID, "id"),
-		helix.ProjectNamedBinding("e", "$label", "label"),
-	}
-	for _, p := range edgeMetaProps {
-		projections = append(projections, helix.ProjectNamedBinding("e", p, p))
-	}
-	return projections
 }

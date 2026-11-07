@@ -36,7 +36,7 @@ func (s *Store) Search(ctx context.Context, scope brain.Scope, q brain.RecordSea
 	}
 	query := strings.TrimSpace(q.Query)
 	if query == "" {
-		return s.listRecords(ctx, scope, plan, q.Limit)
+		return s.listRecords(ctx, scope, plan, q.IDs, q.Limit)
 	}
 	join := ""
 	if len(plan.Conditions()) > 0 {
@@ -45,12 +45,12 @@ func (s *Store) Search(ctx context.Context, scope brain.Scope, q brain.RecordSea
 	b := &pgx.Batch{}
 	// Rows take $1 (query), $2 (namespace), $3 (principals), $4 (limit),
 	// then the filter arguments.
-	where, fargs := restrict(plan, q.Within, 5)
+	where, fargs := restrict(plan, q, 5)
 	scoped := func(sql string, input any) {
 		b.Queue(fmt.Sprintf(sql, join, where), append([]any{input, scope.Namespace, scope.Principals, q.Limit}, fargs...)...)
 	}
 	sid := strings.TrimSpace(scope.SessionID)
-	if q.Within != uuid.Nil {
+	if q.Within != uuid.Nil || len(q.IDs) > 0 {
 		sid = ""
 	}
 	session := func(sql string, input any) {
@@ -67,7 +67,7 @@ func (s *Store) Search(ctx context.Context, scope brain.Scope, q brain.RecordSea
 		slog.WarnContext(ctx, "query embed failed; searching text only", "error", err)
 	} else if vec != nil {
 		// Vectors take the model as $5, so the filters start at $6.
-		vwhere, vargs := restrict(plan, q.Within, 6)
+		vwhere, vargs := restrict(plan, q, 6)
 		b.Queue(fmt.Sprintf(partVectorSQL, join, vwhere), append([]any{vec, scope.Namespace, scope.Principals, q.Limit, s.embedding.Model()}, vargs...)...)
 		if sid != "" {
 			b.Queue(sessionVectorSQL, vec, sid, scope.Namespace.ForSession(sid), q.Limit, s.embedding.Model())
@@ -90,20 +90,30 @@ func (s *Store) Search(ctx context.Context, scope brain.Scope, q brain.RecordSea
 }
 
 // restrict is the WHERE suffix and arguments, from $start, of the filters
-// and, when within is set, of keeping only within's parts.
-func restrict(plan brain.FilterPlan, within uuid.UUID, start int) (string, []any) {
+// and, when q sets them, of keeping only Within's parts or the rows of IDs'
+// records.
+func restrict(plan brain.FilterPlan, q brain.RecordSearch, start int) (string, []any) {
 	where, args := filterSQL(plan, recordColumn, start)
-	if within != uuid.Nil {
+	if q.Within != uuid.Nil {
 		// A part names its record.
 		where += fmt.Sprintf(" AND o.parent_id = coalesce((SELECT w.parent_id FROM objects w WHERE w.id = $%[1]d), $%[1]d)", start+len(args))
-		args = append(args, within)
+		args = append(args, q.Within)
+	}
+	if len(q.IDs) > 0 {
+		where += fmt.Sprintf(" AND coalesce(o.parent_id, o.id) = ANY($%d::uuid[])", start+len(args))
+		args = append(args, q.IDs)
 	}
 	return where, args
 }
 
-// listRecords is the records under scope that plan matches, newest first.
-func (s *Store) listRecords(ctx context.Context, scope brain.Scope, plan brain.FilterPlan, limit int) ([]brain.ScoredID, error) {
+// listRecords is the records under scope that plan matches (among ids
+// when set), newest first.
+func (s *Store) listRecords(ctx context.Context, scope brain.Scope, plan brain.FilterPlan, ids []uuid.UUID, limit int) ([]brain.ScoredID, error) {
 	where, args := filterSQL(plan, func(column string) string { return "o." + column }, 4)
+	if len(ids) > 0 {
+		where += fmt.Sprintf(" AND o.id = ANY($%d::uuid[])", 4+len(args))
+		args = append(args, ids)
+	}
 	rows, _ := s.db.Query(ctx, fmt.Sprintf(listRecordsSQL, where), append([]any{scope.Namespace, scope.Principals, limit}, args...)...)
 	hits, err := pgx.CollectRows(rows, scanHit)
 	if err != nil {

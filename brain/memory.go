@@ -429,7 +429,7 @@ func (s *MemoryStore) Search(ctx context.Context, scope Scope, q RecordSearch) (
 		return nil, err
 	}
 	if strings.TrimSpace(q.Query) == "" {
-		return s.listRecords(scope, plan, q.Limit), nil
+		return s.listRecords(scope, plan, q.IDs, q.Limit), nil
 	}
 	var vec []float32
 	if !q.Exact {
@@ -440,14 +440,14 @@ func (s *MemoryStore) Search(ctx context.Context, scope Scope, q RecordSearch) (
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	parts := s.candidateRows(scope, plan)
+	parts := s.candidateRows(scope, plan, q.IDs)
 	if q.Within != uuid.Nil {
 		record := q.Within
 		if w, ok := s.objects[q.Within]; ok && w.ParentID != nil {
 			record = *w.ParentID
 		}
 		parts = slices.DeleteFunc(parts, func(o Object) bool { return o.ParentID == nil || *o.ParentID != record })
-	} else {
+	} else if len(q.IDs) == 0 {
 		parts = s.appendSessionParts(scope, parts)
 	}
 	lists := [][]ScoredID{lexicalScores(parts, q.Query)}
@@ -558,7 +558,7 @@ func titleFirst(hits []ScoredID, query string) []ScoredID {
 
 // candidateRows are the live rows scope can read whose record passes plan:
 // a record itself, or a part whose parent does.
-func (s *MemoryStore) candidateRows(scope Scope, plan FilterPlan) []Object {
+func (s *MemoryStore) candidateRows(scope Scope, plan FilterPlan, ids []uuid.UUID) []Object {
 	out := make([]Object, 0)
 	for _, obj := range s.objects {
 		if obj.DeletedAt != nil || !scope.CanRead(obj) {
@@ -568,7 +568,7 @@ func (s *MemoryStore) candidateRows(scope Scope, plan FilterPlan) []Object {
 		if obj.ParentID != nil {
 			record = s.objects[*obj.ParentID]
 		}
-		if !plan.Match(record) {
+		if !plan.Match(record) || !amongIDs(ids, record.ID) {
 			continue
 		}
 		out = append(out, obj)
@@ -576,14 +576,17 @@ func (s *MemoryStore) candidateRows(scope Scope, plan FilterPlan) []Object {
 	return out
 }
 
-// listRecords is the records under scope that plan matches, newest first,
-// at most limit.
-func (s *MemoryStore) listRecords(scope Scope, plan FilterPlan, limit int) []ScoredID {
+// amongIDs reports whether id is among ids, or ids is not set.
+func amongIDs(ids []uuid.UUID, id uuid.UUID) bool { return len(ids) == 0 || slices.Contains(ids, id) }
+
+// listRecords is the records under scope that plan matches (among ids when
+// set), newest first, at most limit.
+func (s *MemoryStore) listRecords(scope Scope, plan FilterPlan, ids []uuid.UUID, limit int) []ScoredID {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var records []Object
 	for _, obj := range s.objects {
-		if obj.ParentID == nil && obj.DeletedAt == nil && scope.CanRead(obj) && plan.Match(obj) {
+		if obj.ParentID == nil && obj.DeletedAt == nil && scope.CanRead(obj) && plan.Match(obj) && amongIDs(ids, obj.ID) {
 			records = append(records, obj)
 		}
 	}

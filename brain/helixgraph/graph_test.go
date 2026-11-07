@@ -110,8 +110,10 @@ func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 }
 
 // TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth: a graph write that
-// fails after the store commit is still audited and leaves the row; expand
-// falls back to containment; graph reads report the failure.
+// fails after the store commit is still audited and leaves the row; related
+// falls back to containment; graph reads, a malformed answer, and the next
+// page of a walk report the failure, and an engine without a graph cannot
+// continue a walk.
 func TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -139,22 +141,43 @@ func TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.Link(ctx, scope, brain.LinkRequest{From: doc.ID, To: other.ID, Relation: "references"}); err != nil {
+	third, err := eng.Save(ctx, scope, brain.Object{Kind: "Document", Title: "third"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, to := range []uuid.UUID{other.ID, third.ID} {
+		if err := eng.Link(ctx, scope, brain.LinkRequest{From: doc.ID, To: to, Relation: "references"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bare, err := brain.NewEngine(store)
+	if err != nil {
 		t.Fatal(err)
 	}
 	audited = nil
+	walked, walkedErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relations: []string{"references"}, Limit: 1})
+	_, bareErr := bare.Next(ctx, scope, walked.Rest, 1)
+	near := brain.SearchRequest{Query: "doc", Near: &brain.Near{ID: doc.ID}}
+	helixProxy.failWith("brain_neighborhood", `{"page1_rows":"x"}`)
+	_, malformedWalk := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relations: []string{"references"}})
+	helixProxy.failWith("brain_reach", `{"ids1":"x"}`)
+	_, malformedReach := eng.Search(ctx, scope, near)
+	helixProxy.Clear()
 
 	helixProxy.fail("*", http.StatusBadRequest, "")
 	_, saveErr := eng.Save(ctx, scope, brain.Object{Kind: "Document", Title: "written"})
 	_, treeErr := eng.PutTree(ctx, scope, doc, nil)
 	removeErr := eng.SoftDelete(ctx, scope, other.ID)
-	children, childrenErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID})
+	children, childrenErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Count: true})
 	found, foundErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "written"})
 	failed := map[string]error{
 		"link":   eng.Link(ctx, scope, brain.LinkRequest{From: other.ID, To: doc.ID, Relation: "references"}),
 		"unlink": eng.Link(ctx, scope, brain.LinkRequest{From: doc.ID, To: other.ID, Relation: "references", Remove: true}),
 	}
-	_, failed["related by a relation"] = eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relation: "references"})
+	_, failed["related by a relation"] = eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relations: []string{"references"}})
+	_, failed["the next page of a walk"] = eng.Next(ctx, scope, walked.Rest, 1)
+	_, failed["search near"] = eng.Search(ctx, scope, near)
+	failed["a malformed walk"], failed["a malformed reach"] = malformedWalk, malformedReach
 	helixProxy.hang("brain_put_object")
 	short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
 	_, hungErr := eng.Save(short, scope, brain.Object{Kind: "Document", Title: "hung"})
@@ -194,6 +217,9 @@ func TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth(t *testing.T) {
 	}
 	if retryErr != nil || !errors.Is(erasedErr, brain.ErrNotFound) || leftErr != nil || len(left.Results) != 0 {
 		t.Errorf("erase again once the graph is back = %v, open %v, search %+v %v, want everything gone from store and graph", retryErr, erasedErr, left.Results, leftErr)
+	}
+	if walkedErr != nil || !walked.More || !errors.Is(bareErr, brain.ErrUnsupported) {
+		t.Errorf("a walk of two in pages of one = more %v %v, continued without a graph = %v, want more, then ErrUnsupported", walked.More, walkedErr, bareErr)
 	}
 	if childrenErr != nil || len(children.Results) != 0 {
 		t.Errorf("related on a failing graph = %+v %v, want the children only (none left)", children.Results, childrenErr)

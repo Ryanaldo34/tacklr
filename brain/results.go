@@ -60,7 +60,12 @@ type Page struct {
 	Results Results `json:"results"`
 	Facets  Facets  `json:"facets"`
 	More    bool    `json:"more"`
-	Rest    Rest    `json:"-"`
+	// Counts is everything a Related call reaches, when it asked to count.
+	Counts *Counts `json:"counts,omitempty"`
+	// Truncated reports a graph walk with a hop past FrontierK: its later
+	// hops, or the records a near search ranked, left some out.
+	Truncated bool `json:"truncated,omitempty"`
+	Rest      Rest `json:"-"`
 }
 
 // Facets count the kinds and the common property values of a page's
@@ -76,13 +81,16 @@ type Facets struct {
 // on one page and still be a facet: more is an identifier, not a facet.
 const maxFacetValues = 5
 
-// Rest is the ranked remainder of a Search or Related call. It holds ids,
-// scores and evidence, not rows, so it stays small; Next reads its next
-// page from the store. It marshals to JSON, so a caller can keep it across
-// processes (a SearchContext does, for the agent tools).
+// Rest is the remainder of a Search or Related call: ranked ids, scores
+// and evidence, not rows, and for Related the cursor of its graph walk, so
+// it stays small. Next reads its next page from the store, continuing the
+// walk when the ids run out. It marshals to JSON, so a caller can keep it
+// across processes (a SearchContext does, for the agent tools).
 type Rest struct {
-	refs   []ref
-	filter Filter
+	refs      []ref
+	filter    Filter
+	walk      *walkRest
+	truncated bool
 }
 
 // ref is one ranked, not yet read result.
@@ -113,16 +121,18 @@ func (r ref) key() string {
 }
 
 type restJSON struct {
-	Refs   []ref  `json:"refs,omitempty"`
-	Filter Filter `json:"filter,omitzero"`
+	Refs      []ref     `json:"refs,omitempty"`
+	Filter    Filter    `json:"filter,omitzero"`
+	Walk      *walkRest `json:"walk,omitempty"`
+	Truncated bool      `json:"truncated,omitempty"`
 }
 
 // Empty reports whether r holds no results.
-func (r Rest) Empty() bool { return len(r.refs) == 0 }
+func (r Rest) Empty() bool { return len(r.refs) == 0 && r.walk == nil }
 
 // MarshalJSON implements json.Marshaler.
 func (r Rest) MarshalJSON() ([]byte, error) {
-	return json.Marshal(restJSON{Refs: r.refs, Filter: r.filter})
+	return json.Marshal(restJSON{Refs: r.refs, Filter: r.filter, Walk: r.walk, Truncated: r.truncated})
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
@@ -131,7 +141,7 @@ func (r *Rest) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &v); err != nil {
 		return err
 	}
-	r.refs, r.filter = v.Refs, v.Filter
+	r.refs, r.filter, r.walk, r.truncated = v.Refs, v.Filter, v.Walk, v.Truncated
 	return nil
 }
 
@@ -144,16 +154,28 @@ func (e *Engine) Next(ctx context.Context, scope Scope, rest Rest, limit int) (P
 }
 
 // page reads results from the front of rest until it has limit of them or
-// rest runs out. A result whose row the scope cannot read, or a graph hit
-// whose stored row fails the filter, is skipped.
+// rest runs out, asking the graph for the walk's next page when its ids run
+// out. A result whose row the scope cannot read, or a graph hit whose
+// stored row fails the filter, is skipped.
 func (e *Engine) page(ctx context.Context, scope Scope, rest Rest, limit int) (Page, error) {
 	plan, err := rest.filter.Compile()
 	if err != nil {
 		return Page{}, err
 	}
 	var results Results
-	refs := rest.refs
-	for len(results) < limit && len(refs) > 0 {
+	refs, walk, truncated := rest.refs, rest.walk, rest.truncated
+	for len(results) < limit && (len(refs) > 0 || walk != nil) {
+		if len(refs) == 0 {
+			if e.graph == nil {
+				return Page{}, fmt.Errorf("%w: continuing a graph walk needs a graph", ErrUnsupported)
+			}
+			next, err := e.graph.Neighborhood(ctx, e.walkQuery(scope, walk, rest.filter, limit-len(results), false))
+			if err != nil {
+				return Page{}, fmt.Errorf("brain: graph walk: %w", err)
+			}
+			refs, walk, truncated = neighborRefs(next.Neighbors), walk.after(next), truncated || next.Truncated
+			continue
+		}
 		batch := refs[:min(limit-len(results), len(refs))]
 		refs = refs[len(batch):]
 		got, err := e.read(ctx, scope, batch, plan)
@@ -176,10 +198,11 @@ func (e *Engine) page(ctx context.Context, scope Scope, rest Rest, limit int) (P
 		results = Results{}
 	}
 	return Page{
-		Results: results,
-		Facets:  e.facets(results),
-		More:    len(refs) > 0,
-		Rest:    Rest{refs: refs, filter: rest.filter},
+		Results:   results,
+		Facets:    e.facets(results),
+		More:      len(refs) > 0 || walk != nil,
+		Truncated: truncated,
+		Rest:      Rest{refs: refs, filter: rest.filter, walk: walk, truncated: truncated},
 	}, nil
 }
 
