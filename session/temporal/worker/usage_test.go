@@ -235,15 +235,16 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 		started, commits := false, 0
 		first.SetOnChildWorkflowStartedListener(func(*workflow.Info, workflow.Context, converter.EncodedValues) {
 			started = true
-			first.SetContinueAsNewSuggested(true)
 		})
 		// The job finishes only once the turn has committed its last reply
 		// (the round's commit, then the reply's): the turn then waits on
-		// it and continues as new before the job's result comes.
+		// it and continues as new before the job's result comes. The
+		// suggestion comes with the release, so the history is long by then.
 		first.SetOnActivityCompletedListener(func(info *activity.Info, _ converter.EncodedValue, _ error) {
 			if started && info.ActivityType.Name == "Commit" {
 				if commits++; commits == 2 {
 					let()
+					first.SetContinueAsNewSuggested(true)
 				}
 			}
 		})
@@ -287,11 +288,11 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 		started, commits := false, 0
 		first.SetOnChildWorkflowStartedListener(func(*workflow.Info, workflow.Context, converter.EncodedValues) {
 			started = true
-			first.SetContinueAsNewSuggested(true)
 		})
 		// A close comes while the turn runs, so it waits for the turn, which
 		// then waits on its job and continues as new; the job's result comes
-		// in the next run.
+		// in the next run. The suggestion comes with the job's release, so the
+		// close is queued and carried before the turn polls for a suspend.
 		first.SetOnActivityCompletedListener(func(info *activity.Info, _ converter.EncodedValue, _ error) {
 			if started && info.ActivityType.Name == "Commit" {
 				switch commits++; commits {
@@ -299,6 +300,7 @@ func TestSessionWorkflow_aLongSessionContinuesAsNewWithItsState(t *testing.T) {
 					first.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeClose})
 				case 2:
 					let()
+					first.SetContinueAsNewSuggested(true)
 				}
 			}
 		})

@@ -467,10 +467,12 @@ func (w *workflowRuntime) continueAsNew() bool {
 	return true
 }
 
-// Next is the oldest queued wake: a host wake or a job's end. With block it
-// waits for one, or suspends a parent whose history is long (continue as
-// new) once nothing is queued, so no wake is lost; without, it returns a
-// zero Wake when none is queued.
+// Next is the oldest queued wake: a host wake or a job's end. Once nothing
+// is queued, it suspends a parent whose history is long (continue as new)
+// so no wake is lost; with block it then waits for one, without it returns
+// a zero Wake. The suspend check runs on the non-blocking path too, so a
+// long turn of host-tool calls (which never waits on a child) still
+// continues as new before its history outgrows a delivery limit.
 func (w *workflowRuntime) Next(block bool) session.Wake {
 	for {
 		w.fill()
@@ -479,11 +481,11 @@ func (w *workflowRuntime) Next(block bool) session.Wake {
 			w.queue = w.queue[1:]
 			return wake
 		}
-		if !block {
-			return session.Wake{}
-		}
 		if w.continueAsNew() {
 			return session.Wake{Kind: session.WakeSuspend}
+		}
+		if !block {
+			return session.Wake{}
 		}
 		sel := workflow.NewSelector(w.ctx)
 		w.listen(sel, nil)
