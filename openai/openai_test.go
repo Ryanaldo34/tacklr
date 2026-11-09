@@ -390,12 +390,12 @@ func TestInvoke_aStreamWithoutAUsableEndEndsInATypedError(t *testing.T) {
 		"a failed response with a nested error":     {[]string{`{"type":"response.failed","response":{"error":{"code":"server_error","message":"nested block"}}}`}, nil, "(server_error): nested block"},
 		"a failed response with only an error type": {[]string{`{"type":"response.failed","response":{"error":{"type":"server_error"}}}`}, nil, "server_error"},
 		"a failed response with a long flat error":  {[]string{`{"type":"response.failed","response":{"error_message":"flat failure","error_code":"bad_input","trace":"` + strings.Repeat("x", 400) + `"}}`}, nil, "(bad_input): flat failure"},
-		"an error event":                      {[]string{partial, `{"type":"error","error":{"message":"provider failed mid stream"}}`}, nil, "provider failed mid stream"},
-		"a message that only refuses":         {[]string{`{"type":"response.output_item.done","item":{"id":"msg_r","type":"message","content":[{"type":"refusal","refusal":"I cannot help with that"}]}}`, completed, "[DONE]"}, session.ErrModelRefused, "I cannot help with that"},
-		"a message that refuses with no text": {[]string{`{"type":"response.output_item.done","item":{"id":"msg_e","type":"message","content":[{"type":"refusal","refusal":""}]}}`, completed, "[DONE]"}, session.ErrModelRefused, "model refused"},
-		"done before a terminal event":        {[]string{partial, "[DONE]"}, openai.ErrIncompleteStream, "incomplete provider stream"},
-		"a close before a terminal event":     {[]string{partial}, openai.ErrIncompleteStream, "incomplete provider stream"},
-		"an event that is not JSON":           {[]string{"not-json"}, openai.ErrMalformedStream, "malformed"},
+		"an error event":                            {[]string{partial, `{"type":"error","error":{"message":"provider failed mid stream"}}`}, nil, "provider failed mid stream"},
+		"a message that only refuses":               {[]string{`{"type":"response.output_item.done","item":{"id":"msg_r","type":"message","content":[{"type":"refusal","refusal":"I cannot help with that"}]}}`, completed, "[DONE]"}, session.ErrModelRefused, "I cannot help with that"},
+		"a message that refuses with no text":       {[]string{`{"type":"response.output_item.done","item":{"id":"msg_e","type":"message","content":[{"type":"refusal","refusal":""}]}}`, completed, "[DONE]"}, session.ErrModelRefused, "model refused"},
+		"done before a terminal event":              {[]string{partial, "[DONE]"}, openai.ErrIncompleteStream, "incomplete provider stream"},
+		"a close before a terminal event":           {[]string{partial}, openai.ErrIncompleteStream, "incomplete provider stream"},
+		"an event that is not JSON":                 {[]string{"not-json"}, openai.ErrMalformedStream, "malformed"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
