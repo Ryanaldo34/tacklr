@@ -31,7 +31,7 @@ func TestRunCommand_runsTheModelsCommandInTheJail(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192, Tools: []*tacklr.Tool{RunCommand(dir)}, AllowTools: []string{"run_command"}}
-	h, err := tacklr.NewHarness(t.Context(), tacklr.BindTurn(opts, "shell", nil))
+	h, err := tacklr.NewHarness(t.Context(), tacklr.BindTurn(opts, "shell", nil, nil))
 	if err != nil {
 		t.Fatal(err)
 	}

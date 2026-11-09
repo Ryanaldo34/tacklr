@@ -88,8 +88,8 @@ Every record belongs to a **namespace**: an ordered list of named values, such a
 | `search` | Find records, indexed files, links, and earlier messages. |
 | `open` | Read a whole record by its id or an indexed file's path, with its kind's fields. |
 | `related` | List a record's parts, its parent, and the records linked to it. |
-| `save` | Write a record of a kind in `BrainWriteKinds`. Registered only when that list is not empty. |
-| `link` | Add or remove a link between two records. Registered only with a graph. |
+| `save` | Write a record of a kind in `BrainWriteKinds`. Its description lists each of those kinds with its registered description and fields. Registered only when that list is not empty. |
+| `link` | Add or remove a link between two records, with a note and a role. With `BrainRelations`, it offers only those relations, describes each and the kinds at its ends, and refuses a link between other kinds. Registered only with a graph. |
 | `index_file`, `unindex` | Add a workspace file to the store, or remove it. Registered with a workspace. |
 
 The agent usually works in this order: `search` to find candidates, `search` with a kind and filters to narrow, `open` or `related` to read and walk, then `read` on a file's path to see its current content.

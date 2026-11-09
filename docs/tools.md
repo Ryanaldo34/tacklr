@@ -73,6 +73,9 @@ The string the handler returns is the tool's result, which goes into the context
 
 | Method | Does |
 |---|---|
+| `SessionID()` | The id of the session the call runs in. |
+| `Bindings()` | The turn's mounts with their credentials, the same ones the workspace gets. A tool that calls a connected source itself takes its token from here. |
+| `Plan()` | The session's todos as this call sees them. |
 | `EmitUpdate(text)` | Sends progress to the clients that listen. Progress is not stored. |
 | `Park(interrupt)` | Pauses the session to ask the user. See [Ask the user](#ask-the-user). |
 | `StateGet`, `StateSet`, `StateDelete` | Read and write the session's key-value state. The host sets initial values with `CreateSession.State`, and later with `Prompt.State` or `Resume.State`. |

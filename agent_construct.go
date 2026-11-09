@@ -10,12 +10,13 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/skills"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // AgentOptions is the one agent, and the argument to NewHarness. A session
-// runtime calls BindTurn to attach the session id for each turn. The agent's
-// workspace (package workspace) adds its tools, skills and Overflow to these
-// options for the turns that have one.
+// runtime calls BindTurn to attach the session id and credentials for each
+// turn. The agent's workspace (package workspace) adds its tools, skills and
+// Overflow to these options for the turns that have one.
 type AgentOptions struct {
 	// MaxWindowSize is the context window in tokens. Zero uses the model's
 	// reported window.
@@ -63,9 +64,14 @@ type AgentOptions struct {
 	// before NewHarness. The harness does not construct backends.
 	Brain *brain.Engine
 	// BrainWriteKinds are the kinds the save tool may write; it lists them
-	// as its kind choices. Empty: no save tool. Register them with
-	// brain.WithKinds or ApplyKinds. Ignored when Brain is nil.
+	// as its kind choices, each with its registered description and fields.
+	// Empty: no save tool. Register them with brain.WithKinds or ApplyKinds.
+	// Ignored when Brain is nil.
 	BrainWriteKinds []string
+	// BrainRelations are the relations the link tool may write. It lists
+	// each with its meaning and the kinds at its ends, and refuses any other
+	// relation or a link between other kinds. Empty: any relation label.
+	BrainRelations []brain.RelationSpec
 	// SearchNamespace is the host ceiling for brain tools: the widest
 	// namespace a session may read or write. Each tool call may add attrs
 	// to narrow it; it cannot change ceiling values. Required when Brain is
@@ -91,6 +97,9 @@ type AgentOptions struct {
 	// jobs are the Runtime job workers the runtime registered. BindTurn
 	// sets them.
 	jobs []string
+	// bindings are the turn's mounts with their credentials. BindTurn sets
+	// them.
+	bindings []mount.Binding
 }
 
 // Overflow keeps the full text of results trimmed from the window, where the
@@ -101,11 +110,13 @@ type Overflow interface {
 	Keep(ctx context.Context, sessionID, callID, text string) (string, error)
 }
 
-// BindTurn attaches the per-turn session id and the names of the Runtime
-// job workers the runtime registered. The session runtime calls BindTurn.
-func BindTurn(opts AgentOptions, id string, jobs []string) AgentOptions {
+// BindTurn attaches the per-turn session id, the names of the Runtime job
+// workers the runtime registered, and the turn's credentialed mounts, which
+// tools read with CallContext.Bindings. The session runtime calls BindTurn.
+func BindTurn(opts AgentOptions, id string, jobs []string, bindings []mount.Binding) AgentOptions {
 	opts.sessionID = id
 	opts.jobs = jobs
+	opts.bindings = bindings
 	return opts
 }
 
@@ -131,7 +142,9 @@ func NewHarness(ctx context.Context, opts AgentOptions) (*Harness, error) {
 		skillsLoader:          opts.SkillsLoader,
 		brain:                 opts.Brain,
 		brainWriteKinds:       opts.BrainWriteKinds,
+		brainRelations:        opts.BrainRelations,
 		sessionId:             opts.sessionID,
+		bindings:              opts.bindings,
 		jobs:                  opts.jobs,
 		specialists:           make(map[string]*Specialist),
 		overflow:              opts.Overflow,
@@ -217,7 +230,7 @@ func (a *Harness) injectBuiltinTools() {
 		askUserChoiceTool,
 	)
 	if a.brain != nil {
-		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search, a.sessionId, a.brainWriteKinds)...)
+		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search, a.sessionId, a.brainWriteKinds, a.brainRelations)...)
 	}
 	if len(a.specialists) > 0 {
 		a.tools = append(a.tools, a.spawnTool(), a.listChildrenTool(), a.cancelChildTool())

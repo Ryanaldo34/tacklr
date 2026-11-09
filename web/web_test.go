@@ -320,7 +320,7 @@ func TestWebTools_runInAHarnessAndReportProgress(t *testing.T) {
 	})
 	h, err := tacklr.NewHarness(t.Context(), tacklr.BindTurn(tacklr.AgentOptions{
 		Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192, Tools: []*tacklr.Tool{WebSearch(client), WebFetch(client)},
-	}, "web", nil))
+	}, "web", nil, nil))
 	if err != nil {
 		t.Fatal(err)
 	}

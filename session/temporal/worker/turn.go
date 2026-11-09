@@ -22,7 +22,7 @@ func constructTurn(ctx context.Context, agent tacklr.AgentOptions, ws workspace.
 	if err != nil {
 		return nil, nil, err
 	}
-	opts := tacklr.BindTurn(agent, threadID, jobs)
+	opts := tacklr.BindTurn(agent, threadID, jobs, bindings)
 	if ms != nil {
 		if opts, err = ws.Bind(opts, ms); err != nil {
 			closeWorkspace(srv)

@@ -1373,3 +1373,30 @@ func TestSubscribe_aSubscriberWhoseLogCannotBeReadGetsTheErrorAndCanReadAgain(t 
 		t.Fatalf("a new subscription read %+v; want the turn's answer and its end", evs)
 	}
 }
+
+// TestSession_aToolReadsItsSessionAndThePromptsCredentials: a tool gets the
+// session's id and the credentials the prompt brought.
+func TestSession_aToolReadsItsSessionAndThePromptsCredentials(t *testing.T) {
+	t.Parallel()
+	creds := tacklr.NewTool(tacklr.ToolConfig{Name: "creds", Access: tacklr.ToolReadAccess, Handler: func(_ context.Context, cc *tacklr.CallContext) (string, error) {
+		var got []string
+		for _, b := range cc.Bindings() {
+			got = append(got, b.Alias()+":"+b.Auth.Token)
+		}
+		return cc.SessionID() + " " + strings.Join(got, ","), nil
+	}})
+	f := newFixture(t, callThenAnswer("creds", `{}`), []*tacklr.Tool{creds})
+	ctx := t.Context()
+	if _, err := f.c.CreateSession(ctx, session.CreateSession{SessionID: "sess-creds"}); err != nil {
+		t.Fatal(err)
+	}
+	sub := f.subscribe(t, "sess-creds")
+	if err := f.c.Prompt(ctx, "sess-creds", session.Prompt{Text: "read", Auth: driveAuth("tok")}); err != nil {
+		t.Fatal(err)
+	}
+	evs := untilEnd(t, sub)
+
+	if got := toolResult(evs); got != "sess-creds docs:tok" {
+		t.Errorf("tool result = %q (end %+v), want the session and the prompt's Drive credential", got, last(evs))
+	}
+}

@@ -4,17 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/session"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-// CallContext is what a tool call's tool gets: progress events, the
-// session's user state, Park, and the session's Runtime jobs. Each call of
+// CallContext is what a tool call's tool gets: the session's id and plan,
+// the turn's credentials, progress events, the session's user state, Park,
+// and the session's Runtime jobs. Each call of
 // a reply gets its own, so calls run at once without sharing state. A call
 // reads its own writes first, then the committed state; it writes only
 // here, and Commit applies its writes in call order. A tool may use it from
@@ -60,6 +63,31 @@ func newCallContext(out chan session.Event, turn *Harness, c Call, running []str
 // id as its idempotency key.
 func (cc *CallContext) CurrentToolCallID() string {
 	return cc.call.Key()
+}
+
+// SessionID is the id of the session the call runs in.
+func (cc *CallContext) SessionID() string {
+	return cc.turn.sessionId
+}
+
+// Bindings are the turn's mounts with their credentials: the ones the
+// workspace mounts, including those it leaves unmounted. A tool that calls a
+// connected source itself takes the source's token from here. Each call gets
+// its own copy.
+func (cc *CallContext) Bindings() []mount.Binding {
+	out := make([]mount.Binding, len(cc.turn.bindings))
+	for i, b := range cc.turn.bindings {
+		b.Params = maps.Clone(b.Params)
+		out[i] = b
+	}
+	return out
+}
+
+// Plan is the session's plan as the call sees it: the committed todos with
+// this call's own plan changes on top.
+func (cc *CallContext) Plan() []Todo {
+	todos, _ := cc.plan()
+	return slices.Clone(todos)
 }
 
 // EmitUpdate sends a non-blocking progress update for the call.
