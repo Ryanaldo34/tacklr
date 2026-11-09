@@ -122,7 +122,7 @@ func userMsg(content string) *message.Message {
 // newHarness builds the harness of session id from opts.
 func newHarness(t *testing.T, id string, opts tacklr.AgentOptions) *tacklr.Harness {
 	t.Helper()
-	h, err := tacklr.NewHarness(t.Context(), tacklr.BindTurn(opts, id, nil))
+	h, err := tacklr.NewHarness(t.Context(), tacklr.BindTurn(opts, id, nil, nil))
 	if err != nil {
 		t.Fatal(err)
 	}

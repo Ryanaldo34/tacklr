@@ -46,7 +46,7 @@ func TestJobTools_startListAndCancelTheSessionsJobs(t *testing.T) {
 	model, _ := scripted(t)
 	opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{build, twice}, Brain: eng, SearchNamespace: storetest.Namespace(t, "org", "acme"),
 		Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}}
-	h, err := tacklr.NewHarness(t.Context(), tacklr.BindTurn(opts, "jobs", []string{"ci"}))
+	h, err := tacklr.NewHarness(t.Context(), tacklr.BindTurn(opts, "jobs", []string{"ci"}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}

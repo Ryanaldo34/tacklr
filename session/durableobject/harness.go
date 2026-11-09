@@ -84,8 +84,8 @@ func (hs *harnessState) closeLocked() {
 }
 
 // build is a harness for the session: the agent, or its specialist, with
-// the session's MCP servers and the deployment's job names. A durable
-// object has no workspace.
+// the session's MCP servers, the deployment's job names, and the session's
+// credentialed mounts for its tools. A durable object has no workspace.
 func (e *objectRuntime) build(ctx context.Context) (*tacklr.Harness, error) {
 	spec, err := adapter.ForSession(ctx, e.o.cfg.Agent, e.init.SessionID)
 	if err != nil {
@@ -96,7 +96,12 @@ func (e *objectRuntime) build(ctx context.Context) (*tacklr.Harness, error) {
 			return nil, err
 		}
 	}
-	opts := tacklr.BindTurn(spec, string(e.init.SessionID), slices.Sorted(maps.Keys(e.o.cfg.Jobs)))
+	sec, err := e.o.secrets.Get(ctx, e.init.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	bindings := adapter.BindingsForTurn(e.state.Mounts, sec.Auth)
+	opts := tacklr.BindTurn(spec, string(e.init.SessionID), slices.Sorted(maps.Keys(e.o.cfg.Jobs)), bindings)
 	if len(e.state.MCP) > 0 {
 		opts.MCPConfigs = append(slices.Clone(spec.MCPConfigs), e.state.MCP...)
 	}

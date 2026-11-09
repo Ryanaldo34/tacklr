@@ -243,9 +243,9 @@ func (b brainTools) newSaveTool(kinds []string) *Tool {
 	t := NewTool(ToolConfig{
 		Name:        "save",
 		DisplayName: "Save {kind}: {title}",
-		Description: `Save a finding, fact or memory as a durable record that later steps and sessions can search. Call when something you learned should survive this step.
+		Description: `Save a record that later steps and sessions can search. Call when something you learned should survive this step. Pass id to update a record you saved before.
 
-Returns the saved record. Fails if title is empty, kind is not one of the kinds you may save, or a field is invalid (the error names the valid choices).`,
+Returns the saved record. Fails if title is empty, kind is not one of the kinds you may save, or a field is invalid (the error names the valid choices).` + kindGuide(b.engine.Catalog(), kinds),
 		Category: message.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
@@ -291,6 +291,7 @@ type linkArgs struct {
 	To       string `json:"to" desc:"UUID or indexed file path of the target record."`
 	Relation string `json:"relation" desc:"Relation label, e.g. references, about."`
 	Note     string `json:"note,omitempty" desc:"Why they are related; search finds links by this note."`
+	Role     string `json:"role,omitempty" desc:"Optional: the part the target plays on this link, e.g. champion or cc."`
 	Remove   bool   `json:"remove,omitempty" desc:"Remove the link instead of creating it."`
 }
 
@@ -301,15 +302,16 @@ type linkResult struct {
 	Relation string `json:"relation"`
 	Linked   bool   `json:"linked"`
 	Note     string `json:"note,omitempty"`
+	Role     string `json:"role,omitempty"`
 }
 
-func (b brainTools) newLinkTool() *Tool {
-	return NewTool(ToolConfig{
+func (b brainTools) newLinkTool(relations []brain.RelationSpec) *Tool {
+	t := NewTool(ToolConfig{
 		Name:        "link",
 		DisplayName: "Link {from} → {to}",
 		Description: `Create, update or remove a relationship between two records. Call to record how they relate, so related and search can follow it.
 
-Linking the same pair again updates the note. Removing a link that is absent succeeds. Fails if an end is missing or is a part rather than a record.`,
+Linking the same pair again updates the note and role. Removing a link that is absent succeeds. Fails if an end is missing or is a part rather than a record, or if the relation does not join records of those kinds.` + relationGuide(relations),
 		Category: message.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
@@ -327,13 +329,116 @@ Linking the same pair again updates the note. Removing a link that is absent suc
 			if err != nil {
 				return "", fmt.Errorf("link: %w", err)
 			}
-			req := brain.LinkRequest{From: from, To: to, Relation: args.Relation, Meta: brain.EdgeMeta{Note: args.Note}, Remove: args.Remove}
+			relation := strings.TrimSpace(args.Relation)
+			if !args.Remove {
+				if err := b.checkEnds(ctx, scope, relations, relation, from, to); err != nil {
+					return "", fmt.Errorf("link: %w", err)
+				}
+			}
+			meta := brain.EdgeMeta{Note: strings.TrimSpace(args.Note), Role: strings.TrimSpace(args.Role)}
+			req := brain.LinkRequest{From: from, To: to, Relation: relation, Meta: meta, Remove: args.Remove}
 			if err := b.engine.Link(ctx, scope, req); err != nil {
 				return "", fmt.Errorf("link: %w", err)
 			}
-			return formatBrainJSON(linkResult{From: from.String(), To: to.String(), Relation: strings.TrimSpace(args.Relation), Linked: !args.Remove, Note: strings.TrimSpace(args.Note)})
+			return formatBrainJSON(linkResult{From: from.String(), To: to.String(), Relation: relation, Linked: !args.Remove, Note: meta.Note, Role: meta.Role})
 		},
 	})
+	names := make([]string, 0, len(relations))
+	for _, r := range relations {
+		names = append(names, r.Relation)
+	}
+	setEnum(t, "relation", names)
+	return t
+}
+
+// checkEnds checks that relation may join from and to: with no relations
+// any link goes; otherwise relation must be one of them, between records of
+// the kinds it names.
+func (b brainTools) checkEnds(ctx context.Context, scope brain.Scope, relations []brain.RelationSpec, relation string, from, to uuid.UUID) error {
+	if len(relations) == 0 {
+		return nil
+	}
+	i := slices.IndexFunc(relations, func(r brain.RelationSpec) bool { return r.Relation == relation })
+	if i < 0 {
+		names := make([]string, 0, len(relations))
+		for _, r := range relations {
+			names = append(names, r.Relation)
+		}
+		return fmt.Errorf("%w: relation %q; relations: %s", brain.ErrInvalid, relation, strings.Join(names, ", "))
+	}
+	spec := relations[i]
+	if len(spec.From) == 0 && len(spec.To) == 0 {
+		return nil
+	}
+	fromObj, err := b.engine.Get(ctx, scope, from)
+	if err != nil {
+		return fmt.Errorf("from %s: %w", from, err)
+	}
+	toObj, err := b.engine.Get(ctx, scope, to)
+	if err != nil {
+		return fmt.Errorf("to %s: %w", to, err)
+	}
+	return spec.Ends(fromObj.Kind, toObj.Kind)
+}
+
+// kindGuide describes each kind the save tool writes: what a record of it
+// holds and its fields. A kind the catalog does not have is listed by name.
+func kindGuide(catalog *brain.KindCatalog, kinds []string) string {
+	var sb strings.Builder
+	sb.WriteString("\n\nKinds you may save:")
+	for _, kind := range kinds {
+		sb.WriteString("\n- " + kind)
+		spec, ok := catalog.Get(kind)
+		if !ok {
+			continue
+		}
+		if d := strings.TrimSpace(spec.Description); d != "" {
+			sb.WriteString(": " + d)
+		}
+		var fields []string
+		for _, f := range spec.Fields {
+			field := f.Name + " (" + string(f.Type)
+			if f.Required {
+				field += ", required"
+			}
+			if len(f.Enum) > 0 {
+				field += ", one of " + strings.Join(f.Enum, "|")
+			}
+			field += ")"
+			if d := strings.TrimSpace(f.Description); d != "" {
+				field += " " + d
+			}
+			fields = append(fields, field)
+		}
+		if len(fields) > 0 {
+			sb.WriteString(" Fields: " + strings.Join(fields, "; ") + ".")
+		}
+	}
+	return sb.String()
+}
+
+// relationGuide describes each relation the link tool writes, with the
+// kinds at each end. No relations: any label goes.
+func relationGuide(relations []brain.RelationSpec) string {
+	if len(relations) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n\nRelations (from → to):")
+	for _, r := range relations {
+		sb.WriteString("\n- " + r.Relation + " (" + ends(r.From) + " → " + ends(r.To) + ")")
+		if d := strings.TrimSpace(r.Description); d != "" {
+			sb.WriteString(": " + d)
+		}
+	}
+	return sb.String()
+}
+
+func ends(kinds []string) string {
+	if len(kinds) == 0 {
+		return "any"
+	}
+	return strings.Join(kinds, " or ")
 }
 
 // setEnum makes the tool's string property prop one of values; no values
@@ -363,7 +468,7 @@ func formatBrainJSON(v any) (string, error) {
 // newBrainTools builds the knowledge tools: search, open and related; save
 // when writeKinds is not empty; link when the engine has a graph. Caller
 // must pass a non-nil engine and SearchContext.
-func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, sessionID string, writeKinds []string) []*Tool {
+func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, sessionID string, writeKinds []string, relations []brain.RelationSpec) []*Tool {
 	b := brainTools{engine: engine, sc: sc, sessionID: sessionID}
 	tools := []*Tool{b.newSearchTool(), b.newOpenTool(), b.newRelatedTool()}
 	var kinds []string
@@ -376,7 +481,7 @@ func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, sessionID stri
 		tools = append(tools, b.newSaveTool(kinds))
 	}
 	if engine.HasGraph() {
-		tools = append(tools, b.newLinkTool())
+		tools = append(tools, b.newLinkTool(relations))
 	}
 	return tools
 }

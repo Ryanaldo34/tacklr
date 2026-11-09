@@ -317,7 +317,7 @@ func TestHarness_replaysAToolRoundWithItsThinkingInOrder(t *testing.T) {
 		`{"type":"content_block_stop","index":3}`,
 		usage("tool_use"), stop), textReply("hello sent"))
 	greet := tacklr.NewTool(tacklr.ToolConfig{Name: "greet", Handler: func(context.Context) (string, error) { return "hello", nil }})
-	h, err := tacklr.NewHarness(t.Context(), tacklr.BindTurn(tacklr.AgentOptions{Model: m, Tools: []*tacklr.Tool{greet}}, "replay", nil))
+	h, err := tacklr.NewHarness(t.Context(), tacklr.BindTurn(tacklr.AgentOptions{Model: m, Tools: []*tacklr.Tool{greet}}, "replay", nil, nil))
 	if err != nil {
 		t.Fatal(err)
 	}

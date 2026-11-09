@@ -1668,3 +1668,44 @@ func TestSessionWorkflow_aWorkerSessionRunsEachPromptAsItsJob(t *testing.T) {
 		})
 	}
 }
+
+// TestSessionWorkflow_aToolReadsItsSessionAndTheTurnsCredentials: a tool
+// gets the session's id and the credentials the prompt brought, as the
+// workspace gets them.
+func TestSessionWorkflow_aToolReadsItsSessionAndTheTurnsCredentials(t *testing.T) {
+	t.Parallel()
+	env := newTestWorkflow(t)
+	creds := tacklr.NewTool(tacklr.ToolConfig{
+		Name: "creds", Access: tacklr.ToolReadAccess,
+		Handler: func(_ context.Context, _ struct{}, cc *tacklr.CallContext) (string, error) {
+			var got []string
+			for _, b := range cc.Bindings() {
+				got = append(got, b.Alias()+":"+b.Auth.Token)
+			}
+			return cc.SessionID() + " " + strings.Join(got, ","), nil
+		},
+	})
+	model := testkit.HTTPModel(t, func(_ context.Context, msgs []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		if last := lastMsg(msgs); last != nil && last.Role == message.RoleTool {
+			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: last.Content, IsComplete: true}
+			return
+		}
+		ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true,
+			ToolCalls: []message.ToolCall{{ID: "fc_creds", CallID: "call_creds", Name: "creds", Arguments: `{}`}}}
+	})
+	acts, log := registerSession(env, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{creds}})
+	// The client keeps the prompt's tokens in SecretStorage and signals the
+	// prompt without them.
+	auth := session.AuthContext{Bindings: []mount.Binding{{Provider: "google", Auth: mount.Credential{Token: "at-1"}, Params: map[string]string{mount.ParamName: "mail"}}}}
+	if err := acts.Secrets.Put(t.Context(), "sess-creds", session.Secrets{Auth: auth}); err != nil {
+		t.Fatal(err)
+	}
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "read", Auth: auth.WithoutSecrets()}})
+	signalAt(env, 100*time.Millisecond, session.Wake{Kind: session.WakeClose})
+
+	got := visibleText(finishSession(t, env, log, "sess-creds"))
+
+	if !strings.Contains(got, "sess-creds mail:at-1") {
+		t.Errorf("session events = %q, want the tool to see its session and the prompt's mail credential", got)
+	}
+}

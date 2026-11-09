@@ -19,6 +19,7 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/telemetry"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // Harness is one session's harness for one step: a model request, one
@@ -40,6 +41,9 @@ type Harness struct {
 	skillsLoader    skills.SkillLoader
 	brain           *brain.Engine
 	brainWriteKinds []string
+	brainRelations  []brain.RelationSpec
+	// bindings are the turn's credentialed mounts (BindTurn).
+	bindings []mount.Binding
 	// overflow keeps a trimmed result's full text (AgentOptions.Overflow).
 	// Nil: it is not kept.
 	overflow   Overflow
