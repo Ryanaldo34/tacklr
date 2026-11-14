@@ -146,9 +146,19 @@ type responsesRequest struct {
 	Reasoning      *reasoningDetail    `json:"reasoning,omitempty"`
 	PromptCacheKey string              `json:"prompt_cache_key,omitempty"`
 	PromptCache    *promptCacheOptions `json:"prompt_cache_options,omitempty"`
+	// Provider pins OpenRouter's routing to specific provider slugs.
+	Provider *providerPreferences `json:"provider,omitempty"`
 	// Include asks the provider for extra output fields. reasoning.encrypted_content
 	// is required to replay reasoning items statelessly (OpenAI ZDR / Azure store=false).
 	Include []string `json:"include,omitempty"`
+}
+
+// providerPreferences is OpenRouter's provider routing block. Only restricts
+// routing to the listed slugs; AllowFallbacks false makes an unavailable
+// provider fail the request instead of silently using another one.
+type providerPreferences struct {
+	Only           []string `json:"only,omitempty"`
+	AllowFallbacks bool     `json:"allow_fallbacks"`
 }
 
 // promptCacheOptions is GPT-5.6+ Responses cache policy. Not sent to xAI

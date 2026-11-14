@@ -259,6 +259,26 @@ func TestInvoke_sendsEachProvidersPromptCacheProfile(t *testing.T) {
 	}
 }
 
+// TestInvoke_pinsProviderOnly: WithProviderOnly sends OpenRouter's provider
+// routing block restricted to the given slug with fallbacks disabled.
+func TestInvoke_pinsProviderOnly(t *testing.T) {
+	t.Parallel()
+	srv, sent := provider(t, `{"type":"response.completed","response":{"status":"completed"}}`, "[DONE]")
+	m := openai.NewOpenRouter(srv.Client()).
+		WithModel("deepseek/deepseek-v4.1-flash").
+		WithProviderOnly("particle-ai/us/flex").
+		WithApiKey("k").
+		WithURL(srv.URL)
+
+	invoke(t.Context(), t, m, tacklr.ModelRequest{Messages: []*message.Message{{Role: message.RoleUser, Content: "ask"}}})
+
+	prov, _ := sent.body["provider"].(map[string]any)
+	only, _ := prov["only"].([]any)
+	if prov == nil || len(only) != 1 || only[0] != "particle-ai/us/flex" || prov["allow_fallbacks"] != false {
+		t.Fatalf("provider routing = %v, want only [particle-ai/us/flex] with fallbacks disabled", sent.body["provider"])
+	}
+}
+
 // TestInvoke_sendsTheConversationAsResponsesInput: the input pairs each
 // namespaced call with its output by call id, or by item id when no output
 // has the call id, keeps an incomplete call's
@@ -390,12 +410,12 @@ func TestInvoke_aStreamWithoutAUsableEndEndsInATypedError(t *testing.T) {
 		"a failed response with a nested error":     {[]string{`{"type":"response.failed","response":{"error":{"code":"server_error","message":"nested block"}}}`}, nil, "(server_error): nested block"},
 		"a failed response with only an error type": {[]string{`{"type":"response.failed","response":{"error":{"type":"server_error"}}}`}, nil, "server_error"},
 		"a failed response with a long flat error":  {[]string{`{"type":"response.failed","response":{"error_message":"flat failure","error_code":"bad_input","trace":"` + strings.Repeat("x", 400) + `"}}`}, nil, "(bad_input): flat failure"},
-		"an error event":                      {[]string{partial, `{"type":"error","error":{"message":"provider failed mid stream"}}`}, nil, "provider failed mid stream"},
-		"a message that only refuses":         {[]string{`{"type":"response.output_item.done","item":{"id":"msg_r","type":"message","content":[{"type":"refusal","refusal":"I cannot help with that"}]}}`, completed, "[DONE]"}, session.ErrModelRefused, "I cannot help with that"},
-		"a message that refuses with no text": {[]string{`{"type":"response.output_item.done","item":{"id":"msg_e","type":"message","content":[{"type":"refusal","refusal":""}]}}`, completed, "[DONE]"}, session.ErrModelRefused, "model refused"},
-		"done before a terminal event":        {[]string{partial, "[DONE]"}, openai.ErrIncompleteStream, "incomplete provider stream"},
-		"a close before a terminal event":     {[]string{partial}, openai.ErrIncompleteStream, "incomplete provider stream"},
-		"an event that is not JSON":           {[]string{"not-json"}, openai.ErrMalformedStream, "malformed"},
+		"an error event":                            {[]string{partial, `{"type":"error","error":{"message":"provider failed mid stream"}}`}, nil, "provider failed mid stream"},
+		"a message that only refuses":               {[]string{`{"type":"response.output_item.done","item":{"id":"msg_r","type":"message","content":[{"type":"refusal","refusal":"I cannot help with that"}]}}`, completed, "[DONE]"}, session.ErrModelRefused, "I cannot help with that"},
+		"a message that refuses with no text":       {[]string{`{"type":"response.output_item.done","item":{"id":"msg_e","type":"message","content":[{"type":"refusal","refusal":""}]}}`, completed, "[DONE]"}, session.ErrModelRefused, "model refused"},
+		"done before a terminal event":              {[]string{partial, "[DONE]"}, openai.ErrIncompleteStream, "incomplete provider stream"},
+		"a close before a terminal event":           {[]string{partial}, openai.ErrIncompleteStream, "incomplete provider stream"},
+		"an event that is not JSON":                 {[]string{"not-json"}, openai.ErrMalformedStream, "malformed"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
