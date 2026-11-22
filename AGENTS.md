@@ -1,80 +1,51 @@
-# What is Tacklr
+# Agent Expectations
 
-Tacklr is an opinionated Go agent harness SDK. It is a framework, not a bag of helpers. It defines how a turn should run and how the harness is structured.
+- WASM runtimes are based in wasmtime and implemented in rust for memory safety, latest WASM standard, and latest WASI standards
+- Untrusted, agent generated bash or code scripts are to run in Tacklr's WASM workers securely
+- The harness & runtime cores will be written in GO, and will follow all modern go idioms
+- You will never update this file or skills without explicit permission. You will never add documentation without explicit permission
+- You will never update the README.md or CONTRIBUTE.md without explicit permission
+- Do not run test suites locally that aren't relevant to your changes, aim for 100% coverage in your tests and run other basic CI checks locally before committing changes
+- Do not commit and push without explicit permission per change
+- Define modular components that can be tested in isolation without mocking code we explcitly own
+- Add integration tests only for code we can't cover with unit tests with absolute minimal mocking. We want fast, outcome-oriented tests.
+- Use realism in integration tests with local test containers
+- When writing commit, PR, or changelog descriptions - keep it brief and TL;DR with bullet points so its quick and easy to scan and read. Nobody is reading paragraphs of information and "summaries". Mention breaking changes, new feature additions, and dependencies added
+- You will not add OS-related workarounds for non linux operating systems. We only support linux for both development and production use and issues with other systems is not our problem
+- Tacklr is a large SDK, so packages and modules will remain lightweight and decoupled from one another, allowing for small binary size and not bundling code and components which aren't used
+- Untangle components and refactor as needed. Make the real fix and not temporary workarounds and bandaids
+- Keep comments out of code and only write docstrings. No comments documenting workarounds or making strangely verbose observations and callouts
 
-**Tacklr supports Linux only.** Do not add code, build tags, skips, fallbacks, docs, or workarounds for any other operating system. Build, vet, lint, and run tests on Linux (a Linux VM on a Mac); a local non-Linux problem is not a Tacklr problem.
-
-**The harness core also builds for WebAssembly** (`GOOS=js GOARCH=wasm`, `make wasm`), so a host can run it outside a Linux worker, for example in a Cloudflare Durable Object. The core is the packages in `WASM_CORE` in the Makefile. Keep Linux-only code (the `shell` jail, `vfs/fuse`), the agent's workspace (`workspace` and the `vfs` packages it builds on), and heavy SDK adapters (`mcp`, `vfs/awss3`, `vfs/azureblob`, `telemetry/export`) in their own packages that the core does not import. A component's agent tools live with the component (`web`, `shell`, `workspace`) and reach the harness through `AgentOptions.Tools`. This is not support for another operating system: do not add build tags or wasm-only code paths to the core.
-
-**The one build-tag exception is the Cloudflare bridge.** `session/durableobject/cloudflare` and the example's `main.go` (`examples/cloudflare`) are `//go:build js && wasm`, because they call `syscall/js`. Keep them thin: the object protocol, the object registry, the protocol server (`server.Connect`, `Connection.Serve`) and the example's ACP host are plain Go in other packages, tested on Linux. The bridge's own code is covered by the end-to-end test (`make cloudflare-e2e`, which needs Bun and Node), not by `make cover`. Vet and lint it with `make vet-wasm`.
-
-## Goals of the Project
-
-Design decisions should follow these four ideas.
-
-### Structured context
-
-Context is built for the work in front of the agent, not for everything that has ever been said. Planning cycles (Adaptive Case Management) produce a to-do list. Completing a to-do rebuilds a hand-off for the next work. Unused history does not stay in the window. Specialists are the same idea at a larger grain: a nested session that returns only what the parent asked for.
-
-### Cloud-native
-
-Tacklr is meant to run in the cloud: Go, JSON-RPC protocols, and Temporal so a session outlives one process. Hosts sit behind `session.Client`.
-
-### A bounded agent world
-
-The virtual filesystem gives the agent one read/write interface over the mounts the host chose (local disk, object storage, Drive, Graph, knowledge objects). The agent sees virtual paths. It does not see host paths, other sessions, or credentials. Checkpoints and session state store mount recipes, not tokens or file bytes.
-
-### Knowledge base
-
-The brain is a host-owned store the agent can query: hybrid search, an optional graph, and namespaces. Retrieval is on demand so the window is not a dump of stale text.
-
-# Coding Standards
-
-Tacklr is written in golang, so all modern idioms are to be followed. This includes iterators, generics, stdlib packages such as slice, map, sync, and strings, modern error wrapping & unwrapping, and expressions in the `new()` built-in function.
-
-## Refactoring
-
-We encourage refactoring whenever possible. We always strive to keep code clean and maintainable. If you notice obvious smells, inefficiencies, or violations of coding standards, refactor to improve the code. Do this regardless if its code directly related to the feature you are working on or not. Always aim to build the most maintainable solution. Do not build band-aids and hacky patches, always build the best and most maintainable solution. Just fix the underlying architectural issue. Boil the ocean. 
-
-## Dependencies
-
-Go has a rich standard library. Whenever possible, use the standard library over third-party packages. Third-party packages should be used as a last resort.
-
-## Testing
-
-### Philosophy
-
-We do not care about unit tests. We aim for high-value, outcome-oriented integration tests instead. With AI, the overhead of maintaining large integration tests instead of several smaller, more focused unit tests is not a factor anymore. Therefore, unit tests are not necessary in most cases. Prefer unit tests when we are testing significant, encapsulated implementation details which are not easily tested for in integration tests. We should not test implementation details when integration testing, and instead should test greater outcomes being met. We will not test for something *not existing* or *not happening* but should test for something that *should happen* or is *expected to happen* instead. This is much more effective in catching genuine regressions, making tests less brittle when implementation details change that don't change the outcome. We should aim for 100% coverage built primarily on integration tests covering as many branches as possible at once, with each test case testing a specific return path as an outcome. We should not have duplicate return path coverage across test cases. We should aim for brevity over test volume, or as few tests cases to get to 100% coverage as possible.
-
-### Test Style Guide
+## Test Guide
 
 - Follow AAA pattern (Arrange, Act, Assert)
-- Use absolute minimal mocking and opt for using test containers or in-memory implementations whenever possible
+- Use absolute minimal mocking and opt for using test containers or in-memory implementations whenever possible in integration tests
 - Test names should be self-documenting and be named after the test case they represent
+- Do not hack away at writing tests for goofy edge cases. If you need several tests for an edge case, its probably not an actual edge case or the implementation needs to be cleaner to avoid such edge cases
+- Aim for 100% coverage, write unit tests without mocking code and boundaries we own. Mock only the lowest level components such as networks. Use integration tests to test contracts between modular components and code that isn't coverable in unit tests
+- Each component & module should individually testable without heavy mocking of other components in unit tests
+- Test observable outcomes, not heavy internal behavior that could change at anytime and therefore make tests rigid
+- Avoid singletons and complex fixtures as those will lead to flaky tests that don't catch actual regressions
 
-## How to Write Code
+## Code Guide
 
-- Prefer explicitness over cleverness
-- Build small composable components with clear responsibilities rather than large abstractions that hide behavior
-- Design around interfaces that represent capabilities rather than implementation details
-- APIs consumers shouldn't have access to need to be encapsulated. As this is meant to be a public library, we don't want importers shooting themselves in the foot accessing APIs and data that should be encapsualted and hidden from the user.
-- Prefer immutable inputs and explicit outputs whenever practical
-- Build systems that can be inspected and tested at every stage
-- Before introducing an abstraction, ask:
-  - Does this abstraction add value or just obfuscate the code?
-  - Does this reduce complexity?
-  - Will this still make sense six months from now?
-  - Could this be implemented as two smaller pieces instead?
-- When multiple solutions exist:
-  - Choose the simplest design that satisfies today's requirements
-  - Prefer solutions that compose well with the existing architecture
-  - Minimize framework-specific behavior
-  - Reduce hidden state
-  - Prefer deterministic implementations over "magic"
+- Modular design: each component or piece of the puzzle should be individually testable in isolation. Decouple heavily coupled components
+- Procedural Style: we don't want endless interfaces, fake encapsulation, and pointless getters & setters. Avoid enterprise java-like code. Do not make interfaces for the sack of writing mocks easily, this is bad. Interfaces should only be used polymorphism is actually needed outside of testing mocks. Getters/setters should only be used when locking is needed, everything else should just be public. Favor actual encapsulation at the package/module level by not exporting things that are internal details a programmer should have access to. Keep items private that would expose heavy internal details to a consumer unnecessarily. Everything else should be public.
+- Keep call stack flat and minimal: we don't want endless helper function wrappers so the implementation should be readable without having to click through several pointless wrappers which don't add any testability or reusability benefits
+- All possible errors must be handled at the boundary and explcitly documented. Errors that can be handled internally should be handled internally, only surface errors the caller or consumer needs to know about.
+- Keep error wrapping absolutely minimal and only wrap an error when there is a benefit to conditionally implementing specific error handling logic. Keep error descriptions minimal and descriptive to what went wrong and reconcillation steps. Also include any relevant data that can be used to handle the error or log an unrecoverable crash
+- Telemetry spans should have static attributes, the same trace should go through each system so the trace has the full picture across all systems it touches. Logs within spans should contain the dynamic information. Keep spans minimal and create a span for grouped work that is undeterministic such as anything related to I/O. Anything worth exposing in telemetry to give engineers the full picture of performance and behavior should be logged and exposed. End-to-end observability is a hard requirement
 
-## Planning
+# What is Tacklr
 
-When planning, be extremely detailed and verbose, offering several possible solutions we can explore together. Ask any clarifying questions or request any additional context or information for anything that is unclear. Never make any assumptions. Use ASD-STE100 for writing and nothing that falls outside of its general writing specifications, allowed vocabulary, etc.
+Tacklr is a linux-based cloud-native agent operating & security system. It is a framework for defining & building tools, processing input & output, wiring telemetry & logging into arbitrary observability stacks, securely running untrusted llm-generated code in WASM-based sandboxes, and handling complex parallel agent swarms & workflows.
+- A core that handles tool calls, inference/model API quirks, async subagents and long-running commands, parallelism, and agent swarm coordination; written in go and can compile to lightweight WASM
+- A supervisor that coordinates WASM-based sandboxed workers to run untrusted LLM-generated code and bash scripts
+- A rust-based sandbox worker which is managed by the supervisor
+- Cloud-nativeness built to run on durable runtimes such as Azure Durable Functions, Lambda Durable Functions, Temporal, Durable Objects, and more. We do not care about local.
+- Worker runtime monitoring and configurable security policies; risky calls reviewable by security teams for approval/denial
+
+**The harness core also builds for WebAssembly** (`GOOS=js GOARCH=wasm`, `make wasm`), so a host can run it outside a Linux worker, for example in a Cloudflare Durable Object. The core is the packages in `WASM_CORE` in the Makefile. Keep Linux-only code (the `shell` jail, `vfs/fuse`), the agent's workspace (`workspace` and the `vfs` packages it builds on), and heavy SDK adapters (`mcp`, `vfs/awss3`, `vfs/azureblob`, `telemetry/export`) in their own packages that the core does not import. A component's agent tools live with the component (`web`, `shell`, `workspace`) and reach the harness through `AgentOptions.Tools`. This is not support for another operating system: do not add build tags or wasm-only code paths to the core.
 
 # Agent Checklist Before Committing
 

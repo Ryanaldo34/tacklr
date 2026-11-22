@@ -36,3 +36,6 @@ go.work.sum
 
 bin/
 .bin/
+
+# Cargo build output of the sandbox worker.
+sandbox/worker/target/

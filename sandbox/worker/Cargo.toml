@@ -1,0 +1,29 @@
+[package]
+name = "tacklr-sandbox-worker"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+license = "Apache-2.0"
+publish = false
+description = "A sandboxed worker process for untrusted, agent-generated code. The Tacklr supervisor starts it."
+
+[dependencies]
+landlock = "0.4.8"
+libc = "0.2.191"
+seccompiler = "0.5.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+# The sandbox tests start this test binary again as a child process, so they
+# need their own main.
+[[test]]
+name = "jail"
+harness = false
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"

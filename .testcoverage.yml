@@ -34,6 +34,13 @@ override:
     threshold: 99
   - path: ^server/acp$
     threshold: 99
+  # Uncovered: socketpair(2) and net.FileConn failing in startProcess
+  # (fd exhaustion), and a supervisor that sends neither ready nor exit
+  # first, which our supervisor never does.
+  - path: ^sandbox$
+    threshold: 98
+  - path: ^sandbox/supervisor$
+    threshold: 98
   - path: ^session/durableobject$
     threshold: 96
   - path: ^session/durableobject/dotest$
