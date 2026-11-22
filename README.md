@@ -6,15 +6,21 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Ryanaldo34/tacklr)](https://github.com/Ryanaldo34/tacklr/blob/main/go.mod)
 [![License](https://img.shields.io/github/license/Ryanaldo34/tacklr)](https://github.com/Ryanaldo34/tacklr/blob/main/LICENSE)
 
-Tacklr is a Go framework for AI agents that run as durable sessions. You give it a model and tools. Tacklr runs the agent loop and records every step, so a session can wait days for a person, survive a crash or a deploy, and continue on another machine.
+Tacklr is a Linux-based, cloud-native operating and security system for AI agents. It has three parts:
+
+- **The core (Go).** It runs the agent loop as a durable session: model requests and their API quirks, tool calls, async subagents, long-running commands, and agent swarms. It records every step, so a session can wait days for a person, survive a crash or a deploy, and continue on another machine. It builds for WebAssembly.
+- **The supervisor (Go).** It runs on each worker host and starts, watches, and kills sandboxed workers for the session runtime, over mTLS.
+- **The sandbox worker (Rust).** It runs untrusted, LLM-generated code and bash scripts in a WebAssembly runtime (wasmtime), inside Linux namespaces, Landlock, and seccomp.
 
 ## Features
 
-- **Durable sessions.** Run sessions on [Temporal](https://temporal.io) or on Durable Objects (Cloudflare Workers). Each model request and tool call runs once, even across restarts.
+- **Durable sessions.** Run sessions on [Temporal](https://temporal.io) or on Durable Objects (Cloudflare Workers), with more durable runtimes (Azure Durable Functions, Lambda durable functions) to come. Each model request and tool call runs once, even across restarts.
 - **Claude and OpenAI.** Use `anthropic` for Claude (the Claude API or Microsoft Foundry), `openai` for any endpoint that serves the OpenAI Responses API, or implement `tacklr.Model` yourself.
 - **Focused context.** The agent plans its work as a to-do list. Finishing a to-do replaces the history with a short hand-off, and a full window collapses into a summary.
 - **People in the loop.** A tool can pause the session to ask a question or a permission, and continue when the answer comes back.
 - **A sandboxed workspace.** The agent sees one `/workspace` built from local disk, S3, Azure Blob, Google Drive, Microsoft 365, or Git, plus an optional shell that sees only that workspace.
+- **Sandboxed code execution.** Untrusted code runs in a separate worker process per sandbox: new namespaces, no file system or network access (Landlock), and a seccomp allow-list. The supervisor and the worker's life cycle are in place; the wasmtime runtime comes next.
+- **Security policies (planned).** Worker runtime monitoring and configurable policies, with risky calls sent to security teams to approve or deny.
 - **A knowledge store.** Hybrid search, an optional graph, and namespaces for multi-tenant data.
 - **Standard protocols.** Serve clients over [ACP](https://agentclientprotocol.com), connect [MCP](https://modelcontextprotocol.io) servers, and trace every turn with OpenTelemetry.
 - **Small binaries.** Cloud adapters use plain HTTP instead of vendor SDKs, and the core builds for WebAssembly.
@@ -25,7 +31,7 @@ Tacklr is a Go framework for AI agents that run as durable sessions. You give it
 go get github.com/ryanaldo34/tacklr
 ```
 
-Tacklr needs Go 1.27 or later and runs on Linux.
+Tacklr needs Go 1.27 or later and runs on Linux. The sandbox worker needs Rust (the version in `sandbox/worker/rust-toolchain.toml`) and Linux 6.12 or later (Landlock ABI 6).
 
 ## Quick start
 
@@ -126,11 +132,14 @@ flowchart LR
     runtime -- "runs each step once" --> harness["Harness<br/>model · tools · plan · workspace"]
     harness --> model["Model API"]
     runtime --> stores[("Postgres<br/>sessions · credentials · knowledge")]
+    harness -- "mTLS · HTTP/2" --> supervisor["Supervisor<br/>one per worker host"]
+    supervisor -- "socket pair" --> worker["Sandbox worker (Rust)<br/>namespaces · Landlock · seccomp<br/>wasmtime"]
 ```
 
 - A **host** is a stateless server. It talks to sessions only through `session.Client`, so it scales like any web service.
 - The **runtime** keeps each session durable. On Temporal a session is a workflow, and each model request and tool call is an activity.
 - The **harness** does the work of one step: it calls the model, runs a tool, or commits the result to the context window.
+- The **supervisor** starts one **sandbox worker** process for each stream that the runtime opens (`sandbox.Client`). The worker lives as long as its stream. The supervisor does not trust the worker: it checks each frame, and it kills a worker that breaks the protocol.
 
 See [Concepts](docs/concepts.md) for sessions, turns, rounds, and the context window.
 
@@ -164,9 +173,10 @@ Read [AGENTS.md](AGENTS.md) for the coding and testing standards. Tacklr support
 make cover   # all tests with the race detector, and the coverage gate
 make lint
 make wasm    # checks that the core still builds for WebAssembly
+make rust-lint rust-cover   # the sandbox worker: clippy, tests, and its coverage gate
 ```
 
-The tests start their own Postgres, Helix, Temporal, S3, and Azure Blob containers, so they need Docker, FUSE, and user namespaces.
+The tests start their own Postgres, Helix, Temporal, S3, and Azure Blob containers, so they need Docker, FUSE, and user namespaces. The sandbox tests build the Rust worker with cargo.
 
 ## License
 

@@ -125,6 +125,8 @@ jobs:
       - name: Install FUSE
         run: sudo apt-get update && sudo apt-get install -y fuse3
 
+      # The sandbox/supervisor tests build the Rust worker with cargo
+      # (preinstalled on the runner) and need Landlock ABI 6 (Linux 6.12).
       # One run: race detector and coverage. Testcontainers starts Postgres
       # (pgvector), Helix and Temporal; nothing is pulled or built beforehand.
       - name: Test (race + coverage)
@@ -267,3 +269,25 @@ jobs:
         run: |
           cd examples/cloudflare/worker && bun install --frozen-lockfile && bun test e2e
           cd ../../.. && ./scripts/wasm-size.sh examples/cloudflare/worker/build/tacklr.wasm
+
+  sandbox-worker:
+    name: Sandbox worker (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # rustup on the runner installs the toolchain and components of
+      # sandbox/worker/rust-toolchain.toml when cargo first runs there.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Format (cargo fmt)
+        run: make rust-fmt-check
+
+      - name: Clippy
+        run: make rust-lint
+
+      # The sandbox tests need Landlock ABI 6 (Linux 6.12) or later.
+      - name: Test and coverage
+        run: make rust-cover
