@@ -3,6 +3,8 @@ package wire
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -32,4 +34,10 @@ func TestReadRefusesFramesItCannotTrust(t *testing.T) {
 			require.EqualError(t, err, c.err)
 		})
 	}
+}
+
+func TestWriteRefusesAMessageLargerThanTheLimit(t *testing.T) {
+	err := Write(io.Discard, Message{Type: strings.Repeat("x", MaxBody)})
+
+	require.EqualError(t, err, "wire: message of 1048587 bytes is larger than 1048576")
 }

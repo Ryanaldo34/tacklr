@@ -62,12 +62,17 @@ type Exit struct {
 	Signal string `json:"signal,omitempty"`
 }
 
-// Write writes m as one frame, in one write.
+// Write writes m as one frame, in one write. It refuses a message whose
+// body is larger than MaxBody, as Read does.
 func Write(w io.Writer, m Message) error {
 	body, _ := json.Marshal(m)
-	frame := make([]byte, headerSize, headerSize+len(body))
-	binary.BigEndian.PutUint32(frame, uint32(len(body))) //nolint:gosec
-	frame[4] = kindControl
+	length := len(body)
+	if length < 0 || length > MaxBody {
+		return fmt.Errorf("wire: message of %d bytes is larger than %d", length, MaxBody)
+	}
+	frame := make([]byte, 0, headerSize+length)
+	frame = binary.BigEndian.AppendUint32(frame, uint32(length))
+	frame = append(frame, kindControl)
 	_, err := w.Write(append(frame, body...))
 	return err
 }
