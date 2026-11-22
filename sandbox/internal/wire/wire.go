@@ -70,10 +70,10 @@ func Write(w io.Writer, m Message) error {
 	if length < 0 || length > MaxBody {
 		return fmt.Errorf("wire: message of %d bytes is larger than %d", length, MaxBody)
 	}
-	frame := make([]byte, 0, headerSize+length)
-	frame = binary.BigEndian.AppendUint32(frame, uint32(length))
-	frame = append(frame, kindControl)
-	_, err := w.Write(append(frame, body...))
+	var header [headerSize]byte
+	binary.BigEndian.PutUint32(header[:4], uint32(length))
+	header[4] = kindControl
+	_, err := w.Write(append(header[:], body...))
 	return err
 }
 
