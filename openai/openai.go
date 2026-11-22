@@ -34,6 +34,9 @@ type Model struct {
 	// promptCacheFor overrides cache-profile resolution when non-nil.
 	// NewOpenRouter pins OpenRouter's key-only profile here.
 	promptCacheFor func(model, baseURL, key string) promptCache
+	// providerOnly pins routing to these provider slugs with fallbacks off.
+	// Empty leaves provider choice to the endpoint.
+	providerOnly []string
 }
 
 var (
@@ -88,6 +91,13 @@ func (s *Model) ModelTelemetryIdentity() telemetry.ModelIdentity {
 
 func (s *Model) WithURL(url string) *Model {
 	s.baseURL = url
+	return s
+}
+
+// WithProviderOnly pins OpenRouter routing to the given provider slugs and
+// disables fallbacks. Endpoints that ignore provider routing are unaffected.
+func (s *Model) WithProviderOnly(slugs ...string) *Model {
+	s.providerOnly = slugs
 	return s
 }
 
@@ -203,6 +213,9 @@ func (s *Model) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tackl
 		Tools:   toolsJSON,
 		Stream:  true,
 		Include: []string{"reasoning.encrypted_content"},
+	}
+	if len(s.providerOnly) > 0 {
+		reqBody.Provider = &providerPreferences{Only: s.providerOnly}
 	}
 	if tacklr.ToolChoiceNone(ctx) {
 		reqBody.ToolChoice = "none"
