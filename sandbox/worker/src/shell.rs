@@ -95,7 +95,11 @@ impl Packages {
     pub fn compile(dir: &Path) -> anyhow::Result<usize> {
         use wasmer::sys::{CpuFeature, Cranelift, Target, Triple};
 
-        let target = Target::new(Triple::host(), CpuFeature::set());
+        #[cfg(target_arch = "x86_64")]
+        let features = CpuFeature::SSE2.into();
+        #[cfg(not(target_arch = "x86_64"))]
+        let features = CpuFeature::set();
+        let target = Target::new(Triple::host(), features);
         let engine: Engine = EngineBuilder::new(Cranelift::default())
             .set_target(Some(target))
             .engine()
