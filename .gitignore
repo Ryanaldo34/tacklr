@@ -39,3 +39,7 @@ bin/
 
 # Cargo build output of the sandbox worker.
 sandbox/worker/target/
+
+# WASIX packages fetched by scripts/sandbox-packages.sh.
+sandbox/worker/packages/*.webc
+sandbox/worker/packages/*.part
