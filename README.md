@@ -18,7 +18,7 @@ Tacklr is a Linux-based, cloud-native operating and security system for AI agent
 - **Claude and OpenAI.** Use `anthropic` for Claude (the Claude API or Microsoft Foundry), `openai` for any endpoint that serves the OpenAI Responses API, or implement `tacklr.Model` yourself.
 - **Focused context.** The agent plans its work as a to-do list. Finishing a to-do replaces the history with a short hand-off, and a full window collapses into a summary.
 - **People in the loop.** A tool can pause the session to ask a question or a permission, and continue when the answer comes back.
-- **A sandboxed workspace.** The agent sees one `/workspace` built from local disk, S3, Azure Blob, Google Drive, Microsoft 365, or Git, plus an optional `run_command` shell that sees only that workspace.
+- **A sandboxed workspace.** The agent sees one `/workspace` built from local disk, S3, Azure Blob, Google Drive, or Microsoft 365, plus an optional `run_command` shell that sees only that workspace.
 - **Sandboxed code execution.** `run_command` runs each bash script in its own worker process: WASIX bash with no network, new namespaces, no host file system access (Landlock), and a seccomp allow-list with no executable memory and no new processes. Documents read as their text and cannot be written.
 - **Security policies (planned).** Worker runtime monitoring and configurable policies, with risky calls sent to security teams to approve or deny.
 - **A knowledge store.** Hybrid search, an optional graph, and namespaces for multi-tenant data.

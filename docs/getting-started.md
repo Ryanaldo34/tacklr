@@ -108,7 +108,7 @@ func agentWorkspace() workspace.Config {
 }
 ```
 
-The agent gets the `read`, `write`, `write_document`, and `write_spreadsheet` tools. Set `worker.Config.Sandbox` (a `sandbox.Client` of a sandbox supervisor) to also give it `run_command`, a bash shell in a sandboxed worker that sees only the session's workspace. See [Workspace](workspace.md) for S3, Azure Blob, Google Drive, Microsoft 365, and Git.
+The agent gets the `read`, `write`, `write_document`, and `write_spreadsheet` tools. Set `worker.Config.Sandbox` (a `sandbox.Client` of a sandbox supervisor) to also give it `run_command`, a bash shell in a sandboxed worker that sees only the session's workspace. See [Workspace](workspace.md) for S3, Azure Blob, Google Drive, and Microsoft 365.
 
 ## Add a knowledge store
 

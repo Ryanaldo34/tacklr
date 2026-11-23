@@ -29,10 +29,10 @@ type GitRepo struct {
 }
 
 // Git clones a remote onto local disk with the git CLI and mounts the working
-// tree like Local: writes go to the checkout on disk. The agent runs every git
-// command (status, commit, push, …) itself through run_command, so the
-// environment needs git, and pushing needs credentials the environment gives
-// the shell. The clone credential is not kept.
+// tree like Local: writes go to the checkout on disk. The worker needs git
+// (and ssh for SSH remotes) to clone. The agent edits the working tree; the
+// sandbox of run_command has no git, so the agent cannot commit or push. The
+// clone credential is not kept.
 //
 // The first open for a session clones; later opens on the same worker reuse
 // the checkout as the agent left it. A checkout lives on worker disk only:

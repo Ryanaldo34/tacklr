@@ -41,28 +41,9 @@ A member's options: `.ReadOnly()` refuses writes, and `.NotIndexed()` keeps its 
 | `vfs.Blob(api, container)` | `vfs/azureblob` for `api` | An Azure Blob container. |
 | `vfs.Drive(api, holder)` | `vfs` | A user's Google Drive, with native Docs and Sheets. |
 | `vfs.Graph(api, holder, account)` | `vfs` | A user's OneDrive or a SharePoint library. |
-| `vfs.Git(repo)` | `vfs` | A clone of a repository on the worker's disk. |
 | `vfs.Union(opens...)` | `vfs` | A read-only merge of several sources, for example skill packs. |
 
 The S3 and Azure Blob adapters are in their own packages, so a worker links a cloud SDK only when it uses it. The Google and Microsoft adapters use the REST APIs over `net/http` and link no vendor SDK.
-
-### Git
-
-`vfs.Git` clones one remote into `Dir/<session>/<member>` on the worker's disk and mounts the working tree. The first open in a session clones; later opens on the same worker reuse the checkout.
-
-```go
-api := vfs.GitRepo{
-	URL:   "https://github.com/acme/api.git",
-	Auth:  vfs.GitToken("x-access-token", tokenFromVault), // a func(ctx) (string, error); or vfs.GitSSHKey(key, knownHosts)
-	Ref:   "main",                                // empty: the remote's HEAD
-	Depth: 1,                                     // 0: full history
-	Dir:   "/var/lib/tacklr/git",
-}
-```
-
-- The agent runs git itself (`status`, `commit`, `push`) with `run_command`, so the worker needs `git`, and `ssh` for SSH remotes.
-- The clone credential is used once and is not written to `.git/config`. To push, the shell needs credentials of its own, and the agent can read anything the shell can use.
-- The checkout is on one worker's disk. Work that is not pushed is lost when the session moves to another worker.
 
 ## Users' own folders
 

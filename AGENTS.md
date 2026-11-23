@@ -1,6 +1,6 @@
 # Agent Expectations
 
-- WASM runtimes are based in Wasmer with WASIX (POSIX processes, pipes and threads in WASM) and implemented in rust for memory safety
+- WASM runtimes are based in wasmtime and implemented in rust for memory safety, latest WASM standard, and latest WASI standards
 - Untrusted, agent generated bash or code scripts are to run in Tacklr's WASM workers securely
 - The harness & runtime cores will be written in GO, and will follow all modern go idioms
 - You will never update this file or skills without explicit permission. You will never add documentation without explicit permission
@@ -39,13 +39,11 @@
 # What is Tacklr
 
 Tacklr is a linux-based cloud-native agent operating & security system. It is a framework for defining & building tools, processing input & output, wiring telemetry & logging into arbitrary observability stacks, securely running untrusted llm-generated code in WASM-based sandboxes, and handling complex parallel agent swarms & workflows.
-- A core that handles tool calls, inference/model API quirks, async subagents and long-running commands, parallelism, and agent swarm coordination; written in go and can compile to lightweight WASM
+- A core that handles tool calls, inference/model API quirks, async subagents and long-running commands, parallelism, and agent swarm coordination; written in go and can compile to lightweight WASM to run in JS runtimes
 - A supervisor that coordinates WASM-based sandboxed workers to run untrusted LLM-generated code and bash scripts
 - A rust-based sandbox worker which is managed by the supervisor
 - Cloud-nativeness built to run on durable runtimes such as Azure Durable Functions, Lambda Durable Functions, Temporal, Durable Objects, and more. We do not care about local.
 - Worker runtime monitoring and configurable security policies; risky calls reviewable by security teams for approval/denial
-
-**The harness core also builds for WebAssembly** (`GOOS=js GOARCH=wasm`, `make wasm`), so a host can run it outside a Linux worker, for example in a Cloudflare Durable Object. The core is the packages in `WASM_CORE` in the Makefile. Keep Linux-only code (the `shell` jail, `vfs/fuse`), the agent's workspace (`workspace` and the `vfs` packages it builds on), and heavy SDK adapters (`mcp`, `vfs/awss3`, `vfs/azureblob`, `telemetry/export`) in their own packages that the core does not import. A component's agent tools live with the component (`web`, `shell`, `workspace`) and reach the harness through `AgentOptions.Tools`. This is not support for another operating system: do not add build tags or wasm-only code paths to the core.
 
 # Agent Checklist Before Committing
 
