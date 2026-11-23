@@ -21,10 +21,11 @@ import (
 )
 
 // TestACP_vfsBindRefreshUnbind: a client binds a backend to the session's
-// workspace, and the agent reads a file from it; the agent refreshes and
-// unbinds bindings, and refuses a bind with no backends, a refresh of no
+// workspace, and the turn's tools get the binding with its token (as
+// run_command passes it to the sandbox); the client refreshes and unbinds
+// bindings, and the server refuses a bind with no backends, a refresh of no
 // binding or with no provider, and an unbind with no session; after the
-// unbind the file is not found.
+// unbind the turn has no docs binding.
 func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -40,15 +41,19 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 			}
 		}
 		ch <- tacklr.LLMResponseChunk{
-			Type: session.EventFunctionCall,
-			ToolCalls: []message.ToolCall{{
-				ID: "read-1", CallID: "read-1", Name: "read",
-				Arguments: `{"path":"/workspace/docs/hello.txt"}`,
-			}},
+			Type:       session.EventFunctionCall,
+			ToolCalls:  []message.ToolCall{{ID: "bound-1", CallID: "bound-1", Name: "bound", Arguments: `{}`}},
 			IsComplete: true,
 		}
 	})
-	r := acptest.NewWorkspaceRuntime(t, strategy, tacklr.AgentOptions{}, workspace.Config{Open: func(ctx context.Context, sid string, req vfs.Request) (*vfs.MountSession, error) {
+	bound := tacklr.NewTool(tacklr.ToolConfig{Name: "bound", Handler: func(_ context.Context, _ struct{}, cc *tacklr.CallContext) (string, error) {
+		var out []string
+		for _, b := range cc.Bindings() {
+			out = append(out, b.Alias()+"="+b.Auth.Token)
+		}
+		return "bound: " + strings.Join(out, ","), nil
+	}})
+	r := acptest.NewWorkspaceRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{bound}}, workspace.Config{Open: func(ctx context.Context, sid string, req vfs.Request) (*vfs.MountSession, error) {
 		if _, ok := vfs.BindingByName(req.Bindings, "docs"); !ok {
 			if _, ok := vfs.BindingByName(req.Bindings, "local"); !ok {
 				return vfs.Tree()(ctx, sid, req)
@@ -70,8 +75,8 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 
 	read, frames := c.Say(sessionID, "read")
 	body, _ := json.Marshal(append(frames, read))
-	if !strings.Contains(string(body), "from-workspace") {
-		t.Fatalf("want workspace file in prompt stream, got %s", body)
+	if !strings.Contains(string(body), "docs=tok1") {
+		t.Fatalf("want the docs binding with its token in the turn, got %s", body)
 	}
 
 	expires := time.Now().Add(time.Hour).UTC()
@@ -92,10 +97,7 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	again, frames := c.Say(sessionID, "again")
 	blob, _ := json.Marshal(append(frames, again))
 	out := string(blob)
-	if strings.Contains(out, "from-workspace") {
-		t.Fatalf("workspace still readable after unbind: %s", out)
-	}
-	if !strings.Contains(out, "not found") && !strings.Contains(out, "tool") {
-		t.Fatalf("want missing workspace after unbind, got %s", out)
+	if !strings.Contains(out, "bound: ") || strings.Contains(out, "docs=") {
+		t.Fatalf("want the turn without the docs binding after unbind, got %s", out)
 	}
 }

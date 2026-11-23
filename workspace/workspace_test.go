@@ -1,19 +1,13 @@
 package workspace
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
-
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/adapters"
@@ -36,14 +30,6 @@ func mustMountRequest(t testing.TB, sessionID string, req vfs.Request, members .
 	return ms
 }
 
-func toolNames(tools []*tacklr.Tool) []string {
-	names := make([]string, 0, len(tools))
-	for _, t := range tools {
-		names = append(names, t.Name())
-	}
-	return names
-}
-
 func writeSkill(t *testing.T, root, dir, name string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
@@ -55,8 +41,7 @@ func writeSkill(t *testing.T, root, dir, name string) {
 	}
 }
 
-// TestConfigBind_addsTheWorkspaceToTheTurn: Bind adds the workspace tools
-// after the host's own, the index tools only with a brain, the workspace's
+// TestConfigBind_addsTheWorkspaceToTheTurn: Bind adds the workspace's
 // skills unless the agent has its own loader, and an Overflow under
 // OverflowPath.
 func TestConfigBind_addsTheWorkspaceToTheTurn(t *testing.T) {
@@ -64,31 +49,23 @@ func TestConfigBind_addsTheWorkspaceToTheTurn(t *testing.T) {
 	root := t.TempDir()
 	writeSkill(t, filepath.Join(root, "skills"), "research", "research")
 	ms := mustMountTree(t, "bind", vfs.At("work", vfs.Local(root)))
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
-	if err != nil {
-		t.Fatal(err)
-	}
-	host := tacklr.NewTool(tacklr.ToolConfig{Name: "host", Handler: func(context.Context) (string, error) { return "", nil }})
 	own := skills.Loader{Root: t.TempDir()}
 	cfg := Config{SkillsPath: "/workspace/work/skills", OverflowPath: "/workspace/work/overflow"}
 
-	plain, plainErr := cfg.Bind(tacklr.AgentOptions{Tools: []*tacklr.Tool{host}}, ms)
-	withBrain, brainErr := cfg.Bind(tacklr.AgentOptions{Brain: eng, SearchNamespace: storetest.Namespace(t, "id", uuid.NewString()), SkillsLoader: own}, ms)
+	plain, plainErr := cfg.Bind(tacklr.AgentOptions{}, ms)
+	withLoader, loaderErr := cfg.Bind(tacklr.AgentOptions{SkillsLoader: own}, ms)
 	loaded, loadErr := plain.SkillsLoader.Load(t.Context())
 	kept, keepErr := plain.Overflow.Keep(t.Context(), "s1", "call-1", "the full result")
-	read, readErr := toolsOn(ms)["read"](t.Context(), `{"path":"`+kept+`"}`)
 
-	if plainErr != nil || !slices.Equal(toolNames(plain.Tools), []string{"host", "read", "write", "write_document", "write_spreadsheet"}) {
-		t.Errorf("Bind = %v %v, want the host tool then the workspace tools", toolNames(plain.Tools), plainErr)
-	}
-	if brainErr != nil || !slices.Equal(toolNames(withBrain.Tools), []string{"read", "write", "write_document", "write_spreadsheet", "index_file", "unindex"}) || withBrain.SkillsLoader != own {
-		t.Errorf("Bind with a brain and a loader = %v %v, want the index tools and the agent's own loader", toolNames(withBrain.Tools), brainErr)
+	if plainErr != nil || loaderErr != nil || withLoader.SkillsLoader != own {
+		t.Errorf("Bind = %v, with a loader %v, want the agent's own loader kept", plainErr, loaderErr)
 	}
 	if loadErr != nil || len(loaded) != 1 || loaded[0].Path != "/workspace/work/skills/research/SKILL.md" {
 		t.Errorf("workspace skills = %+v %v, want research from SkillsPath", loaded, loadErr)
 	}
-	if keepErr != nil || kept != "/workspace/work/overflow/s1/call-1.txt" || readErr != nil || !strings.Contains(read, "the full result") {
-		t.Errorf("overflow kept %q %v, read %q %v, want the result where read finds it", kept, keepErr, read, readErr)
+	data, readErr := ms.Route(t.Context(), kept).ReadFile(t.Context())
+	if keepErr != nil || kept != "/workspace/work/overflow/s1/call-1.txt" || readErr != nil || string(data) != "the full result" {
+		t.Errorf("overflow kept %q %v, read %q %v, want the result in the workspace", kept, keepErr, data, readErr)
 	}
 }
 

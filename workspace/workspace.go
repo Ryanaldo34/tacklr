@@ -1,7 +1,7 @@
-// Package workspace is the agent's /workspace on a turn: the tree of mounts
-// the host chose (package vfs), and what the harness gets from it. That is
-// the read and write tools, index_file and unindex into the brain, the
-// skills directory, and a place to keep results trimmed from the window.
+// Package workspace is what the harness gets from the agent's /workspace on
+// a turn (package vfs): the skills directory, and a place to keep results
+// trimmed from the window. The agent reads and writes the workspace's files
+// with run_command (package sandbox).
 //
 // The harness core does not import this package. A Linux worker host wires
 // it in (worker.Config.Workspace); a host without one has no workspace.
@@ -13,14 +13,11 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
-	"slices"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
-	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
 // DefaultSkillsPath is where skills load from when Config.SkillsPath is
@@ -39,25 +36,11 @@ type Config struct {
 	// from the window, at <OverflowPath>/<session>/<call id>.txt. Empty:
 	// the full text is not kept.
 	OverflowPath string
-	// IndexReaders resolves a file's source ACL when index_file indexes it
-	// (see vfsindex.MountIndexer.Readers). Nil indexes files visible to the
-	// whole SearchNamespace.
-	IndexReaders vfsindex.ReadersFunc
 }
 
-// Bind returns opts for a turn whose workspace is ms: its Tools, its
-// IndexTools when opts has a Brain, its skills directory unless opts has a
-// SkillsLoader, and its Overflow when OverflowPath is set.
+// Bind returns opts for a turn whose workspace is ms: its skills directory
+// unless opts has a SkillsLoader, and its Overflow when OverflowPath is set.
 func (c Config) Bind(opts tacklr.AgentOptions, ms *vfs.MountSession) (tacklr.AgentOptions, error) {
-	opts.Tools = append(slices.Clone(opts.Tools), Tools(ms)...)
-	if opts.Brain != nil {
-		opts.Tools = append(opts.Tools, IndexTools(&vfsindex.MountIndexer{
-			VFS:     ms,
-			Brain:   opts.Brain,
-			Scope:   brain.Scope{Namespace: opts.SearchNamespace.Clone(), Principals: slices.Clone(opts.SearchPrincipals)},
-			Readers: c.IndexReaders,
-		})...)
-	}
 	if opts.SkillsLoader == nil {
 		opts.SkillsLoader = Skills(ms, c.SkillsPath)
 	}
@@ -69,19 +52,6 @@ func (c Config) Bind(opts tacklr.AgentOptions, ms *vfs.MountSession) (tacklr.Age
 		opts.Overflow = o
 	}
 	return opts, nil
-}
-
-// Tools are read, write, write_document and write_spreadsheet on ms.
-func Tools(ms *vfs.MountSession) []*tacklr.Tool {
-	v := vfsTools{ms: ms}
-	return []*tacklr.Tool{v.newRead(), v.newWrite(), v.newWriteDocument(), v.newWriteSpreadsheet()}
-}
-
-// IndexTools are index_file and unindex, which put workspace files into
-// the brain through ix and take them out.
-func IndexTools(ix *vfsindex.MountIndexer) []*tacklr.Tool {
-	v := vfsIndexTools{idx: ix}
-	return []*tacklr.Tool{v.newIndexFile(), v.newUnindex()}
 }
 
 // Skills loads one skill per directory under dir on ms (empty:
