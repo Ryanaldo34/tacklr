@@ -200,7 +200,8 @@ func ParseFS(body []byte) (FSRequest, []byte, error) {
 func WriteFS(w io.Writer, reply FSReply, data []byte) error {
 	reply.Type = "fs_reply"
 	encoded, _ := json.Marshal(reply)
-	body := binary.BigEndian.AppendUint32(make([]byte, 0, 4+len(encoded)+len(data)), uint32(len(encoded))) //nolint:gosec // a reply is far below 4 GiB
-	body = append(append(body, encoded...), data...)
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], uint32(len(encoded))) //nolint:gosec // a reply is far below 4 GiB
+	body := append(append(header[:], encoded...), data...)
 	return write(w, KindFS, body)
 }
