@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
-	"github.com/ryanaldo34/tacklr/workspace"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/contrib/workflowstreams"
@@ -64,7 +63,6 @@ func activityError(ctx context.Context, err error) error {
 type activities struct {
 	Agent          tacklr.AgentOptions
 	Store          session.Store
-	Workspace      workspace.Config
 	Sandbox        *sandbox.Client
 	Fallback       session.EventLog
 	DisableStreams bool
@@ -295,7 +293,7 @@ func (a *activities) harness(ctx context.Context, in stepSession) (harnessSpec, 
 				return nil, err
 			}
 		}
-		return constructTurn(ctx, spec, a.Workspace, a.Sandbox, string(in.SessionID), bindings, in.MCPServers, jobs)
+		return constructTurn(ctx, spec, a.Sandbox, string(in.SessionID), bindings, in.MCPServers, jobs)
 	}}, nil
 }
 

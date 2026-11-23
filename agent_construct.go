@@ -48,10 +48,11 @@ type AgentOptions struct {
 	// for a namespaced tool) that run without a permission prompt. A user's
 	// reject-always still wins. An unknown name fails construction.
 	AllowTools []string
-	// SkillsLoader loads the skills the agent can read: skills.Loader for a
-	// local directory, or the workspace's skills directory (package
-	// workspace). Nil: no skills.
-	SkillsLoader skills.SkillLoader
+	// Skills is where the agent's skills come from (skills.Dir for a local
+	// directory, or the host's own Provider). The system prompt lists each
+	// skill's name and description; read_skill reads one through it. Nil:
+	// no skills.
+	Skills skills.Provider
 	// Brain enables the knowledge tools (search, open, related, save, and
 	// link when the engine has a graph) when non-nil. Workers inherit the
 	// same engine. The host builds the store, and the graph with
@@ -126,7 +127,7 @@ func NewHarness(ctx context.Context, opts AgentOptions) (*Harness, error) {
 		mcp:                   opts.MCP,
 		mcpConfigs:            opts.MCPConfigs,
 		mcpCredentialResolver: opts.MCPCredentialResolver,
-		skillsLoader:          opts.SkillsLoader,
+		skills:                opts.Skills,
 		brain:                 opts.Brain,
 		brainWriteKinds:       opts.BrainWriteKinds,
 		brainRelations:        opts.BrainRelations,
@@ -249,18 +250,15 @@ func (a *Harness) planningWriteLock(ctx context.Context, inv ToolInvocation, nex
 }
 
 func (a *Harness) initSkills(ctx context.Context) error {
-	if a.skillsLoader == nil {
+	if a.skills == nil {
 		return nil
 	}
-	loaded, err := a.skillsLoader.Load(ctx)
+	listed, err := a.skills.List(ctx)
 	if err != nil {
 		return err
 	}
-	a.skillByName = make(map[string]skills.Skill, len(loaded))
-	for _, skill := range loaded {
-		a.skillByName[skill.Name] = skill
-	}
-	if len(loaded) > 0 {
+	a.skillSummaries = listed
+	if len(listed) > 0 {
 		a.tools = append(a.tools, a.skillTool())
 	}
 	return nil
@@ -273,9 +271,9 @@ func (a *Harness) skillTool() *Tool {
 		Handler: func(ctx context.Context, args struct {
 			Name string `json:"name" desc:"Skill name from the available skills catalog"`
 		}) (string, error) {
-			skill, ok := a.skillByName[args.Name]
-			if !ok {
-				return "", fmt.Errorf("unknown skill %q", args.Name)
+			skill, err := a.skills.Read(ctx, args.Name)
+			if err != nil {
+				return "", err
 			}
 			return skill.Instructions, nil
 		},

@@ -15,7 +15,6 @@ import (
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/telemetry/export"
-	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 func TestMain(m *testing.M) {
@@ -212,7 +211,7 @@ func TestACP_promptStreamsEvents(t *testing.T) {
 // profile error, and fails a prompt.
 func TestACP_noAgentConfigured(t *testing.T) {
 	t.Parallel()
-	c := acptest.Open(t, &acptest.Runtime{Client: livesess.Runtime(t, tacklr.AgentOptions{}, workspace.Config{})})
+	c := acptest.Open(t, &acptest.Runtime{Client: livesess.Runtime(t, tacklr.AgentOptions{})})
 	sid := c.NewSession("/tmp")
 
 	loaded := acptest.Result(t, c.Call("session/load", `{"sessionId":"`+sid+`","cwd":"/tmp"}`))

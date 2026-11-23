@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -28,9 +27,7 @@ import (
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/telemetry"
-	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
-	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 // TestSessionWorkflow_authExpiredYieldThenResume: a tool whose auth expired
@@ -188,44 +185,6 @@ func TestSessionWorkflow_steerDuringYieldKeepsPark(t *testing.T) {
 }
 
 // TestSessionWorkflow_badWorkspaceBindingFailsTurn: a workspace binding
-// that cannot open fails the turn.
-func TestSessionWorkflow_badWorkspaceBindingFailsTurn(t *testing.T) {
-	t.Parallel()
-	env := newTestWorkflow(t)
-	missing := filepath.Join(t.TempDir(), "missing")
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{
-			Type: session.EventFunctionCall,
-			ToolCalls: []message.ToolCall{{
-				ID: "r1", CallID: "r1", Name: "read",
-				Arguments: `{"path":"/workspace/docs/hello.txt"}`,
-			}},
-			IsComplete: true,
-		}
-	})
-	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}
-	acts, fallback := registerSession(env, agent)
-	acts.Workspace = workspace.Config{Open: vfs.Tree(vfs.At("docs", vfs.Local(missing)))}
-	id := session.ID("sess-bad-binding")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{
-			Text: "read",
-			Auth: session.AuthContext{Bindings: []mount.Binding{{
-				Provider: "local",
-				Params:   map[string]string{mount.ParamName: "docs"},
-				Auth:     mount.Credential{Token: "x"},
-			}}},
-		}})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(protocol.SignalWake, session.Wake{Kind: session.WakeClose}) }, 80*time.Millisecond)
-	env.ExecuteWorkflow(protocol.Workflow, protocol.Input{SessionID: id})
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	if st := querySession(t, env); st.State != session.Failed {
-		t.Fatalf("status %+v events %+v", st, drainLog(t, fallback, id))
-	}
-}
 
 // TestSessionWorkflow_grandchildResultReachesParent: a blocking specialist
 // of a blocking specialist answers, and its answer reaches the root

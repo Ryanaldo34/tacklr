@@ -16,8 +16,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/acptest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
-	"github.com/ryanaldo34/tacklr/vfs"
-	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 // TestACP_vfsBindRefreshUnbind: a client binds a backend to the session's
@@ -53,14 +51,7 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 		}
 		return "bound: " + strings.Join(out, ","), nil
 	}})
-	r := acptest.NewWorkspaceRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{bound}}, workspace.Config{Open: func(ctx context.Context, sid string, req vfs.Request) (*vfs.MountSession, error) {
-		if _, ok := vfs.BindingByName(req.Bindings, "docs"); !ok {
-			if _, ok := vfs.BindingByName(req.Bindings, "local"); !ok {
-				return vfs.Tree()(ctx, sid, req)
-			}
-		}
-		return vfs.Tree(vfs.At("docs", vfs.Local(dir)))(ctx, sid, req)
-	}})
+	r := acptest.NewWorkspaceRuntime(t, strategy, tacklr.AgentOptions{Tools: []*tacklr.Tool{bound}}, true)
 
 	c := acptest.Connect(t, acptest.Listen(t, acptest.Server(r, nil)), `{"protocolVersion":1}`)
 	sessionID := c.NewSession("/tmp")

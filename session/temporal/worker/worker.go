@@ -17,7 +17,6 @@ import (
 	"github.com/ryanaldo34/tacklr/sandbox"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
-	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 // The defaults of a session's step policy, which its client sends in the
@@ -73,10 +72,6 @@ type Config struct {
 	// harnesses it holds. A zero Live serves none: clients get whole
 	// messages only.
 	Live Live
-	// Workspace is the agent's /workspace: the tree each turn mounts, and
-	// the tools, skills and overflow the agent gets from it. A zero
-	// Workspace is no workspace.
-	Workspace workspace.Config
 	// Sandbox is the client of the sandbox supervisor. With it, each turn
 	// that has a workspace gets run_command, which runs the model's bash
 	// scripts in a sandboxed worker over the workspace. Nil is no
@@ -135,7 +130,6 @@ func New(c client.Client, cfg Config) *Worker {
 	acts := &activities{
 		Agent:          cfg.Agent,
 		Store:          cfg.Store,
-		Workspace:      cfg.Workspace,
 		Sandbox:        cfg.Sandbox,
 		Fallback:       fallback,
 		DisableStreams: cfg.DisableStreams,

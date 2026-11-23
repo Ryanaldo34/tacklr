@@ -17,7 +17,7 @@ editor ──ACP over WebSocket──► host ──start · signal · query─�
 
 | Path | What it is |
 |---|---|
-| `agent/` | The agent: a `lookup` tool, a `researcher` specialist, MCP servers that the client names, and the workspace. Each session gets its own directory, `/workspace/work`, under `WORKSPACE_DIR` (`vfs.SessionLocal`). A specialist gets its own directory too. |
+| `agent/` | The agent: a `lookup` tool, a `researcher` specialist, MCP servers that the client names, and the workspace tree (`agent.Tree`). Each session gets its own directory, `/workspace/work`, under the supervisor's `WORKSPACE_DIR` (`vfs.SessionLocal`). A specialist gets its own directory too. |
 | `../host/` | The ACP server with bearer authentication (package `examples/host`). The Cloudflare example serves the same server. |
 | `cmd/internal/stack/` | What both programs read from the environment and open: Temporal, the Postgres stores, the model client and the live key. |
 | `cmd/host/`, `cmd/worker/` | The two programs. |
@@ -36,11 +36,11 @@ export DATABASE_URL=postgres://postgres:tacklr@localhost:5432/postgres
 export SEAL_KEY=$(openssl rand -base64 32) LIVE_KEY=$(openssl rand -base64 32)
 export ANTHROPIC_API_KEY=... MODEL=claude-opus-5-5   # or OPENAI_API_KEY=... MODEL=gpt-5-mini
 
-WORKSPACE_DIR=$PWD/work go run ./examples/temporal/cmd/worker &
+go run ./examples/temporal/cmd/worker &
 API_TOKEN=dev-token go run ./examples/temporal/cmd/host
 ```
 
-Point an ACP client at `ws://localhost:8080/acp` with the header `Authorization: Bearer dev-token`. Ask "What is the status of v2?" (the agent calls `lookup`), then "Write a note about it" (the agent makes a plan, because write tools wait for one, and its write asks you first).
+Point an ACP client at `ws://localhost:8080/acp` with the header `Authorization: Bearer dev-token`. Ask "What is the status of v2?" (the agent calls `lookup`), then "Write a note about it" (the agent makes a plan, and its `run_command` asks you first). `run_command` needs the supervisor (`cmd/supervisor`) and the `SANDBOX_*` settings below.
 
 | Variable | Program | Meaning |
 |---|---|---|
@@ -50,7 +50,6 @@ Point an ACP client at `ws://localhost:8080/acp` with the header `Authorization:
 | `MODEL`, and `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` | both | The model: a Claude model with `ANTHROPIC_API_KEY`, else an OpenAI-compatible one. `ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` set the endpoint. The host uses the model only to refuse content it cannot read. |
 | `TEMPORAL_ADDRESS`, `TASK_QUEUE` | both | Default `localhost:7233` and `tacklr`. |
 | `API_TOKEN`, `ADDR` | host | The bearer token, and the address (default `:8080`). |
-| `WORKSPACE_DIR` | worker | The directory that holds each session's `/workspace/work`. |
 | `LIVE_URL`, `LIVE_ADDR` | worker | How hosts reach the live endpoint (default `http://localhost:8081`), and where it listens (default `:8081`). |
 | `MAX_WINDOW` | worker | Optional. The context window in tokens. The default is the model's. |
 | `SANDBOX_ADDR`, `SANDBOX_CERT`, `SANDBOX_KEY`, `SANDBOX_CA` | worker | Optional. The sandbox supervisor's address, and PEM files of the worker's client certificate, its key and the supervisor's roots. They give the agent `run_command`. |
@@ -65,6 +64,6 @@ Both programs send their telemetry to `OTEL_EXPORTER_OTLP_ENDPOINT` when it is s
 `go test ./examples/temporal` runs the worker and the host as the programs wire them, on Temporal and Postgres in Docker (the same containers as the repository's other live tests), with a scripted model behind a real HTTP endpoint. An ACP client on a WebSocket tests these outcomes:
 
 1. A question runs the agent's tool on the worker, and the answer streams back through the host.
-2. A note: the agent makes a plan, its write asks the operator, and once the operator allows it, the note is in the session's own directory under `WORKSPACE_DIR`.
+2. A note: the agent makes a plan, its `run_command` asks the operator, and once the operator allows it, the sandbox writes the note into the session's own directory under `WORKSPACE_DIR`.
 3. A cancel: the operator cancels the turn while the write asks, and answers the ask with `cancelled`. The prompt ends with `stopReason` `cancelled`, and the session answers the next question.
 4. A wrong token gets 401 at the upgrade, and a connection with no token cannot open a session.

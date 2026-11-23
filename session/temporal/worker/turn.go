@@ -7,24 +7,14 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/sandbox"
 	"github.com/ryanaldo34/tacklr/session"
-	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
-	"github.com/ryanaldo34/tacklr/workspace"
 )
 
-// constructTurn opens the turn's workspace and builds a Harness with its
-// tools, skills and overflow. With a sandbox client the turn also gets
-// run_command, whose supervisor opens the session's tree on the sandbox
-// host.
-func constructTurn(ctx context.Context, agent tacklr.AgentOptions, ws workspace.Config, client *sandbox.Client, threadID string, bindings []mount.Binding, extraMCP []session.MCPServer, jobs []string) (*tacklr.Harness, error) {
+// constructTurn builds a Harness for the turn. With a sandbox client the
+// turn gets run_command, whose supervisor opens the session's tree with the
+// turn's bindings on the sandbox host.
+func constructTurn(ctx context.Context, agent tacklr.AgentOptions, client *sandbox.Client, threadID string, bindings []mount.Binding, extraMCP []session.MCPServer, jobs []string) (*tacklr.Harness, error) {
 	opts := tacklr.BindTurn(agent, threadID, jobs, bindings)
-	if ws.Open != nil {
-		ms, err := ws.Open(ctx, threadID, vfs.Request{Bindings: bindings})
-		if err != nil {
-			return nil, err
-		}
-		opts = ws.Bind(opts, ms)
-	}
 	if client != nil {
 		opts.Tools = append(slices.Clone(opts.Tools), sandbox.RunCommand(client))
 	}

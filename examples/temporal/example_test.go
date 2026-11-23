@@ -89,7 +89,6 @@ func deploy(t *testing.T, model tacklr.Model) deployment {
 	opts.MaxWindowSize = 100_000
 	w := worker.New(c, worker.Config{
 		Agent:          opts,
-		Workspace:      agent.Workspace(dir),
 		Sandbox:        sandboxtest.Client(t, agent.Tree(dir)),
 		TaskQueue:      queue,
 		Store:          db.Store(),

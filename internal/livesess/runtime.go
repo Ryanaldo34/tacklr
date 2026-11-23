@@ -29,7 +29,6 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 	sessionpg "github.com/ryanaldo34/tacklr/session/postgres"
 	"github.com/ryanaldo34/tacklr/telemetry/export"
-	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 var traceOnce sync.Once
@@ -82,10 +81,10 @@ func stores(t testing.TB) (session.Store, session.EventLog, session.SecretStorag
 }
 
 // Runtime starts a worker against the shared Temporal Docker server, on the
-// Postgres session stores, with ws as the agent's workspace. As a host
+// Postgres session stores. As a host
 // serving ACP clients does, it connects MCP servers with mcp.Client unless
 // agent names another client.
-func Runtime(t testing.TB, agent tacklr.AgentOptions, ws workspace.Config) session.Client {
+func Runtime(t testing.TB, agent tacklr.AgentOptions) session.Client {
 	t.Helper()
 	if agent.MCP == nil {
 		agent.MCP = mcp.Client{}
@@ -105,7 +104,7 @@ func Runtime(t testing.TB, agent tacklr.AgentOptions, ws workspace.Config) sessi
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { live.ServeHTTP(w, r) }))
 	t.Cleanup(srv.Close)
 	rt := temporal.Open(c, temporal.Config{TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true, Live: temporal.Live{Key: key}})
-	w := worker.New(c, worker.Config{Agent: agent, Workspace: ws, TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true, Live: worker.Live{URL: srv.URL, Key: key}})
+	w := worker.New(c, worker.Config{Agent: agent, TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, DisableStreams: true, Live: worker.Live{URL: srv.URL, Key: key}})
 	live = w.LiveHandler()
 	stop := make(chan any)
 	done := make(chan struct{})
