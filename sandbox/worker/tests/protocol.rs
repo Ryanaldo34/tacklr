@@ -7,7 +7,12 @@ use std::thread;
 use serde_json::{Value, json};
 use std::path::Path;
 
-use tacklr_sandbox_worker::frame::{self, KIND_CONTROL, KIND_STDERR, KIND_STDOUT, MAX_BODY};
+mod common;
+use common::Workspace;
+
+use tacklr_sandbox_worker::frame::{
+    self, KIND_CONTROL, KIND_FS, KIND_STDERR, KIND_STDOUT, MAX_BODY,
+};
 use tacklr_sandbox_worker::message::Enforcement;
 use tacklr_sandbox_worker::serve::serve;
 use tacklr_sandbox_worker::shell::{Packages, Shell};
@@ -43,13 +48,14 @@ fn read_value(socket: &mut UnixStream) -> Value {
 
 /// Reads frames until the done reply of a run. Returns the stdout and
 /// stderr it got, and the done reply.
-fn read_run(socket: &mut UnixStream) -> (String, String, Value) {
+fn read_run(socket: &mut UnixStream, files: &mut Workspace) -> (String, String, Value) {
     let (mut stdout, mut stderr) = (String::new(), String::new());
     loop {
         let (kind, body) = read_frame(socket);
         match kind {
             KIND_STDOUT => stdout.push_str(std::str::from_utf8(&body).expect("utf-8")),
             KIND_STDERR => stderr.push_str(std::str::from_utf8(&body).expect("utf-8")),
+            KIND_FS => files.answer(socket, &body),
             _ => {
                 return (
                     stdout,
@@ -183,26 +189,28 @@ fn worker_fails_when_the_supervisor_is_gone_before_ready() {
 }
 
 #[test]
-fn worker_streams_a_runs_output_and_keeps_its_workspace_for_the_next_run() {
+fn worker_runs_scripts_over_the_clients_workspace() {
     let (mut supervisor, handle) = start();
     read_value(&mut supervisor);
+    let mut files = Workspace::default();
+    files.files.insert("/old.txt".into(), b"seed\n".to_vec());
 
     write_request(
         &mut supervisor,
-        &json!({"type": "run", "id": 1, "script": "echo hi | tee note.txt; echo warn >&2"}),
+        &json!({"type": "run", "id": 1, "script": "echo hi | tee note.txt; echo warn >&2; mkdir d; mv old.txt d.txt; ls -1"}),
     );
-    let first = read_run(&mut supervisor);
+    let first = read_run(&mut supervisor, &mut files);
     write_request(
         &mut supervisor,
-        &json!({"type": "run", "id": 2, "script": "cat note.txt; exit 4"}),
+        &json!({"type": "run", "id": 2, "script": "cat note.txt d.txt; tail -c 3 d.txt; truncate -s 2 d.txt; cat d.txt; echo; cat missing 2>&1 | grep -c 'No such'; : > note.txt; rm d.txt; exit 4"}),
     );
-    let second = read_run(&mut supervisor);
+    let second = read_run(&mut supervisor, &mut files);
     write_request(&mut supervisor, &json!({"type": "stop"}));
 
     assert_eq!(
         first,
         (
-            "hi\n".into(),
+            "hi\nd\nd.txt\nnote.txt\n".into(),
             "warn\n".into(),
             json!({"type": "done", "id": 1, "code": 0})
         )
@@ -210,11 +218,14 @@ fn worker_streams_a_runs_output_and_keeps_its_workspace_for_the_next_run() {
     assert_eq!(
         second,
         (
-            "hi\n".into(),
+            "hi\nseed\ned\nse\n1\n".into(),
             String::new(),
             json!({"type": "done", "id": 2, "code": 4})
         )
     );
+    assert_eq!(files.files.keys().collect::<Vec<_>>(), ["/note.txt"]);
+    assert_eq!(files.files["/note.txt"], b"");
+    assert!(files.open.is_empty());
     handle.join().expect("join").expect("serve ends cleanly");
 }
 
@@ -233,4 +244,15 @@ fn worker_fails_when_the_supervisor_stops_reading_during_a_run() {
 
     let error = handle.join().expect("join").expect_err("serve fails");
     assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+}
+
+#[test]
+fn worker_refuses_a_file_frame_too_short_for_its_json_length() {
+    let (mut supervisor, handle) = start();
+    read_value(&mut supervisor);
+
+    write_raw(&mut supervisor, 2, KIND_FS, b"{}");
+
+    let error = handle.join().expect("join").expect_err("serve fails");
+    assert_eq!(error.to_string(), "the file frame is too short");
 }

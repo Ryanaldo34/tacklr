@@ -19,5 +19,6 @@
 pub mod frame;
 pub mod jail;
 pub mod message;
+pub mod remote_fs;
 pub mod serve;
 pub mod shell;
