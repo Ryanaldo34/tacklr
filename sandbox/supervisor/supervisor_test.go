@@ -27,9 +27,13 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/sandbox"
 	"github.com/ryanaldo34/tacklr/sandbox/internal/wire"
 	"github.com/ryanaldo34/tacklr/sandbox/supervisor"
+	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/adapters"
 )
@@ -209,6 +213,39 @@ func TestRunReportsAWorkerThatEndsDuringTheRun(t *testing.T) {
 	_, err = worker.Run(t.Context(), "true", vfs.Files{}, io.Discard, io.Discard)
 
 	require.ErrorIs(t, err, sandbox.ErrExited)
+}
+
+func TestRunCommandRunsTheModelsScriptInTheSandbox(t *testing.T) {
+	ca := newAuthority(t)
+	client := sandbox.NewClient(startSupervisor(t, ca, supervisor.Config{}).address, clientConfig(t, ca, ca))
+	dir, files := workspace(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "note.txt"), []byte("sandboxed note\n"), 0o600))
+	call := toolCaller(t, sandbox.RunCommand(client, files))
+
+	cat, catErr := call(`{"command":"cat work/note.txt"}`)
+	empty, emptyErr := call(`{"command":" "}`)
+	flood, floodErr := call(`{"command":"yes | head -c 1100000"}`)
+
+	require.NoError(t, errors.Join(catErr, emptyErr, floodErr))
+	require.Equal(t, "exit=0 truncated=false\n--- stdout ---\nsandboxed note\n--- stderr ---\n", cat)
+	require.Contains(t, empty, "command is required")
+	require.True(t, strings.HasPrefix(flood, "exit=0 truncated=true\noutput truncated\n"), flood[:64])
+}
+
+func TestRunCommandReportsAWorkerThatCannotStartOrRun(t *testing.T) {
+	ca := newAuthority(t)
+	refused := startSupervisor(t, ca, supervisor.Config{WorkerPath: filepath.Join(t.TempDir(), "missing")}).address
+	ending := startSupervisor(t, ca, supervisor.Config{
+		WorkerPath: scriptWorker(t, sendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`), "head -c 1 <&3 >/dev/null", "exit 1"),
+	}).address
+	_, files := workspace(t)
+
+	startResult, startErr := toolCaller(t, sandbox.RunCommand(sandbox.NewClient(refused, clientConfig(t, ca, ca)), files))(`{"command":"true"}`)
+	runResult, runErr := toolCaller(t, sandbox.RunCommand(sandbox.NewClient(ending, clientConfig(t, ca, ca)), files))(`{"command":"true"}`)
+
+	require.NoError(t, errors.Join(startErr, runErr))
+	require.Equal(t, "run_command: sandbox: the supervisor refused the worker: 500 the worker could not start", startResult)
+	require.Equal(t, "run_command: sandbox: the worker has ended", runResult)
 }
 
 func TestStopKillsAWorkerThatDoesNotExit(t *testing.T) {
@@ -437,6 +474,23 @@ func workspace(t *testing.T) (string, vfs.Files) {
 	_, err = ms.Apply(t.Context(), "/workspace/work/Spec.docx", vfs.Mutation{Content: &spec})
 	require.NoError(t, err)
 	return dir, vfs.NewFiles(ms)
+}
+
+// toolCaller runs tool in a harness that allows it, and returns a function
+// that calls it with arguments.
+func toolCaller(t *testing.T, tool *tacklr.Tool) func(arguments string) (string, error) {
+	t.Helper()
+	opts := tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192, Tools: []*tacklr.Tool{tool}, AllowTools: []string{tool.Name()}}
+	h, err := tacklr.NewHarness(t.Context(), tacklr.BindTurn(opts, "sandbox", nil, nil))
+	require.NoError(t, err)
+	t.Cleanup(h.Close)
+	out, stop := tacklr.PipeEvents(func(session.Event) {})
+	t.Cleanup(stop)
+	return func(arguments string) (string, error) {
+		call := tacklr.NewCall(message.ToolCall{ID: "c1", CallID: "c1", Name: tool.Name(), Arguments: arguments}, 0)
+		c, err := h.RunCall(t.Context(), call, out)
+		return c.Body.Text(), err
+	}
 }
 
 // host is a running supervisor.
