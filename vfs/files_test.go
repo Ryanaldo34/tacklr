@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -195,4 +196,23 @@ func TestFiles_reportsAChangeItCannotWriteBack(t *testing.T) {
 	err = note.Close(ctx)
 
 	require.Error(t, err)
+}
+
+// TestFiles_refusesAHostFileItCannotReadAtOffsets: a binary host file that
+// only streams cannot be opened for ranged reads, and one the host cannot
+// read fails with the host's error.
+func TestFiles_refusesAHostFileItCannotReadAtOffsets(t *testing.T) {
+	t.Parallel()
+	ms := richHostSession(t, richHostFS{
+		"stream": {mediaType: "application/octet-stream", size: 3, open: func() io.Reader { return strings.NewReader("abc") }},
+		"sealed": {mediaType: "application/octet-stream", size: 3},
+	}, nil)
+	files := vfs.NewFiles(ms)
+
+	_, streamErr := files.Open(t.Context(), "/workspace/host/stream", vfs.OpenMode{})
+	_, sealedErr := files.Open(t.Context(), "/workspace/host/sealed", vfs.OpenMode{})
+
+	require.ErrorIs(t, streamErr, vfs.ErrNotSupported)
+	require.Error(t, sealedErr)
+	require.NotErrorIs(t, sealedErr, vfs.ErrNotSupported)
 }

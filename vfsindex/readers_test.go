@@ -2,7 +2,9 @@ package vfsindex_test
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -66,5 +68,48 @@ func TestMountIndexer_sourceReadersLimitSearchAndAnACLChangeReindexes(t *testing
 	public, publicErr := idx.IndexPath(ctx, file)
 	if everyone := search("user:mallory"); publicErr != nil || public != vfsindex.PathIndexed || len(everyone) != 1 {
 		t.Fatalf("unshared = %s %v, outsider hits %d", public, publicErr, len(everyone))
+	}
+}
+
+// TestMountIndexer_aReadersFuncThatFailsFailsTheIndex: a source whose
+// sharing cannot be read fails the index with that error and the path.
+func TestMountIndexer_aReadersFuncThatFailsFailsTheIndex(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.write(t, "budget.txt", "fy27 budget forecast\n")
+	refused := errors.New("sharing refused")
+	h.idx.Readers = func(context.Context, string, vfs.FileInfo) ([]string, error) { return nil, refused }
+
+	_, err := h.idx.IndexPath(t.Context(), "/workspace/work/budget.txt")
+
+	if !errors.Is(err, refused) || !strings.Contains(err.Error(), "/workspace/work/budget.txt") {
+		t.Fatalf("index = %v, want the readers error with the path", err)
+	}
+}
+
+// TestMountIndexer_unindexRemovesAnIndexedFileOnce: unindexing an indexed
+// file removes its mirror and leaves the file; unindexing it again does
+// nothing.
+func TestMountIndexer_unindexRemovesAnIndexedFileOnce(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	h := newHarness(t)
+	h.write(t, "notes.txt", "release notes\n")
+	const file = "/workspace/work/notes.txt"
+	if _, err := h.idx.IndexPath(ctx, file); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, removeErr := h.idx.UnindexPath(ctx, file)
+	again, againErr := h.idx.UnindexPath(ctx, file)
+
+	if removeErr != nil || !removed || againErr != nil || again {
+		t.Fatalf("unindex = %v %v, again = %v %v; want removed once", removed, removeErr, again, againErr)
+	}
+	if _, err := h.eng.Get(ctx, h.idx.Scope, h.idx.DocumentID(file)); !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("document after unindex = %v, want ErrNotFound", err)
+	}
+	if _, err := h.ms.Route(ctx, file).Stat(ctx); err != nil {
+		t.Fatalf("file after unindex = %v, want it kept", err)
 	}
 }
