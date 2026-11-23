@@ -88,6 +88,84 @@ func TestClosingAWorkerKillsItsProcess(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
+func TestRunStreamsTheScriptsOutputAndReturnsItsExitCode(t *testing.T) {
+	ca := newAuthority(t)
+	worker, err := sandbox.NewClient(startSupervisor(t, ca, supervisor.Config{}).address, clientConfig(t, ca, ca)).Start(t.Context())
+	require.NoError(t, err)
+	defer worker.Close()
+	var stdout, stderr strings.Builder
+
+	code, err := worker.Run(t.Context(), "printf 'b\\na\\n' | sort | tee sorted.txt; echo warn >&2; exit 3", &stdout, &stderr)
+
+	require.NoError(t, err)
+	require.Equal(t, 3, code)
+	require.Equal(t, "a\nb\n", stdout.String())
+	require.Equal(t, "warn\n", stderr.String())
+}
+
+func TestRunRefusesAnEmptyScript(t *testing.T) {
+	ca := newAuthority(t)
+	worker, err := sandbox.NewClient(startSupervisor(t, ca, supervisor.Config{}).address, clientConfig(t, ca, ca)).Start(t.Context())
+	require.NoError(t, err)
+	defer worker.Close()
+
+	_, err = worker.Run(t.Context(), "", io.Discard, io.Discard)
+
+	require.EqualError(t, err, "sandbox: the script is empty")
+}
+
+func TestRunEndsWithItsContextAndKillsTheWorker(t *testing.T) {
+	ca := newAuthority(t)
+	worker, err := sandbox.NewClient(startSupervisor(t, ca, supervisor.Config{}).address, clientConfig(t, ca, ca)).Start(t.Context())
+	require.NoError(t, err)
+	pid := childPID(t, filepath.Base(workerBinary))
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err = worker.Run(ctx, "sleep 30", io.Discard, io.Discard)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Eventually(t, func() bool {
+		_, err := os.Stat("/proc/" + strconv.Itoa(pid))
+		return errors.Is(err, fs.ErrNotExist)
+	}, 5*time.Second, 10*time.Millisecond)
+}
+
+func TestRunReportsAScriptTheWorkersRuntimeCouldNotRun(t *testing.T) {
+	ca := newAuthority(t)
+	address := startSupervisor(t, ca, supervisor.Config{
+		WorkerPath: scriptWorker(t,
+			sendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`),
+			"head -c 1 <&3 >/dev/null",
+			sendFrame(`{"type":"done","id":1,"code":-1,"error":"wasm trap: out of bounds memory access"}`),
+			"exec sleep 3600"),
+	}).address
+	worker, err := sandbox.NewClient(address, clientConfig(t, ca, ca)).Start(t.Context())
+	require.NoError(t, err)
+	defer worker.Close()
+
+	_, err = worker.Run(t.Context(), "true", io.Discard, io.Discard)
+
+	require.EqualError(t, err, "sandbox: the worker could not run the script: wasm trap: out of bounds memory access")
+}
+
+func TestRunReportsAWorkerThatEndsDuringTheRun(t *testing.T) {
+	ca := newAuthority(t)
+	address := startSupervisor(t, ca, supervisor.Config{
+		WorkerPath: scriptWorker(t,
+			sendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`),
+			"head -c 1 <&3 >/dev/null",
+			"exit 1"),
+	}).address
+	worker, err := sandbox.NewClient(address, clientConfig(t, ca, ca)).Start(t.Context())
+	require.NoError(t, err)
+	defer worker.Close()
+
+	_, err = worker.Run(t.Context(), "true", io.Discard, io.Discard)
+
+	require.ErrorIs(t, err, sandbox.ErrExited)
+}
+
 func TestStopKillsAWorkerThatDoesNotExit(t *testing.T) {
 	ca := newAuthority(t)
 	address := startSupervisor(t, ca, supervisor.Config{
@@ -183,7 +261,7 @@ func TestSupervisorEndsTheStreamOfAClientThatBreaksTheProtocol(t *testing.T) {
 	defer response.Body.Close()
 	ready, err := wire.Read(response.Body)
 	require.NoError(t, err)
-	require.Equal(t, wire.TypeReady, ready.Type)
+	require.Equal(t, wire.TypeReady, ready.Message.Type)
 
 	require.NoError(t, wire.Write(send, wire.Message{Type: wire.TypeReady}))
 	_, err = wire.Read(response.Body)

@@ -4,12 +4,13 @@
 // client opens one HTTP/2 stream over mTLS to it for each worker. The
 // worker is a separate process (sandbox/worker, in Rust) in new namespaces,
 // under Landlock and a seccomp allow-list. It runs untrusted, agent-written
-// code. In this version it has only its life cycle: ready, ping and stop.
+// code: Run runs a bash script in the worker's workspace.
 //
 //	client := sandbox.NewClient("worker-host:7443", tlsConfig)
 //	worker, err := client.Start(ctx)
 //	if err != nil { ... }
 //	defer worker.Close()
+//	code, err := worker.Run(ctx, "ls | wc -l", &stdout, &stderr)
 //	exit, err := worker.Stop(ctx)
 //
 // A worker lives as long as its stream. Close ends the stream, and the
@@ -44,6 +45,9 @@ type Exit = wire.Exit
 // ErrExited is the error of a request to a worker that has ended.
 var ErrExited = errors.New("sandbox: the worker has ended")
 
+// errEmptyScript is the error of Run with an empty script.
+var errEmptyScript = errors.New("sandbox: the script is empty")
+
 // errClosed ends the request body when the client closes a worker.
 var errClosed = errors.New("sandbox: the client closed the worker")
 
@@ -54,6 +58,16 @@ type ExitError struct {
 
 func (e *ExitError) Error() string {
 	return strings.TrimSpace(fmt.Sprintf("sandbox: the worker ended before it was ready: code %d %s", e.Exit.Code, e.Exit.Signal))
+}
+
+// RunError is the error of Run when the worker's runtime could not run the
+// script, for a reason other than the script's exit.
+type RunError struct {
+	Message string
+}
+
+func (e *RunError) Error() string {
+	return "sandbox: the worker could not run the script: " + e.Message
 }
 
 // RefusedError is the error of Start when the supervisor refuses to start a
@@ -115,7 +129,8 @@ func (c *Client) Start(ctx context.Context) (*Worker, error) {
 		cancel()
 		return nil, &RefusedError{StatusCode: response.StatusCode, Message: strings.TrimSpace(string(message))}
 	}
-	first, err := wire.Read(response.Body)
+	frame, err := wire.Read(response.Body)
+	first := frame.Message
 	if err == nil && (first.Type != wire.TypeReady || first.Enforcement == nil) {
 		err = startError(first)
 	}
@@ -148,11 +163,15 @@ type Worker struct {
 	enforcement Enforcement
 	cancel      context.CancelFunc
 
-	// mu guards send, nextID and pongs.
+	// running lets one run go at a time.
+	running sync.Mutex
+
+	// mu guards send, nextID, pongs and run.
 	mu     sync.Mutex
 	send   *io.PipeWriter
 	nextID uint64
 	pongs  map[uint64]chan struct{}
+	run    *run
 
 	// done closes when the stream has ended. exit and err are set before.
 	done chan struct{}
@@ -206,6 +225,46 @@ func (w *Worker) Stop(ctx context.Context) (Exit, error) {
 	}
 }
 
+// Run runs script with bash in the worker's workspace and returns its exit
+// code. The script's stdout and stderr go to stdout and stderr as they
+// come. Runs on one worker go one at a time.
+//
+// Run returns a *RunError if the worker's runtime could not run the script,
+// and ErrExited if the worker ends first. A run cannot be stopped part way:
+// if ctx ends first, Run closes the worker and returns ctx.Err().
+func (w *Worker) Run(ctx context.Context, script string, stdout, stderr io.Writer) (int, error) {
+	if script == "" {
+		return -1, errEmptyScript
+	}
+	w.running.Lock()
+	defer w.running.Unlock()
+	w.mu.Lock()
+	w.nextID++
+	current := &run{id: w.nextID, stdout: stdout, stderr: stderr, done: make(chan wire.Message, 1)}
+	w.run = current
+	_ = wire.Write(w.send, wire.Message{Type: wire.TypeRun, ID: current.id, Script: script})
+	w.mu.Unlock()
+	select {
+	case done := <-current.done:
+		if done.Error != "" {
+			return -1, &RunError{Message: done.Error}
+		}
+		return *done.Code, nil
+	case <-w.done:
+		return -1, ErrExited
+	case <-ctx.Done():
+		w.Close()
+		return -1, ctx.Err()
+	}
+}
+
+// run is the run in progress on a worker.
+type run struct {
+	id             uint64
+	stdout, stderr io.Writer
+	done           chan wire.Message
+}
+
 // Close ends the stream, so the supervisor kills the worker, and waits for
 // the stream to end. Call it when done with the worker, also after Stop.
 func (w *Worker) Close() {
@@ -220,13 +279,26 @@ func (w *Worker) read(body io.ReadCloser) {
 	defer w.cancel()
 	defer body.Close()
 	for {
-		m, err := wire.Read(body)
+		frame, err := wire.Read(body)
 		if err != nil {
 			w.end(fmt.Errorf("sandbox: the stream ended before the worker's exit: %w", err))
 			return
 		}
-		switch m.Type {
-		case wire.TypePong:
+		w.mu.Lock()
+		current := w.run
+		w.mu.Unlock()
+		m := frame.Message
+		switch {
+		case frame.Kind == wire.KindStdout:
+			_, _ = current.stdout.Write(frame.Data)
+		case frame.Kind == wire.KindStderr:
+			_, _ = current.stderr.Write(frame.Data)
+		case m.Type == wire.TypeDone:
+			w.mu.Lock()
+			w.run = nil
+			w.mu.Unlock()
+			current.done <- m
+		case m.Type == wire.TypePong:
 			w.mu.Lock()
 			pong := w.pongs[m.ID]
 			delete(w.pongs, m.ID)
@@ -234,7 +306,7 @@ func (w *Worker) read(body io.ReadCloser) {
 			if pong != nil {
 				close(pong)
 			}
-		case wire.TypeExit:
+		case m.Type == wire.TypeExit:
 			w.exit = m.Exit
 			w.end(ErrExited)
 			return

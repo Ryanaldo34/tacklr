@@ -9,9 +9,9 @@
 // stream and the socket.
 //
 // The worker is not trusted. The supervisor reads at most wire.MaxBody per
-// frame from it, accepts only ready (once, first) and pong, and sends on
-// only the fields of those messages. If the worker sends anything else, the
-// supervisor kills it.
+// frame from it, accepts only ready (once, first), pong, and the output and
+// done of a run the client started, and sends on only the fields of those
+// messages. If the worker sends anything else, the supervisor kills it.
 //
 // A worker lives as long as its stream. When the stream ends, the
 // supervisor kills the worker. A worker that closes its socket, or gets a
@@ -155,16 +155,22 @@ func (s *Supervisor) serveWorker(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	stream := http.NewResponseController(w)
 	_ = stream.Flush()
-	s.relay(r.Context(), r.Body, func(m wire.Message) {
-		if wire.Write(w, m) == nil {
+	s.relay(r.Context(), r.Body, func(f wire.Frame) {
+		var err error
+		if f.Kind == wire.KindControl {
+			err = wire.Write(w, f.Message)
+		} else {
+			err = wire.WriteData(w, f.Kind, f.Data)
+		}
+		if err == nil {
 			_ = stream.Flush()
 		}
 	}, p)
 }
 
-// relay moves messages between the client's stream and the worker until
-// one of them ends.
-func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.Message), p *process) {
+// relay moves frames between the client's stream and the worker until one
+// of them ends.
+func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.Frame), p *process) {
 	done := make(chan struct{})
 	defer close(done)
 	client := receive(body, done)
@@ -175,20 +181,23 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.M
 			stopTimeout = time.After(s.config.StopTimeout)
 		}
 	}
-	ready := false
+	ready, runs := false, 0
 	for {
 		select {
 		case r := <-client:
-			forward, valid := fromClient(r.message)
+			forward, valid := fromClient(r.frame)
 			if r.err != nil || !valid {
 				return
 			}
-			if forward.Type == wire.TypeStop {
+			switch forward.Type {
+			case wire.TypeStop:
 				startStopTimeout()
+			case wire.TypeRun:
+				runs++
 			}
 			_ = wire.Write(p.conn, forward)
 		case r := <-worker:
-			forward, valid := fromWorker(r.message, ready)
+			forward, valid := fromWorker(r.frame, ready, runs)
 			switch {
 			case errors.Is(r.err, io.EOF):
 				worker = nil
@@ -198,12 +207,15 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.M
 				worker = nil
 			default:
 				ready = true
+				if forward.Message.Type == wire.TypeDone {
+					runs--
+				}
 				send(forward)
 			}
 		case <-stopTimeout:
 			p.kill()
 		case <-p.exited:
-			send(wire.Message{Type: wire.TypeExit, Exit: p.exit()})
+			send(wire.Frame{Kind: wire.KindControl, Message: wire.Message{Type: wire.TypeExit, Exit: p.exit()}})
 			return
 		case <-ctx.Done():
 			return
@@ -211,36 +223,47 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.M
 	}
 }
 
-// fromClient returns the message to send to the worker for a message from
-// the client, and false if the client may not send m.
-func fromClient(m wire.Message) (wire.Message, bool) {
+// fromClient returns the message to send to the worker for a frame from the
+// client, and false if the client may not send f.
+func fromClient(f wire.Frame) (wire.Message, bool) {
+	m := f.Message
 	switch {
 	case m.Type == wire.TypePing && m.ID != 0:
 		return wire.Message{Type: wire.TypePing, ID: m.ID}, true
 	case m.Type == wire.TypeStop:
 		return wire.Message{Type: wire.TypeStop}, true
+	case m.Type == wire.TypeRun && m.ID != 0 && m.Script != "":
+		return wire.Message{Type: wire.TypeRun, ID: m.ID, Script: m.Script}, true
 	}
 	return wire.Message{}, false
 }
 
-// fromWorker returns the message to send to the client for a message from
-// the worker, and false if the worker may not send m now. ready tells if the
-// worker has sent ready.
-func fromWorker(m wire.Message, ready bool) (wire.Message, bool) {
+// fromWorker returns the frame to send to the client for a frame from the
+// worker, and false if the worker may not send f now. ready tells if the
+// worker has sent ready, and runs how many runs it has not finished.
+func fromWorker(f wire.Frame, ready bool, runs int) (wire.Frame, bool) {
+	m := f.Message
+	control := func(m wire.Message) (wire.Frame, bool) {
+		return wire.Frame{Kind: wire.KindControl, Message: m}, true
+	}
 	switch {
+	case f.Kind != wire.KindControl:
+		return f, ready && runs > 0
 	case m.Type == wire.TypeReady && !ready && m.Enforcement != nil:
-		return wire.Message{Type: wire.TypeReady, Enforcement: m.Enforcement}, true
+		return control(wire.Message{Type: wire.TypeReady, Enforcement: m.Enforcement})
 	case m.Type == wire.TypePong && ready && m.ID != 0:
-		return wire.Message{Type: wire.TypePong, ID: m.ID}, true
+		return control(wire.Message{Type: wire.TypePong, ID: m.ID})
+	case m.Type == wire.TypeDone && runs > 0 && m.ID != 0 && m.Code != nil:
+		return control(wire.Message{Type: wire.TypeDone, ID: m.ID, Code: m.Code, Error: m.Error})
 	}
-	return wire.Message{}, false
+	return wire.Frame{}, false
 }
 
-// received is one result of a read: a message, or the error that ended
-// the reads.
+// received is one result of a read: a frame, or the error that ended the
+// reads.
 type received struct {
-	message wire.Message
-	err     error
+	frame wire.Frame
+	err   error
 }
 
 // receive reads messages from r and sends each result on the channel. It
@@ -249,9 +272,9 @@ func receive(r io.Reader, done <-chan struct{}) <-chan received {
 	results := make(chan received)
 	go func() {
 		for {
-			m, err := wire.Read(r)
+			f, err := wire.Read(r)
 			select {
-			case results <- received{message: m, err: err}:
+			case results <- received{frame: f, err: err}:
 			case <-done:
 				return
 			}
