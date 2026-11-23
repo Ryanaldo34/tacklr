@@ -7,6 +7,8 @@ package stack
 import (
 	"cmp"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -166,4 +168,22 @@ func newModel() (tacklr.Model, error) {
 		return m, nil
 	}
 	return nil, errors.New("ANTHROPIC_API_KEY or OPENAI_API_KEY must be set")
+}
+
+// LoadTLS reads a certificate and its key from the PEM files certFile and
+// keyFile, and the roots in the PEM file caFile.
+func LoadTLS(certFile, keyFile, caFile string) (tls.Certificate, *x509.CertPool, error) {
+	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return tls.Certificate{}, nil, fmt.Errorf("load the certificate %q: %w", certFile, err)
+	}
+	pem, err := os.ReadFile(caFile) //nolint:gosec // G304: the path is the operator's setting
+	if err != nil {
+		return tls.Certificate{}, nil, fmt.Errorf("read the roots %q: %w", caFile, err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pem) {
+		return tls.Certificate{}, nil, fmt.Errorf("the roots %q have no PEM certificates", caFile)
+	}
+	return certificate, roots, nil
 }

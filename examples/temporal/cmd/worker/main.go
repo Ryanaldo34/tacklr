@@ -8,11 +8,14 @@
 //	LIVE_URL       how hosts reach this worker's live endpoint, default http://localhost:8081
 //	LIVE_ADDR      where it listens, default :8081
 //	MAX_WINDOW     the context window in tokens, default the model's
+//	SANDBOX_ADDR   the sandbox supervisor (host:port); gives the agent run_command (optional)
+//	SANDBOX_CERT, SANDBOX_KEY, SANDBOX_CA  PEM files of this worker's client certificate, its key, and the supervisor's roots (with SANDBOX_ADDR)
 package main
 
 import (
 	"cmp"
 	"context"
+	"crypto/tls"
 	"errors"
 	"log"
 	"net/http"
@@ -24,6 +27,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/examples/temporal/agent"
 	"github.com/ryanaldo34/tacklr/examples/temporal/cmd/internal/stack"
+	"github.com/ryanaldo34/tacklr/sandbox"
 	"github.com/ryanaldo34/tacklr/session/temporal/worker"
 )
 
@@ -59,9 +63,18 @@ func run(ctx context.Context) error {
 		}
 		opts.MaxWindowSize = uint(size)
 	}
+	var sandboxClient *sandbox.Client
+	if addr := os.Getenv("SANDBOX_ADDR"); addr != "" {
+		certificate, roots, err := stack.LoadTLS(os.Getenv("SANDBOX_CERT"), os.Getenv("SANDBOX_KEY"), os.Getenv("SANDBOX_CA"))
+		if err != nil {
+			return err
+		}
+		sandboxClient = sandbox.NewClient(addr, &tls.Config{Certificates: []tls.Certificate{certificate}, RootCAs: roots, MinVersion: tls.VersionTLS13})
+	}
 	w := worker.New(st.Temporal, worker.Config{
 		Agent:          opts,
 		Workspace:      agent.Workspace(dir),
+		Sandbox:        sandboxClient,
 		TaskQueue:      st.TaskQueue,
 		Store:          st.Store,
 		Secrets:        st.Secrets,
