@@ -49,17 +49,17 @@ sandbox-packages:
 rust-fmt-check:
 	cd $(WORKER) && cargo fmt --check
 
-rust-lint:
+rust-lint: sandbox-packages
 	cd $(WORKER) && cargo clippy --locked --all-targets -- -D warnings
 
-rust-test:
+rust-test: sandbox-packages
 	cd $(WORKER) && cargo test --locked
 
 # jail.rs and main.rs run only in sandboxed processes, and Landlock stops
 # those processes from writing coverage data. tests/jail.rs tests each
 # sandbox layer in a child process, and the Go supervisor tests run the
 # whole worker. Every other line must be covered.
-rust-cover:
+rust-cover: sandbox-packages
 	cd $(WORKER) && cargo llvm-cov --locked --ignore-filename-regex '(jail|main)\.rs$$' --fail-under-lines 100
 
 # Functions nothing reaches: not the tests, not a main. Any finding fails.
