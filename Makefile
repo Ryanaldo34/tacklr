@@ -42,15 +42,24 @@ fmt:
 WORKER = sandbox/worker
 
 # The WASIX packages (bash, coreutils, grep, sed, findutils) pinned by
-# SHA-256 in sandbox/worker/packages/packages.txt.
+# SHA-256 in sandbox/worker/packages/packages.txt, compiled ahead of time
+# for this CPU architecture when the pins or the Wasmer version change.
+PACKAGES = $(WORKER)/packages
 sandbox-packages:
 	./scripts/sandbox-packages.sh
+	@$(MAKE) --no-print-directory $(PACKAGES)/compiled/.stamp
+
+$(PACKAGES)/compiled/.stamp: $(PACKAGES)/packages.txt $(WORKER)/Cargo.lock
+	rm -rf $(PACKAGES)/compiled
+	cd $(WORKER) && cargo run --locked --release --features compile --bin tacklr-sandbox-compile -- packages
+	touch $@
 
 rust-fmt-check:
 	cd $(WORKER) && cargo fmt --check
 
 rust-lint: sandbox-packages
 	cd $(WORKER) && cargo clippy --locked --all-targets -- -D warnings
+	cd $(WORKER) && cargo clippy --locked --all-targets --all-features -- -D warnings
 
 rust-test: sandbox-packages
 	cd $(WORKER) && cargo test --locked

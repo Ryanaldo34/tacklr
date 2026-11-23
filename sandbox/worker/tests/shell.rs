@@ -138,3 +138,53 @@ fn shell_refuses_a_package_file_that_does_not_match_its_hash() {
         )
     );
 }
+
+/// A package directory with links to the real packages, and no compiled
+/// modules.
+fn uncompiled_packages(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("tacklr-packages-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    for file in [
+        "packages.txt",
+        "bash.webc",
+        "coreutils.webc",
+        "grep.webc",
+        "sed.webc",
+        "findutils.webc",
+    ] {
+        let _ = std::fs::remove_file(dir.join(file));
+        std::os::unix::fs::symlink(packages().join(file), dir.join(file)).expect("link");
+    }
+    dir
+}
+
+fn compiled_dir(dir: &Path) -> PathBuf {
+    dir.join("compiled").join(std::env::consts::ARCH)
+}
+
+#[test]
+fn shell_refuses_packages_that_are_not_compiled() {
+    let dir = uncompiled_packages("uncompiled");
+
+    let error = Shell::load(&dir).err().expect("load fails");
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "read {} (run make sandbox-packages)",
+            compiled_dir(&dir).display()
+        )
+    );
+}
+
+#[test]
+fn shell_refuses_a_compiled_module_it_cannot_load() {
+    let dir = uncompiled_packages("stale");
+    std::fs::create_dir_all(compiled_dir(&dir)).expect("compiled dir");
+    let stale = compiled_dir(&dir).join(format!("{}.bin", "AB".repeat(32)));
+    std::fs::write(&stale, b"not a wasmer artifact").expect("write");
+
+    let error = Shell::load(&dir).err().expect("load fails");
+
+    assert_eq!(error.to_string(), format!("load {}", stale.display()));
+}
