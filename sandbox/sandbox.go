@@ -10,7 +10,7 @@
 //	worker, err := client.Start(ctx)
 //	if err != nil { ... }
 //	defer worker.Close()
-//	code, err := worker.Run(ctx, "ls | wc -l", &stdout, &stderr)
+//	code, err := worker.Run(ctx, "ls work | wc -l", vfs.NewFiles(session), &stdout, &stderr)
 //	exit, err := worker.Stop(ctx)
 //
 // A worker lives as long as its stream. Close ends the stream, and the
@@ -29,6 +29,7 @@ import (
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/sandbox/internal/wire"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // maxRefusal is the most bytes of a refusal's body that an error keeps.
@@ -225,14 +226,18 @@ func (w *Worker) Stop(ctx context.Context) (Exit, error) {
 	}
 }
 
-// Run runs script with bash in the worker's workspace and returns its exit
-// code. The script's stdout and stderr go to stdout and stderr as they
-// come. Runs on one worker go one at a time.
+// Run runs script with bash in workspace and returns its exit code. The
+// worker sees workspace's /workspace/work as /workspace/work: the run's
+// file requests come back over the stream, and Run serves them from
+// workspace, one at a time. The script's stdout and stderr go to stdout and
+// stderr as they come. Runs on one worker go one at a time.
 //
 // Run returns a *RunError if the worker's runtime could not run the script,
-// and ErrExited if the worker ends first. A run cannot be stopped part way:
-// if ctx ends first, Run closes the worker and returns ctx.Err().
-func (w *Worker) Run(ctx context.Context, script string, stdout, stderr io.Writer) (int, error) {
+// and ErrExited if the worker ends first. When a file the script left open
+// cannot be written back, Run returns that error. A run cannot be stopped
+// part way: if ctx ends first, or the worker sends a file request that is
+// not valid, Run closes the worker and returns the error.
+func (w *Worker) Run(ctx context.Context, script string, workspace vfs.Files, stdout, stderr io.Writer) (int, error) {
 	if script == "" {
 		return -1, errEmptyScript
 	}
@@ -240,29 +245,59 @@ func (w *Worker) Run(ctx context.Context, script string, stdout, stderr io.Write
 	defer w.running.Unlock()
 	w.mu.Lock()
 	w.nextID++
-	current := &run{id: w.nextID, stdout: stdout, stderr: stderr, done: make(chan wire.Message, 1)}
+	current := &run{
+		id: w.nextID, stdout: stdout, stderr: stderr,
+		done: make(chan wire.Message, 1), fs: make(chan []byte), stopped: make(chan struct{}),
+	}
 	w.run = current
 	_ = wire.Write(w.send, wire.Message{Type: wire.TypeRun, ID: current.id, Script: script})
 	w.mu.Unlock()
+	served := make(chan error, 1)
+	go func() {
+		files := &server{files: workspace, open: map[uint64]*vfs.OpenFile{}}
+		served <- files.serve(ctx, current.fs, w.replyFS)
+		close(current.stopped)
+	}()
 	select {
 	case done := <-current.done:
+		close(current.fs)
+		if err := <-served; err != nil {
+			return -1, err
+		}
 		if done.Error != "" {
 			return -1, &RunError{Message: done.Error}
 		}
 		return *done.Code, nil
+	case err := <-served:
+		w.Close()
+		return -1, err
 	case <-w.done:
+		close(current.fs)
+		<-served
 		return -1, ErrExited
 	case <-ctx.Done():
 		w.Close()
+		close(current.fs)
+		<-served
 		return -1, ctx.Err()
 	}
 }
 
-// run is the run in progress on a worker.
+// run is the run in progress on a worker. The read loop sends its file
+// frames to fs until stopped closes.
 type run struct {
 	id             uint64
 	stdout, stderr io.Writer
 	done           chan wire.Message
+	fs             chan []byte
+	stopped        chan struct{}
+}
+
+// replyFS sends a file reply to the worker.
+func (w *Worker) replyFS(reply wire.FSReply, data []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_ = wire.WriteFS(w.send, reply, data)
 }
 
 // Close ends the stream, so the supervisor kills the worker, and waits for
@@ -293,6 +328,11 @@ func (w *Worker) read(body io.ReadCloser) {
 			_, _ = current.stdout.Write(frame.Data)
 		case frame.Kind == wire.KindStderr:
 			_, _ = current.stderr.Write(frame.Data)
+		case frame.Kind == wire.KindFS:
+			select {
+			case current.fs <- frame.Data:
+			case <-current.stopped:
+			}
 		case m.Type == wire.TypeDone:
 			w.mu.Lock()
 			w.run = nil

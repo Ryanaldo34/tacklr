@@ -30,6 +30,8 @@ import (
 	"github.com/ryanaldo34/tacklr/sandbox"
 	"github.com/ryanaldo34/tacklr/sandbox/internal/wire"
 	"github.com/ryanaldo34/tacklr/sandbox/supervisor"
+	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/adapters"
 )
 
 // workerBinary is the real Rust worker and packagesDir its packages, built
@@ -93,14 +95,56 @@ func TestRunStreamsTheScriptsOutputAndReturnsItsExitCode(t *testing.T) {
 	worker, err := sandbox.NewClient(startSupervisor(t, ca, supervisor.Config{}).address, clientConfig(t, ca, ca)).Start(t.Context())
 	require.NoError(t, err)
 	defer worker.Close()
+	dir, files := workspace(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "names.txt"), []byte("b\na\n"), 0o600))
 	var stdout, stderr strings.Builder
 
-	code, err := worker.Run(t.Context(), "printf 'b\\na\\n' | sort | tee sorted.txt; echo warn >&2; exit 3", &stdout, &stderr)
+	code, err := worker.Run(t.Context(), "cd work && sort names.txt | tee sorted.txt; mkdir out && mv sorted.txt out/ && truncate -s 1 names.txt && rm Spec.docx 2>/dev/null; echo warn >&2; exit 3", files, &stdout, &stderr)
 
 	require.NoError(t, err)
 	require.Equal(t, 3, code)
 	require.Equal(t, "a\nb\n", stdout.String())
 	require.Equal(t, "warn\n", stderr.String())
+	sorted, err := os.ReadFile(filepath.Join(dir, "out", "sorted.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "a\nb\n", string(sorted))
+	names, err := os.ReadFile(filepath.Join(dir, "names.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "b", string(names))
+}
+
+func TestRunReadsADocumentAsTextAndCannotWriteIt(t *testing.T) {
+	ca := newAuthority(t)
+	worker, err := sandbox.NewClient(startSupervisor(t, ca, supervisor.Config{}).address, clientConfig(t, ca, ca)).Start(t.Context())
+	require.NoError(t, err)
+	defer worker.Close()
+	_, files := workspace(t)
+	var stdout, stderr strings.Builder
+
+	code, err := worker.Run(t.Context(), "cat work/Spec.docx; echo changed > work/Spec.docx", files, &stdout, &stderr)
+
+	require.NoError(t, err)
+	require.Equal(t, 1, code)
+	require.Contains(t, stdout.String(), "Title")
+	require.Contains(t, stderr.String(), "Spec.docx")
+}
+
+func TestRunClosesAWorkerThatSendsAFileRequestThatIsNotValid(t *testing.T) {
+	ca := newAuthority(t)
+	address := startSupervisor(t, ca, supervisor.Config{
+		WorkerPath: scriptWorker(t,
+			sendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`),
+			"head -c 1 <&3 >/dev/null",
+			"printf '\\000\\000\\000\\002\\004{}' >&3",
+			"exec sleep 3600"),
+	}).address
+	worker, err := sandbox.NewClient(address, clientConfig(t, ca, ca)).Start(t.Context())
+	require.NoError(t, err)
+	defer worker.Close()
+
+	_, err = worker.Run(t.Context(), "true", vfs.Files{}, io.Discard, io.Discard)
+
+	require.EqualError(t, err, "wire: the file frame is too short")
 }
 
 func TestRunRefusesAnEmptyScript(t *testing.T) {
@@ -109,7 +153,7 @@ func TestRunRefusesAnEmptyScript(t *testing.T) {
 	require.NoError(t, err)
 	defer worker.Close()
 
-	_, err = worker.Run(t.Context(), "", io.Discard, io.Discard)
+	_, err = worker.Run(t.Context(), "", vfs.Files{}, io.Discard, io.Discard)
 
 	require.EqualError(t, err, "sandbox: the script is empty")
 }
@@ -119,10 +163,11 @@ func TestRunEndsWithItsContextAndKillsTheWorker(t *testing.T) {
 	worker, err := sandbox.NewClient(startSupervisor(t, ca, supervisor.Config{}).address, clientConfig(t, ca, ca)).Start(t.Context())
 	require.NoError(t, err)
 	pid := childPID(t, filepath.Base(workerBinary))
+	_, files := workspace(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 
-	_, err = worker.Run(ctx, "sleep 30", io.Discard, io.Discard)
+	_, err = worker.Run(ctx, "sleep 30", files, io.Discard, io.Discard)
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Eventually(t, func() bool {
@@ -144,7 +189,7 @@ func TestRunReportsAScriptTheWorkersRuntimeCouldNotRun(t *testing.T) {
 	require.NoError(t, err)
 	defer worker.Close()
 
-	_, err = worker.Run(t.Context(), "true", io.Discard, io.Discard)
+	_, err = worker.Run(t.Context(), "true", vfs.Files{}, io.Discard, io.Discard)
 
 	require.EqualError(t, err, "sandbox: the worker could not run the script: wasm trap: out of bounds memory access")
 }
@@ -161,7 +206,7 @@ func TestRunReportsAWorkerThatEndsDuringTheRun(t *testing.T) {
 	require.NoError(t, err)
 	defer worker.Close()
 
-	_, err = worker.Run(t.Context(), "true", io.Discard, io.Discard)
+	_, err = worker.Run(t.Context(), "true", vfs.Files{}, io.Discard, io.Discard)
 
 	require.ErrorIs(t, err, sandbox.ErrExited)
 }
@@ -379,6 +424,19 @@ func TestNewRefusesAConfigItCannotRunSafely(t *testing.T) {
 			require.EqualError(t, err, c.err)
 		})
 	}
+}
+
+// workspace is a work mount over a temporary directory, with a Word
+// document, as the worker's /workspace.
+func workspace(t *testing.T) (string, vfs.Files) {
+	t.Helper()
+	dir := t.TempDir()
+	ms, err := vfs.Tree(vfs.At("work", vfs.Local(dir))).WithCodecs(adapters.Codecs()...)(t.Context(), t.Name(), vfs.Request{})
+	require.NoError(t, err)
+	spec := "<h1>Title</h1><p>text</p>"
+	_, err = ms.Apply(t.Context(), "/workspace/work/Spec.docx", vfs.Mutation{Content: &spec})
+	require.NoError(t, err)
+	return dir, vfs.NewFiles(ms)
 }
 
 // host is a running supervisor.

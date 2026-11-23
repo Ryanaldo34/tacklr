@@ -41,3 +41,11 @@ func TestWriteRefusesAMessageLargerThanTheLimit(t *testing.T) {
 
 	require.EqualError(t, err, "wire: frame body of 1048587 bytes is larger than 1048576")
 }
+
+func TestParseFSRefusesARequestItCannotDecode(t *testing.T) {
+	body := binary.BigEndian.AppendUint32(nil, 2)
+
+	_, _, err := ParseFS(append(body, "{]"...))
+
+	require.ErrorContains(t, err, "wire: file request: invalid character")
+}

@@ -9,9 +9,11 @@
 // stream and the socket.
 //
 // The worker is not trusted. The supervisor reads at most wire.MaxBody per
-// frame from it, accepts only ready (once, first), pong, and the output and
-// done of a run the client started, and sends on only the fields of those
-// messages. If the worker sends anything else, the supervisor kills it.
+// frame from it, accepts only ready (once, first), pong, and the output,
+// file requests and done of a run the client started, and sends on only
+// the fields of those messages. If the worker sends anything else, the
+// supervisor kills it. File requests and replies pass as they are: the
+// client checks each request it serves.
 //
 // A worker lives as long as its stream. When the stream ends, the
 // supervisor kills the worker. A worker that closes its socket, or gets a
@@ -156,13 +158,7 @@ func (s *Supervisor) serveWorker(w http.ResponseWriter, r *http.Request) {
 	stream := http.NewResponseController(w)
 	_ = stream.Flush()
 	s.relay(r.Context(), r.Body, func(f wire.Frame) {
-		var err error
-		if f.Kind == wire.KindControl {
-			err = wire.Write(w, f.Message)
-		} else {
-			err = wire.WriteData(w, f.Kind, f.Data)
-		}
-		if err == nil {
+		if writeFrame(w, f) == nil {
 			_ = stream.Flush()
 		}
 	}, p)
@@ -185,17 +181,17 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.F
 	for {
 		select {
 		case r := <-client:
-			forward, valid := fromClient(r.frame)
+			forward, valid := fromClient(r.frame, runs)
 			if r.err != nil || !valid {
 				return
 			}
-			switch forward.Type {
+			switch forward.Message.Type {
 			case wire.TypeStop:
 				startStopTimeout()
 			case wire.TypeRun:
 				runs++
 			}
-			_ = wire.Write(p.conn, forward)
+			_ = writeFrame(p.conn, forward)
 		case r := <-worker:
 			forward, valid := fromWorker(r.frame, ready, runs)
 			switch {
@@ -223,19 +219,33 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.F
 	}
 }
 
-// fromClient returns the message to send to the worker for a frame from the
-// client, and false if the client may not send f.
-func fromClient(f wire.Frame) (wire.Message, bool) {
+// fromClient returns the frame to send to the worker for a frame from the
+// client, and false if the client may not send f now. runs is how many runs
+// the worker has not finished: file replies go only to a running worker.
+func fromClient(f wire.Frame, runs int) (wire.Frame, bool) {
 	m := f.Message
-	switch {
-	case m.Type == wire.TypePing && m.ID != 0:
-		return wire.Message{Type: wire.TypePing, ID: m.ID}, true
-	case m.Type == wire.TypeStop:
-		return wire.Message{Type: wire.TypeStop}, true
-	case m.Type == wire.TypeRun && m.ID != 0 && m.Script != "":
-		return wire.Message{Type: wire.TypeRun, ID: m.ID, Script: m.Script}, true
+	control := func(m wire.Message) (wire.Frame, bool) {
+		return wire.Frame{Kind: wire.KindControl, Message: m}, true
 	}
-	return wire.Message{}, false
+	switch {
+	case f.Kind == wire.KindFS:
+		return f, runs > 0
+	case m.Type == wire.TypePing && m.ID != 0:
+		return control(wire.Message{Type: wire.TypePing, ID: m.ID})
+	case m.Type == wire.TypeStop:
+		return control(wire.Message{Type: wire.TypeStop})
+	case m.Type == wire.TypeRun && m.ID != 0 && m.Script != "":
+		return control(wire.Message{Type: wire.TypeRun, ID: m.ID, Script: m.Script})
+	}
+	return wire.Frame{}, false
+}
+
+// writeFrame writes f as its kind.
+func writeFrame(w io.Writer, f wire.Frame) error {
+	if f.Kind == wire.KindControl {
+		return wire.Write(w, f.Message)
+	}
+	return wire.WriteData(w, f.Kind, f.Data)
 }
 
 // fromWorker returns the frame to send to the client for a frame from the
