@@ -9,8 +9,8 @@
 Tacklr is a Linux-based, cloud-native operating and security system for AI agents. It has three parts:
 
 - **The core (Go).** It runs the agent loop as a durable session: model requests and their API quirks, tool calls, async subagents, long-running commands, and agent swarms. It records every step, so a session can wait days for a person, survive a crash or a deploy, and continue on another machine. It builds for WebAssembly.
-- **The supervisor (Go).** It runs on each worker host and starts, watches, and kills sandboxed workers for the session runtime, over mTLS.
-- **The sandbox worker (Rust).** It runs untrusted, LLM-generated bash scripts in WebAssembly (Wasmer with WASIX: bash, coreutils, grep, sed, and findutils, compiled ahead of time), inside Linux namespaces, Landlock, and seccomp. The scripts reach only the session's workspace, which the runtime serves to the worker over its stream.
+- **The supervisor (Go).** It runs on each sandbox host, separate from the session workers. It opens each session's workspace with the session's credentials, and starts, watches, and kills sandboxed workers for the session runtime, over mTLS.
+- **The sandbox worker (Rust).** It runs untrusted, LLM-generated bash scripts in WebAssembly (Wasmer with WASIX: bash, coreutils, grep, sed, and findutils, compiled ahead of time), inside Linux namespaces, Landlock, and seccomp. The scripts reach only the session's workspace, which the supervisor serves to the worker on the same host, so only the script's output goes back to the session runtime.
 
 ## Features
 
@@ -18,7 +18,7 @@ Tacklr is a Linux-based, cloud-native operating and security system for AI agent
 - **Claude and OpenAI.** Use `anthropic` for Claude (the Claude API or Microsoft Foundry), `openai` for any endpoint that serves the OpenAI Responses API, or implement `tacklr.Model` yourself.
 - **Focused context.** The agent plans its work as a to-do list. Finishing a to-do replaces the history with a short hand-off, and a full window collapses into a summary.
 - **People in the loop.** A tool can pause the session to ask a question or a permission, and continue when the answer comes back.
-- **A sandboxed workspace.** The agent sees one `/workspace` built from local disk, S3, Azure Blob, Google Drive, or Microsoft 365, plus an optional `run_command` shell that sees only that workspace.
+- **A sandboxed workspace.** The agent sees one `/workspace` built from local disk, S3, Azure Blob, Google Drive, or Microsoft 365, and works on it with `run_command` scripts that see only that workspace.
 - **Sandboxed code execution.** `run_command` runs each bash script in its own worker process: WASIX bash with no network, new namespaces, no host file system access (Landlock), and a seccomp allow-list with no executable memory and no new processes. Documents read as their text and cannot be written.
 - **Security policies (planned).** Worker runtime monitoring and configurable policies, with risky calls sent to security teams to approve or deny.
 - **A knowledge store.** Hybrid search, an optional graph, and namespaces for multi-tenant data.
@@ -125,21 +125,33 @@ The [getting started guide](docs/getting-started.md) continues from here: asking
 
 ## How it works
 
+Untrusted code reaches files and the network only through Tacklr host functions. Dashed parts are planned and not built yet.
+
 ```mermaid
 flowchart LR
-    clients["Clients"] -- "ACP" --> host["Host<br/>protocol server<br/>session.Client"]
-    host -- "start · signal · events" --> runtime["Durable runtime<br/>Temporal or Durable Objects"]
-    runtime -- "runs each step once" --> harness["Harness<br/>model · tools · plan · workspace"]
-    harness --> model["Model API"]
-    runtime --> stores[("Postgres<br/>sessions · credentials · knowledge")]
-    harness -- "mTLS · HTTP/2" --> supervisor["Supervisor<br/>one per worker host"]
-    supervisor -- "socket pair" --> worker["Sandbox worker (Rust)<br/>namespaces · Landlock · seccomp<br/>Wasmer · WASIX bash"]
+    client["ACP client<br/>editor or app"] <--> session["Session DO<br/>Cloudflare: journal, replay"]
+    session --> model["Model API<br/>Claude, OpenAI"]
+    session --> gateway["Sandbox gateway<br/>leases, exactly-once calls"]
+    gateway -.-> microvm["MicroVM tier<br/>native binaries, later"]
+    detector["Risk detector<br/>park or end risky calls"] -. verdicts .-> gateway
+    gateway --> shell
+    subgraph worker["Sandbox worker: jailed process, no network"]
+        shell["Shell interpreter<br/>mvdan/sh, bash syntax"] --> kernel["Virtual kernel<br/>host calls, policy, events"]
+        tools["WASM tools<br/>coreutils, grep, jq, CPython on WASI"] <--> kernel
+    end
+    kernel --> vfs["VFS service<br/>mounts, codecs, credentials<br/>reads Drive, M365, S3"]
+    kernel --> proxy["Egress proxy<br/>full-URL allow-list<br/>adds credentials outside"]
+    kernel --> detector
+
+    classDef planned stroke-dasharray: 5 5
+    class gateway,microvm,detector,shell,kernel,tools,proxy planned
 ```
 
-- A **host** is a stateless server. It talks to sessions only through `session.Client`, so it scales like any web service.
-- The **runtime** keeps each session durable. On Temporal a session is a workflow, and each model request and tool call is an activity.
-- The **harness** does the work of one step: it calls the model, runs a tool, or commits the result to the context window.
-- The **supervisor** starts one **sandbox worker** process for each stream that the runtime opens (`sandbox.Client`). The worker lives as long as its stream. The supervisor does not trust the worker: it checks each frame, and it kills a worker that breaks the protocol. The worker's file requests go back up the stream, and the runtime serves them from the session's workspace, so no session file is on the worker host.
+- The **session** Durable Object orchestrates and journals each turn. It replays from its journal, so a tool call never runs twice.
+- The **sandbox gateway** runs each call exactly once in a jailed **sandbox worker**, keyed by its tool call id.
+- Inside the worker, the shell and every WASM tool reach files, the network and the risk detector only through the **virtual kernel**'s host calls.
+- The **VFS service** reads the session's mounts with their codecs, so a Google Doc reads as text. The **egress proxy** allows only listed URLs and adds credentials outside the sandbox.
+- The **risk detector** parks or ends a risky call for a person to review.
 
 See [Concepts](docs/concepts.md) for sessions, turns, rounds, and the context window.
 
@@ -151,7 +163,7 @@ See [Concepts](docs/concepts.md) for sessions, turns, rounds, and the context wi
 | [Concepts](docs/concepts.md) | Sessions, turns, rounds, plans, specialists, events |
 | [Models](docs/models.md) | Claude, OpenAI and compatible endpoints, writing your own `Model` |
 | [Tools](docs/tools.md) | Writing tools, permissions, built-in tools, MCP, skills |
-| [Workspace](docs/workspace.md) | The agent's `/workspace`, its sources, files and documents, the shell |
+| [Workspace](docs/workspace.md) | The agent's `/workspace` on the sandbox host, its sources, and how scripts work on it |
 | [Knowledge](docs/knowledge.md) | The knowledge store: kinds, search, the graph, file indexing |
 | [Sessions in production](docs/session.md) | Temporal and Durable Objects, Postgres, credentials, specialists and jobs |
 | [Protocols](docs/protocol.md) | The ACP server, a turn from prompt to answer, writing a protocol |

@@ -2,32 +2,25 @@
 
 The workspace is the agent's file system: one tree under `/workspace`, built from the sources you choose. The agent sees only virtual paths, such as `/workspace/work/main.go`. It never sees host paths, bucket names, other sessions, or credentials.
 
-The workspace is in package `workspace`, over the virtual file system in package `vfs`. It runs on Linux workers only; the harness core does not import it.
+The workspace is a `vfs` tree that your sandbox supervisor opens on the sandbox host (package `sandbox/supervisor`). The agent works on it with `run_command`: bash scripts in a sandboxed worker. The session runtime never opens the tree, and the sandboxed worker never holds a credential.
 
 ## Build a workspace
 
-Set `worker.Config.Workspace`. Each `vfs.At` mounts one source as a directory under `/workspace`:
+Give your supervisor the tree in `supervisor.Config.Workspace`. Each `vfs.At` mounts one source as a directory under `/workspace`:
 
 ```go
-cfg := worker.Config{
-	Agent: agent, Store: store, Secrets: secrets,
-	Workspace: workspace.Config{
-		Open: vfs.Tree(
-			vfs.At("work", vfs.SessionLocal("/srv/tacklr/work")),
-			vfs.At("docs", vfs.S3(awss3.API{Client: s3Client}, "acme-docs")).ReadOnly(),
-		).WithCodecs(adapters.Codecs()...), // read and write Word and Excel files
-		OverflowPath: "/workspace/work/.overflow",
-	},
-	Sandbox: sandboxClient, // optional: adds run_command (package sandbox)
-}
+sup, err := supervisor.New(supervisor.Config{
+	WorkerPath:  "/usr/libexec/tacklr-sandbox-worker",
+	PackagesDir: "/usr/lib/tacklr-sandbox/packages",
+	TLS:         serverTLS,
+	Workspace: vfs.Tree(
+		vfs.At("work", vfs.S3(awss3.API{Client: s3Client}, "acme-work")),
+		vfs.At("docs", vfs.S3(awss3.API{Client: s3Client}, "acme-docs")).ReadOnly(),
+	).WithCodecs(adapters.Codecs()...), // Word and Excel files read as text
+})
 ```
 
-| `workspace.Config` field | Effect |
-|---|---|
-| `Open` | Builds the session's tree for each turn. Usually `vfs.Tree(...)`. |
-| `SkillsPath` | The skills directory. Empty is `/workspace/skills`. |
-| `OverflowPath` | A writable directory for the full text of tool results that the context window cut. |
-| `IndexReaders` | The source's sharing list for each indexed file, so search returns a file only to users who can open it. |
+Then give the session runtime a client of the supervisor (`worker.Config.Sandbox` on Temporal). Each `run_command` sends the session ID and the turn's bindings, and the supervisor opens the tree with them. The Temporal example builds its supervisor this way (`examples/temporal/cmd/supervisor`).
 
 A member's options: `.ReadOnly()` refuses writes, and `.NotIndexed()` keeps its files out of the knowledge store.
 
@@ -43,7 +36,7 @@ A member's options: `.ReadOnly()` refuses writes, and `.NotIndexed()` keeps its 
 | `vfs.Graph(api, holder, account)` | `vfs` | A user's OneDrive or a SharePoint library. |
 | `vfs.Union(opens...)` | `vfs` | A read-only merge of several sources, for example skill packs. |
 
-The S3 and Azure Blob adapters are in their own packages, so a worker links a cloud SDK only when it uses it. The Google and Microsoft adapters use the REST APIs over `net/http` and link no vendor SDK.
+`vfs.Local` and `vfs.SessionLocal` are directories on the sandbox host, so a session's files there stay on that host. The S3 and Azure Blob adapters are in their own packages, so a supervisor links a cloud SDK only when it uses it. The Google and Microsoft adapters use the REST APIs over `net/http` and link no vendor SDK.
 
 ## Users' own folders
 
@@ -60,7 +53,7 @@ Over ACP, the client uses these extension methods:
 
 A change applies from the session's next prompt. A bound folder is read-only unless the client sets `"readOnly": false`.
 
-In your `workspace.Config.Open`, build the member from the turn's binding:
+In your supervisor's `Workspace`, build the member from the turn's binding:
 
 ```go
 func open(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, error) {
@@ -73,7 +66,7 @@ func open(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, e
 }
 ```
 
-The token goes to `session.SecretStorage`, sealed. It is never in the checkpoint, in Temporal history, or in the ACP wire store. See [Sessions in production](session.md#credentials).
+The token goes to `session.SecretStorage`, sealed. It is never in the checkpoint, in Temporal history, or in the ACP wire store. It reaches the supervisor only for the length of a `run_command`, and never the sandboxed worker. See [Sessions in production](session.md#credentials).
 
 | Provider | Read-only scopes | Writable scopes | Parameters |
 |---|---|---|---|
@@ -82,35 +75,16 @@ The token goes to `session.SecretStorage`, sealed. It is never in the checkpoint
 
 An `organization` account needs a `siteId` or a `driveId`, and a SharePoint library also needs `Sites.Read.All` or `Sites.ReadWrite.All`.
 
-## The agent's file tools
+## How the agent works on files
 
-| Tool | Does |
-|---|---|
-| `read` | Reads a page of numbered lines, a line range, a heading's section, or a sheet's cells. A Google Doc or Word file reads as HTML, one block on each line. A spreadsheet reads as an outline first. |
-| `write` | Creates or edits a text or code file: the whole content, a replacement of one string, or a line range. |
-| `write_document` | Creates or edits a Google Doc or a Word file. |
-| `write_spreadsheet` | Creates a spreadsheet, or edits one cell and its format. |
-| `run_command` | Runs a bash script in a sandbox over the session's workspace. Needs `Sandbox`. |
+The agent has one tool for files, `run_command`. Each call starts a sandboxed worker (WASIX bash, coreutils, grep, sed and findutils, with no network) and runs the script in `/workspace`. The worker's file calls go to its supervisor over a local socket, and the supervisor serves them from the tree (`vfs.Files`), so a script reads and writes the sources directly.
 
-Writes ask the user for permission unless the tool is in `AgentOptions.AllowTools`, and they run only after the agent has a plan. A write checks the file's revision from the last `read`, so a stale edit fails, and the agent reads again.
+- Text, Markdown, JSON, YAML and code read and write as bytes.
+- Google Docs, Sheets, Word (`.docx`) and Excel (`.xlsx`) read as their text and cannot be written. Word and Excel need `WithCodecs(adapters.Codecs()...)` on the tree.
+- Other types, such as images, read and write as bytes.
+- A write goes to the source when the script closes the file. Nothing is cached between calls.
 
-A write goes to the source at once. Nothing is cached between turns.
-
-## Documents and spreadsheets
-
-Codecs turn a file's bytes into a document that the tools can read and edit by line, by block, or by cell:
-
-- Text, Markdown, JSON, YAML, and code use the text codec. Markdown also has heading blocks.
-- Google Docs and Sheets use the Docs and Sheets APIs on a Drive source.
-- Word (`.docx`) and Excel (`.xlsx`) need `WithCodecs(adapters.Codecs()...)` on the tree.
-
-Other types, such as images, can be listed and read as bytes but not edited by the tools.
-
-## The shell
-
-With `worker.Config.Sandbox`, a `sandbox.Client` of a sandbox supervisor, the agent gets `run_command`. Each call starts a sandboxed worker (WASIX bash, coreutils, grep, sed and findutils, with no network) and runs the script in `/workspace`. The worker reaches only the session's tree: its file requests come back to the Temporal worker, which serves them from the tree (`vfs.Files`). Documents read as their text and cannot be written. Without `Sandbox`, the agent has no shell.
-
-To add the tool yourself, add `sandbox.RunCommand(client, vfs.NewFiles(ms))` to `AgentOptions.Tools`.
+`run_command` asks the user for permission unless it is in `AgentOptions.AllowTools`. Without a sandbox client, the agent has no file access. To add the tool yourself, add `sandbox.RunCommand(client)` to `AgentOptions.Tools`.
 
 ## Use the workspace from Go
 

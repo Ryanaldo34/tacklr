@@ -97,18 +97,23 @@ The user can allow or reject the call, once or always. A tool with write access 
 
 ## Add a workspace
 
-A workspace gives the agent files to read and write under `/workspace`. Set `worker.Config.Workspace`:
+A workspace gives the agent files under `/workspace`, which it works on with `run_command`: bash scripts in a sandboxed worker on a sandbox host. Run a sandbox supervisor with your tree, and give the worker a client of it:
 
 ```go
-func agentWorkspace() workspace.Config {
-	return workspace.Config{Open: vfs.Tree(
+// On the sandbox host:
+sup, err := supervisor.New(supervisor.Config{
+	WorkerPath: workerBinary, PackagesDir: packagesDir, TLS: serverTLS,
+	Workspace: vfs.Tree(
 		vfs.At("work", vfs.SessionLocal("/srv/tacklr/work")),     // /workspace/work, one directory per session
 		vfs.At("docs", vfs.Local("/srv/tacklr/docs")).ReadOnly(), // /workspace/docs, shared and read-only
-	)}
-}
+	),
+})
+
+// On the session worker:
+cfg.Sandbox = sandbox.NewClient("sandbox-host:7443", clientTLS)
 ```
 
-The agent gets the `read`, `write`, `write_document`, and `write_spreadsheet` tools. Set `worker.Config.Sandbox` (a `sandbox.Client` of a sandbox supervisor) to also give it `run_command`, a bash shell in a sandboxed worker that sees only the session's workspace. See [Workspace](workspace.md) for S3, Azure Blob, Google Drive, and Microsoft 365.
+See [Workspace](workspace.md) for S3, Azure Blob, Google Drive, and Microsoft 365, and `examples/temporal/cmd/supervisor` for a whole supervisor.
 
 ## Add a knowledge store
 

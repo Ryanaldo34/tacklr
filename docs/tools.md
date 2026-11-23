@@ -64,7 +64,7 @@ The string the handler returns is the tool's result, which goes into the context
 
 - **An error** gives the model the error's text, and the model can try again.
 - **A correction** tells the model how to fix its call: `return "", tacklr.Correction(err, "Use a date in YYYY-MM-DD format.")`.
-- **A large result** stays whole when it fits. When a round is too large for the window, its largest results are cut, and the cut result tells the model so. With a workspace, set `workspace.Config.OverflowPath` to keep each full result in a file that the agent can `read`.
+- **A large result** stays whole when it fits. When a round is too large for the window, its largest results are cut, and the cut result tells the model to run a narrower command or query for the rest.
 - **Interceptors.** `AgentOptions.ToolInterceptors` wrap every tool call. An interceptor can log, time, or shorten a result.
 
 ## CallContext
@@ -114,7 +114,7 @@ The user can allow or reject the call, once or always. An "always" answer applie
 
 - `AgentOptions.AllowTools` lists tools that run without the question, by the name the model calls them. A user's "reject always" still wins.
 - A tool with write access (`ToolWriteAccess`) runs only after the agent has made a plan with `create_plan`. You cannot turn this off. Specialists skip it.
-- The built-in workspace write tools and `run_command` ask for permission in the same way.
+- `run_command` asks for permission in the same way.
 
 ## Built-in tools
 
@@ -125,10 +125,8 @@ The harness adds tools for the features you turn on:
 | Always | `create_plan`, `edit_plan`, `list_plan`, `complete_todo`, `ask_user_choice` |
 | `AgentOptions.Specialists` | `spawn_specialist`, `list_children`, `cancel_child` |
 | `AgentOptions.Brain` | `search`, `open`, `related`; `save` with `BrainWriteKinds`; `link` when the store has a graph |
-| `worker.Config.Workspace` | `read`, `write`, `write_document`, `write_spreadsheet` |
-| `worker.Config.Workspace` and `Brain` | `index_file`, `unindex` |
-| `worker.Config.Workspace` and `Sandbox` | `run_command` |
-| `AgentOptions.SkillsLoader`, or a workspace with a `skills` directory | `read_skill` |
+| `worker.Config.Sandbox` | `run_command` |
+| `AgentOptions.Skills` | `read_skill` |
 
 ## Web tools
 
@@ -158,7 +156,7 @@ Credentials in `Env` and `Headers` are never stored. For a credential the sessio
 
 A skill is a directory with a `SKILL.md` file of instructions for one task. The model sees each skill's name and description, and reads the full instructions with `read_skill` when it needs them.
 
-Set `AgentOptions.SkillsLoader` to `skills.Loader{Root: dir}` to read skills from a local directory. With a workspace, skills load from `/workspace/skills` by default (`workspace.Config.SkillsPath`).
+Set `AgentOptions.Skills` to a `skills.Provider`: `skills.Dir{Root: dir}` reads skills from a local directory, or implement `List` and `Read` for your own store. The system prompt lists only each skill's name and description; `read_skill` reads the instructions through the provider when the agent asks.
 
 ## Test a tool
 

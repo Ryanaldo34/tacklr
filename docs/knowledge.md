@@ -79,7 +79,7 @@ Every record belongs to a **namespace**: an ordered list of named values, such a
 - `AgentOptions.SessionScope` gives each session its own namespace and principals, for an agent that serves many tenants or users. The runtime calls it with the session's id when it builds the session's harness and when it deletes the session's messages. A child session's id starts with its parent's id, so the host can give a child its parent's scope.
 - The first value is the **tenant**. A search reaches only records with the same tenant. Every store enforces the tenant with an index, so one tenant's data never ranks in another's search.
 - A record from another namespace looks like a record that does not exist.
-- A record with `Readers` is visible only to callers whose `AgentOptions.SearchPrincipals` (the user's and groups' ids, or the principals `SessionScope` gives) include one of them. Indexed files get their readers from the source's sharing, with `workspace.Config.IndexReaders`.
+- A record with `Readers` is visible only to callers whose `AgentOptions.SearchPrincipals` (the user's and groups' ids, or the principals `SessionScope` gives) include one of them. Indexed files get their readers from the source's sharing, with `vfsindex.MountIndexer.Readers`.
 
 ## The agent's tools
 
@@ -90,9 +90,8 @@ Every record belongs to a **namespace**: an ordered list of named values, such a
 | `related` | List a record's parts, its parent, and the records linked to it. |
 | `save` | Write a record of a kind in `BrainWriteKinds`. Its description lists each of those kinds with its registered description and fields. Registered only when that list is not empty. |
 | `link` | Add or remove a link between two records, with a note and a role. With `BrainRelations`, it offers only those relations, describes each and the kinds at its ends, and refuses a link between other kinds. Registered only with a graph. |
-| `index_file`, `unindex` | Add a workspace file to the store, or remove it. Registered with a workspace. |
 
-The agent usually works in this order: `search` to find candidates, `search` with a kind and filters to narrow, `open` or `related` to read and walk, then `read` on a file's path to see its current content.
+The agent usually works in this order: `search` to find candidates, `search` with a kind and filters to narrow, `open` or `related` to read and walk, then `run_command` on a file's path to see its current content.
 
 ## Search
 
@@ -105,7 +104,7 @@ The agent usually works in this order: `search` to find candidates, `search` wit
 - **`within`** searches only the parts of one record or indexed file.
 - **`near`** searches only the records linked to one record, up to `depth` links away, for example "what in this deal's neighborhood mentions the budget". It needs a graph.
 
-A file's matching chunks do not appear as results of their own. They are attached to their file's record as **evidence**: a snippet with its line numbers or heading, so the agent can `read` that part of the file.
+A file's matching chunks do not appear as results of their own. They are attached to their file's record as **evidence**: a snippet with its line numbers or heading, so the agent can read that part of the file with `run_command`.
 
 Filters test the record. The filter keys are `kind`, `title`, `created_after`, `created_before`, `updated_after`, `updated_before`, and the kind's own fields. A wrong kind or filter fails with an error that lists the valid choices, so the model can correct its call. Each page says whether there is `more`, and `more: true` returns the next page of the tool's last call, also after the session restarts.
 
@@ -137,7 +136,7 @@ Without a graph, `related` returns containment only, and the agent has no `link`
 
 ## Indexed files
 
-A workspace file is indexed when the agent calls `index_file`, or when your code calls `MountIndexer.IndexPath`. Nothing else indexes a file: a later write does not update the index.
+A workspace file is indexed when your code calls `MountIndexer.IndexPath`. Nothing else indexes a file: a later write does not update the index.
 
 ```go
 idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
