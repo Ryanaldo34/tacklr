@@ -15,8 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
+use tokio::io::AsyncReadExt;
 use url::Url;
-use virtual_fs::{FileSystem, VirtualFile};
+use virtual_fs::{FileSystem, Pipe};
 use wasmer::sys::EngineBuilder;
 use wasmer::{Engine, Module};
 use wasmer_config::package::{NamedPackageId, PackageId};
@@ -38,15 +39,16 @@ pub const WORKSPACE: &str = "/workspace";
 
 const BASH: &str = "wasmer/bash";
 
-/// The loaded packages and the runtime that runs scripts with them.
-pub struct Shell {
-    tokio: tokio::runtime::Runtime,
-    runtime: Arc<PluggableRuntime>,
-    bash: BinaryPackage,
-    tools: Vec<BinaryPackage>,
+/// The packages and their compiled modules, read from disk. Loading starts
+/// no thread, so the worker loads them before its jail applies and then
+/// starts the [`Shell`] inside the jail.
+pub struct Packages {
+    bundle: Bundle,
+    engine: Engine,
+    modules: Vec<(ModuleHash, Module)>,
 }
 
-impl Shell {
+impl Packages {
     /// Loads the packages that `dir/packages.txt` lists and their compiled
     /// modules, and checks each package file against its SHA-256 in the
     /// list.
@@ -58,12 +60,11 @@ impl Shell {
     /// match its SHA-256, or the list has no `wasmer/bash`.
     pub fn load(dir: &Path) -> anyhow::Result<Self> {
         let bundle = Bundle::read(dir)?;
-        let tokio = tokio_runtime()?;
         let engine: Engine = EngineBuilder::headless().engine().into();
-        let compiled = SharedCache::new();
         let artifacts = compiled_dir(dir);
         let entries = std::fs::read_dir(&artifacts)
             .with_context(|| format!("read {} (run make sandbox-packages)", artifacts.display()))?;
+        let mut modules = Vec::new();
         for entry in entries {
             let path = entry?.path();
             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -73,9 +74,13 @@ impl Shell {
             // worker binary.
             let module = unsafe { Module::deserialize_from_file(&engine, &path) }
                 .with_context(|| format!("load {}", path.display()))?;
-            tokio.block_on(compiled.save(hash, &engine, &module))?;
+            modules.push((hash, module));
         }
-        Self::start(bundle, tokio, engine, compiled)
+        Ok(Self {
+            bundle,
+            engine,
+            modules,
+        })
     }
 
     /// Compiles the modules of the packages in `dir` for this CPU
@@ -95,12 +100,11 @@ impl Shell {
             .set_target(Some(target))
             .engine()
             .into();
-        let shell = Self::start(
-            Bundle::read(dir)?,
-            tokio_runtime()?,
-            engine.clone(),
-            SharedCache::new(),
-        )?;
+        let shell = Shell::start(Self {
+            bundle: Bundle::read(dir)?,
+            engine: engine.clone(),
+            modules: Vec::new(),
+        })?;
         let out = compiled_dir(dir);
         std::fs::create_dir_all(&out)?;
         let mut done = std::collections::HashSet::new();
@@ -115,23 +119,42 @@ impl Shell {
         }
         Ok(done.len())
     }
+}
 
-    fn start(
-        bundle: Bundle,
-        tokio: tokio::runtime::Runtime,
-        engine: Engine,
-        compiled: SharedCache,
-    ) -> anyhow::Result<Self> {
+/// The runtime that runs scripts with the packages.
+pub struct Shell {
+    tokio: tokio::runtime::Runtime,
+    runtime: Arc<PluggableRuntime>,
+    bash: BinaryPackage,
+    tools: Vec<BinaryPackage>,
+}
+
+impl Shell {
+    /// Starts the runtime for `packages`: the threads of the async runtime
+    /// that runs the packages' processes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the async runtime cannot start or a package's
+    /// dependencies cannot be resolved from the bundle.
+    pub fn start(packages: Packages) -> anyhow::Result<Self> {
+        let tokio = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let compiled = SharedCache::new();
+        for (hash, module) in &packages.modules {
+            tokio.block_on(compiled.save(*hash, &packages.engine, module))?;
+        }
         let mut runtime =
             PluggableRuntime::new(Arc::new(TokioTaskManager::new(tokio.handle().clone())));
-        runtime.set_source(bundle.source);
-        runtime.set_package_loader(bundle.loader);
-        runtime.set_engine(engine);
+        runtime.set_source(packages.bundle.source);
+        runtime.set_package_loader(packages.bundle.loader);
+        runtime.set_engine(packages.engine);
         runtime.set_module_cache(compiled);
         let runtime = Arc::new(runtime);
-        let bash = tokio.block_on(BinaryPackage::from_webc(&bundle.bash, &*runtime))?;
+        let bash = tokio.block_on(BinaryPackage::from_webc(&packages.bundle.bash, &*runtime))?;
         let mut tools = Vec::new();
-        for container in &bundle.tools {
+        for container in &packages.bundle.tools {
             tools.push(tokio.block_on(BinaryPackage::from_webc(container, &*runtime))?);
         }
         Ok(Self {
@@ -143,32 +166,42 @@ impl Shell {
     }
 
     /// Runs `script` with `bash -c` in [`WORKSPACE`], where `workspace` is
-    /// mounted, and returns the script's exit code.
+    /// mounted, and returns the script's exit code. `output` gets the
+    /// script's stdout and stderr as they come, from the runtime's threads.
     ///
     /// # Errors
     ///
     /// Returns an error if the runtime fails for a reason other than the
-    /// script's exit.
+    /// script's exit, or if `output` fails.
     pub fn run(
         &self,
         script: &str,
         workspace: Arc<dyn FileSystem + Send + Sync>,
-        stdout: Box<dyn VirtualFile + Send + Sync>,
-        stderr: Box<dyn VirtualFile + Send + Sync>,
+        output: Output,
     ) -> anyhow::Result<i32> {
         let _context = self.tokio.enter();
+        let (stdout, stdout_rx) = Pipe::channel();
+        let (stderr, stderr_rx) = Pipe::channel();
+        let pumps = [
+            self.tokio
+                .spawn(pump(stdout_rx, Stream::Stdout, output.clone())),
+            self.tokio.spawn(pump(stderr_rx, Stream::Stderr, output)),
+        ];
         let result = WasiRunner::new()
             .with_injected_packages(self.tools.iter().cloned())
             .with_mount(WORKSPACE.to_owned(), workspace)
             .with_current_dir(WORKSPACE)
-            .with_stdout(stdout)
-            .with_stderr(stderr)
+            .with_stdout(Box::new(stdout))
+            .with_stderr(Box::new(stderr))
             .with_args(["-c", script])
             .run_command(
                 "bash",
                 &self.bash,
                 RuntimeOrEngine::Runtime(self.runtime.clone()),
             );
+        for pump in pumps {
+            self.tokio.block_on(pump)??;
+        }
         match result {
             Ok(()) => Ok(0),
             Err(error) => error
@@ -177,6 +210,32 @@ impl Shell {
                 .map(|code| code.raw())
                 .ok_or(error),
         }
+    }
+}
+
+/// The output stream of a script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream {
+    /// The script's stdout.
+    Stdout,
+    /// The script's stderr.
+    Stderr,
+}
+
+/// Where [`Shell::run`] sends a script's output.
+pub type Output = Arc<dyn Fn(Stream, &[u8]) -> std::io::Result<()> + Send + Sync>;
+
+/// Sends what `pipe` gets to `output`, until the script closes it. It reads
+/// with the async API: the blocking read of [`Pipe`] holds the lock that a
+/// write needs.
+async fn pump(mut pipe: Pipe, stream: Stream, output: Output) -> std::io::Result<()> {
+    let mut buffer = vec![0u8; 64 << 10];
+    loop {
+        let read = pipe.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(());
+        }
+        output(stream, &buffer[..read])?;
     }
 }
 
@@ -234,12 +293,6 @@ impl Bundle {
             tools,
         })
     }
-}
-
-fn tokio_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
 }
 
 fn compiled_dir(dir: &Path) -> PathBuf {

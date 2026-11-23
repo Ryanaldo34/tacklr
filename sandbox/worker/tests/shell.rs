@@ -1,46 +1,46 @@
 //! The WASIX shell with the bundled packages. Run `make sandbox-packages`
 //! first.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use tacklr_sandbox_worker::shell::Shell;
-use virtual_fs::{FileSystem, Pipe, mem_fs};
+use tacklr_sandbox_worker::shell::{Output, Packages, Shell, Stream};
+use virtual_fs::{FileSystem, mem_fs};
 
 fn packages() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("packages")
 }
 
-struct Output {
+struct Ran {
     code: i32,
     stdout: String,
     stderr: String,
 }
 
-fn run(shell: &Shell, script: &str, workspace: Arc<dyn FileSystem + Send + Sync>) -> Output {
-    let (stdout, mut stdout_rx) = Pipe::channel();
-    let (stderr, mut stderr_rx) = Pipe::channel();
-    let code = shell
-        .run(script, workspace, Box::new(stdout), Box::new(stderr))
-        .expect("run");
-    let mut output = Output {
+fn run(shell: &Shell, script: &str, workspace: Arc<dyn FileSystem + Send + Sync>) -> Ran {
+    let streams = Arc::new(Mutex::new((String::new(), String::new())));
+    let sink = streams.clone();
+    let output: Output = Arc::new(move |stream, bytes| {
+        let mut streams = sink.lock().unwrap();
+        let text = String::from_utf8_lossy(bytes);
+        match stream {
+            Stream::Stdout => streams.0.push_str(&text),
+            Stream::Stderr => streams.1.push_str(&text),
+        }
+        Ok(())
+    });
+    let code = shell.run(script, workspace, output).expect("run");
+    let (stdout, stderr) = streams.lock().unwrap().clone();
+    Ran {
         code,
-        stdout: String::new(),
-        stderr: String::new(),
-    };
-    stdout_rx
-        .read_to_string(&mut output.stdout)
-        .expect("stdout");
-    stderr_rx
-        .read_to_string(&mut output.stderr)
-        .expect("stderr");
-    output
+        stdout,
+        stderr,
+    }
 }
 
 #[test]
 fn shell_runs_a_pipeline_over_the_workspace_and_a_later_run_sees_its_files() {
-    let shell = Shell::load(&packages()).expect("load");
+    let shell = Shell::start(Packages::load(&packages()).expect("load")).expect("start");
     let workspace = Arc::new(mem_fs::FileSystem::default());
 
     let output = run(
@@ -57,7 +57,7 @@ fn shell_runs_a_pipeline_over_the_workspace_and_a_later_run_sees_its_files() {
 
 #[test]
 fn shell_returns_the_exit_code_and_stderr_of_the_script() {
-    let shell = Shell::load(&packages()).expect("load");
+    let shell = Shell::start(Packages::load(&packages()).expect("load")).expect("start");
 
     let output = run(
         &shell,
@@ -75,7 +75,7 @@ fn shell_refuses_a_package_list_line_that_is_not_name_version_hash() {
     std::fs::create_dir_all(&dir).expect("dir");
     std::fs::write(dir.join("packages.txt"), "wasmer/bash 1.0.25\n").expect("write");
 
-    let error = Shell::load(&dir).err().expect("load fails");
+    let error = Packages::load(&dir).err().expect("load fails");
 
     assert_eq!(
         error.to_string(),
@@ -94,7 +94,7 @@ fn shell_refuses_a_package_list_without_bash() {
     )
     .expect("write");
 
-    let error = Shell::load(&dir).err().expect("load fails");
+    let error = Packages::load(&dir).err().expect("load fails");
 
     assert_eq!(error.to_string(), "packages.txt does not list wasmer/bash");
 }
@@ -109,7 +109,7 @@ fn shell_refuses_a_listed_package_whose_file_is_missing() {
     )
     .expect("write");
 
-    let error = Shell::load(&dir).err().expect("load fails");
+    let error = Packages::load(&dir).err().expect("load fails");
 
     assert_eq!(
         error.to_string(),
@@ -128,7 +128,7 @@ fn shell_refuses_a_package_file_that_does_not_match_its_hash() {
     )
     .expect("write");
 
-    let error = Shell::load(&dir).err().expect("load fails");
+    let error = Packages::load(&dir).err().expect("load fails");
 
     assert_eq!(
         error.to_string(),
@@ -166,7 +166,7 @@ fn compiled_dir(dir: &Path) -> PathBuf {
 fn shell_refuses_packages_that_are_not_compiled() {
     let dir = uncompiled_packages("uncompiled");
 
-    let error = Shell::load(&dir).err().expect("load fails");
+    let error = Packages::load(&dir).err().expect("load fails");
 
     assert_eq!(
         error.to_string(),
@@ -184,7 +184,7 @@ fn shell_refuses_a_compiled_module_it_cannot_load() {
     let stale = compiled_dir(&dir).join(format!("{}.bin", "AB".repeat(32)));
     std::fs::write(&stale, b"not a wasmer artifact").expect("write");
 
-    let error = Shell::load(&dir).err().expect("load fails");
+    let error = Packages::load(&dir).err().expect("load fails");
 
     assert_eq!(error.to_string(), format!("load {}", stale.display()));
 }
