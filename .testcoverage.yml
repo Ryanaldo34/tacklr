@@ -96,5 +96,7 @@ exclude:
     - internal/pgtest
     - internal/faultproxy
     - internal/s3test
+    # The sandbox supervisor and worker for tests.
+    - sandbox/sandboxtest
 
 breakdown-file-name: coverage.breakdown
