@@ -1,6 +1,6 @@
 # Agent Expectations
 
-- WASM runtimes are based in wasmtime and implemented in rust for memory safety, latest WASM standard, and latest WASI standards
+- WASM runtimes are based in Wasmer with WASIX (POSIX processes, pipes and threads in WASM) and implemented in rust for memory safety
 - Untrusted, agent generated bash or code scripts are to run in Tacklr's WASM workers securely
 - The harness & runtime cores will be written in GO, and will follow all modern go idioms
 - You will never update this file or skills without explicit permission. You will never add documentation without explicit permission
