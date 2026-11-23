@@ -5,27 +5,60 @@ use std::os::unix::net::UnixStream;
 use std::thread;
 
 use serde_json::{Value, json};
-use tacklr_sandbox_worker::frame::{self, KIND_CONTROL, MAX_BODY};
+use std::path::Path;
+
+use tacklr_sandbox_worker::frame::{self, KIND_CONTROL, KIND_STDERR, KIND_STDOUT, MAX_BODY};
 use tacklr_sandbox_worker::message::Enforcement;
 use tacklr_sandbox_worker::serve::serve;
+use tacklr_sandbox_worker::shell::{Packages, Shell};
 
 const ENFORCEMENT: Enforcement = Enforcement { landlock_abi: 6 };
 
+fn shell() -> Shell {
+    let packages = Path::new(env!("CARGO_MANIFEST_DIR")).join("packages");
+    Shell::start(Packages::load(&packages).expect("load packages")).expect("start shell")
+}
+
 fn start() -> (UnixStream, thread::JoinHandle<io::Result<()>>) {
     let (mut worker, supervisor) = UnixStream::pair().expect("socket pair");
-    let handle = thread::spawn(move || serve(&mut worker, ENFORCEMENT));
+    let handle = thread::spawn(move || serve(&mut worker, ENFORCEMENT, &shell()));
     (supervisor, handle)
+}
+
+fn read_frame(socket: &mut UnixStream) -> (u8, Vec<u8>) {
+    let mut header = [0u8; 5];
+    socket.read_exact(&mut header).expect("read header");
+    let mut body =
+        vec![0u8; u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize];
+    socket.read_exact(&mut body).expect("read body");
+    (header[4], body)
 }
 
 /// Reads one reply as the supervisor does: a control frame with a JSON body.
 fn read_value(socket: &mut UnixStream) -> Value {
-    let mut header = [0u8; 5];
-    socket.read_exact(&mut header).expect("read header");
-    assert_eq!(header[4], KIND_CONTROL);
-    let mut body =
-        vec![0u8; u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize];
-    socket.read_exact(&mut body).expect("read body");
+    let (kind, body) = read_frame(socket);
+    assert_eq!(kind, KIND_CONTROL);
     serde_json::from_slice(&body).expect("decode reply")
+}
+
+/// Reads frames until the done reply of a run. Returns the stdout and
+/// stderr it got, and the done reply.
+fn read_run(socket: &mut UnixStream) -> (String, String, Value) {
+    let (mut stdout, mut stderr) = (String::new(), String::new());
+    loop {
+        let (kind, body) = read_frame(socket);
+        match kind {
+            KIND_STDOUT => stdout.push_str(std::str::from_utf8(&body).expect("utf-8")),
+            KIND_STDERR => stderr.push_str(std::str::from_utf8(&body).expect("utf-8")),
+            _ => {
+                return (
+                    stdout,
+                    stderr,
+                    serde_json::from_slice(&body).expect("decode reply"),
+                );
+            }
+        }
+    }
 }
 
 /// Writes a request as the supervisor does: one control frame.
@@ -144,7 +177,60 @@ fn worker_fails_when_the_supervisor_is_gone_before_ready() {
     let (mut worker, supervisor) = UnixStream::pair().expect("socket pair");
     drop(supervisor);
 
-    let error = serve(&mut worker, ENFORCEMENT).expect_err("serve fails");
+    let error = serve(&mut worker, ENFORCEMENT, &shell()).expect_err("serve fails");
 
+    assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+}
+
+#[test]
+fn worker_streams_a_runs_output_and_keeps_its_workspace_for_the_next_run() {
+    let (mut supervisor, handle) = start();
+    read_value(&mut supervisor);
+
+    write_request(
+        &mut supervisor,
+        &json!({"type": "run", "id": 1, "script": "echo hi | tee note.txt; echo warn >&2"}),
+    );
+    let first = read_run(&mut supervisor);
+    write_request(
+        &mut supervisor,
+        &json!({"type": "run", "id": 2, "script": "cat note.txt; exit 4"}),
+    );
+    let second = read_run(&mut supervisor);
+    write_request(&mut supervisor, &json!({"type": "stop"}));
+
+    assert_eq!(
+        first,
+        (
+            "hi\n".into(),
+            "warn\n".into(),
+            json!({"type": "done", "id": 1, "code": 0})
+        )
+    );
+    assert_eq!(
+        second,
+        (
+            "hi\n".into(),
+            String::new(),
+            json!({"type": "done", "id": 2, "code": 4})
+        )
+    );
+    handle.join().expect("join").expect("serve ends cleanly");
+}
+
+#[test]
+fn worker_fails_when_the_supervisor_stops_reading_during_a_run() {
+    let (mut supervisor, handle) = start();
+    read_value(&mut supervisor);
+
+    write_request(
+        &mut supervisor,
+        &json!({"type": "run", "id": 1, "script": "echo hi"}),
+    );
+    supervisor
+        .shutdown(std::net::Shutdown::Read)
+        .expect("shutdown");
+
+    let error = handle.join().expect("join").expect_err("serve fails");
     assert_eq!(error.kind(), ErrorKind::BrokenPipe);
 }

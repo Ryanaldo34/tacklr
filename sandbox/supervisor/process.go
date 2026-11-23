@@ -36,11 +36,11 @@ type process struct {
 	state  *os.ProcessState
 }
 
-// startProcess starts the worker binary at path in new namespaces, with an
-// empty environment, the root directory as its working directory, and the
-// worker's end of a Unix socket pair as fd 3. Its stdin, stdout and stderr
-// are /dev/null.
-func startProcess(path string) (*process, error) {
+// startProcess starts the worker binary at path, with the packages directory
+// as its argument, in new namespaces, with an empty environment, the root
+// directory as its working directory, and the worker's end of a Unix socket
+// pair as fd 3. Its stdin, stdout and stderr are /dev/null.
+func startProcess(path, packages string) (*process, error) {
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("supervisor: socket pair: %w", err)
@@ -55,7 +55,7 @@ func startProcess(path string) (*process, error) {
 	}
 	cmd := &exec.Cmd{
 		Path:       path,
-		Args:       []string{path},
+		Args:       []string{path, packages},
 		Env:        []string{},
 		Dir:        "/",
 		ExtraFiles: []*os.File{theirs},

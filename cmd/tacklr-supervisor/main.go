@@ -3,7 +3,8 @@
 // worker binary (-worker) for each client stream.
 //
 //	tacklr-supervisor -listen :7443 -cert server.pem -key server-key.pem \
-//		-client-ca clients-ca.pem -worker /usr/libexec/tacklr-sandbox-worker
+//		-client-ca clients-ca.pem -worker /usr/libexec/tacklr-sandbox-worker \
+//		-packages /usr/lib/tacklr-sandbox/packages
 //
 // It stops on SIGINT or SIGTERM, after it has killed its workers.
 package main
@@ -38,6 +39,7 @@ func run() error {
 	keyFile := flag.String("key", "", "PEM file with the server private key")
 	clientCAFile := flag.String("client-ca", "", "PEM file with the roots that verify client certificates")
 	workerPath := flag.String("worker", "", "absolute path of the sandbox worker binary")
+	packagesDir := flag.String("packages", "", "absolute path of the worker's packages (make sandbox-packages)")
 	maxWorkers := flag.Int("max-workers", 64, "largest number of workers that run at one time")
 	stopTimeout := flag.Duration("stop-timeout", 5*time.Second, "time a worker has to exit after stop")
 	flag.Parse()
@@ -52,6 +54,7 @@ func run() error {
 	}
 	sup, err := supervisor.New(supervisor.Config{
 		WorkerPath:  *workerPath,
+		PackagesDir: *packagesDir,
 		MaxWorkers:  *maxWorkers,
 		StopTimeout: *stopTimeout,
 		TLS: &tls.Config{

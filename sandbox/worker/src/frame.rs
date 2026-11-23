@@ -1,8 +1,9 @@
 //! Frames on the worker's socket.
 //!
 //! A frame is a 5-byte header and a body. The header is the body length as a
-//! big-endian `u32`, then one kind byte. The only kind today is control: a
-//! JSON body. The Go side (`sandbox/internal/wire`) uses the same format.
+//! big-endian `u32`, then one kind byte: control (a JSON body), or the
+//! stdout or stderr bytes of a run. The Go side (`sandbox/internal/wire`)
+//! uses the same format.
 
 use std::io::{self, ErrorKind, Read, Write};
 
@@ -13,6 +14,12 @@ pub const MAX_BODY: usize = 1 << 20;
 
 /// The kind byte of a frame with a JSON control message.
 pub const KIND_CONTROL: u8 = 1;
+
+/// The kind byte of a frame with stdout bytes of the current run.
+pub const KIND_STDOUT: u8 = 2;
+
+/// The kind byte of a frame with stderr bytes of the current run.
+pub const KIND_STDERR: u8 = 3;
 
 const HEADER: usize = 5;
 
@@ -26,13 +33,31 @@ const HEADER: usize = 5;
 ///
 /// Never: a [`Reply`] has only strings and integers, so it always encodes,
 /// and it is far below 4 GiB.
+///
+/// The stdout and stderr of a run go in [`write_data`] frames.
 pub fn write(writer: &mut dyn Write, reply: &Reply) -> io::Result<()> {
     let body = serde_json::to_vec(reply).expect("a reply always encodes");
-    let length = u32::try_from(body.len()).expect("a reply is far below 4 GiB");
+    write_frame(writer, KIND_CONTROL, &body)
+}
+
+/// Writes `bytes` as frames of `kind`, each at most [`MAX_BODY`].
+///
+/// # Errors
+///
+/// Returns the error of the writer.
+pub fn write_data(writer: &mut dyn Write, kind: u8, bytes: &[u8]) -> io::Result<()> {
+    for chunk in bytes.chunks(MAX_BODY) {
+        write_frame(writer, kind, chunk)?;
+    }
+    Ok(())
+}
+
+fn write_frame(writer: &mut dyn Write, kind: u8, body: &[u8]) -> io::Result<()> {
+    let length = u32::try_from(body.len()).expect("a frame body is at most MAX_BODY");
     let mut frame = Vec::with_capacity(HEADER + body.len());
     frame.extend_from_slice(&length.to_be_bytes());
-    frame.push(KIND_CONTROL);
-    frame.extend_from_slice(&body);
+    frame.push(kind);
+    frame.extend_from_slice(body);
     writer.write_all(&frame)
 }
 

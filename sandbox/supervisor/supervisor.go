@@ -19,7 +19,7 @@
 // it. When the worker ends, the supervisor sends its exit on the stream and
 // ends the stream. A worker that seccomp killed
 // has the signal SIGSYS. A worker that could not apply its sandbox has the
-// exit code 125.
+// exit code 125. That includes a worker that could not load its packages.
 package supervisor
 
 import (
@@ -45,6 +45,10 @@ const (
 type Config struct {
 	// WorkerPath is the absolute path of the worker binary.
 	WorkerPath string
+	// PackagesDir is the absolute path of the worker's packages: the
+	// pinned WASIX packages and their compiled modules (make
+	// sandbox-packages). The worker reads it before its jail applies.
+	PackagesDir string
 	// MaxWorkers is the largest number of workers that run at one time. A
 	// request for one more worker gets 503 Service Unavailable.
 	MaxWorkers int
@@ -76,6 +80,8 @@ func New(config Config) (*Supervisor, error) {
 	switch {
 	case !filepath.IsAbs(config.WorkerPath):
 		return nil, errors.New("supervisor: WorkerPath must be an absolute path")
+	case !filepath.IsAbs(config.PackagesDir):
+		return nil, errors.New("supervisor: PackagesDir must be an absolute path")
 	case config.MaxWorkers < 1:
 		return nil, errors.New("supervisor: MaxWorkers must be 1 or more")
 	case config.TLS == nil:
@@ -140,7 +146,7 @@ func (s *Supervisor) serveWorker(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the supervisor runs its largest number of workers", http.StatusServiceUnavailable)
 		return
 	}
-	p, err := startProcess(s.config.WorkerPath)
+	p, err := startProcess(s.config.WorkerPath, s.config.PackagesDir)
 	if err != nil {
 		http.Error(w, "the worker could not start", http.StatusInternalServerError)
 		return

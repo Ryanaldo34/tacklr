@@ -16,6 +16,15 @@ pub enum Request {
     },
     /// Asks the worker to exit with code 0.
     Stop,
+    /// Asks the worker to run a bash script in its workspace. The worker
+    /// sends the script's output in stdout and stderr frames, then
+    /// [`Reply::Done`] with the same ID.
+    Run {
+        /// The ID the worker puts on its done reply.
+        id: u64,
+        /// The script, run with `bash -c`.
+        script: String,
+    },
 }
 
 /// A message from the worker to the supervisor.
@@ -31,6 +40,16 @@ pub enum Reply {
     Pong {
         /// The ID of the ping.
         id: u64,
+    },
+    /// The end of a [`Request::Run`], after all its output.
+    Done {
+        /// The ID of the run.
+        id: u64,
+        /// The script's exit code, or -1 when `error` is set.
+        code: i32,
+        /// Why the runtime could not run the script, if it could not.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 

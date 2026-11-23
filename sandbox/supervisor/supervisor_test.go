@@ -32,21 +32,26 @@ import (
 	"github.com/ryanaldo34/tacklr/sandbox/supervisor"
 )
 
-// workerBinary is the real Rust worker, built once by TestMain.
-var workerBinary string
+// workerBinary is the real Rust worker and packagesDir its packages, built
+// once by TestMain.
+var workerBinary, packagesDir string
 
 func TestMain(m *testing.M) {
 	dir, err := filepath.Abs("../worker")
 	if err != nil {
 		panic(err)
 	}
+	packages := exec.Command("make", "-C", "../..", "sandbox-packages")
 	build := exec.Command("cargo", "build", "--release", "--locked")
 	build.Dir = dir
-	if output, err := build.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "build the sandbox worker: %v\n%s", err, output)
-		os.Exit(1)
+	for _, step := range []*exec.Cmd{packages, build} {
+		if output, err := step.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "build the sandbox worker: %v\n%s", err, output)
+			os.Exit(1)
+		}
 	}
 	workerBinary = filepath.Join(dir, "target", "release", "tacklr-sandbox-worker")
+	packagesDir = filepath.Join(dir, "packages")
 	os.Exit(m.Run())
 }
 
@@ -253,9 +258,10 @@ func TestServeStopsItsWorkersWhenItsContextEnds(t *testing.T) {
 func TestServeFailsWithoutAServerCertificate(t *testing.T) {
 	ca := newAuthority(t)
 	sup, err := supervisor.New(supervisor.Config{
-		WorkerPath: workerBinary,
-		MaxWorkers: 1,
-		TLS:        &tls.Config{ClientCAs: ca.pool, MinVersion: tls.VersionTLS13},
+		WorkerPath:  workerBinary,
+		PackagesDir: packagesDir,
+		MaxWorkers:  1,
+		TLS:         &tls.Config{ClientCAs: ca.pool, MinVersion: tls.VersionTLS13},
 	})
 	require.NoError(t, err)
 	listener, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -269,7 +275,7 @@ func TestServeFailsWithoutAServerCertificate(t *testing.T) {
 func TestNewRefusesAConfigItCannotRunSafely(t *testing.T) {
 	ca := newAuthority(t)
 	valid := func() supervisor.Config {
-		return supervisor.Config{WorkerPath: workerBinary, MaxWorkers: 1, TLS: ca.serverConfig(t)}
+		return supervisor.Config{WorkerPath: workerBinary, PackagesDir: packagesDir, MaxWorkers: 1, TLS: ca.serverConfig(t)}
 	}
 	cases := []struct {
 		name   string
@@ -277,6 +283,7 @@ func TestNewRefusesAConfigItCannotRunSafely(t *testing.T) {
 		err    string
 	}{
 		{"a relative worker path", func(c *supervisor.Config) { c.WorkerPath = "worker" }, "supervisor: WorkerPath must be an absolute path"},
+		{"a relative packages path", func(c *supervisor.Config) { c.PackagesDir = "packages" }, "supervisor: PackagesDir must be an absolute path"},
 		{"no worker slots", func(c *supervisor.Config) { c.MaxWorkers = 0 }, "supervisor: MaxWorkers must be 1 or more"},
 		{"no TLS", func(c *supervisor.Config) { c.TLS = nil }, "supervisor: TLS is required"},
 		{"no client roots", func(c *supervisor.Config) { c.TLS.ClientCAs = nil }, "supervisor: TLS.ClientCAs is required to verify clients"},
@@ -310,6 +317,7 @@ func startSupervisor(t *testing.T, ca *authority, config supervisor.Config) host
 	if config.WorkerPath == "" {
 		config.WorkerPath = workerBinary
 	}
+	config.PackagesDir = packagesDir
 	if config.MaxWorkers == 0 {
 		config.MaxWorkers = 4
 	}
