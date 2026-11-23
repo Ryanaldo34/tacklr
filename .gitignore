@@ -43,5 +43,6 @@ sandbox/worker/target/
 # WASIX packages fetched by scripts/sandbox-packages.sh.
 sandbox/worker/packages/*.webc
 sandbox/worker/packages/*.part
+sandbox/worker/packages/.build.lock
 sandbox/worker/packages/compiled/
 !sandbox/worker/src/bin/

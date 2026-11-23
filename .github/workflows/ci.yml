@@ -121,8 +121,12 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      # The sandbox/supervisor tests build the Rust worker with cargo
-      # (preinstalled on the runner) and need Landlock ABI 6 (Linux 6.12).
+      # Once, before the test packages run in parallel: rustup installs the
+      # crate's toolchain on first use, and the sandbox tests reuse the build.
+      - name: Build the sandbox worker
+        run: make sandbox-worker
+
+      # The sandbox tests need Landlock ABI 6 (Linux 6.12).
       # One run: race detector and coverage. Testcontainers starts Postgres
       # (pgvector), Helix and Temporal; nothing is pulled or built beforehand.
       - name: Test (race + coverage)

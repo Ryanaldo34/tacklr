@@ -1,5 +1,5 @@
 # Requires Go 1.27 (go.mod).
-.PHONY: test vet lint fmt cover coverage check wasm vet-wasm cloudflare-e2e deadcode rust-fmt-check rust-lint rust-test rust-cover sandbox-packages
+.PHONY: test vet lint fmt cover coverage check wasm vet-wasm cloudflare-e2e deadcode rust-fmt-check rust-lint rust-test rust-cover sandbox-packages sandbox-worker
 
 # The harness core builds for WebAssembly (GOOS=js GOARCH=wasm) so a host can
 # run it outside a Linux worker, for example in a Cloudflare Durable Object.
@@ -37,8 +37,8 @@ fmt:
 	cd $(WORKER) && cargo fmt
 
 # The sandbox worker (Rust). cargo runs in the crate directory, so rustup
-# uses the crate's rust-toolchain.toml. The Go tests of sandbox/supervisor
-# build the worker themselves (cargo build --release).
+# uses the crate's rust-toolchain.toml. The Go sandbox tests build the
+# worker themselves (make sandbox-worker).
 WORKER = sandbox/worker
 
 # The WASIX packages (bash, coreutils, grep, sed, findutils) pinned by
@@ -53,6 +53,11 @@ $(PACKAGES)/compiled/.stamp: $(PACKAGES)/packages.txt $(WORKER)/Cargo.lock
 	rm -rf $(PACKAGES)/compiled
 	cd $(WORKER) && cargo run --locked --release --features compile --bin tacklr-sandbox-compile -- packages
 	touch $@
+
+# The release worker binary and its compiled packages, as the Go sandbox
+# tests run them.
+sandbox-worker: sandbox-packages
+	cd $(WORKER) && cargo build --locked --release
 
 rust-fmt-check:
 	cd $(WORKER) && cargo fmt --check

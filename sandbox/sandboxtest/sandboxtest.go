@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -42,22 +43,28 @@ var worker struct {
 	packages string
 }
 
-// Worker builds the real worker and its packages once, and returns the
-// binary's path and the packages directory.
+// Worker builds the real worker and its packages once per test binary,
+// one test binary at a time, and returns the binary's path and the
+// packages directory.
 func Worker(t *testing.T) (binary, packages string) {
 	t.Helper()
 	worker.once.Do(func() {
 		_, file, _, _ := runtime.Caller(0)
 		root := filepath.Join(filepath.Dir(file), "..", "..")
 		crate := filepath.Join(root, "sandbox", "worker")
-		fetch := exec.Command("make", "-C", root, "sandbox-packages")
-		build := exec.Command("cargo", "build", "--release", "--locked")
-		build.Dir = crate
-		for _, step := range []*exec.Cmd{fetch, build} {
-			if output, err := step.CombinedOutput(); err != nil {
-				worker.err = fmt.Errorf("build the sandbox worker: %w\n%s", err, output)
-				return
-			}
+		lock, err := os.OpenFile(filepath.Join(crate, "packages", ".build.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			worker.err = err
+			return
+		}
+		defer lock.Close()
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+			worker.err = err
+			return
+		}
+		if output, err := exec.Command("make", "-C", root, "sandbox-worker").CombinedOutput(); err != nil {
+			worker.err = fmt.Errorf("build the sandbox worker: %w\n%s", err, output)
+			return
 		}
 		worker.binary = filepath.Join(crate, "target", "release", "tacklr-sandbox-worker")
 		worker.packages = filepath.Join(crate, "packages")
