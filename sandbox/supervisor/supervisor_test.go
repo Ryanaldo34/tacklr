@@ -1,6 +1,7 @@
 package supervisor_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -30,13 +31,14 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/adapters"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 func TestWorkerIsReadyAnswersPingsAndExitsOnStop(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	client := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{}).Address, sandboxtest.ClientConfig(t, ca, ca))
 
-	worker, err := client.Start(t.Context())
+	worker, err := client.Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
 	pingErr := worker.Ping(t.Context())
@@ -53,7 +55,7 @@ func TestWorkerIsReadyAnswersPingsAndExitsOnStop(t *testing.T) {
 func TestClosingAWorkerKillsItsProcess(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	client := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{}).Address, sandboxtest.ClientConfig(t, ca, ca))
-	worker, err := client.Start(t.Context())
+	worker, err := client.Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	pid := childPID(t, "tacklr-sandbox-worker")
 
@@ -67,14 +69,14 @@ func TestClosingAWorkerKillsItsProcess(t *testing.T) {
 
 func TestRunStreamsTheScriptsOutputAndReturnsItsExitCode(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
-	worker, err := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{}).Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	dir, tree := workspace(t)
+	worker, err := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{Workspace: tree}).Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
-	dir, files := workspace(t)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "names.txt"), []byte("b\na\n"), 0o600))
 	var stdout, stderr strings.Builder
 
-	code, err := worker.Run(t.Context(), "cd work && sort names.txt | tee sorted.txt; mkdir out && mv sorted.txt out/ && truncate -s 1 names.txt && rm Spec.docx 2>/dev/null; echo warn >&2; exit 3", files, &stdout, &stderr)
+	code, err := worker.Run(t.Context(), "cd work && sort names.txt | tee sorted.txt; mkdir out && mv sorted.txt out/ && truncate -s 1 names.txt && rm Spec.docx 2>/dev/null; echo warn >&2; exit 3", &stdout, &stderr)
 
 	require.NoError(t, err)
 	require.Equal(t, 3, code)
@@ -90,13 +92,13 @@ func TestRunStreamsTheScriptsOutputAndReturnsItsExitCode(t *testing.T) {
 
 func TestRunReadsADocumentAsTextAndCannotWriteIt(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
-	worker, err := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{}).Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	_, tree := workspace(t)
+	worker, err := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{Workspace: tree}).Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
-	_, files := workspace(t)
 	var stdout, stderr strings.Builder
 
-	code, err := worker.Run(t.Context(), "cat work/Spec.docx; echo changed > work/Spec.docx", files, &stdout, &stderr)
+	code, err := worker.Run(t.Context(), "cat work/Spec.docx; echo changed > work/Spec.docx", &stdout, &stderr)
 
 	require.NoError(t, err)
 	require.Equal(t, 1, code)
@@ -104,7 +106,7 @@ func TestRunReadsADocumentAsTextAndCannotWriteIt(t *testing.T) {
 	require.Contains(t, stderr.String(), "Spec.docx")
 }
 
-func TestRunClosesAWorkerThatSendsAFileRequestThatIsNotValid(t *testing.T) {
+func TestSupervisorKillsAWorkerThatSendsAFileRequestThatIsNotValid(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{
 		WorkerPath: sandboxtest.ScriptWorker(t,
@@ -113,36 +115,35 @@ func TestRunClosesAWorkerThatSendsAFileRequestThatIsNotValid(t *testing.T) {
 			"printf '\\000\\000\\000\\002\\004{}' >&3",
 			"exec sleep 3600"),
 	}).Address
-	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
 
-	_, err = worker.Run(t.Context(), "true", vfs.Files{}, io.Discard, io.Discard)
+	_, err = worker.Run(t.Context(), "true", io.Discard, io.Discard)
 
-	require.EqualError(t, err, "wire: the file frame is too short")
+	require.ErrorIs(t, err, sandbox.ErrExited)
 }
 
 func TestRunRefusesAnEmptyScript(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
-	worker, err := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{}).Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	worker, err := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{}).Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
 
-	_, err = worker.Run(t.Context(), "", vfs.Files{}, io.Discard, io.Discard)
+	_, err = worker.Run(t.Context(), "", io.Discard, io.Discard)
 
 	require.EqualError(t, err, "sandbox: the script is empty")
 }
 
 func TestRunEndsWithItsContextAndKillsTheWorker(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
-	worker, err := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{}).Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	worker, err := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{}).Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	pid := childPID(t, "tacklr-sandbox-worker")
-	_, files := workspace(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 
-	_, err = worker.Run(ctx, "sleep 30", files, io.Discard, io.Discard)
+	_, err = worker.Run(ctx, "sleep 30", io.Discard, io.Discard)
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Eventually(t, func() bool {
@@ -160,11 +161,11 @@ func TestRunReportsAScriptTheWorkersRuntimeCouldNotRun(t *testing.T) {
 			sandboxtest.SendFrame(`{"type":"done","id":1,"code":-1,"error":"wasm trap: out of bounds memory access"}`),
 			"exec sleep 3600"),
 	}).Address
-	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
 
-	_, err = worker.Run(t.Context(), "true", vfs.Files{}, io.Discard, io.Discard)
+	_, err = worker.Run(t.Context(), "true", io.Discard, io.Discard)
 
 	require.EqualError(t, err, "sandbox: the worker could not run the script: wasm trap: out of bounds memory access")
 }
@@ -177,27 +178,29 @@ func TestRunReportsAWorkerThatEndsDuringTheRun(t *testing.T) {
 			"head -c 1 <&3 >/dev/null",
 			"exit 1"),
 	}).Address
-	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
 
-	_, err = worker.Run(t.Context(), "true", vfs.Files{}, io.Discard, io.Discard)
+	_, err = worker.Run(t.Context(), "true", io.Discard, io.Discard)
 
 	require.ErrorIs(t, err, sandbox.ErrExited)
 }
 
 func TestRunCommandRunsTheModelsScriptInTheSandbox(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
-	client := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{}).Address, sandboxtest.ClientConfig(t, ca, ca))
-	dir, files := workspace(t)
+	dir, tree := workspace(t)
+	client := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{Workspace: tree}).Address, sandboxtest.ClientConfig(t, ca, ca))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "note.txt"), []byte("sandboxed note\n"), 0o600))
-	call := toolCaller(t, sandbox.RunCommand(client, files))
+	call := toolCaller(t, sandbox.RunCommand(client))
 
 	cat, catErr := call(`{"command":"cat work/note.txt"}`)
 	empty, emptyErr := call(`{"command":" "}`)
 	flood, floodErr := call(`{"command":"yes | head -c 1100000"}`)
+	unended, unendedErr := call(`{"command":"printf done"}`)
 
-	require.NoError(t, errors.Join(catErr, emptyErr, floodErr))
+	require.NoError(t, errors.Join(catErr, emptyErr, floodErr, unendedErr))
+	require.Equal(t, "exit=0 truncated=false\n--- stdout ---\ndone\n--- stderr ---\n", unended)
 	require.Equal(t, "exit=0 truncated=false\n--- stdout ---\nsandboxed note\n--- stderr ---\n", cat)
 	require.Contains(t, empty, "command is required")
 	require.True(t, strings.HasPrefix(flood, "exit=0 truncated=true\noutput truncated\n"), flood[:64])
@@ -209,10 +212,9 @@ func TestRunCommandReportsAWorkerThatCannotStartOrRun(t *testing.T) {
 	ending := sandboxtest.Start(t, ca, supervisor.Config{
 		WorkerPath: sandboxtest.ScriptWorker(t, sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`), "head -c 1 <&3 >/dev/null", "exit 1"),
 	}).Address
-	_, files := workspace(t)
 
-	startResult, startErr := toolCaller(t, sandbox.RunCommand(sandbox.NewClient(refused, sandboxtest.ClientConfig(t, ca, ca)), files))(`{"command":"true"}`)
-	runResult, runErr := toolCaller(t, sandbox.RunCommand(sandbox.NewClient(ending, sandboxtest.ClientConfig(t, ca, ca)), files))(`{"command":"true"}`)
+	startResult, startErr := toolCaller(t, sandbox.RunCommand(sandbox.NewClient(refused, sandboxtest.ClientConfig(t, ca, ca))))(`{"command":"true"}`)
+	runResult, runErr := toolCaller(t, sandbox.RunCommand(sandbox.NewClient(ending, sandboxtest.ClientConfig(t, ca, ca))))(`{"command":"true"}`)
 
 	require.NoError(t, errors.Join(startErr, runErr))
 	require.Equal(t, "run_command: sandbox: the supervisor refused the worker: 500 the worker could not start", startResult)
@@ -225,7 +227,7 @@ func TestStopKillsAWorkerThatDoesNotExit(t *testing.T) {
 		WorkerPath:  sandboxtest.ScriptWorker(t, sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`), "exec 3>&-", "exec sleep 3600"),
 		StopTimeout: 50 * time.Millisecond,
 	}).Address
-	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
 
@@ -240,7 +242,7 @@ func TestPingEndsWithItsContextWhenTheWorkerDoesNotAnswer(t *testing.T) {
 	address := sandboxtest.Start(t, ca, supervisor.Config{
 		WorkerPath: sandboxtest.ScriptWorker(t, sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`), "exec sleep 3600"),
 	}).Address
-	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
@@ -257,7 +259,7 @@ func TestStopEndsWithItsContextWhenTheWorkerDoesNotExit(t *testing.T) {
 		WorkerPath:  sandboxtest.ScriptWorker(t, sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`), "exec sleep 3600"),
 		StopTimeout: time.Hour,
 	}).Address
-	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
@@ -272,7 +274,7 @@ func TestStartReportsAWorkerThatEndsBeforeItIsReady(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{WorkerPath: sandboxtest.ScriptWorker(t, "exit 3")}).Address
 
-	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 
 	var exitErr *sandbox.ExitError
 	require.ErrorAs(t, err, &exitErr)
@@ -289,7 +291,7 @@ func TestSupervisorKillsAWorkerThatBreaksTheProtocol(t *testing.T) {
 			"exec sleep 3600"),
 		StopTimeout: time.Hour,
 	}).Address
-	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
 
@@ -302,16 +304,7 @@ func TestSupervisorKillsAWorkerThatBreaksTheProtocol(t *testing.T) {
 func TestSupervisorEndsTheStreamOfAClientThatBreaksTheProtocol(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{}).Address
-	protocols := new(http.Protocols)
-	protocols.SetHTTP2(true)
-	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: sandboxtest.ClientConfig(t, ca, ca), Protocols: protocols}}
-	requests, send := io.Pipe()
-	defer send.Close()
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, (&url.URL{Scheme: "https", Host: address, Path: wire.StreamPath}).String(), requests)
-	require.NoError(t, err)
-	response, err := httpClient.Do(request)
-	require.NoError(t, err)
-	defer response.Body.Close()
+	send, response := rawStream(t, ca, address, wire.Message{Type: wire.TypeOpen, Session: "s"})
 	ready, err := wire.Read(response.Body)
 	require.NoError(t, err)
 	require.Equal(t, wire.TypeReady, ready.Message.Type)
@@ -322,6 +315,56 @@ func TestSupervisorEndsTheStreamOfAClientThatBreaksTheProtocol(t *testing.T) {
 	require.ErrorIs(t, err, io.EOF)
 }
 
+func TestSupervisorRefusesAStreamThatDoesNotStartWithOpen(t *testing.T) {
+	ca := sandboxtest.NewAuthority(t)
+	address := sandboxtest.Start(t, ca, supervisor.Config{}).Address
+
+	_, response := rawStream(t, ca, address, wire.Message{Type: wire.TypePing, ID: 1})
+
+	require.Equal(t, http.StatusBadRequest, response.StatusCode)
+}
+
+func TestStartRefusesBindingsLargerThanAFrame(t *testing.T) {
+	client := sandbox.NewClient("127.0.0.1:1", &tls.Config{MinVersion: tls.VersionTLS13})
+	huge := []mount.Binding{{Provider: "gdrive", Params: map[string]string{"name": strings.Repeat("x", wire.MaxBody)}}}
+
+	_, err := client.Start(t.Context(), "s", huge)
+
+	require.ErrorContains(t, err, "is larger than 1048576")
+}
+
+func TestSupervisorRefusesAWorkerWhoseWorkspaceCannotOpen(t *testing.T) {
+	ca := sandboxtest.NewAuthority(t)
+	address := sandboxtest.Start(t, ca, supervisor.Config{
+		Workspace: func(context.Context, string, vfs.Request) (*vfs.MountSession, error) {
+			return nil, errors.New("drive token expired")
+		},
+	}).Address
+
+	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
+
+	require.EqualError(t, err, "sandbox: the supervisor refused the worker: 502 the workspace could not open: drive token expired")
+}
+
+// rawStream opens a worker stream whose first frame is first, and returns
+// the stream's writer and the supervisor's response.
+func rawStream(t *testing.T, ca *sandboxtest.Authority, address string, first wire.Message) (*io.PipeWriter, *http.Response) {
+	t.Helper()
+	protocols := new(http.Protocols)
+	protocols.SetHTTP2(true)
+	httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: sandboxtest.ClientConfig(t, ca, ca), Protocols: protocols}}
+	var opening bytes.Buffer
+	require.NoError(t, wire.Write(&opening, first))
+	requests, send := io.Pipe()
+	t.Cleanup(func() { _ = send.Close() })
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, (&url.URL{Scheme: "https", Host: address, Path: wire.StreamPath}).String(), io.MultiReader(&opening, requests))
+	require.NoError(t, err)
+	response, err := httpClient.Do(request)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = response.Body.Close() })
+	return send, response
+}
+
 func TestSupervisorRefusesAClientThatAuthorizeDenies(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{
@@ -330,7 +373,7 @@ func TestSupervisorRefusesAClientThatAuthorizeDenies(t *testing.T) {
 		},
 	}).Address
 
-	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 
 	require.EqualError(t, err, "sandbox: the supervisor refused the worker: 403 spiffe://tacklr.test/runtime may not start workers")
 }
@@ -338,11 +381,11 @@ func TestSupervisorRefusesAClientThatAuthorizeDenies(t *testing.T) {
 func TestSupervisorRefusesAWorkerOverItsLimit(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	client := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{MaxWorkers: 1}).Address, sandboxtest.ClientConfig(t, ca, ca))
-	first, err := client.Start(t.Context())
+	first, err := client.Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer first.Close()
 
-	_, err = client.Start(t.Context())
+	_, err = client.Start(t.Context(), "s", nil)
 
 	var refused *sandbox.RefusedError
 	require.ErrorAs(t, err, &refused)
@@ -353,7 +396,7 @@ func TestSupervisorReportsAWorkerBinaryThatCannotStart(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{WorkerPath: filepath.Join(t.TempDir(), "missing")}).Address
 
-	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 
 	var refused *sandbox.RefusedError
 	require.ErrorAs(t, err, &refused)
@@ -364,7 +407,7 @@ func TestSupervisorRefusesAClientCertificateFromAnotherAuthority(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{}).Address
 
-	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, sandboxtest.NewAuthority(t))).Start(t.Context())
+	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, sandboxtest.NewAuthority(t))).Start(t.Context(), "s", nil)
 
 	require.ErrorContains(t, err, "sandbox: start a worker:")
 }
@@ -372,7 +415,7 @@ func TestSupervisorRefusesAClientCertificateFromAnotherAuthority(t *testing.T) {
 func TestServeStopsItsWorkersWhenItsContextEnds(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	host := sandboxtest.Start(t, ca, supervisor.Config{})
-	worker, err := sandbox.NewClient(host.Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context())
+	worker, err := sandbox.NewClient(host.Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
 	pid := childPID(t, "tacklr-sandbox-worker")
@@ -436,17 +479,18 @@ func TestNewRefusesAConfigItCannotRunSafely(t *testing.T) {
 	}
 }
 
-// workspace is a work mount over a temporary directory, with a Word
-// document, as the worker's /workspace.
-func workspace(t *testing.T) (string, vfs.Files) {
+// workspace is a host's tree for the supervisor: a work mount over a
+// temporary directory that holds a Word document.
+func workspace(t *testing.T) (string, vfs.OpenVFS) {
 	t.Helper()
 	dir := t.TempDir()
-	ms, err := vfs.Tree(vfs.At("work", vfs.Local(dir))).WithCodecs(adapters.Codecs()...)(t.Context(), t.Name(), vfs.Request{})
+	tree := vfs.Tree(vfs.At("work", vfs.Local(dir))).WithCodecs(adapters.Codecs()...)
+	ms, err := tree(t.Context(), "seed", vfs.Request{})
 	require.NoError(t, err)
 	spec := "<h1>Title</h1><p>text</p>"
 	_, err = ms.Apply(t.Context(), "/workspace/work/Spec.docx", vfs.Mutation{Content: &spec})
 	require.NoError(t, err)
-	return dir, vfs.NewFiles(ms)
+	return dir, tree
 }
 
 // toolCaller runs tool in a harness that allows it, and returns a function

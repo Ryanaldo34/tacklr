@@ -1,4 +1,4 @@
-package sandbox
+package supervisor
 
 import (
 	"context"
@@ -36,8 +36,18 @@ var errnos = []struct {
 	{errBadHandle, "EBADF"},
 }
 
-// errBadHandle is the error of a request for a handle the run did not open.
-var errBadHandle = errors.New("sandbox: no open file has this handle")
+// emptyTree answers a request on the empty tree of a supervisor with no
+// Workspace: the root is an empty directory, and nothing else exists.
+func emptyTree(r wire.FSRequest) (wire.FSReply, []byte, error) {
+	if path.Clean("/"+r.Path) == "/" && (r.Op == "stat" || r.Op == "read_dir") {
+		return wire.FSReply{IsDir: true, Entries: []wire.FSEntry{}}, nil, nil
+	}
+	return wire.FSReply{}, nil, vfs.ErrNotExist
+}
+
+// errBadHandle is the error of a request for a handle the worker did not
+// open.
+var errBadHandle = errors.New("supervisor: no open file has this handle")
 
 func errno(err error) string {
 	for _, e := range errnos {
@@ -48,9 +58,10 @@ func errno(err error) string {
 	return "EIO"
 }
 
-// server serves the file requests of one run from its workspace, one at a
-// time and in order. The worker is not trusted: a request reaches only the
-// workspace, through vfs.Files, and only the files this run opened.
+// server serves the file requests of one worker from its session's tree, one
+// at a time and in order. The worker is not trusted: a request reaches only
+// the tree, through vfs.Files, and only the files this worker opened. A
+// supervisor with no Workspace has an empty tree (emptyTree).
 type server struct {
 	files vfs.Files
 	open  map[uint64]*vfs.OpenFile
@@ -83,6 +94,9 @@ func (s *server) serve(ctx context.Context, requests <-chan []byte, reply func(w
 }
 
 func (s *server) do(ctx context.Context, r wire.FSRequest, data []byte) (wire.FSReply, []byte, error) {
+	if s.files == (vfs.Files{}) {
+		return emptyTree(r)
+	}
 	p := path.Join(workspaceRoot, r.Path)
 	switch r.Op {
 	case "stat":

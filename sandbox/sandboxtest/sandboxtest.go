@@ -31,6 +31,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/sandbox"
 	"github.com/ryanaldo34/tacklr/sandbox/supervisor"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // worker is the real Rust worker binary and its packages directory.
@@ -65,12 +66,12 @@ func Worker(t *testing.T) (binary, packages string) {
 	return worker.binary, worker.packages
 }
 
-// Client starts a supervisor with the real worker and returns a client of
-// it.
-func Client(t *testing.T) *sandbox.Client {
+// Client starts a supervisor with the real worker over workspace (nil: an
+// empty tree) and returns a client of it.
+func Client(t *testing.T, workspace vfs.OpenVFS) *sandbox.Client {
 	t.Helper()
 	ca := NewAuthority(t)
-	return sandbox.NewClient(Start(t, ca, supervisor.Config{}).Address, ClientConfig(t, ca, ca))
+	return sandbox.NewClient(Start(t, ca, supervisor.Config{Workspace: workspace}).Address, ClientConfig(t, ca, ca))
 }
 
 // Host is a running supervisor.

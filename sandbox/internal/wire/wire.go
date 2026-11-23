@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // StreamPath is the URL path where a client opens a worker stream.
@@ -35,9 +37,10 @@ const (
 	KindFS      byte = 4
 )
 
-// The message types. Ready, pong and done come from the worker; ping, stop
-// and run from the client. Exit comes from the supervisor.
+// The message types. Ready, pong and done come from the worker; open, ping,
+// stop and run from the client. Exit comes from the supervisor.
 const (
+	TypeOpen  = "open"
 	TypeReady = "ready"
 	TypePing  = "ping"
 	TypePong  = "pong"
@@ -49,13 +52,15 @@ const (
 
 // Message is one control message. Only the fields of its Type are set.
 type Message struct {
-	Type        string       `json:"type"`
-	ID          uint64       `json:"id,omitzero"`
-	Script      string       `json:"script,omitempty"`
-	Code        *int         `json:"code,omitempty"`
-	Error       string       `json:"error,omitempty"`
-	Enforcement *Enforcement `json:"enforcement,omitempty"`
-	Exit        *Exit        `json:"exit,omitempty"`
+	Type        string          `json:"type"`
+	ID          uint64          `json:"id,omitzero"`
+	Script      string          `json:"script,omitempty"`
+	Session     string          `json:"session,omitempty"`
+	Bindings    []mount.Binding `json:"bindings,omitempty"`
+	Code        *int            `json:"code,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	Enforcement *Enforcement    `json:"enforcement,omitempty"`
+	Exit        *Exit           `json:"exit,omitempty"`
 }
 
 // Frame is one frame: a control message, or output bytes of a run.
@@ -138,7 +143,7 @@ func Read(r io.Reader) (Frame, error) {
 	return Frame{Kind: kind, Message: m}, nil
 }
 
-// FSRequest is a file request from a worker, during a run. Paths are below
+// FSRequest is a file request from a worker to its supervisor, during a run. Paths are below
 // the workspace root, such as /work/a.txt.
 type FSRequest struct {
 	Type     string `json:"type"`

@@ -425,8 +425,7 @@ func TestLive_sandboxGivesTheAgentRunCommandOnItsWorkspace(t *testing.T) {
 	})
 	agent := liveAgent(t, model, tacklr.AgentOptions{AllowTools: []string{"run_command"}})
 	stack := newLiveStack(t, agent, func(cfg *Config) {
-		cfg.Workspace = workspace.Config{Open: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}
-		cfg.Sandbox = sandboxtest.Client(t)
+		cfg.Sandbox = sandboxtest.Client(t, vfs.Tree(vfs.At("docs", vfs.Local(dir))))
 	})
 	id, err := stack.Client.CreateSession(ctx, session.CreateSession{})
 	if err != nil {

@@ -1,19 +1,22 @@
 // Package supervisor runs sandboxed workers on one host for the session
 // runtime (package sandbox is the client).
 //
-// A client opens one HTTP/2 stream over mTLS for each worker. The
-// supervisor starts the worker binary (sandbox/worker) in new user, pid,
-// mount, network, IPC, UTS and cgroup namespaces, with the worker's end of a
-// Unix socket pair as fd 3. The worker applies Landlock and seccomp to
-// itself and sends ready. Then the supervisor relays messages between the
-// stream and the socket.
+// A client opens one HTTP/2 stream over mTLS for each worker, and names the
+// session and its bindings first. The supervisor opens the session's tree
+// with Config.Workspace, then starts the worker binary (sandbox/worker) in
+// new user, pid, mount, network, IPC, UTS and cgroup namespaces, with the
+// worker's end of a Unix socket pair as fd 3. The worker applies Landlock
+// and seccomp to itself and sends ready. Then the supervisor relays
+// messages between the stream and the socket, and serves the worker's file
+// requests from the tree itself: only a run's output and its done reach the
+// client, and no credential reaches the worker.
 //
 // The worker is not trusted. The supervisor reads at most wire.MaxBody per
 // frame from it, accepts only ready (once, first), pong, and the output,
 // file requests and done of a run the client started, and sends on only
 // the fields of those messages. If the worker sends anything else, the
-// supervisor kills it. File requests and replies pass as they are: the
-// client checks each request it serves.
+// supervisor kills it. A file request reaches only the session's tree,
+// through vfs.Files, and only the files that worker opened.
 //
 // A worker lives as long as its stream. When the stream ends, the
 // supervisor kills the worker. A worker that closes its socket, or gets a
@@ -33,9 +36,11 @@ import (
 	"net"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/ryanaldo34/tacklr/sandbox/internal/wire"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 const (
@@ -65,6 +70,11 @@ type Config struct {
 	// It gets the client's leaf certificate. An error gets 403 Forbidden.
 	// If it is nil, every client that ClientCAs verifies may start workers.
 	Authorize func(client *x509.Certificate) error
+	// Workspace opens a session's tree for its workers: the host's tree, as
+	// its session runtime builds it, with the bindings the client sends.
+	// The supervisor serves the worker's file requests from it; the worker
+	// never holds a credential. Nil is an empty tree.
+	Workspace vfs.OpenVFS
 	// StopTimeout is the time a worker has to exit after a stop request.
 	// After it, the supervisor kills the worker. Zero is 5 seconds.
 	StopTimeout time.Duration
@@ -148,6 +158,20 @@ func (s *Supervisor) serveWorker(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the supervisor runs its largest number of workers", http.StatusServiceUnavailable)
 		return
 	}
+	open, err := wire.Read(r.Body)
+	if err != nil || open.Message.Type != wire.TypeOpen {
+		http.Error(w, "the stream must start with open", http.StatusBadRequest)
+		return
+	}
+	var files vfs.Files
+	if s.config.Workspace != nil {
+		ms, err := s.config.Workspace(r.Context(), open.Message.Session, vfs.Request{Bindings: open.Message.Bindings})
+		if err != nil {
+			http.Error(w, "the workspace could not open: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		files = vfs.NewFiles(ms)
+	}
 	p, err := startProcess(s.config.WorkerPath, s.config.PackagesDir)
 	if err != nil {
 		http.Error(w, "the worker could not start", http.StatusInternalServerError)
@@ -161,16 +185,40 @@ func (s *Supervisor) serveWorker(w http.ResponseWriter, r *http.Request) {
 		if writeFrame(w, f) == nil {
 			_ = stream.Flush()
 		}
-	}, p)
+	}, p, files)
 }
 
 // relay moves frames between the client's stream and the worker until one
-// of them ends.
-func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.Frame), p *process) {
+// of them ends, and serves the worker's file requests from files. When it
+// ends, the files the worker left open are written back.
+func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.Frame), p *process, files vfs.Files) {
 	done := make(chan struct{})
 	defer close(done)
 	client := receive(body, done)
 	worker := receive(p.conn, done)
+	var writes sync.Mutex
+	toWorker := func(f wire.Frame) {
+		writes.Lock()
+		defer writes.Unlock()
+		_ = writeFrame(p.conn, f)
+	}
+	requests, served := make(chan []byte), make(chan struct{})
+	go func() {
+		defer close(served)
+		fs := &server{files: files, open: map[uint64]*vfs.OpenFile{}}
+		_ = fs.serve(ctx, requests, func(reply wire.FSReply, data []byte) {
+			writes.Lock()
+			defer writes.Unlock()
+			_ = wire.WriteFS(p.conn, reply, data)
+		})
+	}()
+	defer func() {
+		close(requests)
+		<-served
+	}()
+	// The file server stops before the stream ends only on a request that
+	// is not valid.
+	broken := served
 	var stopTimeout <-chan time.Time
 	startStopTimeout := func() {
 		if stopTimeout == nil {
@@ -181,7 +229,7 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.F
 	for {
 		select {
 		case r := <-client:
-			forward, valid := fromClient(r.frame, runs)
+			forward, valid := fromClient(r.frame)
 			if r.err != nil || !valid {
 				return
 			}
@@ -191,7 +239,7 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.F
 			case wire.TypeRun:
 				runs++
 			}
-			_ = writeFrame(p.conn, forward)
+			toWorker(forward)
 		case r := <-worker:
 			forward, valid := fromWorker(r.frame, ready, runs)
 			switch {
@@ -201,6 +249,11 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.F
 			case r.err != nil || !valid:
 				p.kill()
 				worker = nil
+			case forward.Kind == wire.KindFS:
+				select {
+				case requests <- forward.Data:
+				case <-served:
+				}
 			default:
 				ready = true
 				if forward.Message.Type == wire.TypeDone {
@@ -208,6 +261,9 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.F
 				}
 				send(forward)
 			}
+		case <-broken:
+			broken = nil
+			p.kill()
 		case <-stopTimeout:
 			p.kill()
 		case <-p.exited:
@@ -220,16 +276,13 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.F
 }
 
 // fromClient returns the frame to send to the worker for a frame from the
-// client, and false if the client may not send f now. runs is how many runs
-// the worker has not finished: file replies go only to a running worker.
-func fromClient(f wire.Frame, runs int) (wire.Frame, bool) {
+// client, and false if the client may not send f.
+func fromClient(f wire.Frame) (wire.Frame, bool) {
 	m := f.Message
 	control := func(m wire.Message) (wire.Frame, bool) {
 		return wire.Frame{Kind: wire.KindControl, Message: m}, true
 	}
 	switch {
-	case f.Kind == wire.KindFS:
-		return f, runs > 0
 	case m.Type == wire.TypePing && m.ID != 0:
 		return control(wire.Message{Type: wire.TypePing, ID: m.ID})
 	case m.Type == wire.TypeStop:

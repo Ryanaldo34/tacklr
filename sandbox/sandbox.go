@@ -7,10 +7,10 @@
 // code: Run runs a bash script in the worker's workspace.
 //
 //	client := sandbox.NewClient("worker-host:7443", tlsConfig)
-//	worker, err := client.Start(ctx)
+//	worker, err := client.Start(ctx, sessionID, bindings)
 //	if err != nil { ... }
 //	defer worker.Close()
-//	code, err := worker.Run(ctx, "ls work | wc -l", vfs.NewFiles(session), &stdout, &stderr)
+//	code, err := worker.Run(ctx, "ls work | wc -l", &stdout, &stderr)
 //	exit, err := worker.Stop(ctx)
 //
 // A worker lives as long as its stream. Close ends the stream, and the
@@ -18,6 +18,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -29,7 +30,7 @@ import (
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/sandbox/internal/wire"
-	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // maxRefusal is the most bytes of a refusal's body that an error keeps.
@@ -72,8 +73,10 @@ func (e *RunError) Error() string {
 }
 
 // RefusedError is the error of Start when the supervisor refuses to start a
-// worker: 403 when the client is not authorized, 503 when the host runs its
-// largest number of workers, 500 when the worker binary cannot start.
+// worker: 400 when the stream does not start with open, 403 when the client
+// is not authorized, 503 when the host runs its largest number of workers,
+// 502 when the session's workspace cannot open, 500 when the worker binary
+// cannot start.
 type RefusedError struct {
 	StatusCode int
 	Message    string
@@ -106,18 +109,28 @@ func NewClient(address string, config *tls.Config) *Client {
 	}
 }
 
-// Start starts a worker and returns when it is ready. ctx limits only the
-// wait. The worker lives until Close, or until it ends.
-func (c *Client) Start(ctx context.Context) (*Worker, error) {
+// Start starts a worker for session and returns when it is ready. The
+// supervisor opens the session's tree with bindings (the turn's mounts and
+// their credentials), and the worker sees it at /workspace. ctx limits only
+// the wait. The worker lives until Close, or until it ends.
+func (c *Client) Start(ctx context.Context, session string, bindings []mount.Binding) (*Worker, error) {
 	streamCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	stopWaiting := context.AfterFunc(ctx, cancel)
 	defer stopWaiting()
+	var open bytes.Buffer
+	if err := wire.Write(&open, wire.Message{Type: wire.TypeOpen, Session: session, Bindings: bindings}); err != nil {
+		cancel()
+		return nil, err
+	}
 	requests, send := io.Pipe()
 	request := (&http.Request{
 		Method: http.MethodPost,
 		URL:    c.url,
 		Header: http.Header{},
-		Body:   requests,
+		Body: struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(&open, requests), requests},
 	}).WithContext(streamCtx)
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -226,18 +239,14 @@ func (w *Worker) Stop(ctx context.Context) (Exit, error) {
 	}
 }
 
-// Run runs script with bash in workspace and returns its exit code. The
-// worker sees workspace's /workspace/work as /workspace/work: the run's
-// file requests come back over the stream, and Run serves them from
-// workspace, one at a time. The script's stdout and stderr go to stdout and
-// stderr as they come. Runs on one worker go one at a time.
+// Run runs script with bash in the worker's /workspace and returns its exit
+// code. The script's stdout and stderr go to stdout and stderr as they come.
+// Runs on one worker go one at a time.
 //
 // Run returns a *RunError if the worker's runtime could not run the script,
-// and ErrExited if the worker ends first. When a file the script left open
-// cannot be written back, Run returns that error. A run cannot be stopped
-// part way: if ctx ends first, or the worker sends a file request that is
-// not valid, Run closes the worker and returns the error.
-func (w *Worker) Run(ctx context.Context, script string, workspace vfs.Files, stdout, stderr io.Writer) (int, error) {
+// and ErrExited if the worker ends first. A run cannot be stopped part way:
+// if ctx ends first, Run closes the worker and returns ctx.Err().
+func (w *Worker) Run(ctx context.Context, script string, stdout, stderr io.Writer) (int, error) {
 	if script == "" {
 		return -1, errEmptyScript
 	}
@@ -245,59 +254,29 @@ func (w *Worker) Run(ctx context.Context, script string, workspace vfs.Files, st
 	defer w.running.Unlock()
 	w.mu.Lock()
 	w.nextID++
-	current := &run{
-		id: w.nextID, stdout: stdout, stderr: stderr,
-		done: make(chan wire.Message, 1), fs: make(chan []byte), stopped: make(chan struct{}),
-	}
+	current := &run{id: w.nextID, stdout: stdout, stderr: stderr, done: make(chan wire.Message, 1)}
 	w.run = current
 	_ = wire.Write(w.send, wire.Message{Type: wire.TypeRun, ID: current.id, Script: script})
 	w.mu.Unlock()
-	served := make(chan error, 1)
-	go func() {
-		files := &server{files: workspace, open: map[uint64]*vfs.OpenFile{}}
-		served <- files.serve(ctx, current.fs, w.replyFS)
-		close(current.stopped)
-	}()
 	select {
 	case done := <-current.done:
-		close(current.fs)
-		if err := <-served; err != nil {
-			return -1, err
-		}
 		if done.Error != "" {
 			return -1, &RunError{Message: done.Error}
 		}
 		return *done.Code, nil
-	case err := <-served:
-		w.Close()
-		return -1, err
 	case <-w.done:
-		close(current.fs)
-		<-served
 		return -1, ErrExited
 	case <-ctx.Done():
 		w.Close()
-		close(current.fs)
-		<-served
 		return -1, ctx.Err()
 	}
 }
 
-// run is the run in progress on a worker. The read loop sends its file
-// frames to fs until stopped closes.
+// run is the run in progress on a worker.
 type run struct {
 	id             uint64
 	stdout, stderr io.Writer
 	done           chan wire.Message
-	fs             chan []byte
-	stopped        chan struct{}
-}
-
-// replyFS sends a file reply to the worker.
-func (w *Worker) replyFS(reply wire.FSReply, data []byte) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	_ = wire.WriteFS(w.send, reply, data)
 }
 
 // Close ends the stream, so the supervisor kills the worker, and waits for
@@ -328,11 +307,6 @@ func (w *Worker) read(body io.ReadCloser) {
 			_, _ = current.stdout.Write(frame.Data)
 		case frame.Kind == wire.KindStderr:
 			_, _ = current.stderr.Write(frame.Data)
-		case frame.Kind == wire.KindFS:
-			select {
-			case current.fs <- frame.Data:
-			case <-current.stopped:
-			}
 		case m.Type == wire.TypeDone:
 			w.mu.Lock()
 			w.run = nil

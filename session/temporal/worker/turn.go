@@ -13,8 +13,9 @@ import (
 )
 
 // constructTurn opens the turn's workspace and builds a Harness with its
-// tools, skills and overflow. With a sandbox client, a turn that has a
-// workspace also gets run_command over it.
+// tools, skills and overflow. With a sandbox client the turn also gets
+// run_command, whose supervisor opens the session's tree on the sandbox
+// host.
 func constructTurn(ctx context.Context, agent tacklr.AgentOptions, ws workspace.Config, client *sandbox.Client, threadID string, bindings []mount.Binding, extraMCP []session.MCPServer, jobs []string) (*tacklr.Harness, error) {
 	opts := tacklr.BindTurn(agent, threadID, jobs, bindings)
 	if ws.Open != nil {
@@ -25,9 +26,9 @@ func constructTurn(ctx context.Context, agent tacklr.AgentOptions, ws workspace.
 		if opts, err = ws.Bind(opts, ms); err != nil {
 			return nil, err
 		}
-		if client != nil {
-			opts.Tools = append(slices.Clone(opts.Tools), sandbox.RunCommand(client, vfs.NewFiles(ms)))
-		}
+	}
+	if client != nil {
+		opts.Tools = append(slices.Clone(opts.Tools), sandbox.RunCommand(client))
 	}
 	if len(extraMCP) > 0 {
 		opts.MCPConfigs = append(append([]session.MCPServer(nil), agent.MCPConfigs...), extraMCP...)

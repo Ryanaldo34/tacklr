@@ -10,7 +10,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/message"
-	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 const (
@@ -23,11 +22,12 @@ type runCommandArgs struct {
 }
 
 // RunCommand is the run_command tool: the model's bash script runs in a
-// sandboxed worker that client starts, over workspace (the turn's tree,
-// vfs.NewFiles). Each call starts a worker and ends it, so nothing but the
-// workspace lasts from one call to the next. It asks for execute permission
-// unless the host lists it in AgentOptions.AllowTools.
-func RunCommand(client *Client, workspace vfs.Files) *tacklr.Tool {
+// sandboxed worker that client starts on a sandbox host, whose supervisor
+// opens the session's tree with the turn's bindings. Each call starts a
+// worker and ends it, so nothing but the workspace lasts from one call to
+// the next. It asks for execute permission unless the host lists it in
+// AgentOptions.AllowTools.
+func RunCommand(client *Client) *tacklr.Tool {
 	return tacklr.NewTool(tacklr.ToolConfig{
 		Name:        "run_command",
 		DisplayName: "Run {command}",
@@ -46,14 +46,14 @@ May pause for execute permission. Returns stdout/stderr. A non-zero exit is stil
 				return "", tacklr.Correctionf(tacklr.ErrInvalid, "run_command: command is required. Pass a bash script, for example ls work")
 			}
 			cc.EmitUpdate("Running " + command)
-			worker, err := client.Start(ctx)
+			worker, err := client.Start(ctx, cc.SessionID(), cc.Bindings())
 			if err != nil {
 				return "", err
 			}
 			defer worker.Close()
 			budget := outputBudget{remaining: outputCap}
 			stdout, stderr := budget.writer(), budget.writer()
-			code, err := worker.Run(ctx, command, workspace, stdout, stderr)
+			code, err := worker.Run(ctx, command, stdout, stderr)
 			if err != nil {
 				return "", err
 			}
