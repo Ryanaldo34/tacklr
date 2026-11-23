@@ -378,20 +378,6 @@ func TestSupervisorRefusesAClientThatAuthorizeDenies(t *testing.T) {
 	require.EqualError(t, err, "sandbox: the supervisor refused the worker: 403 spiffe://tacklr.test/runtime may not start workers")
 }
 
-func TestSupervisorRefusesAWorkerOverItsLimit(t *testing.T) {
-	ca := sandboxtest.NewAuthority(t)
-	client := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{MaxWorkers: 1}).Address, sandboxtest.ClientConfig(t, ca, ca))
-	first, err := client.Start(t.Context(), "s", nil)
-	require.NoError(t, err)
-	defer first.Close()
-
-	_, err = client.Start(t.Context(), "s", nil)
-
-	var refused *sandbox.RefusedError
-	require.ErrorAs(t, err, &refused)
-	require.Equal(t, http.StatusServiceUnavailable, refused.StatusCode)
-}
-
 func TestSupervisorReportsAWorkerBinaryThatCannotStart(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{WorkerPath: filepath.Join(t.TempDir(), "missing")}).Address
@@ -435,7 +421,6 @@ func TestServeFailsWithoutAServerCertificate(t *testing.T) {
 	sup, err := supervisor.New(supervisor.Config{
 		WorkerPath:  binary,
 		PackagesDir: packages,
-		MaxWorkers:  1,
 		TLS:         &tls.Config{ClientCAs: ca.Pool, MinVersion: tls.VersionTLS13},
 	})
 	require.NoError(t, err)
@@ -451,7 +436,7 @@ func TestNewRefusesAConfigItCannotRunSafely(t *testing.T) {
 	binary, packages := sandboxtest.Worker(t)
 	ca := sandboxtest.NewAuthority(t)
 	valid := func() supervisor.Config {
-		return supervisor.Config{WorkerPath: binary, PackagesDir: packages, MaxWorkers: 1, TLS: ca.ServerConfig(t)}
+		return supervisor.Config{WorkerPath: binary, PackagesDir: packages, TLS: ca.ServerConfig(t)}
 	}
 	cases := []struct {
 		name   string
@@ -460,7 +445,6 @@ func TestNewRefusesAConfigItCannotRunSafely(t *testing.T) {
 	}{
 		{"a relative worker path", func(c *supervisor.Config) { c.WorkerPath = "worker" }, "supervisor: WorkerPath must be an absolute path"},
 		{"a relative packages path", func(c *supervisor.Config) { c.PackagesDir = "packages" }, "supervisor: PackagesDir must be an absolute path"},
-		{"no worker slots", func(c *supervisor.Config) { c.MaxWorkers = 0 }, "supervisor: MaxWorkers must be 1 or more"},
 		{"no TLS", func(c *supervisor.Config) { c.TLS = nil }, "supervisor: TLS is required"},
 		{"no client roots", func(c *supervisor.Config) { c.TLS.ClientCAs = nil }, "supervisor: TLS.ClientCAs is required to verify clients"},
 		{"a per-client TLS config", func(c *supervisor.Config) {

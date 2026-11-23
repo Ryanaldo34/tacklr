@@ -74,8 +74,7 @@ func (e *RunError) Error() string {
 
 // RefusedError is the error of Start when the supervisor refuses to start a
 // worker: 400 when the stream does not start with open, 403 when the client
-// is not authorized, 503 when the host runs its largest number of workers,
-// 502 when the session's workspace cannot open, 500 when the worker binary
+// is not authorized, 502 when the session's workspace cannot open, 500 when the worker binary
 // cannot start.
 type RefusedError struct {
 	StatusCode int

@@ -40,7 +40,6 @@ func run() error {
 	clientCAFile := flag.String("client-ca", "", "PEM file with the roots that verify client certificates")
 	workerPath := flag.String("worker", "", "absolute path of the sandbox worker binary")
 	packagesDir := flag.String("packages", "", "absolute path of the worker's packages (make sandbox-packages)")
-	maxWorkers := flag.Int("max-workers", 64, "largest number of workers that run at one time")
 	stopTimeout := flag.Duration("stop-timeout", 5*time.Second, "time a worker has to exit after stop")
 	flag.Parse()
 
@@ -55,7 +54,6 @@ func run() error {
 	sup, err := supervisor.New(supervisor.Config{
 		WorkerPath:  *workerPath,
 		PackagesDir: *packagesDir,
-		MaxWorkers:  *maxWorkers,
 		StopTimeout: *stopTimeout,
 		TLS: &tls.Config{
 			Certificates: []tls.Certificate{certificate},

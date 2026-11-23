@@ -56,9 +56,6 @@ type Config struct {
 	// pinned WASIX packages and their compiled modules (make
 	// sandbox-packages). The worker reads it before its jail applies.
 	PackagesDir string
-	// MaxWorkers is the largest number of workers that run at one time. A
-	// request for one more worker gets 503 Service Unavailable.
-	MaxWorkers int
 	// TLS is the server's TLS configuration. It must have the server
 	// certificate (Certificates or GetCertificate) and ClientCAs, the roots
 	// that verify client certificates. The supervisor sets TLS 1.3 as the
@@ -84,7 +81,6 @@ type Config struct {
 type Supervisor struct {
 	config Config
 	tls    *tls.Config
-	slots  chan struct{}
 }
 
 // New checks config and returns a Supervisor.
@@ -94,8 +90,6 @@ func New(config Config) (*Supervisor, error) {
 		return nil, errors.New("supervisor: WorkerPath must be an absolute path")
 	case !filepath.IsAbs(config.PackagesDir):
 		return nil, errors.New("supervisor: PackagesDir must be an absolute path")
-	case config.MaxWorkers < 1:
-		return nil, errors.New("supervisor: MaxWorkers must be 1 or more")
 	case config.TLS == nil:
 		return nil, errors.New("supervisor: TLS is required")
 	case config.TLS.ClientCAs == nil:
@@ -112,7 +106,6 @@ func New(config Config) (*Supervisor, error) {
 	return &Supervisor{
 		config: config,
 		tls:    serverTLS,
-		slots:  make(chan struct{}, config.MaxWorkers),
 	}, nil
 }
 
@@ -150,13 +143,6 @@ func (s *Supervisor) serveWorker(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
-	}
-	select {
-	case s.slots <- struct{}{}:
-		defer func() { <-s.slots }()
-	default:
-		http.Error(w, "the supervisor runs its largest number of workers", http.StatusServiceUnavailable)
-		return
 	}
 	open, err := wire.Read(r.Body)
 	if err != nil || open.Message.Type != wire.TypeOpen {

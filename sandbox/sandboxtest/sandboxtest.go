@@ -82,7 +82,7 @@ type Host struct {
 }
 
 // Start serves a supervisor on a loopback port. Empty fields of
-// config get the real worker, 4 slots and ca's server TLS.
+// config get the real worker and ca's server TLS.
 func Start(t *testing.T, ca *Authority, config supervisor.Config) Host {
 	t.Helper()
 	binary, packages := Worker(t)
@@ -90,9 +90,6 @@ func Start(t *testing.T, ca *Authority, config supervisor.Config) Host {
 		config.WorkerPath = binary
 	}
 	config.PackagesDir = packages
-	if config.MaxWorkers == 0 {
-		config.MaxWorkers = 4
-	}
 	config.TLS = ca.ServerConfig(t)
 	sup, err := supervisor.New(config)
 	require.NoError(t, err)
