@@ -121,10 +121,6 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      # FUSE tests mount the session tree; go-fuse needs fusermount3.
-      - name: Install FUSE
-        run: sudo apt-get update && sudo apt-get install -y fuse3
-
       # The sandbox/supervisor tests build the Rust worker with cargo
       # (preinstalled on the runner) and need Landlock ABI 6 (Linux 6.12).
       # One run: race detector and coverage. Testcontainers starts Postgres

@@ -127,7 +127,7 @@ The harness adds tools for the features you turn on:
 | `AgentOptions.Brain` | `search`, `open`, `related`; `save` with `BrainWriteKinds`; `link` when the store has a graph |
 | `worker.Config.Workspace` | `read`, `write`, `write_document`, `write_spreadsheet` |
 | `worker.Config.Workspace` and `Brain` | `index_file`, `unindex` |
-| `worker.Config.Workspace` and `FuseRoot` | `run_command` |
+| `worker.Config.Workspace` and `Sandbox` | `run_command` |
 | `AgentOptions.SkillsLoader`, or a workspace with a `skills` directory | `read_skill` |
 
 ## Web tools

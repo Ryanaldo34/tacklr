@@ -16,7 +16,6 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/session/postgres"
-	"github.com/ryanaldo34/tacklr/vfs/fuse"
 )
 
 // postgresDB is the session tables in a schema of their own, in the shared
@@ -53,10 +52,9 @@ func dropTable(t *testing.T, pool *pgxpool.Pool, schema, table string) {
 func testHarness(t *testing.T, id session.ID, builds *atomic.Int32) harnessSpec {
 	t.Helper()
 	model := testkit.HTTPModel(t, nil)
-	return harnessSpec{ID: id, Key: "k", Build: func(ctx context.Context) (*tacklr.Harness, *fuse.Server, error) {
+	return harnessSpec{ID: id, Key: "k", Build: func(ctx context.Context) (*tacklr.Harness, error) {
 		builds.Add(1)
-		h, err := tacklr.NewHarness(ctx, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
-		return h, nil, err
+		return tacklr.NewHarness(ctx, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
 	}}
 }
 
@@ -147,7 +145,7 @@ func TestHarnesses_aStepFailsWhenItsHarnessOrStoreDoes(t *testing.T) {
 			var builds atomic.Int32
 			w := testHarness(t, "s", &builds)
 			if tc.build != nil {
-				w.Build = func(context.Context) (*tacklr.Harness, *fuse.Server, error) { return nil, nil, tc.build }
+				w.Build = func(context.Context) (*tacklr.Harness, error) { return nil, tc.build }
 			}
 
 			// Act and assert

@@ -22,7 +22,6 @@ const (
 	MetricCompressTotal   = "tacklr.context.compress.total"
 	MetricSessionCreated  = "tacklr.session.created.total"
 	MetricCheckpointSave  = "tacklr.checkpoint.save.total"
-	MetricFuseMount       = "tacklr.fuse.mount.total"
 	MetricConnections     = "tacklr.server.connections"
 	MetricModelDuration   = "gen_ai.client.operation.duration"
 	MetricTokenUsage      = "gen_ai.client.token.usage"
@@ -56,7 +55,6 @@ type Instruments struct {
 	compressTotal   metric.Int64Counter
 	sessionCreated  metric.Int64Counter
 	checkpointSave  metric.Int64Counter
-	fuseMountTotal  metric.Int64Counter
 	connections     metric.Int64UpDownCounter
 	modelDuration   metric.Float64Histogram
 	tokenUsage      metric.Int64Histogram
@@ -98,9 +96,6 @@ func MustInstruments(m metric.Meter) *Instruments {
 	)
 	i.checkpointSave, _ = m.Int64Counter(MetricCheckpointSave,
 		metric.WithDescription("Session checkpoint save attempts"),
-	)
-	i.fuseMountTotal, _ = m.Int64Counter(MetricFuseMount,
-		metric.WithDescription("FUSE mount attempts by outcome (ok, error, unavailable)"),
 	)
 	i.connections, _ = m.Int64UpDownCounter(MetricConnections,
 		metric.WithDescription("Protocol connections open now"),
@@ -225,17 +220,6 @@ func (i *Instruments) recordRPC(ctx context.Context, method, errType string, d t
 		attrs = append(attrs, attribute.String(LabelErrorType, errType))
 	}
 	i.rpcCallDuration.Record(ctx, d.Seconds(), metric.WithAttributes(attrs...))
-}
-
-// Fuse mount outcomes for RecordFuseMount (closed enum).
-const (
-	FuseMountOutcomeOK    = "ok"
-	FuseMountOutcomeError = "error"
-)
-
-// RecordFuseMount increments tacklr.fuse.mount.total{outcome=...}.
-func (i *Instruments) RecordFuseMount(ctx context.Context, outcome string) {
-	i.fuseMountTotal.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelOutcome, outcome)))
 }
 
 // agentContextKey carries the agent's name for the spans and metrics of a

@@ -18,7 +18,7 @@ cfg := worker.Config{
 		).WithCodecs(adapters.Codecs()...), // read and write Word and Excel files
 		OverflowPath: "/workspace/work/.overflow",
 	},
-	FuseRoot: "/var/lib/tacklr/fuse", // optional: adds run_command
+	Sandbox: sandboxClient, // optional: adds run_command (package sandbox)
 }
 ```
 
@@ -109,7 +109,7 @@ An `organization` account needs a `siteId` or a `driveId`, and a SharePoint libr
 | `write` | Creates or edits a text or code file: the whole content, a replacement of one string, or a line range. |
 | `write_document` | Creates or edits a Google Doc or a Word file. |
 | `write_spreadsheet` | Creates a spreadsheet, or edits one cell and its format. |
-| `run_command` | Runs a shell command in the session's workspace. Needs `FuseRoot`. |
+| `run_command` | Runs a bash script in a sandbox over the session's workspace. Needs `Sandbox`. |
 
 Writes ask the user for permission unless the tool is in `AgentOptions.AllowTools`, and they run only after the agent has a plan. A write checks the file's revision from the last `read`, so a stale edit fails, and the agent reads again.
 
@@ -127,11 +127,9 @@ Other types, such as images, can be listed and read as bytes but not edited by t
 
 ## The shell
 
-With `worker.Config.FuseRoot`, the worker mounts each session's tree with FUSE at `FuseRoot/<session>` and gives the agent `run_command`. The command runs in a sandbox that sees only that session's workspace. System directories are read-only, and each command starts with a small environment.
+With `worker.Config.Sandbox`, a `sandbox.Client` of a sandbox supervisor, the agent gets `run_command`. Each call starts a sandboxed worker (WASIX bash, coreutils, grep, sed and findutils, with no network) and runs the script in `/workspace`. The worker reaches only the session's tree: its file requests come back to the Temporal worker, which serves them from the tree (`vfs.Files`). Documents read as their text and cannot be written. Without `Sandbox`, the agent has no shell.
 
-The worker needs FUSE and user namespaces. Without `FuseRoot`, the workspace stays in the process, and the agent has no shell.
-
-To mount a tree yourself, use `fuse.Mount(ms, dir)` (package `vfs/fuse`) and add `shell.RunCommand(dir)` to `AgentOptions.Tools`.
+To add the tool yourself, add `sandbox.RunCommand(client, vfs.NewFiles(ms))` to `AgentOptions.Tools`.
 
 ## Use the workspace from Go
 

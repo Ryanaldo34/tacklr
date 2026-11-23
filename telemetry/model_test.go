@@ -284,8 +284,8 @@ func TestClassifyErrorClass_bucketsEachFailure(t *testing.T) {
 // agent of its step: it ends ok, as an error (whose text is on its
 // tool.failed log), or parked (yield). A handoff span ends with its
 // outcome; a plan install is a plan.installed log. The tool and handoff
-// metrics count each under the agent; a checkpoint save, a FUSE mount and
-// a connection count too. Each span ends once, and an event needs a name.
+// metrics count each under the agent; a checkpoint save and a connection
+// count too. Each span ends once, and an event needs a name.
 func TestSpans_recordToolHandoffAndPlanOutcomes(t *testing.T) {
 	o := observe(t)
 	step := telemetry.Step(t.Context(), nil, "agent-1", "s1")
@@ -307,7 +307,6 @@ func TestSpans_recordToolHandoffAndPlanOutcomes(t *testing.T) {
 	telemetry.PlanInstalled(step, 3, 2, errors.New("install"))
 	telemetry.RecordCheckpointAttempt(global, nil)
 	telemetry.RecordCheckpointAttempt(global, errors.New("save failed"))
-	telemetry.Metrics().RecordFuseMount(global, telemetry.FuseMountOutcomeError)
 	telemetry.Metrics().RecordConnection(global, "/acp", 1)
 	telemetry.EmitEvent(global, "")
 
@@ -333,7 +332,6 @@ func TestSpans_recordToolHandoffAndPlanOutcomes(t *testing.T) {
 		{telemetry.MetricHandoffTotal, []attribute.KeyValue{agent, attribute.String(telemetry.LabelOutcome, telemetry.HandoffOutcomeError)}, 1},
 		{telemetry.MetricCheckpointSave, []attribute.KeyValue{attribute.String(telemetry.LabelOutcome, telemetry.OutcomeOK)}, 1},
 		{telemetry.MetricCheckpointSave, []attribute.KeyValue{attribute.String(telemetry.LabelOutcome, telemetry.OutcomeError)}, 1},
-		{telemetry.MetricFuseMount, []attribute.KeyValue{attribute.String(telemetry.LabelOutcome, telemetry.FuseMountOutcomeError)}, 1},
 		{telemetry.MetricConnections, []attribute.KeyValue{attribute.String(telemetry.LabelProtocol, "/acp")}, 1},
 	} {
 		if got := o.count(t, tc.name, tc.attrs...); got != tc.want {

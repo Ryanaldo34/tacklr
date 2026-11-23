@@ -128,8 +128,6 @@ const (
 	EventPlanInstalled  = "plan.installed"
 	EventTurnStarted    = "turn.started"
 	EventTurnEnded      = "turn.ended"
-	EventFuseMount      = "vfs.fuse.mount"
-	EventFuseUnmount    = "vfs.fuse.unmount"
 )
 
 // Attribute keys on log events (dynamic values).

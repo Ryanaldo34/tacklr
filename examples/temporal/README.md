@@ -51,7 +51,6 @@ Point an ACP client at `ws://localhost:8080/acp` with the header `Authorization:
 | `API_TOKEN`, `ADDR` | host | The bearer token, and the address (default `:8080`). |
 | `WORKSPACE_DIR` | worker | The directory that holds each session's `/workspace/work`. |
 | `LIVE_URL`, `LIVE_ADDR` | worker | How hosts reach the live endpoint (default `http://localhost:8081`), and where it listens (default `:8081`). |
-| `FUSE_ROOT` | worker | Optional. A directory for FUSE. It gives the agent `run_command`, which runs in a sandbox that sees only its session's workspace. |
 | `MAX_WINDOW` | worker | Optional. The context window in tokens. The default is the model's. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL` | both | Optional. Where traces, metrics and logs go (OTLP over gRPC by default, or `http`). |
 

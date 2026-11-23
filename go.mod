@@ -13,7 +13,6 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/exaring/otelpgx v0.11.1
 	github.com/google/uuid v1.6.0
-	github.com/hanwen/go-fuse/v2 v2.12.1
 	github.com/helixdb/helix-db/sdks/go v0.3.1
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/modelcontextprotocol/go-sdk v1.6.1

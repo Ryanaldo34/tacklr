@@ -14,6 +14,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/sandbox"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
 	"github.com/ryanaldo34/tacklr/workspace"
@@ -42,8 +43,7 @@ const (
 	defaultHeartbeatThrottle = 2 * time.Second
 	defaultHarnessIdle       = 10 * time.Minute
 	// defaultMaxHarnesses bounds the harnesses one worker keeps: each holds a
-	// window, MCP connections (a process per stdio server), and a VFS that
-	// may be a FUSE mount.
+	// window, MCP connections (a process per stdio server), and a VFS.
 	defaultMaxHarnesses = 256
 )
 
@@ -77,11 +77,11 @@ type Config struct {
 	// the tools, skills and overflow the agent gets from it. A zero
 	// Workspace is no workspace.
 	Workspace workspace.Config
-	// FuseRoot is the host directory under which the worker shows each
-	// turn's workspace with FUSE, one directory per session, so run_command
-	// can run there. Empty keeps the workspace in-process, and the harness
-	// then has no run_command tool.
-	FuseRoot string
+	// Sandbox is the client of the sandbox supervisor. With it, each turn
+	// that has a workspace gets run_command, which runs the model's bash
+	// scripts in a sandboxed worker over the workspace. Nil is no
+	// run_command.
+	Sandbox *sandbox.Client
 	// Jobs are named background workers Schedule can start. A specialist
 	// of the same name takes precedence.
 	Jobs map[string]session.JobHandler
@@ -136,7 +136,7 @@ func New(c client.Client, cfg Config) *Worker {
 		Agent:          cfg.Agent,
 		Store:          cfg.Store,
 		Workspace:      cfg.Workspace,
-		FuseRoot:       cfg.FuseRoot,
+		Sandbox:        cfg.Sandbox,
 		Fallback:       fallback,
 		DisableStreams: cfg.DisableStreams,
 		Secrets:        cfg.Secrets,

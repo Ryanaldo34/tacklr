@@ -9,8 +9,8 @@ import (
 const htmlMediaType = "text/html"
 
 // HTML encodes and decodes the pretty HTML dialect used for Docs/Word agent
-// buffers. It is not registered as the text/html file codec (FUSE would steal
-// .html). One heading, paragraph, list item, or table per line.
+// buffers. It is not registered as the text/html file codec (the shell would
+// see .html files as documents). One heading, paragraph, list item, or table per line.
 type HTML struct{}
 
 func (HTML) DecodeBlocks(ctx context.Context, _ string, _ string, data []byte) ([]vfs.Block, error) {

@@ -7,7 +7,6 @@
 //	WORKSPACE_DIR  an absolute directory: each session's /workspace/work is under it (required)
 //	LIVE_URL       how hosts reach this worker's live endpoint, default http://localhost:8081
 //	LIVE_ADDR      where it listens, default :8081
-//	FUSE_ROOT      a directory for FUSE: gives the agent run_command (optional)
 //	MAX_WINDOW     the context window in tokens, default the model's
 package main
 
@@ -63,7 +62,6 @@ func run(ctx context.Context) error {
 	w := worker.New(st.Temporal, worker.Config{
 		Agent:          opts,
 		Workspace:      agent.Workspace(dir),
-		FuseRoot:       os.Getenv("FUSE_ROOT"),
 		TaskQueue:      st.TaskQueue,
 		Store:          st.Store,
 		Secrets:        st.Secrets,

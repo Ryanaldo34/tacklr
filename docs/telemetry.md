@@ -92,7 +92,6 @@ Logs carry what changes within an operation, correlated to its span:
 | `tool.failed` (warn) | `execute_tool` | the error's text |
 | `tacklr.context.handoff` | the handoff | the open todos |
 | `plan.installed` | the step | the todos and the open todos, or the error |
-| `vfs.fuse.mount`, `vfs.fuse.unmount` | the step | the session |
 
 Tacklr's own diagnostics are `slog` records with their context (`slog.WarnContext`, ...), with an `area` field (runtime, harness, model_tasks, context). With `export.SlogHandler` they reach the same logs, with the trace and span ids. On Temporal the workflow's logger is the client's `Logger`.
 
@@ -109,7 +108,7 @@ Tacklr's own diagnostics are `slog` records with their context (`slog.WarnContex
 | `tacklr.context.handoff.total`, `tacklr.context.compress.total` | counter | `gen_ai.agent.name`, `outcome` |
 | `rpc.server.call.duration` | histogram (s) | `rpc.system`, `rpc.method`, `error.type` |
 | `tacklr.server.connections` | up-down counter | `protocol` |
-| `tacklr.session.created.total`, `tacklr.checkpoint.save.total`, `tacklr.fuse.mount.total` | counter | `outcome` |
+| `tacklr.session.created.total`, `tacklr.checkpoint.save.total` | counter | `outcome` |
 | Temporal SDK metrics (`temporal_*`) | | Temporal's |
 
 A runtime counts a turn once: the turn's metrics are recorded with its span, which a replay does not start again.

@@ -30,6 +30,7 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/message"
+	"github.com/ryanaldo34/tacklr/sandbox/sandboxtest"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/postgres"
 	"github.com/ryanaldo34/tacklr/session/temporal"
@@ -392,11 +393,11 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 	})
 }
 
-// TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace: with a FuseRoot the
-// worker mounts the session's workspace on the host and the agent gets
-// run_command there. An empty command gets a correction; a command reads
-// the workspace.
-func TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace(t *testing.T) {
+// TestLive_sandboxGivesTheAgentRunCommandOnItsWorkspace: with a sandbox
+// client the agent gets run_command, which runs in a sandboxed worker over
+// the session's workspace. An empty command gets a correction; a command
+// reads the workspace.
+func TestLive_sandboxGivesTheAgentRunCommandOnItsWorkspace(t *testing.T) {
 	t.Parallel()
 	// Arrange
 	ctx := t.Context()
@@ -417,7 +418,7 @@ func TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace(t *testing.T) {
 		case last.Role != message.RoleTool:
 			ch <- runCommand("empty", "  ")
 		case strings.Contains(last.Content, "command is required"):
-			ch <- runCommand("cat", "cat workspace/docs/hello.txt")
+			ch <- runCommand("cat", "cat docs/hello.txt")
 		default:
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: last.Content, IsComplete: true}
 		}
@@ -425,7 +426,7 @@ func TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace(t *testing.T) {
 	agent := liveAgent(t, model, tacklr.AgentOptions{AllowTools: []string{"run_command"}})
 	stack := newLiveStack(t, agent, func(cfg *Config) {
 		cfg.Workspace = workspace.Config{Open: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}
-		cfg.FuseRoot = t.TempDir()
+		cfg.Sandbox = sandboxtest.Client(t)
 	})
 	id, err := stack.Client.CreateSession(ctx, session.CreateSession{})
 	if err != nil {

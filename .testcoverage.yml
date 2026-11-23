@@ -55,12 +55,8 @@ override:
     threshold: 93
   - path: ^session/temporal/worker$
     threshold: 97
-  - path: ^shell$
-    threshold: 95
   - path: ^vfs$
     threshold: 99
-  - path: ^vfs/fuse$
-    threshold: 97
   - path: ^vfsindex$
     threshold: 99
   - path: ^telemetry/export$

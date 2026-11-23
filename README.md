@@ -176,7 +176,7 @@ make wasm    # checks that the core still builds for WebAssembly
 make rust-lint rust-cover   # the sandbox worker: clippy, tests, and its coverage gate
 ```
 
-The tests start their own Postgres, Helix, Temporal, S3, and Azure Blob containers, so they need Docker, FUSE, and user namespaces. The sandbox tests build the Rust worker with cargo.
+The tests start their own Postgres, Helix, Temporal, S3, and Azure Blob containers, so they need Docker and user namespaces. The sandbox tests build the Rust worker with cargo.
 
 ## License
 

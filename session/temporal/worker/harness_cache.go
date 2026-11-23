@@ -9,7 +9,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
-	"github.com/ryanaldo34/tacklr/vfs/fuse"
 )
 
 // harnessSpec names one session's harness: its tacklr.Harness (tools, MCP
@@ -19,7 +18,7 @@ import (
 type harnessSpec struct {
 	ID    session.ID
 	Key   string
-	Build func(context.Context) (*tacklr.Harness, *fuse.Server, error)
+	Build func(context.Context) (*tacklr.Harness, error)
 }
 
 // harnessCache keeps each session's harness on this worker, so the steps of a
@@ -43,7 +42,6 @@ type entry struct {
 	ready chan struct{}
 	err   error
 	h     *tacklr.Harness
-	mount *fuse.Server
 	users int
 	last  uint64
 	gone  bool
@@ -203,8 +201,8 @@ func (ws *harnessCache) makeRoom() {
 // build builds the harness outside the cache lock, so other sessions do not
 // wait on it. It outlives the step that asked for it, so it does not stop
 // when that step is cancelled.
-func (c *entry) build(ctx context.Context, build func(context.Context) (*tacklr.Harness, *fuse.Server, error)) {
-	c.h, c.mount, c.err = build(ctx)
+func (c *entry) build(ctx context.Context, build func(context.Context) (*tacklr.Harness, error)) {
+	c.h, c.err = build(ctx)
 	close(c.ready)
 }
 
@@ -290,7 +288,9 @@ func (c *entry) close() <-chan struct{} {
 	go func() {
 		defer close(done)
 		<-c.ready
-		abandonTurn(c.h, c.mount)
+		if c.h != nil {
+			c.h.Close()
+		}
 	}()
 	return done
 }

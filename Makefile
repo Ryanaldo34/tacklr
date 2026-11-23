@@ -5,7 +5,7 @@
 # run it outside a Linux worker, for example in a Cloudflare Durable Object.
 WASM_CORE = . ./message ./session ./session/orchestrator ./brain ./skills ./vfs/mount ./telemetry ./telemetry/otlpjson ./openai ./anthropic ./web ./server ./server/acp ./session/durableobject
 
-# The whole suite. It needs Linux, FUSE and Docker: Testcontainers starts
+# The whole suite. It needs Linux, Docker and cargo: Testcontainers starts
 # Postgres (pgvector), Helix and Temporal. -covermode=atomic is required with -race.
 test:
 	go test -race -count=1 -covermode=atomic ./...
