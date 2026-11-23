@@ -9,7 +9,9 @@
 // and seccomp to itself and sends ready. Then the supervisor relays
 // messages between the stream and the socket, and serves the worker's file
 // requests from the tree itself: only a run's output and its done reach the
-// client, and no credential reaches the worker.
+// client, and no credential reaches the worker. When a binding's token is
+// near expiry or its source refuses it, the supervisor asks the client for
+// a new credential on the stream (vfs.Request.Refresh).
 //
 // The worker is not trusted. The supervisor reads at most wire.MaxBody per
 // frame from it, accepts only ready (once, first), pong, and the output,
@@ -32,6 +34,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -41,6 +44,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/sandbox/internal/wire"
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 const (
@@ -70,7 +74,9 @@ type Config struct {
 	// Workspace opens a session's tree for its workers: the host's tree, as
 	// its session runtime builds it, with the bindings the client sends.
 	// The supervisor serves the worker's file requests from it; the worker
-	// never holds a credential. Nil is an empty tree.
+	// never holds a credential. The request's Refresh asks the client for a
+	// new credential of a binding while the stream is open: build each
+	// binding's TokenHolder with Request.Holder. Nil is an empty tree.
 	Workspace vfs.OpenVFS
 	// StopTimeout is the time a worker has to exit after a stop request.
 	// After it, the supervisor kills the worker. Zero is 5 seconds.
@@ -149,39 +155,103 @@ func (s *Supervisor) serveWorker(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "the stream must start with open", http.StatusBadRequest)
 		return
 	}
+	w.WriteHeader(http.StatusOK)
+	stream := http.NewResponseController(w)
+	_ = stream.Flush()
+	var sends sync.Mutex
+	send := func(f wire.Frame) {
+		sends.Lock()
+		defer sends.Unlock()
+		if writeFrame(w, f) == nil {
+			_ = stream.Flush()
+		}
+	}
+	refuse := func(status int, message string) {
+		send(wire.Frame{Kind: wire.KindControl, Message: wire.Message{Type: wire.TypeRefused, Code: &status, Error: message}})
+	}
+	tokens := newTokens(send)
+	done := make(chan struct{})
+	defer close(done)
+	client := receive(r.Body, done, tokens.deliver)
 	var files vfs.Files
 	if s.config.Workspace != nil {
-		ms, err := s.config.Workspace(r.Context(), open.Message.Session, vfs.Request{Bindings: open.Message.Bindings})
+		ms, err := s.config.Workspace(r.Context(), open.Message.Session, vfs.Request{Bindings: open.Message.Bindings, Refresh: tokens.refresh})
 		if err != nil {
-			http.Error(w, "the workspace could not open: "+err.Error(), http.StatusBadGateway)
+			refuse(http.StatusBadGateway, "the workspace could not open: "+err.Error())
 			return
 		}
 		files = vfs.NewFiles(ms)
 	}
 	p, err := startProcess(s.config.WorkerPath, s.config.PackagesDir)
 	if err != nil {
-		http.Error(w, "the worker could not start", http.StatusInternalServerError)
+		refuse(http.StatusInternalServerError, "the worker could not start")
 		return
 	}
 	defer p.close()
-	w.WriteHeader(http.StatusOK)
-	stream := http.NewResponseController(w)
-	_ = stream.Flush()
-	s.relay(r.Context(), r.Body, func(f wire.Frame) {
-		if writeFrame(w, f) == nil {
-			_ = stream.Flush()
+	s.relay(r.Context(), client, send, p, files)
+}
+
+// tokens asks the client of one stream for new credentials of its
+// bindings, and routes the client's replies.
+type tokens struct {
+	mu      sync.Mutex
+	send    func(wire.Frame)
+	nextID  uint64
+	pending map[uint64]chan wire.Message
+}
+
+// newTokens asks over send, which writes a frame to the client.
+func newTokens(send func(wire.Frame)) *tokens {
+	return &tokens{send: send, pending: map[uint64]chan wire.Message{}}
+}
+
+// refresh asks the client for a new credential of b and waits for the
+// reply, or for ctx, which ends with the stream. b goes without its token.
+func (t *tokens) refresh(ctx context.Context, b mount.Binding) (mount.Credential, error) {
+	b.Auth = mount.Credential{}
+	t.mu.Lock()
+	t.nextID++
+	id := t.nextID
+	reply := make(chan wire.Message, 1)
+	t.pending[id] = reply
+	t.send(wire.Frame{Kind: wire.KindControl, Message: wire.Message{Type: wire.TypeToken, ID: id, Binding: &b}})
+	t.mu.Unlock()
+	defer func() {
+		t.mu.Lock()
+		delete(t.pending, id)
+		t.mu.Unlock()
+	}()
+	select {
+	case m := <-reply:
+		if m.Credential == nil {
+			return mount.Credential{}, fmt.Errorf("supervisor: the client did not refresh the token of %s: %s", b.Provider, m.Error)
 		}
-	}, p, files)
+		return *m.Credential, nil
+	case <-ctx.Done():
+		return mount.Credential{}, ctx.Err()
+	}
+}
+
+// deliver hands the client's reply m to the refresh that waits for it.
+func (t *tokens) deliver(m wire.Message) {
+	t.mu.Lock()
+	reply := t.pending[m.ID]
+	delete(t.pending, m.ID)
+	t.mu.Unlock()
+	if reply != nil {
+		reply <- m
+	}
 }
 
 // relay moves frames between the client's stream and the worker until one
 // of them ends, and serves the worker's file requests from files. When it
-// ends, the files the worker left open are written back.
-func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.Frame), p *process, files vfs.Files) {
+// ends, the files the worker left open are written back. It keeps reading
+// the client while a file request waits, so a later token reply reaches
+// the request that waits for it.
+func (s *Supervisor) relay(ctx context.Context, client <-chan received, send func(wire.Frame), p *process, files vfs.Files) {
 	done := make(chan struct{})
 	defer close(done)
-	client := receive(body, done)
-	worker := receive(p.conn, done)
+	worker := receive(p.conn, done, nil)
 	var writes sync.Mutex
 	toWorker := func(f wire.Frame) {
 		writes.Lock()
@@ -212,20 +282,26 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.F
 		}
 	}
 	ready, runs := false, 0
+	fromStream := func(r received) bool {
+		forward, valid := fromClient(r.frame)
+		if r.err != nil || !valid {
+			return false
+		}
+		switch forward.Message.Type {
+		case wire.TypeStop:
+			startStopTimeout()
+		case wire.TypeRun:
+			runs++
+		}
+		toWorker(forward)
+		return true
+	}
 	for {
 		select {
 		case r := <-client:
-			forward, valid := fromClient(r.frame)
-			if r.err != nil || !valid {
+			if !fromStream(r) {
 				return
 			}
-			switch forward.Message.Type {
-			case wire.TypeStop:
-				startStopTimeout()
-			case wire.TypeRun:
-				runs++
-			}
-			toWorker(forward)
 		case r := <-worker:
 			forward, valid := fromWorker(r.frame, ready, runs)
 			switch {
@@ -236,9 +312,17 @@ func (s *Supervisor) relay(ctx context.Context, body io.Reader, send func(wire.F
 				p.kill()
 				worker = nil
 			case forward.Kind == wire.KindFS:
-				select {
-				case requests <- forward.Data:
-				case <-served:
+				for queued := false; !queued; {
+					select {
+					case requests <- forward.Data:
+						queued = true
+					case <-served:
+						queued = true
+					case r := <-client:
+						if !fromStream(r) {
+							return
+						}
+					}
 				}
 			default:
 				ready = true
@@ -315,13 +399,18 @@ type received struct {
 	err   error
 }
 
-// receive reads messages from r and sends each result on the channel. It
-// stops after the first error, or when done closes.
-func receive(r io.Reader, done <-chan struct{}) <-chan received {
+// receive reads messages from r and sends each result on the channel, but
+// hands each token message to token when it is set. It stops after the
+// first error, or when done closes.
+func receive(r io.Reader, done <-chan struct{}, token func(wire.Message)) <-chan received {
 	results := make(chan received)
 	go func() {
 		for {
 			f, err := wire.Read(r)
+			if token != nil && err == nil && f.Kind == wire.KindControl && f.Message.Type == wire.TypeToken {
+				token(f.Message)
+				continue
+			}
 			select {
 			case results <- received{frame: f, err: err}:
 			case <-done:

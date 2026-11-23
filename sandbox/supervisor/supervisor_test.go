@@ -16,12 +16,16 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/testdrive"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/sandbox"
@@ -344,6 +348,165 @@ func TestSupervisorRefusesAWorkerWhoseWorkspaceCannotOpen(t *testing.T) {
 	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 
 	require.EqualError(t, err, "sandbox: the supervisor refused the worker: 502 the workspace could not open: drive token expired")
+}
+
+func TestStartAndRunRefreshABindingsTokenThroughTheClient(t *testing.T) {
+	ca := sandboxtest.NewAuthority(t)
+	client := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{Workspace: gatedWorkspace(t)}).Address, sandboxtest.ClientConfig(t, ca, ca))
+	var refreshes atomic.Int32
+	var session atomic.Value
+	var asked atomic.Value
+	client.Refresh = func(_ context.Context, s string, b mount.Binding) (mount.Credential, error) {
+		refreshes.Add(1)
+		session.Store(s)
+		asked.Store(b)
+		return mount.Credential{Token: "fresh", ExpiresAt: time.Now().Add(30 * time.Second)}, nil
+	}
+	worker, err := client.Start(t.Context(), "s", []mount.Binding{gatedBinding})
+	require.NoError(t, err)
+	defer worker.Close()
+	atStart := refreshes.Load()
+	var stdout strings.Builder
+
+	code, err := worker.Run(t.Context(), "cat drive/readme.txt", &stdout, io.Discard)
+
+	require.NoError(t, err)
+	require.Equal(t, 0, code)
+	require.Equal(t, "hello", stdout.String())
+	require.Positive(t, atStart)
+	require.Greater(t, refreshes.Load(), atStart)
+	require.Equal(t, "s", session.Load())
+	binding := asked.Load().(mount.Binding)
+	require.Equal(t, "drive", binding.Alias())
+	require.Empty(t, binding.Auth.Token)
+}
+
+func TestStartIsRefusedWhenTheClientDoesNotRefreshAnExpiredToken(t *testing.T) {
+	ca := sandboxtest.NewAuthority(t)
+	address := sandboxtest.Start(t, ca, supervisor.Config{Workspace: gatedWorkspace(t)}).Address
+	refused := func(context.Context, string, mount.Binding) (mount.Credential, error) {
+		return mount.Credential{}, errors.New("no refresh token")
+	}
+	for name, refresh := range map[string]func(context.Context, string, mount.Binding) (mount.Credential, error){"without a refresh": nil, "with a refresh that fails": refused} {
+		t.Run(name, func(t *testing.T) {
+			client := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca))
+			client.Refresh = refresh
+
+			_, err := client.Start(t.Context(), "s", []mount.Binding{gatedBinding})
+
+			var refusal *sandbox.RefusedError
+			require.ErrorAs(t, err, &refusal)
+			require.Equal(t, http.StatusBadGateway, refusal.StatusCode)
+			require.Contains(t, refusal.Message, "auth expired")
+		})
+	}
+}
+
+func TestStartEndsWithItsContextWhileARefreshWaits(t *testing.T) {
+	ca := sandboxtest.NewAuthority(t)
+	host := sandboxtest.Start(t, ca, supervisor.Config{Workspace: gatedWorkspace(t)})
+	client := sandbox.NewClient(host.Address, sandboxtest.ClientConfig(t, ca, ca))
+	ctx, cancel := context.WithCancel(t.Context())
+	client.Refresh = func(refreshCtx context.Context, _ string, _ mount.Binding) (mount.Credential, error) {
+		cancel()
+		<-refreshCtx.Done()
+		return mount.Credential{}, refreshCtx.Err()
+	}
+
+	_, err := client.Start(ctx, "s", []mount.Binding{gatedBinding})
+
+	require.Error(t, err)
+	require.NoError(t, host.Stop())
+}
+
+func TestRunEndsWhenTheWorkerDiesWhileARefreshWaitsForTheClient(t *testing.T) {
+	ca := sandboxtest.NewAuthority(t)
+	host := sandboxtest.Start(t, ca, supervisor.Config{Workspace: gatedWorkspace(t)})
+	client := sandbox.NewClient(host.Address, sandboxtest.ClientConfig(t, ca, ca))
+	var started atomic.Bool
+	var asking sync.Once
+	asked := make(chan struct{})
+	client.Refresh = func(ctx context.Context, _ string, _ mount.Binding) (mount.Credential, error) {
+		if !started.Load() {
+			return mount.Credential{Token: "fresh", ExpiresAt: time.Now().Add(30 * time.Second)}, nil
+		}
+		asking.Do(func() { close(asked) })
+		<-ctx.Done()
+		return mount.Credential{}, ctx.Err()
+	}
+	worker, err := client.Start(t.Context(), "s", []mount.Binding{gatedBinding})
+	require.NoError(t, err)
+	defer worker.Close()
+	started.Store(true)
+	pid := childPID(t, "tacklr-sandbox-worker")
+	ran := make(chan error, 1)
+	go func() {
+		_, err := worker.Run(t.Context(), "cat drive/readme.txt", io.Discard, io.Discard)
+		ran <- err
+	}()
+	<-asked
+
+	require.NoError(t, syscall.Kill(pid, syscall.SIGKILL))
+
+	require.ErrorIs(t, <-ran, sandbox.ErrExited)
+	require.NoError(t, host.Stop())
+}
+
+func TestSupervisorRelaysTheClientWhileAFileRequestWaitsForARefresh(t *testing.T) {
+	ca := sandboxtest.NewAuthority(t)
+	host := sandboxtest.Start(t, ca, supervisor.Config{
+		Workspace: gatedWorkspace(t),
+		WorkerPath: sandboxtest.ScriptWorker(t,
+			sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`),
+			"head -c 1 <&3 >/dev/null",
+			sandboxtest.SendFS(`{"id":1,"op":"stat","path":"drive/readme.txt"}`, `{"id":2,"op":"stat","path":"drive/readme.txt"}`),
+			"exec sleep 3600"),
+	})
+	client := sandbox.NewClient(host.Address, sandboxtest.ClientConfig(t, ca, ca))
+	var started atomic.Bool
+	var asks atomic.Int32
+	var asking sync.Once
+	asked, release := make(chan struct{}), make(chan struct{})
+	client.Refresh = func(context.Context, string, mount.Binding) (mount.Credential, error) {
+		if started.Load() && asks.Add(1) == 1 {
+			asking.Do(func() { close(asked) })
+			<-release
+		}
+		return mount.Credential{Token: "fresh", ExpiresAt: time.Now().Add(30 * time.Second)}, nil
+	}
+	worker, err := client.Start(t.Context(), "s", []mount.Binding{gatedBinding})
+	require.NoError(t, err)
+	defer worker.Close()
+	started.Store(true)
+	go func() { _, _ = worker.Run(t.Context(), "true", io.Discard, io.Discard) }()
+	<-asked
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+
+	pingErr := worker.Ping(ctx)
+	close(release)
+
+	require.ErrorIs(t, pingErr, context.DeadlineExceeded)
+	require.Eventually(t, func() bool { return asks.Load() >= 2 }, 5*time.Second, 10*time.Millisecond, "the second file request never asked for its token")
+}
+
+// gatedBinding is a Drive folder that holds readme.txt, with a token that
+// has expired.
+var gatedBinding = mount.Binding{
+	Provider: mount.ProviderGoogleDrive,
+	Params:   map[string]string{mount.ParamName: "drive", mount.ParamFolderID: "root-b"},
+	Auth:     mount.Credential{Token: "stale", ExpiresAt: time.Now().Add(-time.Hour)},
+}
+
+// gatedWorkspace mounts the Drive folder of gatedBinding, on a fake Drive
+// server, at /workspace/drive. Drive refreshes the expired token through
+// the binding's holder before its first call.
+func gatedWorkspace(t *testing.T) vfs.OpenVFS {
+	t.Helper()
+	return func(ctx context.Context, session string, req vfs.Request) (*vfs.MountSession, error) {
+		b, _ := vfs.BindingByName(req.Bindings, "drive")
+		return vfs.Tree(vfs.At("drive", testdrive.Open(t, testdrive.Tree(), req.Holder(b))))(ctx, session, req)
+	}
 }
 
 // rawStream opens a worker stream whose first frame is first, and returns

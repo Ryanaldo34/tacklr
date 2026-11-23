@@ -38,29 +38,36 @@ const (
 )
 
 // The message types. Ready, pong and done come from the worker; open, ping,
-// stop and run from the client. Exit comes from the supervisor.
+// stop and run from the client. Exit and refused come from the supervisor:
+// refused, before ready, has the status (Code) and the reason (Error) the
+// worker did not start for. Token is the supervisor's request for a new
+// credential of a binding, and the client's reply with the same ID.
 const (
-	TypeOpen  = "open"
-	TypeReady = "ready"
-	TypePing  = "ping"
-	TypePong  = "pong"
-	TypeStop  = "stop"
-	TypeRun   = "run"
-	TypeDone  = "done"
-	TypeExit  = "exit"
+	TypeOpen    = "open"
+	TypeReady   = "ready"
+	TypePing    = "ping"
+	TypePong    = "pong"
+	TypeStop    = "stop"
+	TypeRun     = "run"
+	TypeDone    = "done"
+	TypeExit    = "exit"
+	TypeToken   = "token"
+	TypeRefused = "refused"
 )
 
 // Message is one control message. Only the fields of its Type are set.
 type Message struct {
-	Type        string          `json:"type"`
-	ID          uint64          `json:"id,omitzero"`
-	Script      string          `json:"script,omitempty"`
-	Session     string          `json:"session,omitempty"`
-	Bindings    []mount.Binding `json:"bindings,omitempty"`
-	Code        *int            `json:"code,omitempty"`
-	Error       string          `json:"error,omitempty"`
-	Enforcement *Enforcement    `json:"enforcement,omitempty"`
-	Exit        *Exit           `json:"exit,omitempty"`
+	Type        string            `json:"type"`
+	ID          uint64            `json:"id,omitzero"`
+	Script      string            `json:"script,omitempty"`
+	Session     string            `json:"session,omitempty"`
+	Bindings    []mount.Binding   `json:"bindings,omitempty"`
+	Code        *int              `json:"code,omitempty"`
+	Error       string            `json:"error,omitempty"`
+	Enforcement *Enforcement      `json:"enforcement,omitempty"`
+	Exit        *Exit             `json:"exit,omitempty"`
+	Binding     *mount.Binding    `json:"binding,omitempty"`
+	Credential  *mount.Credential `json:"credential,omitempty"`
 }
 
 // Frame is one frame: a control message, or output bytes of a run.

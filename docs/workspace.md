@@ -59,7 +59,7 @@ In your supervisor's `Workspace`, build the member from the turn's binding:
 func open(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, error) {
 	members := []vfs.Member{vfs.At("work", vfs.SessionLocal("/srv/tacklr/work"))}
 	if b, ok := vfs.BindingByName(req.Bindings, "drive"); ok && b.Auth.Token != "" {
-		h := vfs.NewTokenHolder(b.Auth)
+		h := req.Holder(b) // refreshes through the session runtime
 		members = append(members, vfs.At("drive", vfs.Drive(vfs.NewGoogleDrive(h, "", nil), h)))
 	}
 	return vfs.Tree(members...)(ctx, id, req)
@@ -67,6 +67,8 @@ func open(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, e
 ```
 
 The token goes to `session.SecretStorage`, sealed. It is never in the checkpoint, in Temporal history, or in the ACP wire store. It reaches the supervisor only for the length of a `run_command`, and never the sandboxed worker. See [Sessions in production](session.md#credentials).
+
+When a token is near expiry, or Drive or Microsoft 365 refuses it, the supervisor asks the session runtime for a new one on the `run_command` stream. Set `sandbox.Client.Refresh` to answer: it gets the session ID and the binding (without its token) and returns a new `mount.Credential`, for example from your identity provider. Without `Refresh`, a source with an expired token fails, and a workspace that cannot open refuses the worker.
 
 | Provider | Read-only scopes | Writable scopes | Parameters |
 |---|---|---|---|

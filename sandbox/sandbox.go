@@ -87,6 +87,13 @@ func (e *RefusedError) Error() string {
 
 // Client starts workers on one supervisor.
 type Client struct {
+	// Refresh, if set, gets a new credential for one of a worker's
+	// bindings when the supervisor asks: the binding's token is near
+	// expiry, or its source refused it. It gets the worker's session and
+	// the binding without its token. Nil refuses each refresh. Set it
+	// before Start.
+	Refresh func(ctx context.Context, session string, binding mount.Binding) (mount.Credential, error)
+
 	url  *url.URL
 	http *http.Client
 }
@@ -110,8 +117,9 @@ func NewClient(address string, config *tls.Config) *Client {
 
 // Start starts a worker for session and returns when it is ready. The
 // supervisor opens the session's tree with bindings (the turn's mounts and
-// their credentials), and the worker sees it at /workspace. ctx limits only
-// the wait. The worker lives until Close, or until it ends.
+// their credentials), and the worker sees it at /workspace. While it does,
+// Start answers its token requests with Refresh. ctx limits only the wait.
+// The worker lives until Close, or until it ends.
 func (c *Client) Start(ctx context.Context, session string, bindings []mount.Binding) (*Worker, error) {
 	streamCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	stopWaiting := context.AfterFunc(ctx, cancel)
@@ -142,38 +150,51 @@ func (c *Client) Start(ctx context.Context, session string, bindings []mount.Bin
 		cancel()
 		return nil, &RefusedError{StatusCode: response.StatusCode, Message: strings.TrimSpace(string(message))}
 	}
-	frame, err := wire.Read(response.Body)
-	first := frame.Message
-	if err == nil && (first.Type != wire.TypeReady || first.Enforcement == nil) {
-		err = startError(first)
+	w := &Worker{
+		session: session,
+		refresh: c.Refresh,
+		cancel:  cancel,
+		send:    send,
+		pongs:   map[uint64]chan struct{}{},
+		done:    make(chan struct{}),
 	}
-	if err != nil {
+	for {
+		frame, err := wire.Read(response.Body)
+		m := frame.Message
+		switch {
+		case err == nil && m.Type == wire.TypeToken && m.Binding != nil:
+			w.answerToken(streamCtx, m.ID, *m.Binding)
+			continue
+		case err == nil && m.Type == wire.TypeReady && m.Enforcement != nil:
+			w.enforcement = *m.Enforcement
+			go w.read(streamCtx, response.Body)
+			return w, nil
+		case err == nil:
+			err = startError(m)
+		}
 		_ = response.Body.Close()
 		cancel()
 		return nil, err
 	}
-	w := &Worker{
-		enforcement: *first.Enforcement,
-		cancel:      cancel,
-		send:        send,
-		pongs:       map[uint64]chan struct{}{},
-		done:        make(chan struct{}),
-	}
-	go w.read(response.Body)
-	return w, nil
 }
 
-// startError is the error of a first message that is not ready.
-func startError(first wire.Message) error {
-	if first.Type == wire.TypeExit && first.Exit != nil {
-		return &ExitError{Exit: *first.Exit}
+// startError is the error of a message before ready that is not a token
+// request.
+func startError(m wire.Message) error {
+	switch {
+	case m.Type == wire.TypeExit && m.Exit != nil:
+		return &ExitError{Exit: *m.Exit}
+	case m.Type == wire.TypeRefused && m.Code != nil:
+		return &RefusedError{StatusCode: *m.Code, Message: m.Error}
 	}
-	return fmt.Errorf("sandbox: the supervisor sent %q before ready", first.Type)
+	return fmt.Errorf("sandbox: the supervisor sent %q before ready", m.Type)
 }
 
 // Worker is one running worker.
 type Worker struct {
 	enforcement Enforcement
+	session     string
+	refresh     func(ctx context.Context, session string, binding mount.Binding) (mount.Credential, error)
 	cancel      context.CancelFunc
 
 	// running lets one run go at a time.
@@ -286,8 +307,10 @@ func (w *Worker) Close() {
 	<-w.done
 }
 
-// read takes the supervisor's messages until the stream ends.
-func (w *Worker) read(body io.ReadCloser) {
+// read takes the supervisor's messages until the stream ends. It answers
+// each token request on its own, so output keeps coming while a refresh
+// waits.
+func (w *Worker) read(ctx context.Context, body io.ReadCloser) {
 	defer close(w.done)
 	defer w.cancel()
 	defer body.Close()
@@ -319,12 +342,30 @@ func (w *Worker) read(body io.ReadCloser) {
 			if pong != nil {
 				close(pong)
 			}
+		case m.Type == wire.TypeToken && m.Binding != nil:
+			go w.answerToken(ctx, m.ID, *m.Binding)
 		case m.Type == wire.TypeExit:
 			w.exit = m.Exit
 			w.end(ErrExited)
 			return
 		}
 	}
+}
+
+// answerToken replies to the supervisor's token request id with a new
+// credential of binding from Refresh, or with why there is none.
+func (w *Worker) answerToken(ctx context.Context, id uint64, binding mount.Binding) {
+	reply := wire.Message{Type: wire.TypeToken, ID: id}
+	if w.refresh == nil {
+		reply.Error = "the session runtime does not refresh tokens"
+	} else if credential, err := w.refresh(ctx, w.session, binding); err != nil {
+		reply.Error = err.Error()
+	} else {
+		reply.Credential = &credential
+	}
+	w.mu.Lock()
+	_ = wire.Write(w.send, reply)
+	w.mu.Unlock()
 }
 
 // end records err and makes every later send fail.

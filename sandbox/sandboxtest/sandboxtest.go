@@ -132,16 +132,28 @@ func ScriptWorker(t *testing.T, lines ...string) string {
 // SendFrame is a shell command that writes body as one control frame on
 // the worker's socket (fd 3).
 func SendFrame(body string) string {
-	header := binary.BigEndian.AppendUint32(nil, uint32(len(body))) //nolint:gosec // test bodies are short
-	header = append(header, 1)
-	var command strings.Builder
-	command.WriteString("printf '")
-	for _, b := range header {
-		fmt.Fprintf(&command, `\%03o`, b)
+	return "printf '" + frame(1, nil, body) + "' >&3"
+}
+
+// SendFS is a shell command that writes each request as a file frame with
+// no bytes, all in one write on the worker's socket (fd 3).
+func SendFS(requests ...string) string {
+	var frames strings.Builder
+	for _, request := range requests {
+		frames.WriteString(frame(4, binary.BigEndian.AppendUint32(nil, uint32(len(request))), request)) //nolint:gosec // test requests are short
 	}
-	command.WriteString(body)
-	command.WriteString("' >&3")
-	return command.String()
+	return "printf '" + frames.String() + "' >&3"
+}
+
+// frame is one frame of kind for printf: its header, prefix and body.
+func frame(kind byte, prefix []byte, body string) string {
+	header := binary.BigEndian.AppendUint32(nil, uint32(len(prefix)+len(body))) //nolint:gosec // test bodies are short
+	var out strings.Builder
+	for _, b := range append(append(header, kind), prefix...) {
+		fmt.Fprintf(&out, `\%03o`, b)
+	}
+	out.WriteString(body)
+	return out.String()
 }
 
 // Authority is a test certificate authority.
