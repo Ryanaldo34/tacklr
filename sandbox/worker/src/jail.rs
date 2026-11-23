@@ -7,11 +7,12 @@
 //! 2. Landlock: no filesystem access, no TCP bind or connect, and no abstract
 //!    Unix socket or signal outside the worker's own Landlock domain.
 //! 3. seccomp: an allow-list of system calls. Any other system call kills the
-//!    process with `SIGSYS`.
+//!    process with `SIGSYS`. No call may map executable memory, start a
+//!    process or a namespace, or open a file.
 //!
 //! Both Landlock and seccomp set `PR_SET_NO_NEW_PRIVS` before they apply.
-//! Call [`enter`] while the process has only one thread, so that every thread
-//! it starts later gets the same filter.
+//! Landlock and seccomp apply to the calling thread and to the threads it
+//! starts later, so call [`enter`] while the process has only one thread.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -21,7 +22,10 @@ use std::os::fd::RawFd;
 use landlock::{
     ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr, Scope,
 };
-use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
+use seccompiler::{
+    BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+    SeccompRule,
+};
 
 use crate::message::Enforcement;
 
@@ -34,9 +38,10 @@ pub const MIN_LANDLOCK_ABI: ABI = ABI::V6;
 /// the kernel has them.
 const MAX_LANDLOCK_ABI: ABI = ABI::V10;
 
-/// The system calls the worker may make after [`enter`]: socket I/O, memory
-/// allocation, the futex of the Rust runtime, signal return and exit. Every
-/// other system call kills the process.
+/// The system calls the worker may make after [`enter`] with any
+/// arguments: socket I/O, memory, the futexes, threads and signals of the
+/// async runtime and of Wasmer's trap handlers, and exit.
+/// [`syscall_rules`] adds the calls allowed only with some arguments.
 const ALLOWED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_read,
     libc::SYS_write,
@@ -44,16 +49,32 @@ const ALLOWED_SYSCALLS: &[libc::c_long] = &[
     libc::SYS_sendto,
     libc::SYS_close,
     libc::SYS_brk,
-    libc::SYS_mmap,
     libc::SYS_munmap,
     libc::SYS_mremap,
     libc::SYS_madvise,
     libc::SYS_futex,
+    libc::SYS_getrandom,
+    libc::SYS_gettid,
+    libc::SYS_sched_yield,
+    libc::SYS_sched_getaffinity,
+    libc::SYS_set_robust_list,
+    libc::SYS_rseq,
+    libc::SYS_rt_sigaction,
+    libc::SYS_rt_sigprocmask,
     libc::SYS_rt_sigreturn,
     libc::SYS_sigaltstack,
     libc::SYS_exit,
     libc::SYS_exit_group,
 ];
+
+/// The namespace flags of `clone`. A thread of the worker never makes one.
+const NAMESPACE_FLAGS: u64 = (libc::CLONE_NEWUSER
+    | libc::CLONE_NEWNS
+    | libc::CLONE_NEWPID
+    | libc::CLONE_NEWNET
+    | libc::CLONE_NEWIPC
+    | libc::CLONE_NEWUTS
+    | libc::CLONE_NEWCGROUP) as u64;
 
 /// An error that stopped the worker from applying its sandbox.
 pub type JailError = Box<dyn Error + Send + Sync>;
@@ -95,28 +116,97 @@ pub fn restrict_filesystem_and_network() -> Result<i32, JailError> {
     Ok(ABI::from(status.landlock) as i32)
 }
 
-/// Installs the seccomp allow-list ([`ALLOWED_SYSCALLS`]) on the calling
-/// thread. A system call outside the list kills the whole process with
-/// `SIGSYS`.
+/// Installs the seccomp filters on the calling thread. Two filters make
+/// `openat` fail with `EACCES`, as Landlock does, and `clone3` with
+/// `ENOSYS`, so that threads start with `clone`, whose flags the allow-list
+/// can check. The allow-list of [`syscall_rules`] goes last, because each
+/// install first sets `PR_SET_NO_NEW_PRIVS`, which the allow-list refuses.
+/// Any system call outside it kills the whole process with `SIGSYS`.
 ///
 /// # Errors
 ///
 /// Returns an error if the CPU architecture is not supported or the kernel
-/// refuses the filter.
+/// refuses a filter.
 pub fn install_syscall_filter() -> Result<(), JailError> {
-    let rules = ALLOWED_SYSCALLS
-        .iter()
-        .map(|&syscall| (syscall, Vec::new()))
-        .collect::<BTreeMap<_, _>>();
-    let filter = SeccompFilter::new(
-        rules,
-        SeccompAction::KillProcess,
-        SeccompAction::Allow,
-        std::env::consts::ARCH.try_into()?,
-    )?;
-    let program: BpfProgram = filter.try_into()?;
-    seccompiler::apply_filter(&program)?;
+    let arch = std::env::consts::ARCH.try_into()?;
+    let filters = [
+        SeccompFilter::new(
+            [(libc::SYS_openat, Vec::new())].into(),
+            SeccompAction::Allow,
+            SeccompAction::Errno(libc::EACCES as u32),
+            arch,
+        )?,
+        SeccompFilter::new(
+            [(libc::SYS_clone3, Vec::new())].into(),
+            SeccompAction::Allow,
+            SeccompAction::Errno(libc::ENOSYS as u32),
+            arch,
+        )?,
+        SeccompFilter::new(
+            syscall_rules()?,
+            SeccompAction::KillProcess,
+            SeccompAction::Allow,
+            arch,
+        )?,
+    ];
+    for filter in filters {
+        let program: BpfProgram = filter.try_into()?;
+        seccompiler::apply_filter(&program)?;
+    }
     Ok(())
+}
+
+/// The allow-list: [`ALLOWED_SYSCALLS`] with any arguments, plus `mmap` and
+/// `mprotect` without `PROT_EXEC`, `clone` of a thread without namespace
+/// flags, `prctl` to name a thread, `fcntl` to read fd flags or duplicate
+/// the socket, and `openat` and `clone3`, which the errno filters refuse.
+fn syscall_rules() -> Result<BTreeMap<i64, Vec<SeccompRule>>, JailError> {
+    let arg = |index: u8, op: SeccompCmpOp, value: u64| {
+        SeccompCondition::new(index, SeccompCmpArgLen::Qword, op, value)
+    };
+    let no_exec = SeccompRule::new(vec![arg(
+        2,
+        SeccompCmpOp::MaskedEq(libc::PROT_EXEC as u64),
+        0,
+    )?])?;
+    let mut rules: BTreeMap<i64, Vec<SeccompRule>> = ALLOWED_SYSCALLS
+        .iter()
+        .chain([libc::SYS_openat, libc::SYS_clone3].iter())
+        .map(|&syscall| (syscall, Vec::new()))
+        .collect();
+    rules.insert(libc::SYS_mmap, vec![no_exec.clone()]);
+    rules.insert(libc::SYS_mprotect, vec![no_exec]);
+    rules.insert(
+        libc::SYS_clone,
+        vec![SeccompRule::new(vec![
+            arg(
+                0,
+                SeccompCmpOp::MaskedEq(libc::CLONE_THREAD as u64),
+                libc::CLONE_THREAD as u64,
+            )?,
+            arg(0, SeccompCmpOp::MaskedEq(NAMESPACE_FLAGS), 0)?,
+        ])?],
+    );
+    rules.insert(
+        libc::SYS_prctl,
+        vec![SeccompRule::new(vec![arg(
+            0,
+            SeccompCmpOp::Eq,
+            libc::PR_SET_NAME as u64,
+        )?])?],
+    );
+    rules.insert(
+        libc::SYS_fcntl,
+        vec![
+            SeccompRule::new(vec![arg(1, SeccompCmpOp::Eq, libc::F_GETFD as u64)?])?,
+            SeccompRule::new(vec![arg(
+                1,
+                SeccompCmpOp::Eq,
+                libc::F_DUPFD_CLOEXEC as u64,
+            )?])?,
+        ],
+    );
+    Ok(rules)
 }
 
 fn close_fds_after(last_kept_fd: RawFd) -> io::Result<()> {
