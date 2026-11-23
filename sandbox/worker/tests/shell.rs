@@ -111,5 +111,30 @@ fn shell_refuses_a_listed_package_whose_file_is_missing() {
 
     let error = Shell::load(&dir).err().expect("load fails");
 
-    assert_eq!(error.to_string(), format!("read {}", dir.join("bash.webc").display()));
+    assert_eq!(
+        error.to_string(),
+        format!("read {}", dir.join("bash.webc").display())
+    );
+}
+
+#[test]
+fn shell_refuses_a_package_file_that_does_not_match_its_hash() {
+    let dir = std::env::temp_dir().join(format!("tacklr-packages-hash-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::copy(packages().join("sed.webc"), dir.join("bash.webc")).expect("copy");
+    std::fs::write(
+        dir.join("packages.txt"),
+        "wasmer/bash 1.0.25 059606d132e2e6bc1afe3b432ee64dcb1b1b059815c8bb213cf3b24798ef21e1\n",
+    )
+    .expect("write");
+
+    let error = Shell::load(&dir).err().expect("load fails");
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "{} does not match its SHA-256 in packages.txt",
+            dir.join("bash.webc").display()
+        )
+    );
 }

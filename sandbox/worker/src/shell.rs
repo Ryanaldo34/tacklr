@@ -12,12 +12,15 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
+use url::Url;
 use virtual_fs::{FileSystem, VirtualFile};
 use wasmer_config::package::{NamedPackageId, PackageId};
 use wasmer_wasix::bin_factory::BinaryPackage;
 use wasmer_wasix::runners::wasi::{RuntimeOrEngine, WasiRunner};
 use wasmer_wasix::runtime::package_loader::{PackageLoader, load_package_tree};
-use wasmer_wasix::runtime::resolver::{InMemorySource, PackageSummary, Resolution, WebcHash};
+use wasmer_wasix::runtime::resolver::{
+    DistributionInfo, InMemorySource, PackageInfo, PackageSummary, Resolution, WebcHash,
+};
 use wasmer_wasix::runtime::task_manager::tokio::TokioTaskManager;
 use wasmer_wasix::{PluggableRuntime, WasiRuntimeError};
 use webc::Container;
@@ -37,32 +40,45 @@ pub struct Shell {
 }
 
 impl Shell {
-    /// Loads the packages that `dir/packages.txt` lists.
+    /// Loads the packages that `dir/packages.txt` lists, and checks each
+    /// package file against its SHA-256 in the list.
     ///
     /// # Errors
     ///
     /// Returns an error if the list or a package file cannot be read, a line
-    /// is not `name version sha256`, or the list has no `wasmer/bash`.
+    /// is not `name version sha256`, a file does not match its SHA-256, or
+    /// the list has no `wasmer/bash`.
     pub fn load(dir: &Path) -> anyhow::Result<Self> {
         let list = std::fs::read_to_string(dir.join("packages.txt"))?;
         let mut source = InMemorySource::new();
         let mut bundled = Bundled::default();
         let mut containers = Vec::new();
         for line in list.lines() {
-            let [name, version, _] = line.split_whitespace().collect::<Vec<_>>()[..] else {
+            let [name, version, hash] = line.split_whitespace().collect::<Vec<_>>()[..] else {
                 bail!("packages.txt: {line:?} is not \"name version sha256\"");
             };
             let file = dir.join(format!("{}.webc", name.rsplit('/').next().unwrap_or(name)));
-            let mut summary = PackageSummary::from_webc_file(&file)
-                .with_context(|| format!("read {}", file.display()))?;
-            summary.pkg.id = PackageId::Named(NamedPackageId {
+            let bytes = std::fs::read(&file).with_context(|| format!("read {}", file.display()))?;
+            let webc_sha256 = WebcHash::sha256(&bytes);
+            if webc_sha256 != WebcHash::parse_hex(hash)? {
+                bail!(
+                    "{} does not match its SHA-256 in packages.txt",
+                    file.display()
+                );
+            }
+            let container = wasmer_package::utils::from_bytes(bytes)?;
+            let id = PackageId::Named(NamedPackageId {
                 full_name: name.to_owned(),
                 version: version.parse()?,
             });
-            let container = wasmer_package::utils::from_disk(&file)?;
-            bundled
-                .0
-                .insert(summary.dist.webc_sha256, container.clone());
+            let summary = PackageSummary {
+                pkg: PackageInfo::from_manifest(id, container.manifest(), container.version())?,
+                dist: DistributionInfo {
+                    webc: Url::parse(&format!("bundled:{name}"))?,
+                    webc_sha256,
+                },
+            };
+            bundled.0.insert(webc_sha256, container.clone());
             source.add(summary);
             containers.push((name.to_owned(), container));
         }
