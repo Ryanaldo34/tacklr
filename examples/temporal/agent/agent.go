@@ -48,11 +48,7 @@ func Tree(dir string) vfs.OpenVFS {
 }
 
 // Workspace is the session worker's view of each session's /workspace, the
-// same tree as Tree, for the file tools. Results cut from the window are
-// kept in it, so the agent can read them back.
+// same tree as Tree.
 func Workspace(dir string) workspace.Config {
-	return workspace.Config{
-		Open:         Tree(dir),
-		OverflowPath: "/workspace/work/.overflow",
-	}
+	return workspace.Config{Open: Tree(dir)}
 }

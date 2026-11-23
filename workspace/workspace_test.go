@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
@@ -42,72 +41,24 @@ func writeSkill(t *testing.T, root, dir, name string) {
 }
 
 // TestConfigBind_addsTheWorkspaceToTheTurn: Bind adds the workspace's
-// skills unless the agent has its own loader, and an Overflow under
-// OverflowPath.
+// skills unless the agent has its own loader.
 func TestConfigBind_addsTheWorkspaceToTheTurn(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeSkill(t, filepath.Join(root, "skills"), "research", "research")
 	ms := mustMountTree(t, "bind", vfs.At("work", vfs.Local(root)))
 	own := skills.Loader{Root: t.TempDir()}
-	cfg := Config{SkillsPath: "/workspace/work/skills", OverflowPath: "/workspace/work/overflow"}
+	cfg := Config{SkillsPath: "/workspace/work/skills"}
 
-	plain, plainErr := cfg.Bind(tacklr.AgentOptions{}, ms)
-	withLoader, loaderErr := cfg.Bind(tacklr.AgentOptions{SkillsLoader: own}, ms)
+	plain := cfg.Bind(tacklr.AgentOptions{}, ms)
+	withLoader := cfg.Bind(tacklr.AgentOptions{SkillsLoader: own}, ms)
 	loaded, loadErr := plain.SkillsLoader.Load(t.Context())
-	kept, keepErr := plain.Overflow.Keep(t.Context(), "s1", "call-1", "the full result")
 
-	if plainErr != nil || loaderErr != nil || withLoader.SkillsLoader != own {
-		t.Errorf("Bind = %v, with a loader %v, want the agent's own loader kept", plainErr, loaderErr)
+	if withLoader.SkillsLoader != own {
+		t.Errorf("Bind with a loader = %v, want the agent's own loader kept", withLoader.SkillsLoader)
 	}
 	if loadErr != nil || len(loaded) != 1 || loaded[0].Path != "/workspace/work/skills/research/SKILL.md" {
 		t.Errorf("workspace skills = %+v %v, want research from SkillsPath", loaded, loadErr)
-	}
-	data, readErr := ms.Route(t.Context(), kept).ReadFile(t.Context())
-	if keepErr != nil || kept != "/workspace/work/overflow/s1/call-1.txt" || readErr != nil || string(data) != "the full result" {
-		t.Errorf("overflow kept %q %v, read %q %v, want the result in the workspace", kept, keepErr, data, readErr)
-	}
-}
-
-// TestConfigBind_refusesAnOverflowPathItCannotWrite: an OverflowPath
-// outside the mounts or on a read-only mount fails the turn.
-func TestConfigBind_refusesAnOverflowPathItCannotWrite(t *testing.T) {
-	t.Parallel()
-	ms := mustMountTree(t, "overflow", vfs.At("work", vfs.Local(t.TempDir())), vfs.At("ro", vfs.Local(t.TempDir())).ReadOnly())
-
-	_, outside := Config{OverflowPath: "/elsewhere"}.Bind(tacklr.AgentOptions{}, ms)
-	_, readOnly := Config{OverflowPath: "/workspace/ro/overflow"}.Bind(tacklr.AgentOptions{}, ms)
-
-	if outside == nil || readOnly == nil || !strings.Contains(readOnly.Error(), "read-only") {
-		t.Fatalf("outside the mounts = %v, on a read-only mount = %v, want both refused", outside, readOnly)
-	}
-}
-
-// TestOverflow_keepFailsWhenItCannotWrite: a file where the session's
-// directory goes, or a directory where the result goes, fails Keep.
-func TestOverflow_keepFailsWhenItCannotWrite(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	ms := mustMountTree(t, "overflow-fail", vfs.At("work", vfs.Local(t.TempDir())))
-	o, err := Overflow(ms, "/workspace/work/overflow")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Route(ctx, "/workspace/work/overflow").MkdirAll(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Route(ctx, "/workspace/work/overflow/file-session").WriteFile(ctx, []byte("x")); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Route(ctx, "/workspace/work/overflow/s1/dir-call.txt").MkdirAll(ctx); err != nil {
-		t.Fatal(err)
-	}
-
-	_, noDir := o.Keep(ctx, "file-session", "c1", "x")
-	_, noFile := o.Keep(ctx, "s1", "dir-call", "x")
-
-	if noDir == nil || noFile == nil {
-		t.Fatalf("keep under a file = %v, keep over a directory = %v, want both to fail", noDir, noFile)
 	}
 }
 

@@ -23,9 +23,7 @@ func constructTurn(ctx context.Context, agent tacklr.AgentOptions, ws workspace.
 		if err != nil {
 			return nil, err
 		}
-		if opts, err = ws.Bind(opts, ms); err != nil {
-			return nil, err
-		}
+		opts = ws.Bind(opts, ms)
 	}
 	if client != nil {
 		opts.Tools = append(slices.Clone(opts.Tools), sandbox.RunCommand(client))

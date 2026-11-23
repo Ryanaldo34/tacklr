@@ -227,31 +227,6 @@ func TestSessionWorkflow_badWorkspaceBindingFailsTurn(t *testing.T) {
 	}
 }
 
-// TestSessionWorkflow_anOverflowPathOnAReadOnlyMountFailsTheTurn: the
-// workspace cannot keep cut results on a read-only mount, so building the
-// session's harness fails, and the turn fails with why.
-func TestSessionWorkflow_anOverflowPathOnAReadOnlyMountFailsTheTurn(t *testing.T) {
-	t.Parallel()
-	env := newTestWorkflow(t)
-	model := testkit.HTTPModel(t, func(_ context.Context, _ []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
-	})
-	acts, log := registerSession(env, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
-	acts.Workspace = workspace.Config{
-		Open:         vfs.Tree(vfs.At("docs", vfs.Local(t.TempDir())).ReadOnly()),
-		OverflowPath: "/workspace/docs/.overflow",
-	}
-	id := session.ID("sess-read-only-overflow")
-	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "hello"}})
-	signalAt(env, 80*time.Millisecond, session.Wake{Kind: session.WakeClose})
-
-	got := visibleText(finishSession(t, env, log, id))
-
-	if !strings.Contains(got, "is on a read-only mount") {
-		t.Fatalf("session events = %q, want the turn to fail on the read-only overflow path", got)
-	}
-}
-
 // TestSessionWorkflow_grandchildResultReachesParent: a blocking specialist
 // of a blocking specialist answers, and its answer reaches the root
 // session through its parent.

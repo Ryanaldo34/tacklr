@@ -15,8 +15,8 @@ import (
 
 // AgentOptions is the one agent, and the argument to NewHarness. A session
 // runtime calls BindTurn to attach the session id and credentials for each
-// turn. The agent's workspace (package workspace) adds its tools, skills and
-// Overflow to these options for the turns that have one.
+// turn. The agent's workspace (package workspace) adds its skills to these
+// options for the turns that have one.
 type AgentOptions struct {
 	// MaxWindowSize is the context window in tokens. Zero uses the model's
 	// reported window.
@@ -40,11 +40,6 @@ type AgentOptions struct {
 	// connection. Inline client credentials remain session-scoped.
 	MCPCredentialResolver session.MCPCredentialResolver
 	Specialists           []*Specialist
-	// Overflow keeps the full text of results the window trims. When a round
-	// is too large for the window even with the history fully summarized,
-	// its largest results are trimmed; each one's full text is first kept
-	// here and the trimmed result says where. Nil: the full text is not kept.
-	Overflow Overflow
 	// ToolInterceptors wrap each tool call (outermost first). Built-in
 	// planning lock and OnCall middleware are installed after these.
 	// Hosts cannot omit the planning lock; specialists skip it via WithSpecialist.
@@ -102,14 +97,6 @@ type AgentOptions struct {
 	bindings []mount.Binding
 }
 
-// Overflow keeps the full text of results trimmed from the window, where the
-// agent can read it again. Package workspace keeps it on the workspace.
-type Overflow interface {
-	// Keep stores text, the full result of the session's call callID, and
-	// returns where the agent reads it.
-	Keep(ctx context.Context, sessionID, callID, text string) (string, error)
-}
-
 // BindTurn attaches the per-turn session id, the names of the Runtime job
 // workers the runtime registered, and the turn's credentialed mounts, which
 // tools read with CallContext.Bindings. The session runtime calls BindTurn.
@@ -147,7 +134,6 @@ func NewHarness(ctx context.Context, opts AgentOptions) (*Harness, error) {
 		bindings:              opts.bindings,
 		jobs:                  opts.jobs,
 		specialists:           make(map[string]*Specialist),
-		overflow:              opts.Overflow,
 	}
 	h.window = newWindow(opts.Model, h, int(opts.MaxWindowSize))
 	chain := slices.Clone(opts.ToolInterceptors)

@@ -44,9 +44,7 @@ type Harness struct {
 	brainRelations  []brain.RelationSpec
 	// bindings are the turn's credentialed mounts (BindTurn).
 	bindings []mount.Binding
-	// overflow keeps a trimmed result's full text (AgentOptions.Overflow).
 	// Nil: it is not kept.
-	overflow   Overflow
 	mcpCleanup func()
 	// window is the context window; the harness is its host.
 	window     *window
@@ -270,15 +268,6 @@ func (a *Harness) archive(ctx context.Context, window []*message.Message) (bool,
 		return false, fmt.Errorf("save session messages: %w", err)
 	}
 	return true, nil
-}
-
-// keep stores a cut result's full text in Overflow, and returns its path;
-// "" when the harness has no Overflow.
-func (a *Harness) keep(ctx context.Context, callID, text string) (string, error) {
-	if a.overflow == nil {
-		return "", nil
-	}
-	return a.overflow.Keep(ctx, a.sessionId, callID, text)
 }
 
 func messageSearchText(m *message.Message) string {
