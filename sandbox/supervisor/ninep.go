@@ -107,8 +107,12 @@ func (w *workspace) qid(p string, dir bool) p9.QID {
 }
 
 // stat is the vfs stat of the guest path p, with the size of its writer
-// when one is open.
+// when one is open. The root is a directory, also in a tree with no
+// mounts.
 func (w *workspace) stat(p string) (vfs.FileInfo, error) {
+	if p == "/" {
+		return vfs.FileInfo{Name: "/", IsDir: true}, nil
+	}
 	st, err := w.files.Stat(w.ctx, path.Join(workspaceRoot, p))
 	if err != nil {
 		return vfs.FileInfo{}, err
@@ -242,6 +246,9 @@ func (n *node) Open(mode p9.OpenFlags) (p9.QID, uint32, error) {
 	switch {
 	case st.IsDir:
 		n.entries, err = n.w.files.ReadDir(n.w.ctx, path.Join(workspaceRoot, n.path))
+		if n.path == "/" && errors.Is(err, vfs.ErrNotMounted) {
+			n.entries, err = nil, nil
+		}
 	case mode.Mode() == p9.ReadOnly:
 		n.read, err = n.w.files.Open(n.w.ctx, path.Join(workspaceRoot, n.path), vfs.OpenMode{})
 	default:

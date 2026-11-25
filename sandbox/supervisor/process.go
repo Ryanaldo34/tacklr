@@ -127,7 +127,7 @@ type process struct {
 // a configuration file in a new directory, in new namespaces, with an
 // empty environment. Its stdout (its log and the guest's console) goes to
 // m.log. The guest connects to the listeners of the VM's vsock ports.
-func startProcess(m machine) (p *process, err error) {
+func startProcess(m machine) (_ *process, err error) {
 	args, err := m.bootArgs()
 	if err != nil {
 		return nil, err
@@ -136,7 +136,7 @@ func startProcess(m machine) (p *process, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("supervisor: the VM directory: %w", err)
 	}
-	p = &process{dir: dir, exited: make(chan struct{})}
+	p := &process{dir: dir, exited: make(chan struct{})}
 	defer func() {
 		if err != nil {
 			p.closeListeners()

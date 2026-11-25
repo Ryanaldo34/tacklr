@@ -95,7 +95,12 @@ if ! fresh rootfs.ext4 "$stamp"; then
 	rm -rf "$context"
 	mkdir -p "$context"
 	cp "$image/Dockerfile" "$worker" "$context/"
-	docker build -q --output "type=local,dest=$out" "$context" >/dev/null
+	tag=tacklr-sandbox-rootfs:build
+	docker build -q -t "$tag" "$context" >/dev/null
+	container=$(docker create "$tag" /rootfs.ext4)
+	docker cp "$container:/rootfs.ext4" "$out/rootfs.ext4"
+	docker rm "$container" >/dev/null
+	docker rmi "$tag" >/dev/null
 	echo "$stamp" >"$out/rootfs.ext4.stamp"
 	echo "sandbox-image: rootfs.ext4"
 fi

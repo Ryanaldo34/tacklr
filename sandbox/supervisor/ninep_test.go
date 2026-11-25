@@ -188,3 +188,26 @@ func TestErrnoOfAnErrorTheTreeDoesNotNameIsEIO(t *testing.T) {
 	require.Equal(t, linux.EIO, errno(io.ErrUnexpectedEOF))
 	require.Equal(t, linux.ENOTSUP, errno(vfs.ErrNotSupported))
 }
+
+func TestWorkspaceOfATreeWithNoMountsIsAnEmptyDirectory(t *testing.T) {
+	ms, err := vfs.Tree()(t.Context(), t.Name(), vfs.Request{})
+	require.NoError(t, err)
+	server, conn := net.Pipe()
+	go serveWorkspace(t.Context(), vfs.NewFiles(ms), server)
+	client, err := p9.NewClient(conn)
+	require.NoError(t, err)
+	defer client.Close()
+	root, err := client.Attach("")
+	require.NoError(t, err)
+
+	qid, _, attr, attrErr := root.GetAttr(p9.AttrMask{Mode: true})
+	_, _, openErr := root.Open(p9.ReadOnly)
+	entries, readdirErr := root.Readdir(0, 4096)
+
+	require.NoError(t, attrErr)
+	require.Equal(t, p9.TypeDir, qid.Type)
+	require.True(t, attr.Mode.IsDir())
+	require.NoError(t, openErr)
+	require.NoError(t, readdirErr)
+	require.Empty(t, entries)
+}

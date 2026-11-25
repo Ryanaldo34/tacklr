@@ -1,6 +1,6 @@
 # The root file system of a sandbox microVM: Debian with the tools that
 # agent scripts use, the agent user, and the worker as init. The last
-# stage is the ext4 image alone (docker build --output).
+# stage is the ext4 image alone.
 FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS root
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
