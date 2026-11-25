@@ -97,12 +97,13 @@ The user can allow or reject the call, once or always. A tool with write access 
 
 ## Add a workspace
 
-A workspace gives the agent files under `/workspace`, which it works on with `run_command`: bash scripts in a sandboxed worker on a sandbox host. Run a sandbox supervisor with your tree, and give the worker a client of it:
+A workspace gives the agent files under `/workspace`, which it works on with `run_command`: bash scripts in a Firecracker microVM on a sandbox host. Run a sandbox supervisor with your tree, and give the worker a client of it:
 
 ```go
 // On the sandbox host:
 sup, err := supervisor.New(supervisor.Config{
-	WorkerPath: workerBinary, PackagesDir: packagesDir, TLS: serverTLS,
+	Firecracker: firecracker, Kernel: kernel, Rootfs: rootfs, // make sandbox-image
+	TLS: serverTLS,
 	Workspace: vfs.Tree(
 		vfs.At("work", vfs.SessionLocal("/srv/tacklr/work")),     // /workspace/work, one directory per session
 		vfs.At("docs", vfs.Local("/srv/tacklr/docs")).ReadOnly(), // /workspace/docs, shared and read-only

@@ -2,7 +2,7 @@
 
 The workspace is the agent's file system: one tree under `/workspace`, built from the sources you choose. The agent sees only virtual paths, such as `/workspace/work/main.go`. It never sees host paths, bucket names, other sessions, or credentials.
 
-The workspace is a `vfs` tree that your sandbox supervisor opens on the sandbox host (package `sandbox/supervisor`). The agent works on it with `run_command`: bash scripts in a sandboxed worker. The session runtime never opens the tree, and the sandboxed worker never holds a credential.
+The workspace is a `vfs` tree that your sandbox supervisor opens on the sandbox host (package `sandbox/supervisor`). The agent works on it with `run_command`: bash scripts in a Firecracker microVM. The session runtime never opens the tree, and the VM never holds a credential.
 
 ## Build a workspace
 
@@ -10,8 +10,9 @@ Give your supervisor the tree in `supervisor.Config.Workspace`. Each `vfs.At` mo
 
 ```go
 sup, err := supervisor.New(supervisor.Config{
-	WorkerPath:  "/usr/libexec/tacklr-sandbox-worker",
-	PackagesDir: "/usr/lib/tacklr-sandbox/packages",
+	Firecracker: "/usr/libexec/tacklr-sandbox/firecracker", // the files of make sandbox-image
+	Kernel:      "/usr/lib/tacklr-sandbox/vmlinux",
+	Rootfs:      "/usr/lib/tacklr-sandbox/rootfs.ext4",
 	TLS:         serverTLS,
 	Workspace: vfs.Tree(
 		vfs.At("work", vfs.S3(awss3.API{Client: s3Client}, "acme-work")),
@@ -66,7 +67,7 @@ func open(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, e
 }
 ```
 
-The token goes to `session.SecretStorage`, sealed. It is never in the checkpoint, in Temporal history, or in the ACP wire store. It reaches the supervisor only for the length of a `run_command`, and never the sandboxed worker. See [Sessions in production](session.md#credentials).
+The token goes to `session.SecretStorage`, sealed. It is never in the checkpoint, in Temporal history, or in the ACP wire store. It reaches the supervisor only for the length of a `run_command`, and never the VM. See [Sessions in production](session.md#credentials).
 
 When a token is near expiry, or Drive or Microsoft 365 refuses it, the supervisor asks the session runtime for a new one on the `run_command` stream. Set `sandbox.Client.Refresh` to answer: it gets the session ID and the binding (without its token) and returns a new `mount.Credential`, for example from your identity provider. Without `Refresh`, a source with an expired token fails, and a workspace that cannot open refuses the worker.
 
@@ -79,7 +80,7 @@ An `organization` account needs a `siteId` or a `driveId`, and a SharePoint libr
 
 ## How the agent works on files
 
-The agent has one tool for files, `run_command`. Each call starts a sandboxed worker (WASIX bash, coreutils, grep, sed and findutils, with no network) and runs the script in `/workspace`. The worker's file calls go to its supervisor over a local socket, and the supervisor serves them from the tree (`vfs.Files`), so a script reads and writes the sources directly.
+The agent has one tool for files, `run_command`. Each call boots a Firecracker microVM on the sandbox host and runs the script with bash in `/workspace`, as an unprivileged user, with native tools (coreutils, git, Python, jq) and no network. The guest mounts `/workspace` over 9P2000.L on a vsock connection, and the supervisor serves it from the tree (`vfs.Files`), so a script reads and writes the sources directly.
 
 - Text, Markdown, JSON, YAML and code read and write as bytes.
 - Google Docs, Sheets, Word (`.docx`) and Excel (`.xlsx`) read as their text and cannot be written. Word and Excel need `WithCodecs(adapters.Codecs()...)` on the tree.

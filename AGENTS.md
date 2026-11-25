@@ -1,8 +1,8 @@
 # Agent Expectations
 
-- WASM runtimes are based in wasmtime and implemented in rust for memory safety, latest WASM standard, and latest WASI standards
-- Untrusted, agent generated bash or code scripts are to run in Tacklr's WASM workers securely
-- The harness & runtime cores will be written in GO, and will follow all modern go idioms
+- Untrusted, agent generated bash or code scripts run only in Tacklr's sandbox workers: Firecracker microVMs on a sandbox host, never on the session worker, with no network and no credentials inside the VM
+- Credentials and the session's data sources stay with the supervisor on the sandbox host; the guest reaches files only through the supervisor's 9P2000.L server over vsock, and only output goes back to the session runtime
+- Everything we write is Go (the core, the supervisor, and the guest's worker) and follows all modern Go idioms
 - You will never update this file or skills without explicit permission. You will never add documentation without explicit permission
 - You will never update the README.md or CONTRIBUTE.md without explicit permission
 - Do not run test suites locally that aren't relevant to your changes, aim for 100% coverage in your tests and run other basic CI checks locally before committing changes
@@ -38,10 +38,10 @@
 
 # What is Tacklr
 
-Tacklr is a linux-based cloud-native agent operating & security system. It is a framework for defining & building tools, processing input & output, wiring telemetry & logging into arbitrary observability stacks, securely running untrusted llm-generated code in WASM-based sandboxes, and handling complex parallel agent swarms & workflows.
+Tacklr is a linux-based cloud-native agent operating & security system. It is a framework for defining & building tools, processing input & output, wiring telemetry & logging into arbitrary observability stacks, securely running untrusted llm-generated code in microVM sandboxes, and handling complex parallel agent swarms & workflows.
 - A core that handles tool calls, inference/model API quirks, async subagents and long-running commands, parallelism, and agent swarm coordination; written in go and can compile to lightweight WASM to run in JS runtimes
-- A supervisor that coordinates WASM-based sandboxed workers to run untrusted LLM-generated code and bash scripts
-- A rust-based sandbox worker which is managed by the supervisor
+- A supervisor on each sandbox host that boots, watches and kills Firecracker microVMs for the session runtime over mTLS, holds the user's delegated credentials, and serves each VM's /workspace from the session's tree
+- A Go worker that is the init of each microVM: it mounts /workspace and runs the supervisor's scripts with native bash and tools
 - Cloud-nativeness built to run on durable runtimes such as Azure Durable Functions, Lambda Durable Functions, Temporal, Durable Objects, and more. We do not care about local.
 - Worker runtime monitoring and configurable security policies; risky calls reviewable by security teams for approval/denial
 

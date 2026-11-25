@@ -1,5 +1,5 @@
 // Command supervisor runs the example's sandbox supervisor on a sandbox
-// host: the agent's run_command runs here, in sandboxed workers, over the
+// host: the agent's run_command runs here, in Firecracker microVMs, over the
 // example's tree. A host builds its own supervisor like this, with the tree
 // its sessions use. See README.md.
 //
@@ -9,8 +9,9 @@
 //	SUPERVISOR_CERT       PEM file of its certificate chain (required)
 //	SUPERVISOR_KEY        PEM file of its private key (required)
 //	SUPERVISOR_CLIENT_CA  PEM file of the roots that verify the session workers (required)
-//	WORKER_BIN            absolute path of the sandbox worker binary (required)
-//	PACKAGES_DIR          absolute path of the worker's packages, from make sandbox-packages (required)
+//	FIRECRACKER           absolute path of the firecracker binary (required)
+//	GUEST_KERNEL          absolute path of the guest kernel, from make sandbox-image (required)
+//	GUEST_ROOTFS          absolute path of the guest root file system, from make sandbox-image (required)
 //	WORKSPACE_DIR         an absolute directory: each session's /workspace/work is under it (required)
 package main
 
@@ -52,8 +53,9 @@ func run(ctx context.Context) error {
 		return err
 	}
 	sup, err := supervisor.New(supervisor.Config{
-		WorkerPath:  os.Getenv("WORKER_BIN"),
-		PackagesDir: os.Getenv("PACKAGES_DIR"),
+		Firecracker: os.Getenv("FIRECRACKER"),
+		Kernel:      os.Getenv("GUEST_KERNEL"),
+		Rootfs:      os.Getenv("GUEST_ROOTFS"),
 		Workspace:   agent.Tree(dir),
 		TLS:         &tls.Config{Certificates: []tls.Certificate{certificate}, ClientCAs: clientCAs, MinVersion: tls.VersionTLS13},
 	})

@@ -1,10 +1,10 @@
 // Package sandbox is the session runtime's client for sandboxed workers.
 //
-// A supervisor (package sandbox/supervisor) runs on each worker host. The
+// A supervisor (package sandbox/supervisor) runs on each sandbox host. The
 // client opens one HTTP/2 stream over mTLS to it for each worker. The
-// worker is a separate process (sandbox/worker, in Rust) in new namespaces,
-// under Landlock and a seccomp allow-list. It runs untrusted, agent-written
-// code: Run runs a bash script in the worker's workspace.
+// worker is a Firecracker microVM with no network: it runs untrusted,
+// agent-written code. Run runs a bash script in the VM's /workspace,
+// which the supervisor serves from the session's tree.
 //
 //	client := sandbox.NewClient("worker-host:7443", tlsConfig)
 //	worker, err := client.Start(ctx, sessionID, bindings)
@@ -36,12 +36,11 @@ import (
 // maxRefusal is the most bytes of a refusal's body that an error keeps.
 const maxRefusal = 1 << 10
 
-// Enforcement is what a worker enforces on itself.
+// Enforcement is how the supervisor isolates a worker.
 type Enforcement = wire.Enforcement
 
-// Exit is how a worker process ended. Signal SIGSYS means that seccomp
-// killed the worker. Code 125 means that the worker could not apply its
-// sandbox.
+// Exit is how a worker's VM ended: the exit of its Firecracker process.
+// Signal SIGKILL means that the supervisor killed the VM.
 type Exit = wire.Exit
 
 // ErrExited is the error of a request to a worker that has ended.
@@ -74,8 +73,8 @@ func (e *RunError) Error() string {
 
 // RefusedError is the error of Start when the supervisor refuses to start a
 // worker: 400 when the stream does not start with open, 403 when the client
-// is not authorized, 502 when the session's workspace cannot open, 500 when the worker binary
-// cannot start.
+// is not authorized, 502 when the session's workspace cannot open, 500 when
+// Firecracker cannot start.
 type RefusedError struct {
 	StatusCode int
 	Message    string
@@ -213,7 +212,7 @@ type Worker struct {
 	err  error
 }
 
-// Enforcement is what the worker enforces on itself.
+// Enforcement is how the supervisor isolates the worker.
 func (w *Worker) Enforcement() Enforcement {
 	return w.enforcement
 }

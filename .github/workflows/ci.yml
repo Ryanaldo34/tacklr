@@ -112,8 +112,8 @@ jobs:
       - name: Build the core for WebAssembly
         run: make wasm
 
-      # Ubuntu 24.04 AppArmor lets unprivileged CLONE_NEWUSER succeed but
-      # blocks bind-mounts inside the namespace. The session jail needs both.
+      # Ubuntu 24.04 AppArmor restricts unprivileged user namespaces. The
+      # sandbox supervisor starts each Firecracker in new ones.
       - name: Allow unprivileged user namespaces
         run: |
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
@@ -121,14 +121,32 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      # Once, before the test packages run in parallel: rustup installs the
-      # crate's toolchain on first use, and the sandbox tests reuse the build.
-      - name: Build the sandbox worker
-        run: make sandbox-worker
+      # The sandbox tests boot Firecracker microVMs: they need /dev/kvm,
+      # which the runner has but only root may open.
+      - name: Allow /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
 
-      # The sandbox tests need Landlock ABI 6 (Linux 6.12).
-      # One run: race detector and coverage. Testcontainers starts Postgres
-      # (pgvector), Helix and Temporal; nothing is pulled or built beforehand.
+      - name: Install the kernel build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends flex bison bc libelf-dev libssl-dev
+
+      # The guest kernel takes minutes to build; it changes only with the
+      # image script and the kernel options.
+      - name: Cache the guest kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            sandbox/image/out/vmlinux
+            sandbox/image/out/vmlinux.stamp
+          key: sandbox-kernel-${{ runner.arch }}-${{ hashFiles('scripts/sandbox-image.sh', 'sandbox/image/kernel.config') }}
+
+      # Once, before the test packages run in parallel.
+      - name: Build the sandbox image
+        run: make sandbox-image
+
       - name: Test (race + coverage)
         run: |
           go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
@@ -269,25 +287,3 @@ jobs:
         run: |
           cd examples/cloudflare/worker && bun install --frozen-lockfile && bun test e2e
           cd ../../.. && ./scripts/wasm-size.sh examples/cloudflare/worker/build/tacklr.wasm
-
-  sandbox-worker:
-    name: Sandbox worker (Rust)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # rustup on the runner installs the toolchain and components of
-      # sandbox/worker/rust-toolchain.toml when cargo first runs there.
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-
-      - name: Format (cargo fmt)
-        run: make rust-fmt-check
-
-      - name: Clippy
-        run: make rust-lint
-
-      # The sandbox tests need Landlock ABI 6 (Linux 6.12) or later.
-      - name: Test and coverage
-        run: make rust-cover

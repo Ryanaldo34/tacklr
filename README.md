@@ -9,8 +9,8 @@
 Tacklr is a Linux-based, cloud-native operating and security system for AI agents. It has three parts:
 
 - **The core (Go).** It runs the agent loop as a durable session: model requests and their API quirks, tool calls, async subagents, long-running commands, and agent swarms. It records every step, so a session can wait days for a person, survive a crash or a deploy, and continue on another machine. It builds for WebAssembly.
-- **The supervisor (Go).** It runs on each sandbox host, separate from the session workers. It opens each session's workspace with the session's credentials, and starts, watches, and kills sandboxed workers for the session runtime, over mTLS.
-- **The sandbox worker (Rust).** It runs untrusted, LLM-generated bash scripts in WebAssembly (Wasmer with WASIX: bash, coreutils, grep, sed, and findutils, compiled ahead of time), inside Linux namespaces, Landlock, and seccomp. The scripts reach only the session's workspace, which the supervisor serves to the worker on the same host, so only the script's output goes back to the session runtime.
+- **The supervisor (Go).** It runs on each sandbox host, separate from the session workers. It boots, watches, and kills Firecracker microVMs for the session runtime, over mTLS. It holds the session's credentials and opens its workspace, so no credential enters a VM.
+- **The sandbox worker (Go).** It is the init of each microVM. It runs untrusted, LLM-generated bash scripts with native tools (bash, coreutils, git, Python) as an unprivileged user, in a VM with no network. Its `/workspace` is a 9P2000.L mount that the supervisor serves from the session's sources, so only the script's output goes back to the session runtime.
 
 ## Features
 
@@ -19,7 +19,7 @@ Tacklr is a Linux-based, cloud-native operating and security system for AI agent
 - **Focused context.** The agent plans its work as a to-do list. Finishing a to-do replaces the history with a short hand-off, and a full window collapses into a summary.
 - **People in the loop.** A tool can pause the session to ask a question or a permission, and continue when the answer comes back.
 - **A sandboxed workspace.** The agent sees one `/workspace` built from local disk, S3, Azure Blob, Google Drive, or Microsoft 365, and works on it with `run_command` scripts that see only that workspace.
-- **Sandboxed code execution.** `run_command` runs each bash script in its own worker process: WASIX bash with no network, new namespaces, no host file system access (Landlock), and a seccomp allow-list with no executable memory and no new processes. Documents read as their text and cannot be written.
+- **Sandboxed code execution.** `run_command` runs bash scripts in a Firecracker microVM: its own kernel, a read-only root file system, no network device, and Firecracker in its own namespaces on the sandbox host. Documents read as their text and cannot be written.
 - **Security policies (planned).** Worker runtime monitoring and configurable policies, with risky calls sent to security teams to approve or deny.
 - **A knowledge store.** Hybrid search, an optional graph, and namespaces for multi-tenant data.
 - **Standard protocols.** Serve clients over [ACP](https://agentclientprotocol.com), connect [MCP](https://modelcontextprotocol.io) servers, and trace every turn with OpenTelemetry.
@@ -31,7 +31,7 @@ Tacklr is a Linux-based, cloud-native operating and security system for AI agent
 go get github.com/ryanaldo34/tacklr
 ```
 
-Tacklr needs Go 1.27 or later and runs on Linux. The sandbox worker needs Rust (the version in `sandbox/worker/rust-toolchain.toml`) and Linux 6.12 or later (Landlock ABI 6).
+Tacklr needs Go 1.27 or later and runs on Linux. A sandbox host needs `/dev/kvm` for Firecracker; `make sandbox-image` builds Firecracker, the guest kernel, and the root file system.
 
 ## Quick start
 
@@ -125,33 +125,41 @@ The [getting started guide](docs/getting-started.md) continues from here: asking
 
 ## How it works
 
-Untrusted code reaches files and the network only through Tacklr host functions. Dashed parts are planned and not built yet.
+Dashed parts are planned and not built yet.
 
 ```mermaid
 flowchart LR
-    client["ACP client<br/>editor or app"] <--> session["Session DO<br/>Cloudflare: journal, replay"]
-    session --> model["Model API<br/>Claude, OpenAI"]
-    session --> gateway["Sandbox gateway<br/>leases, exactly-once calls"]
-    gateway -.-> microvm["MicroVM tier<br/>native binaries, later"]
-    detector["Risk detector<br/>park or end risky calls"] -. verdicts .-> gateway
-    gateway --> shell
-    subgraph worker["Sandbox worker: jailed process, no network"]
-        shell["Shell interpreter<br/>mvdan/sh, bash syntax"] --> kernel["Virtual kernel<br/>host calls, policy, events"]
-        tools["WASM tools<br/>coreutils, grep, jq, CPython on WASI"] <--> kernel
+    client["Clients<br/>ACP editors and apps"] <--> host["Hosts<br/>stateless, session.Client"]
+    host <--> runtime["Durable runtime<br/>Temporal, Durable Objects"]
+    subgraph sessionworker["Session worker"]
+        core["Agent core<br/>agent loop, tools, plans,<br/>specialists, context window"]
     end
-    kernel --> vfs["VFS service<br/>mounts, codecs, credentials<br/>reads Drive, M365, S3"]
-    kernel --> proxy["Egress proxy<br/>full-URL allow-list<br/>adds credentials outside"]
-    kernel --> detector
+    runtime <--> core
+    core --> models["Model APIs<br/>Claude, OpenAI"]
+    core <--> stores["Sessions and knowledge<br/>Postgres"]
+    core --> otel["Observability<br/>OpenTelemetry"]
+    core <-- "run_command over mTLS:<br/>bindings, output, token refresh" --> supervisor
+    subgraph sandboxhost["Sandbox host"]
+        supervisor["Supervisor<br/>delegated tokens,<br/>the session's tree"]
+        subgraph vm["Firecracker microVM: no network, no credentials"]
+            worker["Worker (init)<br/>bash, git, Python<br/>as the agent user"]
+        end
+        supervisor <-- "control frames, vsock" --> worker
+        supervisor <-- "/workspace: 9P2000.L, vsock" --> worker
+    end
+    supervisor <--> sources["Sources<br/>S3, Azure Blob, Google Drive,<br/>Microsoft 365, disk"]
+    scheduler["Sandbox scheduler<br/>warm pools, snapshots"] -.-> supervisor
+    policy["Policy and review<br/>risky calls to people"] -.-> supervisor
+    worker -.-> proxy["Egress proxy<br/>allow-list, adds credentials"]
 
     classDef planned stroke-dasharray: 5 5
-    class gateway,microvm,detector,shell,kernel,tools,proxy planned
+    class scheduler,policy,proxy planned
 ```
 
-- The **session** Durable Object orchestrates and journals each turn. It replays from its journal, so a tool call never runs twice.
-- The **sandbox gateway** runs each call exactly once in a jailed **sandbox worker**, keyed by its tool call id.
-- Inside the worker, the shell and every WASM tool reach files, the network and the risk detector only through the **virtual kernel**'s host calls.
-- The **VFS service** reads the session's mounts with their codecs, so a Google Doc reads as text. The **egress proxy** allows only listed URLs and adds credentials outside the sandbox.
-- The **risk detector** parks or ends a risky call for a person to review.
+- **Hosts** serve clients and keep no session state. The **durable runtime** runs each session on a **session worker**, and every model request and tool call runs once, even across crashes.
+- The **agent core** calls the model, runs tools, and saves sessions and knowledge. Each turn is one trace.
+- `run_command` goes to a **supervisor** on a separate sandbox host. The supervisor opens the session's tree with the turn's bindings, boots a **microVM**, and refreshes a binding's token through the session runtime when it nears expiry.
+- The **worker** is the VM's init. It mounts `/workspace` over 9P from the supervisor and runs the script with native tools. The VM holds no credential and has no network: only the script's output leaves it.
 
 See [Concepts](docs/concepts.md) for sessions, turns, rounds, and the context window.
 
@@ -184,12 +192,11 @@ Read [AGENTS.md](AGENTS.md) for the coding and testing standards. Tacklr support
 ```bash
 make cover   # all tests with the race detector, and the coverage gate
 make lint
-make wasm    # checks that the core still builds for WebAssembly
-make sandbox-packages       # fetches the pinned WASIX packages and compiles them ahead of time
-make rust-lint rust-cover   # the sandbox worker: clippy, tests, and its coverage gate
+make wasm           # checks that the core still builds for WebAssembly
+make sandbox-image  # Firecracker, the guest kernel, and the root file system of the sandbox VMs
 ```
 
-The tests start their own Postgres, Helix, Temporal, S3, and Azure Blob containers, so they need Docker and user namespaces. The sandbox tests build the Rust worker with cargo.
+The tests start their own Postgres, Helix, Temporal, S3, and Azure Blob containers, so they need Docker and user namespaces. The sandbox tests boot Firecracker microVMs, so they need `/dev/kvm`, and build the sandbox image themselves.
 
 ## License
 

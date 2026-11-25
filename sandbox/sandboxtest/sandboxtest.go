@@ -1,11 +1,12 @@
-// Package sandboxtest starts a sandbox supervisor with the real Rust worker
-// for tests: a test certificate authority, a supervisor on a loopback port,
-// and workers written as shell scripts that break the protocol. The first
-// test that needs the worker builds it and its packages (make
-// sandbox-packages, cargo build --release) once per test binary.
+// Package sandboxtest starts a sandbox supervisor that boots real
+// Firecracker microVMs for tests: a test certificate authority, a
+// supervisor on a loopback port, and guests written in Python that break
+// the protocol. The first test that needs the guest image builds it (make
+// sandbox-image) once per test binary. The tests need /dev/kvm.
 package sandboxtest
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -13,7 +14,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/binary"
 	"fmt"
 	"math/big"
 	"net"
@@ -35,45 +35,61 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// worker is the real Rust worker binary and its packages directory.
-var worker struct {
-	once     sync.Once
-	err      error
-	binary   string
-	packages string
+// image is the guest image: Firecracker, the kernel and the root file
+// system.
+var image struct {
+	once  sync.Once
+	err   error
+	paths Image
 }
 
-// Worker builds the real worker and its packages once per test binary,
-// one test binary at a time, and returns the binary's path and the
-// packages directory.
-func Worker(t *testing.T) (binary, packages string) {
+// Image is the paths of the guest image.
+type Image struct {
+	Firecracker, Kernel, Rootfs string
+}
+
+// BuildImage builds the guest image once per test binary, one test binary
+// at a time (make sandbox-image), and returns its paths. It fails the
+// test on a host without /dev/kvm: the sandbox tests boot real microVMs.
+func BuildImage(t *testing.T) Image {
 	t.Helper()
-	worker.once.Do(func() {
+	image.once.Do(func() {
+		if _, err := os.Stat("/dev/kvm"); err != nil {
+			image.err = fmt.Errorf("the sandbox tests boot Firecracker microVMs and need /dev/kvm: %w", err)
+			return
+		}
 		_, file, _, _ := runtime.Caller(0)
 		root := filepath.Join(filepath.Dir(file), "..", "..")
-		crate := filepath.Join(root, "sandbox", "worker")
-		lock, err := os.OpenFile(filepath.Join(crate, "packages", ".build.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+		out := filepath.Join(root, "sandbox", "image", "out")
+		if err := os.MkdirAll(out, 0o750); err != nil {
+			image.err = err
+			return
+		}
+		lock, err := os.OpenFile(filepath.Join(out, ".build.lock"), os.O_CREATE|os.O_RDWR, 0o600)
 		if err != nil {
-			worker.err = err
+			image.err = err
 			return
 		}
 		defer lock.Close()
 		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-			worker.err = err
+			image.err = err
 			return
 		}
-		if output, err := exec.Command("make", "-C", root, "sandbox-worker").CombinedOutput(); err != nil {
-			worker.err = fmt.Errorf("build the sandbox worker: %w\n%s", err, output)
+		if output, err := exec.Command("make", "-C", root, "sandbox-image").CombinedOutput(); err != nil {
+			image.err = fmt.Errorf("build the sandbox image: %w\n%s", err, output)
 			return
 		}
-		worker.binary = filepath.Join(crate, "target", "release", "tacklr-sandbox-worker")
-		worker.packages = filepath.Join(crate, "packages")
+		image.paths = Image{
+			Firecracker: filepath.Join(out, "firecracker"),
+			Kernel:      filepath.Join(out, "vmlinux"),
+			Rootfs:      filepath.Join(out, "rootfs.ext4"),
+		}
 	})
-	require.NoError(t, worker.err)
-	return worker.binary, worker.packages
+	require.NoError(t, image.err)
+	return image.paths
 }
 
-// Client starts a supervisor with the real worker over workspace (nil: an
+// Client starts a supervisor with the real guest over workspace (nil: an
 // empty tree) and returns a client of it.
 func Client(t *testing.T, workspace vfs.OpenVFS) *sandbox.Client {
 	t.Helper()
@@ -88,16 +104,25 @@ type Host struct {
 	Stop func() error
 }
 
-// Start serves a supervisor on a loopback port. Empty fields of
-// config get the real worker and ca's server TLS.
+// Start serves a supervisor on a loopback port. Empty fields of config get
+// the guest image and ca's server TLS. The VMs' log is in the test's
+// output when the test fails.
 func Start(t *testing.T, ca *Authority, config supervisor.Config) Host {
 	t.Helper()
-	binary, packages := Worker(t)
-	if config.WorkerPath == "" {
-		config.WorkerPath = binary
+	paths := BuildImage(t)
+	if config.Firecracker == "" {
+		config.Firecracker = paths.Firecracker
 	}
-	config.PackagesDir = packages
+	config.Kernel = paths.Kernel
+	config.Rootfs = paths.Rootfs
 	config.TLS = ca.ServerConfig(t)
+	log := &syncBuffer{}
+	config.Log = log
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("the VMs' log:\n%s", log.String())
+		}
+	})
 	sup, err := supervisor.New(config)
 	require.NoError(t, err)
 	listener, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
@@ -119,41 +144,34 @@ func Start(t *testing.T, ca *Authority, config supervisor.Config) Host {
 	return Host{Address: listener.Addr().String(), Stop: stop}
 }
 
-// ScriptWorker writes a shell script that takes the place of the worker
-// binary: a worker that does not follow the protocol.
-func ScriptWorker(t *testing.T, lines ...string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "worker")
-	script := "#!/bin/sh\n" + strings.Join(lines, "\n") + "\n"
-	require.NoError(t, os.WriteFile(path, []byte(script), 0o700)) //nolint:gosec // the script must be executable
-	return path
+// syncBuffer is a buffer that the VMs write their log to concurrently.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
 }
 
-// SendFrame is a shell command that writes body as one control frame on
-// the worker's socket (fd 3).
-func SendFrame(body string) string {
-	return "printf '" + frame(1, nil, body) + "' >&3"
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
 }
 
-// SendFS is a shell command that writes each request as a file frame with
-// no bytes, all in one write on the worker's socket (fd 3).
-func SendFS(requests ...string) string {
-	var frames strings.Builder
-	for _, request := range requests {
-		frames.WriteString(frame(4, binary.BigEndian.AppendUint32(nil, uint32(len(request))), request)) //nolint:gosec // test requests are short
-	}
-	return "printf '" + frames.String() + "' >&3"
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
-// frame is one frame of kind for printf: its header, prefix and body.
-func frame(kind byte, prefix []byte, body string) string {
-	header := binary.BigEndian.AppendUint32(nil, uint32(len(prefix)+len(body))) //nolint:gosec // test bodies are short
-	var out strings.Builder
-	for _, b := range append(append(header, kind), prefix...) {
-		fmt.Fprintf(&out, `\%03o`, b)
-	}
-	out.WriteString(body)
-	return out.String()
+// Guest is a guest init that takes the place of the worker: a Python
+// program that does not follow the protocol. It connects to the host's
+// control port as s, then runs each statement. send(m) writes the dict m
+// as one control frame. A statement may not have a double quote or a
+// newline.
+func Guest(statements ...string) []string {
+	setup := "import socket,struct,json,time,os;" +
+		"s=socket.socket(socket.AF_VSOCK,socket.SOCK_STREAM);s.connect((2,1024));" +
+		"send=lambda m:s.sendall(struct.pack('>IB',len(json.dumps(m)),1)+json.dumps(m).encode())"
+	return []string{"/usr/bin/python3", "-c", strings.Join(append([]string{setup}, statements...), ";")}
 }
 
 // Authority is a test certificate authority.

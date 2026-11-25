@@ -49,7 +49,7 @@ func TestWorkerIsReadyAnswersPingsAndExitsOnStop(t *testing.T) {
 	exit, stopErr := worker.Stop(t.Context())
 	pingAfterExit := worker.Ping(t.Context())
 
-	require.GreaterOrEqual(t, worker.Enforcement().LandlockABI, 6)
+	require.Equal(t, "firecracker", worker.Enforcement().Hypervisor)
 	require.NoError(t, pingErr)
 	require.NoError(t, stopErr)
 	require.Equal(t, sandbox.Exit{Code: 0}, exit)
@@ -61,7 +61,7 @@ func TestClosingAWorkerKillsItsProcess(t *testing.T) {
 	client := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{}).Address, sandboxtest.ClientConfig(t, ca, ca))
 	worker, err := client.Start(t.Context(), "s", nil)
 	require.NoError(t, err)
-	pid := childPID(t, "tacklr-sandbox-worker")
+	pid := childPID(t, "firecracker")
 
 	worker.Close()
 
@@ -110,14 +110,10 @@ func TestRunReadsADocumentAsTextAndCannotWriteIt(t *testing.T) {
 	require.Contains(t, stderr.String(), "Spec.docx")
 }
 
-func TestSupervisorKillsAWorkerThatSendsAFileRequestThatIsNotValid(t *testing.T) {
+func TestSupervisorKillsAGuestThatSendsAFrameOfAKindItDoesNotKnow(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{
-		WorkerPath: sandboxtest.ScriptWorker(t,
-			sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`),
-			"head -c 1 <&3 >/dev/null",
-			"printf '\\000\\000\\000\\002\\004{}' >&3",
-			"exec sleep 3600"),
+		Init: sandboxtest.Guest("send({'type':'ready'})", "s.recv(5)", `s.sendall(b'\x00\x00\x00\x02\x09{}')`, "time.sleep(3600)"),
 	}).Address
 	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
@@ -143,7 +139,7 @@ func TestRunEndsWithItsContextAndKillsTheWorker(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	worker, err := sandbox.NewClient(sandboxtest.Start(t, ca, supervisor.Config{}).Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
-	pid := childPID(t, "tacklr-sandbox-worker")
+	pid := childPID(t, "firecracker")
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 
@@ -159,11 +155,7 @@ func TestRunEndsWithItsContextAndKillsTheWorker(t *testing.T) {
 func TestRunReportsAScriptTheWorkersRuntimeCouldNotRun(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{
-		WorkerPath: sandboxtest.ScriptWorker(t,
-			sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`),
-			"head -c 1 <&3 >/dev/null",
-			sandboxtest.SendFrame(`{"type":"done","id":1,"code":-1,"error":"wasm trap: out of bounds memory access"}`),
-			"exec sleep 3600"),
+		Init: sandboxtest.Guest("send({'type':'ready'})", "s.recv(5)", "send({'type':'done','id':1,'code':-1,'error':'bash could not start'})", "time.sleep(3600)"),
 	}).Address
 	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
@@ -171,16 +163,13 @@ func TestRunReportsAScriptTheWorkersRuntimeCouldNotRun(t *testing.T) {
 
 	_, err = worker.Run(t.Context(), "true", io.Discard, io.Discard)
 
-	require.EqualError(t, err, "sandbox: the worker could not run the script: wasm trap: out of bounds memory access")
+	require.EqualError(t, err, "sandbox: the worker could not run the script: bash could not start")
 }
 
 func TestRunReportsAWorkerThatEndsDuringTheRun(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{
-		WorkerPath: sandboxtest.ScriptWorker(t,
-			sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`),
-			"head -c 1 <&3 >/dev/null",
-			"exit 1"),
+		Init: sandboxtest.Guest("send({'type':'ready'})", "s.recv(5)", "os._exit(1)"),
 	}).Address
 	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
@@ -212,9 +201,9 @@ func TestRunCommandRunsTheModelsScriptInTheSandbox(t *testing.T) {
 
 func TestRunCommandReportsAWorkerThatCannotStartOrRun(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
-	refused := sandboxtest.Start(t, ca, supervisor.Config{WorkerPath: filepath.Join(t.TempDir(), "missing")}).Address
+	refused := sandboxtest.Start(t, ca, supervisor.Config{Firecracker: filepath.Join(t.TempDir(), "missing")}).Address
 	ending := sandboxtest.Start(t, ca, supervisor.Config{
-		WorkerPath: sandboxtest.ScriptWorker(t, sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`), "head -c 1 <&3 >/dev/null", "exit 1"),
+		Init: sandboxtest.Guest("send({'type':'ready'})", "s.recv(5)", "os._exit(1)"),
 	}).Address
 
 	startResult, startErr := toolCaller(t, sandbox.RunCommand(sandbox.NewClient(refused, sandboxtest.ClientConfig(t, ca, ca))))(`{"command":"true"}`)
@@ -228,7 +217,7 @@ func TestRunCommandReportsAWorkerThatCannotStartOrRun(t *testing.T) {
 func TestStopKillsAWorkerThatDoesNotExit(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{
-		WorkerPath:  sandboxtest.ScriptWorker(t, sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`), "exec 3>&-", "exec sleep 3600"),
+		Init:        sandboxtest.Guest("send({'type':'ready'})", "s.close()", "time.sleep(3600)"),
 		StopTimeout: 50 * time.Millisecond,
 	}).Address
 	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
@@ -244,7 +233,7 @@ func TestStopKillsAWorkerThatDoesNotExit(t *testing.T) {
 func TestPingEndsWithItsContextWhenTheWorkerDoesNotAnswer(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{
-		WorkerPath: sandboxtest.ScriptWorker(t, sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`), "exec sleep 3600"),
+		Init: sandboxtest.Guest("send({'type':'ready'})", "time.sleep(3600)"),
 	}).Address
 	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
@@ -260,7 +249,7 @@ func TestPingEndsWithItsContextWhenTheWorkerDoesNotAnswer(t *testing.T) {
 func TestStopEndsWithItsContextWhenTheWorkerDoesNotExit(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{
-		WorkerPath:  sandboxtest.ScriptWorker(t, sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`), "exec sleep 3600"),
+		Init:        sandboxtest.Guest("send({'type':'ready'})", "time.sleep(3600)"),
 		StopTimeout: time.Hour,
 	}).Address
 	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
@@ -274,25 +263,36 @@ func TestStopEndsWithItsContextWhenTheWorkerDoesNotExit(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
-func TestStartReportsAWorkerThatEndsBeforeItIsReady(t *testing.T) {
+func TestStartReportsAGuestThatEndsBeforeItIsReady(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
-	address := sandboxtest.Start(t, ca, supervisor.Config{WorkerPath: sandboxtest.ScriptWorker(t, "exit 3")}).Address
+	address := sandboxtest.Start(t, ca, supervisor.Config{Init: sandboxtest.Guest("os._exit(3)")}).Address
 
 	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 
 	var exitErr *sandbox.ExitError
 	require.ErrorAs(t, err, &exitErr)
-	require.Equal(t, sandbox.Exit{Code: 3}, exitErr.Exit)
-	require.EqualError(t, err, "sandbox: the worker ended before it was ready: code 3")
+	require.Empty(t, exitErr.Exit.Signal)
+	require.ErrorContains(t, err, "sandbox: the worker ended before it was ready")
+}
+
+func TestStartReportsAGuestThatDoesNotConnectInTheBootTimeout(t *testing.T) {
+	ca := sandboxtest.NewAuthority(t)
+	address := sandboxtest.Start(t, ca, supervisor.Config{
+		Init:        []string{"/usr/bin/python3", "-c", "import time;time.sleep(3600)"},
+		BootTimeout: 2 * time.Second,
+	}).Address
+
+	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
+
+	var exitErr *sandbox.ExitError
+	require.ErrorAs(t, err, &exitErr)
+	require.Equal(t, sandbox.Exit{Code: -1, Signal: "SIGKILL"}, exitErr.Exit)
 }
 
 func TestSupervisorKillsAWorkerThatBreaksTheProtocol(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
 	address := sandboxtest.Start(t, ca, supervisor.Config{
-		WorkerPath: sandboxtest.ScriptWorker(t,
-			sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`),
-			sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`),
-			"exec sleep 3600"),
+		Init:        sandboxtest.Guest("send({'type':'ready'})", "send({'type':'ready'})", "time.sleep(3600)"),
 		StopTimeout: time.Hour,
 	}).Address
 	worker, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
@@ -438,7 +438,7 @@ func TestRunEndsWhenTheWorkerDiesWhileARefreshWaitsForTheClient(t *testing.T) {
 	require.NoError(t, err)
 	defer worker.Close()
 	started.Store(true)
-	pid := childPID(t, "tacklr-sandbox-worker")
+	pid := childPID(t, "firecracker")
 	ran := make(chan error, 1)
 	go func() {
 		_, err := worker.Run(t.Context(), "cat drive/readme.txt", io.Discard, io.Discard)
@@ -452,25 +452,19 @@ func TestRunEndsWhenTheWorkerDiesWhileARefreshWaitsForTheClient(t *testing.T) {
 	require.NoError(t, host.Stop())
 }
 
-func TestSupervisorRelaysTheClientWhileAFileRequestWaitsForARefresh(t *testing.T) {
+func TestSupervisorAnswersPingsWhileAWorkspaceRequestWaitsForARefresh(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
-	host := sandboxtest.Start(t, ca, supervisor.Config{
-		Workspace: gatedWorkspace(t),
-		WorkerPath: sandboxtest.ScriptWorker(t,
-			sandboxtest.SendFrame(`{"type":"ready","enforcement":{"landlock_abi":6}}`),
-			"head -c 1 <&3 >/dev/null",
-			sandboxtest.SendFS(`{"id":1,"op":"stat","path":"drive/readme.txt"}`, `{"id":2,"op":"stat","path":"drive/readme.txt"}`),
-			"exec sleep 3600"),
-	})
+	host := sandboxtest.Start(t, ca, supervisor.Config{Workspace: gatedWorkspace(t)})
 	client := sandbox.NewClient(host.Address, sandboxtest.ClientConfig(t, ca, ca))
 	var started atomic.Bool
-	var asks atomic.Int32
 	var asking sync.Once
 	asked, release := make(chan struct{}), make(chan struct{})
 	client.Refresh = func(context.Context, string, mount.Binding) (mount.Credential, error) {
-		if started.Load() && asks.Add(1) == 1 {
-			asking.Do(func() { close(asked) })
-			<-release
+		if started.Load() {
+			asking.Do(func() {
+				close(asked)
+				<-release
+			})
 		}
 		return mount.Credential{Token: "fresh", ExpiresAt: time.Now().Add(30 * time.Second)}, nil
 	}
@@ -478,16 +472,22 @@ func TestSupervisorRelaysTheClientWhileAFileRequestWaitsForARefresh(t *testing.T
 	require.NoError(t, err)
 	defer worker.Close()
 	started.Store(true)
-	go func() { _, _ = worker.Run(t.Context(), "true", io.Discard, io.Discard) }()
+	var stdout strings.Builder
+	ran := make(chan error, 1)
+	go func() {
+		_, err := worker.Run(t.Context(), "cat drive/readme.txt", &stdout, io.Discard)
+		ran <- err
+	}()
 	<-asked
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	pingErr := worker.Ping(ctx)
 	close(release)
 
-	require.ErrorIs(t, pingErr, context.DeadlineExceeded)
-	require.Eventually(t, func() bool { return asks.Load() >= 2 }, 5*time.Second, 10*time.Millisecond, "the second file request never asked for its token")
+	require.NoError(t, pingErr)
+	require.NoError(t, <-ran)
+	require.Equal(t, "hello", stdout.String())
 }
 
 // gatedBinding is a Drive folder that holds readme.txt, with a token that
@@ -541,9 +541,9 @@ func TestSupervisorRefusesAClientThatAuthorizeDenies(t *testing.T) {
 	require.EqualError(t, err, "sandbox: the supervisor refused the worker: 403 spiffe://tacklr.test/runtime may not start workers")
 }
 
-func TestSupervisorReportsAWorkerBinaryThatCannotStart(t *testing.T) {
+func TestSupervisorReportsAFirecrackerThatCannotStart(t *testing.T) {
 	ca := sandboxtest.NewAuthority(t)
-	address := sandboxtest.Start(t, ca, supervisor.Config{WorkerPath: filepath.Join(t.TempDir(), "missing")}).Address
+	address := sandboxtest.Start(t, ca, supervisor.Config{Firecracker: filepath.Join(t.TempDir(), "missing")}).Address
 
 	_, err := sandbox.NewClient(address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 
@@ -567,7 +567,7 @@ func TestServeStopsItsWorkersWhenItsContextEnds(t *testing.T) {
 	worker, err := sandbox.NewClient(host.Address, sandboxtest.ClientConfig(t, ca, ca)).Start(t.Context(), "s", nil)
 	require.NoError(t, err)
 	defer worker.Close()
-	pid := childPID(t, "tacklr-sandbox-worker")
+	pid := childPID(t, "firecracker")
 
 	serveErr := host.Stop()
 	_, stopErr := worker.Stop(t.Context())
@@ -579,11 +579,12 @@ func TestServeStopsItsWorkersWhenItsContextEnds(t *testing.T) {
 }
 
 func TestServeFailsWithoutAServerCertificate(t *testing.T) {
-	binary, packages := sandboxtest.Worker(t)
+	image := sandboxtest.BuildImage(t)
 	ca := sandboxtest.NewAuthority(t)
 	sup, err := supervisor.New(supervisor.Config{
-		WorkerPath:  binary,
-		PackagesDir: packages,
+		Firecracker: image.Firecracker,
+		Kernel:      image.Kernel,
+		Rootfs:      image.Rootfs,
 		TLS:         &tls.Config{ClientCAs: ca.Pool, MinVersion: tls.VersionTLS13},
 	})
 	require.NoError(t, err)
@@ -596,18 +597,20 @@ func TestServeFailsWithoutAServerCertificate(t *testing.T) {
 }
 
 func TestNewRefusesAConfigItCannotRunSafely(t *testing.T) {
-	binary, packages := sandboxtest.Worker(t)
+	image := sandboxtest.BuildImage(t)
 	ca := sandboxtest.NewAuthority(t)
 	valid := func() supervisor.Config {
-		return supervisor.Config{WorkerPath: binary, PackagesDir: packages, TLS: ca.ServerConfig(t)}
+		return supervisor.Config{Firecracker: image.Firecracker, Kernel: image.Kernel, Rootfs: image.Rootfs, TLS: ca.ServerConfig(t)}
 	}
 	cases := []struct {
 		name   string
 		change func(*supervisor.Config)
 		err    string
 	}{
-		{"a relative worker path", func(c *supervisor.Config) { c.WorkerPath = "worker" }, "supervisor: WorkerPath must be an absolute path"},
-		{"a relative packages path", func(c *supervisor.Config) { c.PackagesDir = "packages" }, "supervisor: PackagesDir must be an absolute path"},
+		{"a relative Firecracker path", func(c *supervisor.Config) { c.Firecracker = "firecracker" }, "supervisor: Firecracker must be an absolute path"},
+		{"a relative kernel path", func(c *supervisor.Config) { c.Kernel = "vmlinux" }, "supervisor: Kernel must be an absolute path"},
+		{"a relative root file system path", func(c *supervisor.Config) { c.Rootfs = "rootfs.ext4" }, "supervisor: Rootfs must be an absolute path"},
+		{"an init argument with a quote", func(c *supervisor.Config) { c.Init = []string{"/bin/sh", `say "hi"`} }, `supervisor: the init argument "say \"hi\"" has a quote or a newline`},
 		{"no TLS", func(c *supervisor.Config) { c.TLS = nil }, "supervisor: TLS is required"},
 		{"no client roots", func(c *supervisor.Config) { c.TLS.ClientCAs = nil }, "supervisor: TLS.ClientCAs is required to verify clients"},
 		{"a per-client TLS config", func(c *supervisor.Config) {

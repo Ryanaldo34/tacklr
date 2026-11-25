@@ -21,7 +21,7 @@ editor ──ACP over WebSocket──► host ──start · signal · query─�
 | `../host/` | The ACP server with bearer authentication (package `examples/host`). The Cloudflare example serves the same server. |
 | `cmd/internal/stack/` | What both programs read from the environment and open: Temporal, the Postgres stores, the model client and the live key. |
 | `cmd/host/`, `cmd/worker/` | The two programs. |
-| `cmd/supervisor/` | Optional. The sandbox supervisor, for a sandbox host: the agent's `run_command` runs there, over the same tree (`agent.Tree`). |
+| `cmd/supervisor/` | Optional. The sandbox supervisor, for a sandbox host: the agent's `run_command` runs there in Firecracker microVMs, over the same tree (`agent.Tree`). |
 | `example_test.go` | The end-to-end test. |
 
 ## Run it
@@ -54,7 +54,7 @@ Point an ACP client at `ws://localhost:8080/acp` with the header `Authorization:
 | `MAX_WINDOW` | worker | Optional. The context window in tokens. The default is the model's. |
 | `SANDBOX_ADDR`, `SANDBOX_CERT`, `SANDBOX_KEY`, `SANDBOX_CA` | worker | Optional. The sandbox supervisor's address, and PEM files of the worker's client certificate, its key and the supervisor's roots. They give the agent `run_command`. |
 | `SUPERVISOR_ADDR`, `SUPERVISOR_CERT`, `SUPERVISOR_KEY`, `SUPERVISOR_CLIENT_CA` | supervisor | Where it serves mTLS (default `:7443`), its certificate and key, and the roots that verify the workers. |
-| `WORKER_BIN`, `PACKAGES_DIR`, `WORKSPACE_DIR` | supervisor | The sandbox worker binary, its packages (`make sandbox-packages`), and the directory of each session's `/workspace/work`. |
+| `FIRECRACKER`, `GUEST_KERNEL`, `GUEST_ROOTFS`, `WORKSPACE_DIR` | supervisor | Firecracker, the guest kernel and the root file system (`make sandbox-image`), and the directory of each session's `/workspace/work`. The sandbox host needs `/dev/kvm`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL` | both | Optional. Where traces, metrics and logs go (OTLP over gRPC by default, or `http`). |
 
 Both programs send their telemetry to `OTEL_EXPORTER_OTLP_ENDPOINT` when it is set (for example a local Grafana LGTM stack): one trace per turn, from the client's request through the host, Temporal, the worker's steps, the model, the MCP servers and Postgres. Their logs go to stderr and, with the trace and span of each record, to the same endpoint. See [docs/telemetry.md](../../docs/telemetry.md).

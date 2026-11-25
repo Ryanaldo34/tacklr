@@ -40,9 +40,6 @@ bin/
 # Cargo build output of the sandbox worker.
 sandbox/worker/target/
 
-# WASIX packages fetched by scripts/sandbox-packages.sh.
-sandbox/worker/packages/*.webc
-sandbox/worker/packages/*.part
-sandbox/worker/packages/.build.lock
-sandbox/worker/packages/compiled/
-!sandbox/worker/src/bin/
+# The guest image that make sandbox-image builds: Firecracker, the kernel
+# and the root file system.
+sandbox/image/out/
