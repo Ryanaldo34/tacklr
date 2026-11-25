@@ -22,10 +22,10 @@ func TestReadRefusesFramesItCannotTrust(t *testing.T) {
 		input []byte
 		err   string
 	}{
-		{"a body larger than the limit", frame(MaxBody+1, kindControl, ""), "wire: frame body of 1048577 bytes is larger than 1048576"},
+		{"a body larger than the limit", frame(MaxBody+1, KindControl, ""), "wire: frame body of 1048577 bytes is larger than 1048576"},
 		{"a kind it does not know", frame(2, 9, "{}"), "wire: frame kind 9 is not known"},
-		{"a body that ends early", frame(10, kindControl, "{}"), "wire: frame body ends early: unexpected EOF"},
-		{"a field it does not know", frame(26, kindControl, `{"type":"ready","extra":1}`), `wire: frame body: json: unknown field "extra"`},
+		{"a body that ends early", frame(10, KindControl, "{}"), "wire: frame body ends early: unexpected EOF"},
+		{"a field it does not know", frame(26, KindControl, `{"type":"ready","extra":1}`), `wire: frame body: json: unknown field "extra"`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -39,5 +39,5 @@ func TestReadRefusesFramesItCannotTrust(t *testing.T) {
 func TestWriteRefusesAMessageLargerThanTheLimit(t *testing.T) {
 	err := Write(io.Discard, Message{Type: strings.Repeat("x", MaxBody)})
 
-	require.EqualError(t, err, "wire: message of 1048587 bytes is larger than 1048576")
+	require.EqualError(t, err, "wire: frame body of 1048587 bytes is larger than 1048576")
 }

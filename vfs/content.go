@@ -50,8 +50,8 @@ func (r *ContentRegistry) create(path, mediaType string, mut Mutation) (Document
 
 // IdentityCodec is a Codec whose persist form is the UTF-8 payload itself
 // (no container). TextCodec implements it. Office/cloud codecs (Word, Notion,
-// Google Docs) must not — FUSE then returns EROFS and the write tool uses
-// WriteDocument. Register those codecs under their native media types; do not
+// Google Docs) must not — the shell (vfs.Files) then refuses writes and the
+// write tool uses WriteDocument. Register those codecs under their native media types; do not
 // steal text/markdown.
 type IdentityCodec interface {
 	Codec

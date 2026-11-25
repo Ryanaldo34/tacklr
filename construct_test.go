@@ -64,7 +64,7 @@ func TestNewHarness_refusesAnInvalidConfiguration(t *testing.T) {
 		"a nil nested specialist": {tacklr.AgentOptions{Model: model, Specialists: []*tacklr.Specialist{
 			{Name: "lead", Model: model, Specialists: []*tacklr.Specialist{nil}},
 		}}, "specialist lead"},
-		"a skill directory without SKILL.md": {tacklr.AgentOptions{Model: model, SkillsLoader: skills.Loader{Root: broken}}, "initialize skills"},
+		"a skill directory without SKILL.md": {tacklr.AgentOptions{Model: model, Skills: skills.Dir{Root: broken}}, "initialize skills"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -95,7 +95,7 @@ func (expiredVault) ResolveMCP(context.Context, string) (session.MCPCredentials,
 }
 
 // skillPack is a local skills directory with one skill.
-func skillPack(t *testing.T, name, description, instructions string) skills.Loader {
+func skillPack(t *testing.T, name, description, instructions string) skills.Dir {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
@@ -105,7 +105,7 @@ func skillPack(t *testing.T, name, description, instructions string) skills.Load
 	if err := os.WriteFile(filepath.Join(root, name, "SKILL.md"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return skills.Loader{Root: root}
+	return skills.Dir{Root: root}
 }
 
 // TestNewHarness_twoBuildsSendTheSameRequestPrefix: two harnesses built
@@ -140,7 +140,7 @@ func TestNewHarness_twoBuildsSendTheSameRequestPrefix(t *testing.T) {
 			{Name: "vault", Type: session.MCPHTTP, URL: hs.URL, CredentialRef: "vault://svc"},
 		},
 		MCPCredentialResolver: expiredVault{},
-		SkillsLoader:          skillPack(t, "research", "Research carefully", "Verify claims."),
+		Skills:                skillPack(t, "research", "Research carefully", "Verify claims."),
 		Brain:                 eng, SearchNamespace: storetest.Namespace(t, "org", "acme"),
 		Specialists: []*tacklr.Specialist{{Name: "writer", Description: "Writes.", Model: model}, {Name: "analyst", Model: model}},
 	}

@@ -55,6 +55,8 @@ func richApplySession(t *testing.T, host richHostFS) *vfs.MountSession {
 
 func richStr(s string) *string { return &s }
 
+func richInt(n int) *int { return &n }
+
 // TestMountSession_applyRefusesBadWrites: Apply refuses each bad write with
 // its error, and the files stay as they are. The writes are: a bad path, no
 // change or two changes, an unmounted path, a body that is too large, a
@@ -109,6 +111,17 @@ func TestMountSession_applyRefusesBadWrites(t *testing.T) {
 		{name: "an unknown sheet", path: "/workspace/work/Budget.xlsx", mut: vfs.Mutation{BlockID: "Nope!A1", Body: richStr("x")}, wantErr: vfs.ErrUnknownBlock},
 		{name: "a sheet tab_id that does not match", path: "/workspace/work/Budget.xlsx", mut: vfs.Mutation{BlockID: "Budget!B2", TabID: "9", Body: richStr("x")}, wantErrMsg: `tab_id "9" does not match`},
 		{name: "a bad cell", path: "/workspace/work/Budget.xlsx", mut: vfs.Mutation{BlockID: "Budget!A0", Body: richStr("x")}, wantErr: vfs.ErrInvalidA1},
+		{name: "a substring of a missing file", path: "/workspace/work/none.txt", mut: vfs.Mutation{Old: richStr("x"), New: richStr("y")}, wantErr: vfs.ErrNotExist},
+		{name: "an empty substring", path: "/workspace/work/note.md", mut: vfs.Mutation{Old: richStr(""), New: richStr("y")}, wantErrMsg: "old is required"},
+		{name: "a substring that is not there", path: "/workspace/work/note.md", mut: vfs.Mutation{Old: richStr("absent"), New: richStr("y")}, wantErrMsg: "was not found"},
+		{name: "a substring that occurs twice", path: "/workspace/work/twice.txt", mut: vfs.Mutation{Old: richStr("x"), New: richStr("y")}, wantErrMsg: "occurs 2 times"},
+		{name: "a line range that is not valid", path: "/workspace/work/note.md", mut: vfs.Mutation{Start: richInt(0), End: richInt(1), Body: richStr("x")}, wantErrMsg: "invalid range"},
+		{name: "a line range with a stale rev", path: "/workspace/work/note.md", mut: vfs.Mutation{Rev: "stale", Start: richInt(1), End: richInt(2), Body: richStr("x")}, wantErr: vfs.ErrStaleContent},
+		{name: "a line range of a sheet", path: "/workspace/work/Budget.xlsx", mut: vfs.Mutation{Start: richInt(1), End: richInt(2), Body: richStr("x")}, wantErr: vfs.ErrProjected},
+		{name: "a document body that is not HTML", path: "/workspace/work/Spec.docx", mut: vfs.Mutation{Content: richStr("plain words")}, wantErr: vfs.ErrUseHTML},
+		{name: "blocks for a plain text file", path: "/workspace/work/note.md", mut: vfs.Mutation{Blocks: para}, wantErr: vfs.ErrProjected},
+		{name: "no blocks for a document", path: "/workspace/work/Spec.docx", mut: vfs.Mutation{Blocks: []vfs.Block{}}, wantErr: vfs.ErrEmptyReplace},
+		{name: "blocks for a sheet", path: "/workspace/work/Budget.xlsx", mut: vfs.Mutation{Blocks: para}, wantErr: vfs.ErrNotSupported},
 		{name: "a cell that makes the grid too large", path: "/workspace/work/Budget.xlsx", mut: vfs.Mutation{BlockID: "Budget!A100001", Body: richStr("x")}, wantErr: vfs.ErrTooLarge},
 	}
 	for _, tc := range cases {
@@ -129,8 +142,9 @@ func TestMountSession_applyRefusesBadWrites(t *testing.T) {
 
 // TestMountSession_applyWritesSubstringsBlocksAndCells: a replace_all
 // substring reports its replacements, a block body that ends in a newline
-// replaces the heading body, and a formula in a cell below the grid grows
-// the sheet and keeps no stale value.
+// replaces the heading body, a formula in a cell below the grid grows the
+// sheet and keeps no stale value, whole content replaces a text file, and
+// blocks create a document or replace one's body.
 func TestMountSession_applyWritesSubstringsBlocksAndCells(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -139,12 +153,15 @@ func TestMountSession_applyWritesSubstringsBlocksAndCells(t *testing.T) {
 	replaced, replaceErr := ms.Apply(ctx, "/workspace/work/twice.txt", vfs.Mutation{Old: richStr("x"), New: richStr("y"), ReplaceAll: true})
 	_, blockErr := ms.Apply(ctx, "/workspace/work/note.md", vfs.Mutation{BlockID: "intro", Body: richStr("new body\n")})
 	_, cellErr := ms.Apply(ctx, "/workspace/work/Budget.xlsx", vfs.Mutation{BlockID: "Budget!A4", Body: richStr("=B2*2")})
+	_, wholeErr := ms.Apply(ctx, "/workspace/work/twice.txt", vfs.Mutation{Content: richStr("whole\n")})
+	_, createErr := ms.Apply(ctx, "/workspace/work/New.docx", vfs.Mutation{Blocks: []vfs.Block{{Kind: vfs.BlockKindParagraph, Text: "created"}}})
+	_, replaceBlocksErr := ms.Apply(ctx, "/workspace/work/Spec.docx", vfs.Mutation{TabID: "t1", Blocks: []vfs.Block{{Kind: vfs.BlockKindParagraph, Text: "replaced"}}})
 
 	if replaceErr != nil || replaced.Replacements != 2 || !strings.Contains(replaced.String(), "replacements=2") {
 		t.Fatalf("replace_all = %v err=%v, want 2 replacements", replaced, replaceErr)
 	}
-	if twice, err := ms.Route(ctx, "/workspace/work/twice.txt").ReadFile(ctx); err != nil || string(twice) != "y-y" {
-		t.Fatalf("twice.txt = %q err=%v", twice, err)
+	if twice, err := ms.Route(ctx, "/workspace/work/twice.txt").ReadFile(ctx); err != nil || string(twice) != "whole\n" {
+		t.Fatalf("twice.txt = %q err=%v, want the whole replacement after the substrings", twice, err)
 	}
 	if blockErr != nil {
 		t.Fatal(blockErr)
@@ -154,6 +171,15 @@ func TestMountSession_applyWritesSubstringsBlocksAndCells(t *testing.T) {
 	}
 	if cellErr != nil {
 		t.Fatal(cellErr)
+	}
+	for p, want := range map[string]string{"/workspace/work/New.docx": "created", "/workspace/work/Spec.docx": "replaced"} {
+		doc, err := ms.Route(ctx, p).ReadText(ctx)
+		if err != nil || !strings.Contains(doc.Text(), want) || strings.Contains(doc.Text(), "Title") {
+			t.Fatalf("%s after blocks = %v, want only %q", p, err, want)
+		}
+	}
+	if wholeErr != nil || createErr != nil || replaceBlocksErr != nil {
+		t.Fatalf("whole = %v, create from blocks = %v, replace blocks = %v", wholeErr, createErr, replaceBlocksErr)
 	}
 	doc, err := ms.Route(ctx, "/workspace/work/Budget.xlsx").ReadText(ctx)
 	if err != nil {

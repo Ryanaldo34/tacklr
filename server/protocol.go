@@ -32,7 +32,8 @@ type Env struct {
 	Client session.Client
 	Agent  tacklr.AgentOptions
 	// Workspace says the runtime mounts a workspace for the sessions
-	// (Server.Workspace), so clients may bind backends to it.
+	// (Server.Workspace, opened by a sandbox supervisor), so clients may bind
+	// backends to it.
 	Workspace bool
 	// Security is the host's authentication and authorization. Nil allows
 	// every operation.

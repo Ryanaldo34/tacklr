@@ -9,7 +9,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/vfs"
-	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 // Options is the agent every session runs on model: a tool of its own
@@ -40,13 +39,9 @@ func Options(model tacklr.Model) tacklr.AgentOptions {
 	}
 }
 
-// Workspace is each session's /workspace: work is a directory of the
-// session's own under dir (a specialist gets its own too), which the agent
-// reads and writes. A write asks the user first. Results cut from the window
-// are kept in it, so the agent can read them back.
-func Workspace(dir string) workspace.Config {
-	return workspace.Config{
-		Open:         vfs.Tree(vfs.At("work", vfs.SessionLocal(dir))),
-		OverflowPath: "/workspace/work/.overflow",
-	}
+// Tree is each session's /workspace: work is a directory of the session's
+// own under dir (a specialist gets its own too). The supervisor opens it on
+// the sandbox host for the agent's run_command.
+func Tree(dir string) vfs.OpenVFS {
+	return vfs.Tree(vfs.At("work", vfs.SessionLocal(dir)))
 }

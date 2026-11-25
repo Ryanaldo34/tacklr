@@ -1,12 +1,14 @@
 // Package wire is the frame format and the messages of the sandbox. The same
 // frames go on both links: from the session runtime to the supervisor (one
-// HTTP/2 stream per worker) and from the supervisor to a worker (a Unix
-// socket pair). The Rust worker has the same format (sandbox/worker/src/frame.rs
-// and message.rs).
+// HTTP/2 stream per worker) and from the supervisor to the worker in its VM
+// (a vsock connection). The Rust worker has the same format
+// (sandbox/worker/src/frame.rs and message.rs). The worker's files do not
+// travel in frames: the guest mounts /workspace over 9P2000.L on a vsock
+// connection of its own.
 //
 // A frame is a 5-byte header and a body. The header is the body length as a
-// big-endian uint32, then one kind byte. The only kind today is control: a
-// JSON body with a "type" field.
+// big-endian uint32, then one kind byte: control (a JSON body with a "type"
+// field), or the stdout or stderr bytes of a run.
 package wire
 
 import (
@@ -15,6 +17,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+
+	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
 // StreamPath is the URL path where a client opens a worker stream.
@@ -23,37 +27,65 @@ const StreamPath = "/v1/worker"
 // MaxBody is the largest frame body.
 const MaxBody = 1 << 20
 
+const headerSize = 5
+
+// The frame kinds.
 const (
-	headerSize  = 5
-	kindControl = 1
+	KindControl byte = 1
+	KindStdout  byte = 2
+	KindStderr  byte = 3
 )
 
-// The message types. Ready and pong come from the worker, ping and stop
-// from the client. Exit comes from the supervisor.
+// The message types. Ready, pong and done come from the worker; open, ping,
+// stop and run from the client. Exit and refused come from the supervisor:
+// refused, before ready, has the status (Code) and the reason (Error) the
+// worker did not start for. Token is the supervisor's request for a new
+// credential of a binding, and the client's reply with the same ID.
 const (
-	TypeReady = "ready"
-	TypePing  = "ping"
-	TypePong  = "pong"
-	TypeStop  = "stop"
-	TypeExit  = "exit"
+	TypeOpen    = "open"
+	TypeReady   = "ready"
+	TypePing    = "ping"
+	TypePong    = "pong"
+	TypeStop    = "stop"
+	TypeRun     = "run"
+	TypeDone    = "done"
+	TypeExit    = "exit"
+	TypeToken   = "token"
+	TypeRefused = "refused"
 )
 
 // Message is one control message. Only the fields of its Type are set.
 type Message struct {
-	Type        string       `json:"type"`
-	ID          uint64       `json:"id,omitzero"`
-	Enforcement *Enforcement `json:"enforcement,omitempty"`
-	Exit        *Exit        `json:"exit,omitempty"`
+	Type        string            `json:"type"`
+	ID          uint64            `json:"id,omitzero"`
+	Script      string            `json:"script,omitempty"`
+	Session     string            `json:"session,omitempty"`
+	Bindings    []mount.Binding   `json:"bindings,omitempty"`
+	Code        *int              `json:"code,omitempty"`
+	Error       string            `json:"error,omitempty"`
+	Enforcement *Enforcement      `json:"enforcement,omitempty"`
+	Exit        *Exit             `json:"exit,omitempty"`
+	Binding     *mount.Binding    `json:"binding,omitempty"`
+	Credential  *mount.Credential `json:"credential,omitempty"`
 }
 
-// Enforcement is what a worker enforces on itself.
+// Frame is one frame: a control message, or output bytes of a run.
+type Frame struct {
+	// Kind is KindControl, KindStdout or KindStderr.
+	Kind byte
+	// Message is the control message when Kind is KindControl.
+	Message Message
+	// Data is the output bytes otherwise.
+	Data []byte
+}
+
+// Enforcement is how the supervisor isolates a worker.
 type Enforcement struct {
-	// LandlockABI is the Landlock ABI version of the worker's ruleset on
-	// this kernel: 6 or more.
-	LandlockABI int `json:"landlock_abi"`
+	// Hypervisor is the hypervisor of the worker's VM: firecracker.
+	Hypervisor string `json:"hypervisor"`
 }
 
-// Exit is how a worker process ended.
+// Exit is how a worker's VM ended: the exit of its Firecracker process.
 type Exit struct {
 	// Code is the exit code, or -1 when a signal ended the process.
 	Code int `json:"code"`
@@ -62,44 +94,56 @@ type Exit struct {
 	Signal string `json:"signal,omitempty"`
 }
 
-// Write writes m as one frame, in one write. It refuses a message whose
-// body is larger than MaxBody, as Read does.
+// Write writes m as one control frame, in one write.
 func Write(w io.Writer, m Message) error {
 	body, _ := json.Marshal(m)
+	return write(w, KindControl, body)
+}
+
+// WriteData writes data as one frame of kind, in one write.
+func WriteData(w io.Writer, kind byte, data []byte) error {
+	return write(w, kind, data)
+}
+
+// write refuses a body larger than MaxBody, as Read does.
+func write(w io.Writer, kind byte, body []byte) error {
 	length := len(body)
 	if length < 0 || length > MaxBody {
-		return fmt.Errorf("wire: message of %d bytes is larger than %d", length, MaxBody)
+		return fmt.Errorf("wire: frame body of %d bytes is larger than %d", length, MaxBody)
 	}
 	var header [headerSize]byte
 	binary.BigEndian.PutUint32(header[:4], uint32(length))
-	header[4] = kindControl
+	header[4] = kind
 	_, err := w.Write(append(header[:], body...))
 	return err
 }
 
-// Read reads one frame and decodes its message. It returns io.EOF when the
-// stream ends before a frame starts.
-func Read(r io.Reader) (Message, error) {
+// Read reads one frame, and decodes it if it is a control frame. It returns
+// io.EOF when the stream ends before a frame starts.
+func Read(r io.Reader) (Frame, error) {
 	var header [headerSize]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
-		return Message{}, err
+		return Frame{}, err
 	}
-	length := binary.BigEndian.Uint32(header[:4])
+	length, kind := binary.BigEndian.Uint32(header[:4]), header[4]
 	if length > MaxBody {
-		return Message{}, fmt.Errorf("wire: frame body of %d bytes is larger than %d", length, MaxBody)
+		return Frame{}, fmt.Errorf("wire: frame body of %d bytes is larger than %d", length, MaxBody)
 	}
-	if header[4] != kindControl {
-		return Message{}, fmt.Errorf("wire: frame kind %d is not known", header[4])
+	if kind < KindControl || kind > KindStderr {
+		return Frame{}, fmt.Errorf("wire: frame kind %d is not known", kind)
 	}
 	body := make([]byte, length)
 	if _, err := io.ReadFull(r, body); err != nil {
-		return Message{}, fmt.Errorf("wire: frame body ends early: %w", err)
+		return Frame{}, fmt.Errorf("wire: frame body ends early: %w", err)
+	}
+	if kind != KindControl {
+		return Frame{Kind: kind, Data: body}, nil
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	var m Message
 	if err := decoder.Decode(&m); err != nil {
-		return Message{}, fmt.Errorf("wire: frame body: %w", err)
+		return Frame{}, fmt.Errorf("wire: frame body: %w", err)
 	}
-	return m, nil
+	return Frame{Kind: kind, Message: m}, nil
 }

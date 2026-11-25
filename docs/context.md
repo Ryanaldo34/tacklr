@@ -23,7 +23,7 @@ The window's size is `AgentOptions.MaxWindowSize`. Zero uses the model's `MaxCon
 Over the pressure, the window makes room in this order:
 
 1. **Collapse.** Everything after the user's first message and the plan becomes one summary that the model writes. The new round goes after the summary. Reasoning in the messages that stay is dropped, because it was about messages that the summary replaced.
-2. **Cut.** When the round alone is still larger than the window, its largest tool results are cut until it fits. Each cut result ends with a note that says how much was kept. With `AgentOptions.Overflow` (the workspace's `OverflowPath`), the full result is kept in a file first, and the note gives the path to `read`.
+2. **Cut.** When the round alone is still larger than the window, its largest tool results are cut until it fits. Each cut result ends with a note that says how much was kept and tells the agent to run a narrower command or query for the rest. The full result is not kept.
 
 A round with nothing to cut fails the commit. When any part of a commit fails (a count, the summary, a save), the commit saves nothing, and the window stays as it was.
 

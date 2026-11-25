@@ -30,6 +30,7 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/message"
+	"github.com/ryanaldo34/tacklr/sandbox/sandboxtest"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/postgres"
 	"github.com/ryanaldo34/tacklr/session/temporal"
@@ -38,7 +39,6 @@ import (
 	"github.com/ryanaldo34/tacklr/telemetry/export"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
-	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 var liveSeq atomic.Int64
@@ -293,29 +293,30 @@ func TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages(t *testi
 	}
 }
 
-// TestLive_workerRestartWhileParkedThenResumeRemounts: a session parks, its
-// worker goes away, and a resume with a new token runs on another worker,
-// which mounts the workspace again and reads it. The next prompt goes on
-// after one more restart.
-func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
+// TestLive_workerRestartWhileParkedThenResumeGetsTheNewToken: a session
+// parks, its worker goes away, and a resume with a new token runs on
+// another worker, whose tools get the binding with the new token (as
+// run_command passes it to the sandbox). The next prompt goes on after one
+// more restart.
+func TestLive_workerRestartWhileParkedThenResumeGetsTheNewToken(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	bound := tacklr.NewTool(tacklr.ToolConfig{Name: "bound", Handler: func(_ context.Context, _ struct{}, cc *tacklr.CallContext) (string, error) {
+		var out []string
+		for _, b := range cc.Bindings() {
+			out = append(out, b.Alias()+"="+b.Auth.Token)
+		}
+		return "bound: " + strings.Join(out, ","), nil
+	}})
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		if last := lastMsg(msgs); last != nil && last.Role == message.RoleTool {
-			if strings.Contains(last.Content, "from-workspace") {
+			if strings.Contains(last.Content, "bound: ") {
 				ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: last.Content, IsComplete: true}
 				return
 			}
 			ch <- tacklr.LLMResponseChunk{
-				Type: session.EventFunctionCall,
-				ToolCalls: []message.ToolCall{{
-					ID: "read1", CallID: "read1", Name: "read",
-					Arguments: `{"path":"/workspace/docs/hello.txt"}`,
-				}},
+				Type:       session.EventFunctionCall,
+				ToolCalls:  []message.ToolCall{{ID: "bound1", CallID: "bound1", Name: "bound", Arguments: `{}`}},
 				IsComplete: true,
 			}
 			return
@@ -329,9 +330,7 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 			IsComplete: true,
 		}
 	})
-	stack := newLiveStack(t, liveAgent(t, model, tacklr.AgentOptions{}), func(cfg *Config) {
-		cfg.Workspace = workspace.Config{Open: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}
-	})
+	stack := newLiveStack(t, liveAgent(t, model, tacklr.AgentOptions{Tools: []*tacklr.Tool{bound}}))
 	id, err := stack.Client.CreateSession(ctx, session.CreateSession{})
 	if err != nil {
 		t.Fatal(err)
@@ -377,9 +376,9 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 	// a step leaves it to the heartbeat timeout.
 	resumed := waitTurn(t, stack.Client, id, sub, 60*time.Second)
 	if !slices.ContainsFunc(resumed, func(ev session.Event) bool {
-		return ev.Type == session.EventMessage && strings.Contains(ev.Content, "from-workspace")
+		return ev.Type == session.EventMessage && strings.Contains(ev.Content, "docs=tok-2")
 	}) {
-		t.Fatalf("want the remounted workspace read after the restart, got %+v", resumed)
+		t.Fatalf("want the binding with the new token after the restart, got %+v", resumed)
 	}
 	// The next prompt's Commit finds the worker holding the harness gone too,
 	// and the session goes on on the new one.
@@ -392,11 +391,11 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 	})
 }
 
-// TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace: with a FuseRoot the
-// worker mounts the session's workspace on the host and the agent gets
-// run_command there. An empty command gets a correction; a command reads
-// the workspace.
-func TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace(t *testing.T) {
+// TestLive_sandboxGivesTheAgentRunCommandOnItsWorkspace: with a sandbox
+// client the agent gets run_command, which runs in a sandboxed worker over
+// the session's workspace. An empty command gets a correction; a command
+// reads the workspace.
+func TestLive_sandboxGivesTheAgentRunCommandOnItsWorkspace(t *testing.T) {
 	t.Parallel()
 	// Arrange
 	ctx := t.Context()
@@ -417,15 +416,14 @@ func TestLive_fuseRootGivesTheAgentAShellOnItsWorkspace(t *testing.T) {
 		case last.Role != message.RoleTool:
 			ch <- runCommand("empty", "  ")
 		case strings.Contains(last.Content, "command is required"):
-			ch <- runCommand("cat", "cat workspace/docs/hello.txt")
+			ch <- runCommand("cat", "cat docs/hello.txt")
 		default:
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: last.Content, IsComplete: true}
 		}
 	})
 	agent := liveAgent(t, model, tacklr.AgentOptions{AllowTools: []string{"run_command"}})
 	stack := newLiveStack(t, agent, func(cfg *Config) {
-		cfg.Workspace = workspace.Config{Open: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}
-		cfg.FuseRoot = t.TempDir()
+		cfg.Sandbox = sandboxtest.Client(t, vfs.Tree(vfs.At("docs", vfs.Local(dir))))
 	})
 	id, err := stack.Client.CreateSession(ctx, session.CreateSession{})
 	if err != nil {

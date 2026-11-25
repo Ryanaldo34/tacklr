@@ -115,7 +115,7 @@ A step can run more than once before the runtime records it, for example when a 
 
 | `worker.Config` | Default | Effect |
 |---|---|---|
-| `Workspace`, `FuseRoot` | none | The agent's workspace and shell. See [Workspace](workspace.md). |
+| `Workspace`, `Sandbox` | none | The agent's workspace and shell. See [Workspace](workspace.md). |
 | `Jobs` | none | The jobs tools can start, by name. |
 | `MaxHarnesses` | 256 | The harnesses one worker keeps. The one unused longest closes first. |
 | `HarnessIdle` | 10 minutes | How long an unused harness stays open. |
@@ -142,7 +142,7 @@ sessions := durableobject.NewClient(platform)
 | `RetryBackoff` | 1 second | The first wait between attempts. It doubles, up to 30 seconds. |
 | `Watchdog` | 1 minute | The alarm that restarts an object that stopped during a step. |
 
-A durable object has no FUSE and no shell, so its agent has no workspace.
+A durable object has no shell, so its agent has no workspace.
 
 ### Cloudflare Workers
 

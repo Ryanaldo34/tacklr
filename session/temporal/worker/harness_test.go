@@ -23,9 +23,7 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 	adapter "github.com/ryanaldo34/tacklr/session/internal"
 	"github.com/ryanaldo34/tacklr/session/orchestrator"
-	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
-	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 // mcpServer is an MCP server over HTTP with one tool, ping. It counts the
@@ -84,15 +82,12 @@ func (m *mcpServer) ended(t *testing.T, n int32) {
 }
 
 // TestSessionWorkflow_aSessionsStepsShareOneHarness: a reply's calls and the
-// steps around them share one harness: the VFS opens once and each MCP
-// server is connected once. A prompt that changes the MCP servers builds a
+// steps around them share one harness: each MCP server is connected once. A prompt that changes the MCP servers builds a
 // new harness, and the old one closes.
 func TestSessionWorkflow_aSessionsStepsShareOneHarness(t *testing.T) {
 	t.Parallel()
 	env := newTestWorkflow(t)
 	first, second := newMCPServer(t, "first"), newMCPServer(t, "second")
-	var opens atomic.Int32
-	tree := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))
 	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		if last := lastMsg(msgs); last != nil && last.Role == message.RoleTool {
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
@@ -105,11 +100,7 @@ func TestSessionWorkflow_aSessionsStepsShareOneHarness(t *testing.T) {
 			ToolCalls: []message.ToolCall{ping("p1"), ping("p2"), ping("p3")}}
 	})
 	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, MCP: mcp.Client{}}
-	acts, _ := registerSession(env, agent)
-	acts.Workspace = workspace.Config{Open: func(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, error) {
-		opens.Add(1)
-		return tree(ctx, id, req)
-	}}
+	registerSession(env, agent)
 	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.Prompt{Text: "go", MCPServers: []session.MCPServer{first.config}}})
 	// A steer that changes the MCP servers joins the running turn (queued
 	// before its first request, it is in that request), which keeps its
@@ -127,9 +118,9 @@ func TestSessionWorkflow_aSessionsStepsShareOneHarness(t *testing.T) {
 	if first.pings.Load() != 6 {
 		t.Fatalf("pings = %d, want three calls in each of two replies: the turn with its steer, and the next prompt's", first.pings.Load())
 	}
-	if opens.Load() != 2 || first.opens.Load() != 2 || second.opens.Load() != 1 {
-		t.Fatalf("VFS opens = %d, MCP sessions first = %d second = %d; want one harness per MCP config: 2, 2, 1",
-			opens.Load(), first.opens.Load(), second.opens.Load())
+	if first.opens.Load() != 2 || second.opens.Load() != 1 {
+		t.Fatalf("MCP sessions first = %d second = %d; want one harness per MCP config: 2, 1",
+			first.opens.Load(), second.opens.Load())
 	}
 	first.ended(t, 2)
 	second.ended(t, 1)
@@ -197,8 +188,8 @@ func TestActivities_aWorkerSeesWhatAnotherCommittedAndFailsOnceTheSnapshotIsDele
 }
 
 // TestActivities_aChildUsesItsParentsSecretsAndAStepFailsOnWhatItCannotRead:
-// a child step without secrets of its own opens its workspace with its
-// parent's token. A step whose secrets, or whose parent's secrets, do not
+// a child step without secrets of its own commits with its parent's
+// secrets. A step whose secrets, or whose parent's secrets, do not
 // open fails, and so do a step for an unknown specialist and a new turn's
 // commit whose event log cannot give its head.
 func TestActivities_aChildUsesItsParentsSecretsAndAStepFailsOnWhatItCannotRead(t *testing.T) {
@@ -224,16 +215,8 @@ func TestActivities_aChildUsesItsParentsSecretsAndAStepFailsOnWhatItCannotRead(t
 	if _, err := pool.Exec(ctx, `INSERT INTO `+schema+`.session_secrets (session_id, sealed) VALUES ('locked', $1)`, foreign); err != nil {
 		t.Fatal(err)
 	}
-	var gotToken string
-	open := vfs.Tree(vfs.At("docs", vfs.Local(t.TempDir())))
 	acts := newActs(tacklr.AgentOptions{Model: testkit.HTTPModel(t, nil), MaxWindowSize: 8192}, session.NewMemoryEventLog(), true)
 	acts.Secrets = secrets
-	acts.Workspace = workspace.Config{Open: func(ctx context.Context, sessionID string, req vfs.Request) (*vfs.MountSession, error) {
-		if len(req.Bindings) > 0 {
-			gotToken = req.Bindings[0].Auth.Token
-		}
-		return open(ctx, sessionID, req)
-	}}
 	child := stepSession{SessionID: "child", Identity: orchestrator.Identity{Parent: "parent", Mounts: adapter.ApplyAuth(nil, parentAuth)}}
 	locked := stepSession{SessionID: "locked"}
 	lockedChild := stepSession{SessionID: "locked-child", Identity: orchestrator.Identity{Parent: "locked"}}
@@ -253,8 +236,8 @@ func TestActivities_aChildUsesItsParentsSecretsAndAStepFailsOnWhatItCannotRead(t
 	_, headErr := headless.Commit(ctx, commitInput{stepSession: stepSession{SessionID: "fresh"}, In: say("hi"), NewTurn: true})
 
 	// Assert
-	if childErr != nil || gotToken != "parent-tok" {
-		t.Fatalf("child commit %v, workspace token %q; want the parent's token", childErr, gotToken)
+	if childErr != nil {
+		t.Fatalf("child commit %v; want the parent's secrets opened for it", childErr)
 	}
 	for name, err := range map[string]error{"inference": inferErr, "tool": toolErr, "commit": commitErr, "a child of it": parentErr} {
 		if err == nil || !strings.Contains(err.Error(), `secrets "locked": open`) {

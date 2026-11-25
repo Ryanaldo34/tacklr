@@ -27,9 +27,9 @@ const (
 type Server struct {
 	Client session.Client
 	Agent  tacklr.AgentOptions
-	// Workspace says the runtime mounts a workspace for the sessions
-	// (worker.Config.Workspace), so clients may bind backends to it (ACP
-	// vfs/bind). False refuses binds.
+	// Workspace says the sessions have a workspace, which a sandbox
+	// supervisor opens with the bindings (worker.Config.Sandbox), so
+	// clients may bind backends to it (ACP vfs/bind). False refuses binds.
 	Workspace bool
 	// Protocols are the wire protocols the server serves, each at its
 	// Path.

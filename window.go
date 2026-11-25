@@ -54,9 +54,6 @@ type windowHost interface {
 	summarize(ctx context.Context, msgs []*message.Message) (string, error)
 	// archive saves msgs for search. It reports whether they are kept.
 	archive(ctx context.Context, msgs []*message.Message) (bool, error)
-	// keep stores a cut result's full text, and returns where it is, or
-	// "" when nothing keeps it.
-	keep(ctx context.Context, callID, text string) (string, error)
 }
 
 // requestCount is a provider's input token count for one model request,
@@ -266,13 +263,12 @@ func (w *window) measure(ctx context.Context, count requestCount, msgs, round []
 }
 
 // trim cuts the round's largest results until the window and round fit
-// the window's size. Before a result's first cut, its full text is kept
-// when the host keeps results, and the cut result says where.
+// the window's size. A cut result says it was cut, so the agent runs a
+// narrower command for the rest.
 func (w *window) trim(ctx context.Context, count requestCount, msgs, round []*message.Message, n int) ([]*message.Message, error) {
 	round = slices.Clone(round)
 	full := map[int]string{}
 	kept := map[int]int{}
-	where := map[int]string{}
 	size := func(i int) int {
 		if k, ok := kept[i]; ok {
 			return k
@@ -291,11 +287,6 @@ func (w *window) trim(ctx context.Context, count requestCount, msgs, round []*me
 		}
 		if _, ok := full[i]; !ok {
 			full[i] = round[i].Content
-			path, err := w.host.keep(ctx, round[i].ToolCallID, full[i])
-			if err != nil {
-				return nil, fmt.Errorf("stage full tool result: %w", err)
-			}
-			where[i] = path
 		}
 		// Scale the result by how far over the window is; n > size, so
 		// each pass keeps less.
@@ -305,7 +296,7 @@ func (w *window) trim(ctx context.Context, count requestCount, msgs, round []*me
 		}
 		kept[i] = keep
 		cut := *round[i]
-		cut.Content = full[i][:keep] + truncationNote(keep, len(full[i]), where[i])
+		cut.Content = full[i][:keep] + truncationNote(keep, len(full[i]))
 		round[i] = &cut
 		var err error
 		if n, err = w.measure(ctx, count, msgs, round); err != nil {
@@ -375,13 +366,10 @@ func protectedPrefixLen(msgs []*message.Message) int {
 	return min(len(msgs), 1)
 }
 
-// truncationNote ends a cut result: how much of it is left, and where the
-// full output is when it was kept.
-func truncationNote(kept, total int, path string) string {
-	if path == "" {
-		return fmt.Sprintf("\n\n[Output truncated to fit the context window: kept the first %d of %d bytes. The full output was not kept.]", kept, total)
-	}
-	return fmt.Sprintf("\n\n[Output truncated to fit the context window: kept the first %d of %d bytes. The full output is at %s; read it with start and end.]", kept, total, path)
+// truncationNote ends a cut result: how much of it is left, and what the
+// agent does for the rest.
+func truncationNote(kept, total int) string {
+	return fmt.Sprintf("\n\n[Output truncated to fit the context window: kept the first %d of %d bytes. Run a narrower command or query to see the rest.]", kept, total)
 }
 
 // planDocumentPrefix identifies durable plan messages so a collapse keeps

@@ -380,3 +380,27 @@ func TestSessionAuth_replaceAndUnbindProvider(t *testing.T) {
 		t.Fatal("nil SessionAuth accessors")
 	}
 }
+
+// TestRequest_holderRefreshesThroughTheRequestsRefresh: a request's holder
+// gets a new token of its binding from Refresh; without Refresh it keeps
+// the binding's token and cannot refresh.
+func TestRequest_holderRefreshesThroughTheRequestsRefresh(t *testing.T) {
+	t.Parallel()
+	binding := mount.Binding{Provider: mount.ProviderGoogleDrive, Auth: mount.Credential{Token: "stale"}}
+	var asked mount.Binding
+	refreshing := vfs.Request{Refresh: func(_ context.Context, b mount.Binding) (mount.Credential, error) {
+		asked = b
+		return mount.Credential{Token: "fresh"}, nil
+	}}.Holder(binding)
+	fixed := vfs.Request{}.Holder(binding)
+
+	refreshErr := refreshing.RefreshOnce(t.Context())
+	fixedErr := fixed.RefreshOnce(t.Context())
+
+	if refreshErr != nil || refreshing.Current().Token != "fresh" || asked.Provider != mount.ProviderGoogleDrive {
+		t.Fatalf("refresh = %v, token %q, asked for %+v; want fresh for the binding", refreshErr, refreshing.Current().Token, asked)
+	}
+	if !errors.Is(fixedErr, vfs.ErrAuthExpired) || fixed.Current().Token != "stale" {
+		t.Fatalf("refresh without Refresh = %v, token %q; want ErrAuthExpired and the binding's token", fixedErr, fixed.Current().Token)
+	}
+}

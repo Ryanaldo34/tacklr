@@ -1,19 +1,20 @@
 // Command worker runs the example's sessions: the session workflow and its
-// steps, the agent and its workspace, and the live endpoint that streams a
+// steps, the agent, and the live endpoint that streams a
 // session's deltas to the hosts. Run as many as you need; see README.md.
 //
 // Besides the variables of package stack it reads:
 //
-//	WORKSPACE_DIR  an absolute directory: each session's /workspace/work is under it (required)
 //	LIVE_URL       how hosts reach this worker's live endpoint, default http://localhost:8081
 //	LIVE_ADDR      where it listens, default :8081
-//	FUSE_ROOT      a directory for FUSE: gives the agent run_command (optional)
 //	MAX_WINDOW     the context window in tokens, default the model's
+//	SANDBOX_ADDR   the sandbox supervisor (host:port); gives the agent run_command (optional)
+//	SANDBOX_CERT, SANDBOX_KEY, SANDBOX_CA  PEM files of this worker's client certificate, its key, and the supervisor's roots (with SANDBOX_ADDR)
 package main
 
 import (
 	"cmp"
 	"context"
+	"crypto/tls"
 	"errors"
 	"log"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/examples/temporal/agent"
 	"github.com/ryanaldo34/tacklr/examples/temporal/cmd/internal/stack"
+	"github.com/ryanaldo34/tacklr/sandbox"
 	"github.com/ryanaldo34/tacklr/session/temporal/worker"
 )
 
@@ -38,14 +40,6 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	dir := os.Getenv("WORKSPACE_DIR")
-	if dir == "" {
-		return errors.New("WORKSPACE_DIR must be set")
-	}
-	// WORKSPACE_DIR is the operator's own directory.
-	if err := os.MkdirAll(dir, 0o750); err != nil { //nolint:gosec // G703: the path is the operator's setting
-		return err
-	}
 	st, err := stack.Open(ctx, "tacklr-worker")
 	if err != nil {
 		return err
@@ -60,10 +54,17 @@ func run(ctx context.Context) error {
 		}
 		opts.MaxWindowSize = uint(size)
 	}
+	var sandboxClient *sandbox.Client
+	if addr := os.Getenv("SANDBOX_ADDR"); addr != "" {
+		certificate, roots, err := stack.LoadTLS(os.Getenv("SANDBOX_CERT"), os.Getenv("SANDBOX_KEY"), os.Getenv("SANDBOX_CA"))
+		if err != nil {
+			return err
+		}
+		sandboxClient = sandbox.NewClient(addr, &tls.Config{Certificates: []tls.Certificate{certificate}, RootCAs: roots, MinVersion: tls.VersionTLS13})
+	}
 	w := worker.New(st.Temporal, worker.Config{
 		Agent:          opts,
-		Workspace:      agent.Workspace(dir),
-		FuseRoot:       os.Getenv("FUSE_ROOT"),
+		Sandbox:        sandboxClient,
 		TaskQueue:      st.TaskQueue,
 		Store:          st.Store,
 		Secrets:        st.Secrets,

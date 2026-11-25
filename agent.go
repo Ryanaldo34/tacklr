@@ -37,16 +37,14 @@ type Harness struct {
 	specialists           map[string]*Specialist
 	// jobs are the Runtime job workers tools may Schedule.
 	jobs            []string
-	skillByName     map[string]skills.Skill
-	skillsLoader    skills.SkillLoader
+	skills          skills.Provider
+	skillSummaries  []skills.Summary
 	brain           *brain.Engine
 	brainWriteKinds []string
 	brainRelations  []brain.RelationSpec
 	// bindings are the turn's credentialed mounts (BindTurn).
 	bindings []mount.Binding
-	// overflow keeps a trimmed result's full text (AgentOptions.Overflow).
 	// Nil: it is not kept.
-	overflow   Overflow
 	mcpCleanup func()
 	// window is the context window; the harness is its host.
 	window     *window
@@ -175,16 +173,7 @@ If an active to-do is sufficiently large and parallel work would improve efficie
 		b.WriteString(` Findings that should survive later steps belong in the knowledge store as durable facts. When starting a new plan, search the knowledge store for material related to the task. After a handoff, search it again for durable facts saved during earlier work. A search returns knowledge saved for this agent and earlier messages from this session. Knowledge saved for later sessions uses the namespace configured for the agent.`)
 	}
 	b.WriteString("\n</context>\n")
-	if len(a.skillByName) > 0 {
-		names := make([]string, 0, len(a.skillByName))
-		for name := range a.skillByName {
-			names = append(names, name)
-		}
-		slices.Sort(names)
-		loaded := make([]skills.Skill, 0, len(names))
-		for _, name := range names {
-			loaded = append(loaded, a.skillByName[name])
-		}
+	if len(a.skillSummaries) > 0 {
 		b.WriteString("<skills>\n")
 		b.WriteString(`The following skills describe reusable approaches, methodologies, or areas of expertise that can improve task performance.
 
@@ -197,7 +186,7 @@ When solving a task:
 - Do not force the use of a skill if it is unrelated to the current task.
 
 `)
-		b.WriteString(skills.Catalog(loaded))
+		b.WriteString(skills.Catalog(a.skillSummaries))
 		b.WriteString("\n</skills>\n")
 	}
 	if subList := a.formatSpecialistPromptList(); subList != "" {
@@ -270,15 +259,6 @@ func (a *Harness) archive(ctx context.Context, window []*message.Message) (bool,
 		return false, fmt.Errorf("save session messages: %w", err)
 	}
 	return true, nil
-}
-
-// keep stores a cut result's full text in Overflow, and returns its path;
-// "" when the harness has no Overflow.
-func (a *Harness) keep(ctx context.Context, callID, text string) (string, error) {
-	if a.overflow == nil {
-		return "", nil
-	}
-	return a.overflow.Keep(ctx, a.sessionId, callID, text)
 }
 
 func messageSearchText(m *message.Message) string {

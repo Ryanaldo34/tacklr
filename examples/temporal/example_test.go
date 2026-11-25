@@ -25,6 +25,7 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/temporaldocker"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/message"
+	"github.com/ryanaldo34/tacklr/sandbox/sandboxtest"
 	serverpg "github.com/ryanaldo34/tacklr/server/postgres"
 	"github.com/ryanaldo34/tacklr/session"
 	sessionpg "github.com/ryanaldo34/tacklr/session/postgres"
@@ -88,7 +89,7 @@ func deploy(t *testing.T, model tacklr.Model) deployment {
 	opts.MaxWindowSize = 100_000
 	w := worker.New(c, worker.Config{
 		Agent:          opts,
-		Workspace:      agent.Workspace(dir),
+		Sandbox:        sandboxtest.Client(t, agent.Tree(dir)),
 		TaskQueue:      queue,
 		Store:          db.Store(),
 		Secrets:        db.Secrets(sealer),
@@ -202,8 +203,8 @@ func (o *operator) prompt(sid, text string, answer func(req map[string]any) any)
 }
 
 // releases is the model of a releases assistant: it looks a release up
-// and answers from the result; asked for a note, it makes a plan (write
-// tools wait for one), then writes the note.
+// and answers from the result; asked for a note, it makes a plan, then
+// writes the note with run_command.
 func releases(t *testing.T) tacklr.Model {
 	return testkit.HTTPModel(t, func(_ context.Context, msgs []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		last := msgs[len(msgs)-1]
@@ -213,7 +214,7 @@ func releases(t *testing.T) tacklr.Model {
 		}
 		switch {
 		case tacklr.IsPlanDocument(last):
-			call("write", `{"path":"/workspace/work/notes.txt","content":"v2 shipped"}`)
+			call("run_command", `{"command":"printf 'v2 shipped' > work/notes.txt"}`)
 		case last.Role == message.RoleTool && strings.Contains(last.Content, "shipped"):
 			// The answer streams as deltas, then the message completes.
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "v2 has "}
@@ -231,9 +232,9 @@ func releases(t *testing.T) tacklr.Model {
 
 // TestExample_anOperatorAsksAboutAReleaseAndSavesANote: over ACP, the
 // operator's question runs the agent's own tool on a worker and the answer
-// streams back through the host. For a note the agent plans, then its write
-// asks the operator first; once allowed, the note lands in the session's own
-// directory of the workspace.
+// streams back through the host. For a note the agent plans, then its
+// run_command asks the operator first; once allowed, the sandbox writes the
+// note into the session's own directory of the workspace.
 func TestExample_anOperatorAsksAboutAReleaseAndSavesANote(t *testing.T) {
 	t.Parallel()
 	// Arrange

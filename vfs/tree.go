@@ -14,6 +14,21 @@ import (
 // params["name"] to the At name.
 type Request struct {
 	Bindings []mount.Binding
+	// Refresh, if set, gets a new credential for one of Bindings when its
+	// token is near expiry or its source refuses it. Holder installs it on
+	// the binding's TokenHolder.
+	Refresh func(ctx context.Context, binding mount.Binding) (mount.Credential, error)
+}
+
+// Holder returns a TokenHolder with b's token that refreshes through
+// Refresh, or that cannot refresh when Refresh is nil. Pass it to the
+// source of b (Drive, Graph).
+func (r Request) Holder(b mount.Binding) *TokenHolder {
+	h := NewTokenHolder(b.Auth)
+	if r.Refresh != nil {
+		h.SetRefresh(func(ctx context.Context) (mount.Credential, error) { return r.Refresh(ctx, b) })
+	}
+	return h
 }
 
 // OpenVFS builds a turn-scoped MountSession. Nil OpenVFS means no VFS.

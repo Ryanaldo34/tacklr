@@ -27,11 +27,12 @@ func skillMD(name, description, body string) string {
 	return "---\nname: " + name + "\ndescription: " + description + "\n---\n\n" + body
 }
 
-// TestLoader_loadsEachSkillDirectorySortedByName: a pack loads one skill
-// per real child directory, sorted by name, with its path and instructions;
-// files and symlinked directories are not skills. The catalog lists each
-// skill's name and description. An empty or missing root loads no skills.
-func TestLoader_loadsEachSkillDirectorySortedByName(t *testing.T) {
+// TestDir_listsEachSkillDirectoryAndReadsOne: a directory lists one skill
+// per real child directory, sorted by name, by name and description; files
+// and symlinked directories are not skills. Read returns a skill's
+// instructions, and a name with no skill is unknown. The catalog lists each
+// skill's name and description. An empty or missing root has no skills.
+func TestDir_listsEachSkillDirectoryAndReadsOne(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeSkillMD(t, root, "beta", skillMD("beta", "Beta skill", "Do beta things."))
@@ -42,28 +43,34 @@ func TestLoader_loadsEachSkillDirectorySortedByName(t *testing.T) {
 	if err := os.Symlink(filepath.Join(root, "alpha"), filepath.Join(root, "link")); err != nil {
 		t.Fatal(err)
 	}
+	dir := skills.Dir{Root: root}
 
-	loaded, err := skills.Loader{Root: root}.Load(t.Context())
-	empty, emptyErr := skills.Loader{Root: " "}.Load(t.Context())
-	missing, missingErr := skills.Loader{Root: filepath.Join(root, "missing")}.Load(t.Context())
+	listed, listErr := dir.List(t.Context())
+	alpha, readErr := dir.Read(t.Context(), "alpha")
+	_, unknownErr := dir.Read(t.Context(), "gamma")
+	empty, emptyErr := skills.Dir{Root: " "}.List(t.Context())
+	missing, missingErr := skills.Dir{Root: filepath.Join(root, "missing")}.List(t.Context())
 
-	if err != nil || len(loaded) != 2 {
-		t.Fatalf("load = %#v %v, want alpha and beta", loaded, err)
+	if listErr != nil || len(listed) != 2 || listed[0] != (skills.Summary{Name: "alpha", Description: "Alpha skill"}) {
+		t.Fatalf("list = %#v %v, want alpha then beta", listed, listErr)
 	}
-	if alpha := loaded[0]; alpha.Name != "alpha" || alpha.Instructions != "Do alpha things." || alpha.Path != filepath.Join(root, "alpha", "SKILL.md") {
-		t.Fatalf("first skill = %#v, want alpha with its instructions and path", alpha)
+	if readErr != nil || alpha.Instructions != "Do alpha things." {
+		t.Fatalf("read alpha = %#v %v, want its instructions", alpha, readErr)
 	}
-	if cat := skills.Catalog(loaded); cat != "Available skills:\n- alpha: Alpha skill\n- beta: Beta skill\n" {
+	if !errors.Is(unknownErr, skills.ErrUnknown) {
+		t.Fatalf("read gamma = %v, want ErrUnknown", unknownErr)
+	}
+	if cat := skills.Catalog(listed); cat != "Available skills:\n- alpha: Alpha skill\n- beta: Beta skill\n" {
 		t.Fatalf("catalog = %q", cat)
 	}
-	if empty != nil || emptyErr != nil || missing != nil || missingErr != nil {
+	if len(empty) != 0 || emptyErr != nil || len(missing) != 0 || missingErr != nil {
 		t.Fatalf("empty root = %#v %v, missing root = %#v %v, want no skills", empty, emptyErr, missing, missingErr)
 	}
 }
 
-// TestLoader_failsOnAPackItCannotLoad: each pack that cannot load fails
-// with an error that names the cause.
-func TestLoader_failsOnAPackItCannotLoad(t *testing.T) {
+// TestDir_failsOnADirectoryItCannotLoad: each directory that cannot load
+// fails with an error that names the cause.
+func TestDir_failsOnADirectoryItCannotLoad(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
 		docs map[string]string // dir -> SKILL.md; "" makes the dir only
@@ -90,19 +97,19 @@ func TestLoader_failsOnAPackItCannotLoad(t *testing.T) {
 				writeSkillMD(t, root, dir, doc)
 			}
 
-			_, err := skills.Loader{Root: root}.Load(t.Context())
+			_, err := skills.Dir{Root: root}.Read(t.Context(), "x")
 
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("load = %v, want %q", err, tc.want)
+				t.Fatalf("read = %v, want %q", err, tc.want)
 			}
 		})
 	}
 }
 
-// TestLoader_failsOnADirectoryItCannotReadOrAnEndedContext: an unreadable
-// skills directory fails the load, and a context that ends stops a load or
-// a Collect between two skills with the context's error.
-func TestLoader_failsOnADirectoryItCannotReadOrAnEndedContext(t *testing.T) {
+// TestDir_failsOnADirectoryItCannotReadOrAnEndedContext: an unreadable
+// skills directory fails the list, and an ended context stops it with the
+// context's error.
+func TestDir_failsOnADirectoryItCannotReadOrAnEndedContext(t *testing.T) {
 	t.Parallel()
 	unreadable := t.TempDir()
 	writeSkillMD(t, unreadable, "alpha", skillMD("alpha", "A", "Body."))
@@ -112,19 +119,14 @@ func TestLoader_failsOnADirectoryItCannotReadOrAnEndedContext(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o755) })
 	ended, cancel := context.WithCancel(t.Context())
 	cancel()
-	between, cancelBetween := context.WithCancel(t.Context())
 
-	_, readErr := skills.Loader{Root: unreadable}.Load(t.Context())
-	_, loadErr := skills.Loader{Root: t.TempDir()}.Load(ended)
-	_, collectErr := skills.Collect(between, []string{"a", "b"}, func(context.Context, string) ([]byte, string, error) {
-		cancelBetween()
-		return []byte(skillMD("a", "d", "body")), "a", nil
-	})
+	_, readErr := skills.Dir{Root: unreadable}.List(t.Context())
+	_, endedErr := skills.Dir{Root: t.TempDir()}.List(ended)
 
 	if readErr == nil || !strings.Contains(readErr.Error(), "read skills directory") {
-		t.Fatalf("load of an unreadable directory = %v, want a read error (tests must not run as root)", readErr)
+		t.Fatalf("list of an unreadable directory = %v, want a read error (tests must not run as root)", readErr)
 	}
-	if !errors.Is(loadErr, context.Canceled) || !errors.Is(collectErr, context.Canceled) {
-		t.Fatalf("load = %v, collect = %v, want context.Canceled", loadErr, collectErr)
+	if !errors.Is(endedErr, context.Canceled) {
+		t.Fatalf("list = %v, want context.Canceled", endedErr)
 	}
 }

@@ -1,12 +1,13 @@
 # Requires Go 1.27 (go.mod).
-.PHONY: test vet lint fmt cover coverage check wasm vet-wasm cloudflare-e2e deadcode rust-fmt-check rust-lint rust-test rust-cover
+.PHONY: test vet lint fmt cover coverage check wasm vet-wasm cloudflare-e2e deadcode sandbox-image
 
 # The harness core builds for WebAssembly (GOOS=js GOARCH=wasm) so a host can
 # run it outside a Linux worker, for example in a Cloudflare Durable Object.
 WASM_CORE = . ./message ./session ./session/orchestrator ./brain ./skills ./vfs/mount ./telemetry ./telemetry/otlpjson ./openai ./anthropic ./web ./server ./server/acp ./session/durableobject
 
-# The whole suite. It needs Linux, FUSE and Docker: Testcontainers starts
-# Postgres (pgvector), Helix and Temporal. -covermode=atomic is required with -race.
+# The whole suite. It needs Linux, Docker and /dev/kvm: Testcontainers starts
+# Postgres (pgvector), Helix and Temporal, and the sandbox tests boot
+# Firecracker microVMs. -covermode=atomic is required with -race.
 test:
 	go test -race -count=1 -covermode=atomic ./...
 
@@ -30,32 +31,17 @@ cloudflare-e2e:
 	cd examples/cloudflare/worker && bun install --frozen-lockfile && bun test e2e
 	./scripts/wasm-size.sh examples/cloudflare/worker/build/tacklr.wasm
 
-# Format all packages (gofmt + goimports if available) and the sandbox worker.
+# Format all packages (gofmt + goimports if available).
 fmt:
 	gofmt -w .
 	@command -v goimports >/dev/null 2>&1 && goimports -w -local github.com/ryanaldo34/tacklr . || true
-	cd $(WORKER) && cargo fmt
 
-# The sandbox worker (Rust). cargo runs in the crate directory, so rustup
-# uses the crate's rust-toolchain.toml. The Go tests of sandbox/supervisor
-# build the worker themselves (cargo build --release).
-WORKER = sandbox/worker
-
-rust-fmt-check:
-	cd $(WORKER) && cargo fmt --check
-
-rust-lint:
-	cd $(WORKER) && cargo clippy --locked --all-targets -- -D warnings
-
-rust-test:
-	cd $(WORKER) && cargo test --locked
-
-# jail.rs and main.rs run only in sandboxed processes, and Landlock stops
-# those processes from writing coverage data. tests/jail.rs tests each
-# sandbox layer in a child process, and the Go supervisor tests run the
-# whole worker. Every other line must be covered.
-rust-cover:
-	cd $(WORKER) && cargo llvm-cov --locked --ignore-filename-regex '(jail|main)\.rs$$' --fail-under-lines 100
+# The guest image of the sandbox microVMs in sandbox/image/out:
+# Firecracker, the guest kernel, and the root file system with the worker
+# as init. It needs curl, Docker and the kernel's build tools. The Go
+# sandbox tests build it themselves.
+sandbox-image:
+	./scripts/sandbox-image.sh
 
 # Functions nothing reaches: not the tests, not a main. Any finding fails.
 # The Linux packages use the tests as roots; the js/wasm bridge uses the
@@ -83,7 +69,7 @@ cover:
 coverage: cover
 
 # Full local gate: format check + lint + vet + race tests + coverage thresholds.
-check: vet wasm vet-wasm lint deadcode rust-fmt-check rust-lint rust-cover cover
+check: vet wasm vet-wasm lint deadcode cover
 	@unformatted=$$(gofmt -l .); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \

@@ -1,7 +1,6 @@
-// Package s3test runs the S3-compatible server live tests share. Every test
-// package of one go test run shares one server: a reusable container by
-// name, which Ryuk removes when the run ends. Each test gets a bucket of its
-// own.
+// Package s3test runs the S3-compatible server live tests share. Each test
+// binary starts one server, which Ryuk removes when the binary ends, and
+// each test gets a bucket of its own.
 package s3test
 
 import (
@@ -42,7 +41,6 @@ func server(t testing.TB) *url.URL {
 			testcontainers.WithEnv(map[string]string{"RUSTFS_ACCESS_KEY": key, "RUSTFS_SECRET_KEY": secret}),
 			testcontainers.WithExposedPorts("9000/tcp"),
 			testcontainers.WithWaitStrategy(wait.ForHTTP("/health").WithPort("9000/tcp")),
-			testcontainers.WithReuseByName("tacklr-s3-"+testcontainers.SessionID()),
 		)
 		if err != nil {
 			serverErr = err

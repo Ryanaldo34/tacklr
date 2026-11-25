@@ -21,11 +21,11 @@ import (
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/server/acp"
 	"github.com/ryanaldo34/tacklr/session"
-	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 // Runtime is the session client and agent an ACP request runs against.
-// Workspace says the sessions have a workspace, so clients may bind to it.
+// Workspace says the sessions have a workspace (a sandbox opens it), so
+// clients may bind backends to it.
 type Runtime struct {
 	Client    session.Client
 	Agent     tacklr.AgentOptions
@@ -37,11 +37,12 @@ type Runtime struct {
 // system prompt get test defaults.
 func NewRuntime(t *testing.T, model tacklr.Model, spec tacklr.AgentOptions) *Runtime {
 	t.Helper()
-	return NewWorkspaceRuntime(t, model, spec, workspace.Config{})
+	return NewWorkspaceRuntime(t, model, spec, false)
 }
 
-// NewWorkspaceRuntime is NewRuntime with ws as the agent's workspace.
-func NewWorkspaceRuntime(t *testing.T, model tacklr.Model, spec tacklr.AgentOptions, ws workspace.Config) *Runtime {
+// NewWorkspaceRuntime is NewRuntime whose sessions have a workspace when
+// workspace is true, so clients may bind backends to it.
+func NewWorkspaceRuntime(t *testing.T, model tacklr.Model, spec tacklr.AgentOptions, workspace bool) *Runtime {
 	t.Helper()
 	if spec.Model == nil {
 		spec.Model = model
@@ -55,7 +56,7 @@ func NewWorkspaceRuntime(t *testing.T, model tacklr.Model, spec tacklr.AgentOpti
 	if spec.SystemPrompt == "" {
 		spec.SystemPrompt = "test prompt"
 	}
-	return &Runtime{Client: livesess.Runtime(t, spec, ws), Agent: spec, Workspace: ws.Open != nil}
+	return &Runtime{Client: livesess.Runtime(t, spec), Agent: spec, Workspace: workspace}
 }
 
 // Server is an anonymous ACP server for r, with its wire state in wire

@@ -34,9 +34,9 @@ override:
     threshold: 99
   - path: ^server/acp$
     threshold: 99
-  # Uncovered: socketpair(2) and net.FileConn failing in startProcess
-  # (fd exhaustion), and a supervisor that sends neither ready nor exit
-  # first, which our supervisor never does.
+  # Uncovered: the host failing to make a VM's directory, sockets or
+  # configuration file in startProcess, and a supervisor that sends neither
+  # ready nor exit first, which our supervisor never does.
   - path: ^sandbox$
     threshold: 98
   - path: ^sandbox/supervisor$
@@ -55,12 +55,8 @@ override:
     threshold: 93
   - path: ^session/temporal/worker$
     threshold: 97
-  - path: ^shell$
-    threshold: 95
   - path: ^vfs$
     threshold: 99
-  - path: ^vfs/fuse$
-    threshold: 97
   - path: ^vfsindex$
     threshold: 99
   - path: ^telemetry/export$
@@ -96,5 +92,7 @@ exclude:
     - internal/pgtest
     - internal/faultproxy
     - internal/s3test
+    # The sandbox supervisor and worker for tests.
+    - sandbox/sandboxtest
 
 breakdown-file-name: coverage.breakdown

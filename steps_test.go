@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -18,8 +17,6 @@ import (
 	"github.com/ryanaldo34/tacklr/message"
 	"github.com/ryanaldo34/tacklr/openai"
 	"github.com/ryanaldo34/tacklr/session"
-	"github.com/ryanaldo34/tacklr/vfs"
-	"github.com/ryanaldo34/tacklr/workspace"
 )
 
 // TestInfer_streamsAReplyWhoseRoundTheNextRequestAnswers: Infer streams
@@ -143,24 +140,20 @@ func TestCommit_aPromptPastAnOpenRoundCancelsItsOpenCalls(t *testing.T) {
 
 // TestCommit_cutsAResultTooLargeForTheWindow: a result too large for the
 // window even with nothing left to summarize is cut to fit, on a rune
-// boundary. With an Overflow its full text is first kept and the cut
-// result says where; without, the note says it was not kept. A Keep or a
-// count that fails, or a round with no result to cut, fails the commit.
+// boundary, and says to run a narrower command for the rest. A count that
+// fails, or a round with no result to cut, fails the commit.
 func TestCommit_cutsAResultTooLargeForTheWindow(t *testing.T) {
 	t.Parallel()
 	ascii, runes := strings.Repeat("x", 2000)+"END", strings.Repeat("─", 700)
 	cases := []struct {
-		name     string
-		full     string
-		overflow string // "", "writable" or "read-only"
-		count    func([]*message.Message) (int, error)
-		prompt   bool
-		note     string // the cut result's note
-		fail     string // the commit's error
+		name   string
+		full   string
+		count  func([]*message.Message) (int, error)
+		prompt bool
+		note   string // the cut result's note
+		fail   string // the commit's error
 	}{
-		{name: "kept", full: ascii, overflow: "writable", count: windowTokens, note: "The full output is at /workspace/work/overflow/trim/b1.txt; read it with start and end."},
-		{name: "not kept", full: runes, count: windowTokens, note: "The full output was not kept."},
-		{name: "a keep that fails", full: ascii, overflow: "read-only", count: windowTokens, fail: "stage full tool result"},
+		{name: "cut", full: runes, count: windowTokens, note: "Run a narrower command or query to see the rest."},
 		// The prompt's commit counts once, the round's once, then the cut.
 		{name: "a count that fails after a cut", full: ascii, count: failAfter(2), fail: "count tokens"},
 		{name: "a prompt with no result to cut", full: ascii, count: windowTokens, prompt: true, fail: "the round needs 2005 tokens"},
@@ -169,29 +162,14 @@ func TestCommit_cutsAResultTooLargeForTheWindow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			big := tacklr.NewTool(tacklr.ToolConfig{Name: "big", Handler: func(context.Context) (string, error) { return tc.full, nil }})
-			dir := t.TempDir()
-			ms, err := vfs.Tree(vfs.At("work", vfs.Local(dir)))(t.Context(), "trim", vfs.Request{})
-			if err != nil {
-				t.Fatal(err)
-			}
 			model, _ := counted(t, tc.count)
 			opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 500, Tools: []*tacklr.Tool{big}}
-			if tc.overflow != "" {
-				if opts.Overflow, err = workspace.Overflow(ms, "/workspace/work/overflow"); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if tc.overflow == "read-only" {
-				if err := os.Chmod(dir, 0o555); err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-			}
 			h := newHarness(t, "trim", opts)
 			if err := h.Commit(t.Context(), tacklr.CommitIn{Users: []*message.Message{userMsg("go")}}, newStream(t).out); err != nil {
 				t.Fatal(err)
 			}
 
+			var err error
 			if tc.prompt {
 				err = h.Commit(t.Context(), tacklr.CommitIn{Users: []*message.Message{userMsg(tc.full)}}, newStream(t).out)
 			} else {
@@ -208,9 +186,6 @@ func TestCommit_cutsAResultTooLargeForTheWindow(t *testing.T) {
 			}
 			if err != nil || !utf8.ValidString(cut) || cut[:3] != tc.full[:3] || !strings.HasSuffix(cut, tc.note+"]") || len(cut) >= len(tc.full) {
 				t.Fatalf("result = %q %v, want it cut on a rune with %q", cut, err, tc.note)
-			}
-			if kept, _ := ms.Route(t.Context(), "/workspace/work/overflow/trim/b1.txt").ReadFile(t.Context()); tc.overflow != "" && string(kept) != tc.full {
-				t.Fatalf("kept = %q, want the full result", kept)
 			}
 		})
 	}
