@@ -13,7 +13,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/storetest"
-	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
 // TestEngine_everyEntryPointRejectsAnEmptyScope: every engine call with an
@@ -21,7 +20,7 @@ import (
 func TestEngine_everyEntryPointRejectsAnEmptyScope(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Graph(t)))
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +104,7 @@ func TestEngine_auditRecordsEveryServedReadAndWrite(t *testing.T) {
 		events = append(events, ev)
 		return nil
 	}
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithAudit(record), brain.WithGraph(helixtest.Graph(t)))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithAudit(record), brain.WithGraph(memoryGraph()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +172,7 @@ func TestEngine_aFailedAuditRecordFailsEveryServedReadAndWrite(t *testing.T) {
 		}
 		return nil
 	}
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithAudit(record), brain.WithGraph(helixtest.Graph(t)))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithAudit(record), brain.WithGraph(memoryGraph()))
 	if err != nil {
 		t.Fatal(err)
 	}

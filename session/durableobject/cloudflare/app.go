@@ -13,28 +13,24 @@ import (
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
-	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/session/durableobject"
 	"github.com/ryanaldo34/tacklr/telemetry/otlpjson"
 )
 
-// App is a host's Worker: its session objects, and the protocol server
-// that its clients connect to.
+// App is a Worker: its session objects, and the host's own routes over a
+// client of them.
 type App struct {
 	// Sessions is the env name of the session objects' Durable Object
 	// namespace (wrangler's durable_objects binding).
 	Sessions string
-	// Connections is the env name of the connection objects' namespace.
-	// Each WebSocket to the Worker gets its own connection object, which
-	// serves it with Server.
-	Connections string
 	// Config is what every session object of the isolate runs with. It is
 	// called once per isolate, on the first request.
 	Config func(Env) (durableobject.Config, error)
-	// Server is the protocol server (such as ACP) over a client of the
-	// session objects, with its network policy set. It is called once per
-	// isolate. The Worker serves its other routes with Server.HTTPMux.
-	Server func(Env, *durableobject.Client) (*server.Server, error)
+	// Handler is the host's routes over a session.Client of the session
+	// objects: the Worker's every request from outside. It is called once
+	// per isolate. A response body streams, so a route can follow a
+	// session's events.
+	Handler func(Env, *durableobject.Client) (http.Handler, error)
 	// MaxIdleObjects bounds the idle objects the isolate keeps in memory
 	// (durableobject.NewRegistry; zero: 64).
 	MaxIdleObjects int
@@ -54,16 +50,14 @@ func (e Env) String(name string) string {
 
 // Serve serves app to shim.js and blocks. Call it from main.
 func Serve(app App) {
-	if app.Sessions == "" || app.Connections == "" || app.Config == nil || app.Server == nil {
-		panic("cloudflare: App needs Sessions, Connections, Config and Server")
+	if app.Sessions == "" || app.Config == nil || app.Handler == nil {
+		panic("cloudflare: App needs Sessions, Config and Handler")
 	}
 	w := &worker{app: app, objects: durableobject.NewRegistry(app.MaxIdleObjects)}
 	js.Global().Set("__tacklr", map[string]any{
-		"connections": app.Connections,
-		"object":      js.FuncOf(w.object),
-		"alarm":       js.FuncOf(w.alarm),
-		"front":       js.FuncOf(w.front),
-		"connect":     js.FuncOf(w.connect),
+		"object": js.FuncOf(w.object),
+		"alarm":  js.FuncOf(w.alarm),
+		"front":  js.FuncOf(w.front),
 	})
 	select {}
 }
@@ -78,7 +72,6 @@ type worker struct {
 	err      error
 	platform platform
 	cfg      durableobject.Config
-	server   *server.Server
 	routes   http.Handler
 	// tp is the tracer provider when the env names an OTLP endpoint.
 	tp *sdktrace.TracerProvider
@@ -110,14 +103,8 @@ func (w *worker) build(env js.Value) error {
 	if w.cfg.Sealer == nil {
 		return errors.New("cloudflare: Config needs a Sealer")
 	}
-	if w.server, err = w.app.Server(e, durableobject.NewClient(w.platform)); err != nil {
-		return err
-	}
-	if err := w.server.Policy(); err != nil {
-		return err
-	}
-	w.routes = w.server.HTTPMux()
-	return nil
+	w.routes, err = w.app.Handler(e, durableobject.NewClient(w.platform))
+	return err
 }
 
 // acquire is the object of the shim's host, for one request. Its release
@@ -176,51 +163,14 @@ func (w *worker) alarm(_ js.Value, args []js.Value) any {
 	})
 }
 
-// front(env, request) serves the Worker's requests that are not a
-// WebSocket: the shim sends those to a connection object.
+// front(env, request) serves a request to the Worker with the host's
+// routes.
 func (w *worker) front(_ js.Value, args []js.Value) any {
 	env, req := args[0], args[1]
 	if err := w.setup(env); err != nil {
 		return rejected(err)
 	}
 	return serve(w.routes, req, func() {})
-}
-
-// connect(env, request) admits a WebSocket request to a connection
-// object. It is a Promise of {status} when the server refuses it, else of
-// {status: 101, serve}: the shim accepts the socket and calls
-// serve(socket), which serves it until it closes.
-func (w *worker) connect(_ js.Value, args []js.Value) any {
-	env, r := args[0], args[1]
-	if err := w.setup(env); err != nil {
-		return rejected(err)
-	}
-	return promise(func() (any, error) {
-		req, err := request(r)
-		if err != nil {
-			return nil, err
-		}
-		o := jsObject.New()
-		c, status := w.server.Connect(req)
-		if status != 0 {
-			o.Set("status", status)
-			return o, nil
-		}
-		var serveFn js.Func
-		serveFn = js.FuncOf(func(_ js.Value, args []js.Value) any {
-			serveFn.Release()
-			s := newSocket(args[0])
-			go func() {
-				defer s.close()
-				c.Serve(context.Background(), s)
-				w.flush()
-			}()
-			return nil
-		})
-		o.Set("status", http.StatusSwitchingProtocols)
-		o.Set("serve", serveFn)
-		return o, nil
-	})
 }
 
 // rejected is a Promise rejected with err.

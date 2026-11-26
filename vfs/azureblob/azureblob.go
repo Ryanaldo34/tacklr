@@ -6,7 +6,6 @@ package azureblob
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 
@@ -21,21 +20,12 @@ import (
 // API is a vfs.S3API over the Azure Blob SDK (Azure Blob Storage and
 // Azurite).
 type API struct {
+	// Client is required.
 	Client *azblob.Client
-}
-
-func (a API) require() error {
-	if a.Client == nil {
-		return fmt.Errorf("azureblob: client required")
-	}
-	return nil
 }
 
 // Head implements vfs.S3API.
 func (a API) Head(ctx context.Context, bucket, key string) (vfs.S3Object, error) {
-	if err := a.require(); err != nil {
-		return vfs.S3Object{}, err
-	}
 	props, err := a.Client.ServiceClient().NewContainerClient(bucket).NewBlobClient(key).GetProperties(ctx, nil)
 	if err != nil {
 		return vfs.S3Object{}, mapBlobError(err)
@@ -53,9 +43,6 @@ func (a API) Head(ctx context.Context, bucket, key string) (vfs.S3Object, error)
 
 // Get implements vfs.S3API.
 func (a API) Get(ctx context.Context, bucket, key string, off, n int64) (io.ReadCloser, error) {
-	if err := a.require(); err != nil {
-		return nil, err
-	}
 	out, err := a.Client.DownloadStream(ctx, bucket, key, &azblob.DownloadStreamOptions{
 		Range: azblob.HTTPRange{Offset: off, Count: max(n, 0)},
 	})
@@ -67,27 +54,18 @@ func (a API) Get(ctx context.Context, bucket, key string, off, n int64) (io.Read
 
 // Put implements vfs.S3API. UploadStream reads body in blocks; size is unused.
 func (a API) Put(ctx context.Context, bucket, key string, body io.Reader, _ int64) error {
-	if err := a.require(); err != nil {
-		return err
-	}
 	_, err := a.Client.UploadStream(ctx, bucket, key, body, nil)
 	return mapBlobError(err)
 }
 
 // Delete implements vfs.S3API.
 func (a API) Delete(ctx context.Context, bucket, key string) error {
-	if err := a.require(); err != nil {
-		return err
-	}
 	_, err := a.Client.DeleteBlob(ctx, bucket, key, nil)
 	return mapBlobError(err)
 }
 
 // List implements vfs.S3API with delimiter "/" for virtual directories.
 func (a API) List(ctx context.Context, bucket, prefix string) (keys []string, dirs []string, err error) {
-	if err := a.require(); err != nil {
-		return nil, nil, err
-	}
 	opts := &container.ListBlobsHierarchyOptions{}
 	if prefix != "" {
 		opts.Prefix = &prefix
@@ -130,8 +108,7 @@ func mapBlobError(err error) error {
 	if bloberror.HasCode(err, bloberror.BlobNotFound, bloberror.ContainerNotFound) {
 		return vfs.ErrNotExist
 	}
-	var re *azcore.ResponseError
-	if errors.As(err, &re) && re.StatusCode == http.StatusNotFound {
+	if re, ok := errors.AsType[*azcore.ResponseError](err); ok && re.StatusCode == http.StatusNotFound {
 		return vfs.ErrNotExist
 	}
 	return err

@@ -21,8 +21,6 @@ import (
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-var _ telemetry.ProviderStatus = (*APIStatusError)(nil)
-
 var (
 	// ErrIncompleteStream is a stream that closed before its terminal event.
 	ErrIncompleteStream = errors.New("incomplete provider stream")

@@ -74,17 +74,25 @@ func (s *streamAssembler) MessageFromComplete(chunk LLMResponseChunk) *message.M
 
 // invokeTurn calls the model on the committed window. The window changes
 // only when a round commits or a window effect applies, never here.
-func (a *Harness) invokeTurn(ctx context.Context) (<-chan LLMResponseChunk, error) {
+func (a *Harness) invokeTurn(ctx context.Context) <-chan LLMResponseChunk {
 	msgs := a.window.Messages()
 	a.modelSeq++
 	ctx = a.modelIdentity(ctx)
 	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, a.modelSeq, windowShape(msgs))
-	ch, err := a.model.Invoke(ctx, a.request(msgs))
-	if err != nil {
-		span.End(err, telemetry.TokenUsage{})
-		return nil, err
+	return watchModelStream(ctx, span, a.invoke(ctx, a.request(msgs)))
+}
+
+// invoke sends req to the model. A request the model cannot send is a
+// stream of that one error, so each reader has one failure path.
+func (a *Harness) invoke(ctx context.Context, req ModelRequest) <-chan LLMResponseChunk {
+	ch, err := a.model.Invoke(ctx, req)
+	if err == nil {
+		return ch
 	}
-	return watchModelStream(ctx, span, ch), nil
+	failed := make(chan LLMResponseChunk, 1)
+	failed <- LLMResponseChunk{Type: session.EventError, Content: err.Error(), Error: err, IsComplete: true}
+	close(failed)
+	return failed
 }
 
 // modelIdentity adds the model's static GenAI identity to ctx for spans.
@@ -141,11 +149,7 @@ func (a *Harness) summarize(ctx context.Context, window []*message.Message) (str
 	a.modelSeq++
 	invokeMsgs := slices.Concat(window, []*message.Message{{Role: message.RoleDeveloper, Content: summaryInstruction}})
 	mctx, mspan := telemetry.StartModelSpan(a.modelIdentity(ctx), telemetry.ModelPhaseCompress, a.modelSeq, windowShape(invokeMsgs))
-	events, err := a.model.Invoke(ContextWithToolChoiceNone(mctx), a.request(invokeMsgs))
-	if err != nil {
-		mspan.End(err, telemetry.TokenUsage{})
-		return "", fmt.Errorf("context compress invoke failed: %w", err)
-	}
+	events := a.invoke(ContextWithToolChoiceNone(mctx), a.request(invokeMsgs))
 	var body strings.Builder
 	var streamErr error
 	var usage telemetry.TokenUsage
@@ -201,50 +205,31 @@ Relevant Context for Remaining Todos: Only information the next todos are likely
 	prompt.WriteString(planB.String())
 	prompt.WriteString("</current_plan>")
 
-	// Keep tools and the live system prompt so the cached prefix matches a
-	// normal turn. The handoff task is an extra developer message; tool_choice
-	// none prevents calls. On model failure, install a plan-derived handoff.
 	invokeWindow := append(slices.Clone(window), &message.Message{Role: message.RoleDeveloper, Content: prompt.String()})
 	mctx, mspan := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseHandoff, 0, windowShape(invokeWindow))
-	events, err := a.model.Invoke(ContextWithToolChoiceNone(mctx), a.request(invokeWindow))
-	var lastCompletedMessage string
-	usedFallback := false
-	if err != nil {
-		mspan.End(err, telemetry.TokenUsage{})
-		slog.ErrorContext(ctx, "handoff model call failed; using plan-derived fallback text",
-			"area", telemetry.AreaModelTasks, "error", err)
-		lastCompletedMessage = fallbackHandoffContent(plan)
-		usedFallback = true
-	} else {
-		asm := newStreamAssembler()
-		var streamErr error
-		var usage telemetry.TokenUsage
-		for chunk := range events {
-			mergeTokenUsage(&usage, chunk)
-			if err := chunk.Err(); err != nil {
-				streamErr = fmt.Errorf("handoff model stream failed: %w", err)
-				break
-			}
-			asm.AddDelta(chunk)
-			if chunk.IsComplete && chunk.Type == session.EventMessage {
-				if content := asm.CompleteContent(chunk); content != "" {
-					lastCompletedMessage = content
-				}
-			}
+	events := a.invoke(ContextWithToolChoiceNone(mctx), a.request(invokeWindow))
+	asm := newStreamAssembler()
+	var handoff string
+	var streamErr error
+	var usage telemetry.TokenUsage
+	for chunk := range events {
+		mergeTokenUsage(&usage, chunk)
+		if err := chunk.Err(); err != nil {
+			streamErr = fmt.Errorf("handoff model stream failed: %w", err)
+			break
 		}
-		mspan.End(streamErr, usage)
-		if streamErr != nil {
-			slog.ErrorContext(ctx, "handoff model stream failed; using plan-derived fallback text",
-				"area", telemetry.AreaModelTasks, "error", streamErr)
-			lastCompletedMessage = fallbackHandoffContent(plan)
-			usedFallback = true
-		} else if strings.TrimSpace(lastCompletedMessage) == "" {
-			lastCompletedMessage = fallbackHandoffContent(plan)
-			usedFallback = true
+		asm.AddDelta(chunk)
+		if chunk.IsComplete && chunk.Type == session.EventMessage {
+			handoff = cmp.Or(asm.CompleteContent(chunk), handoff)
 		}
 	}
-
-	return lastCompletedMessage, usedFallback, nil
+	mspan.End(streamErr, usage)
+	if streamErr != nil || strings.TrimSpace(handoff) == "" {
+		slog.WarnContext(ctx, "the model gave no handoff; using plan-derived fallback text",
+			"area", telemetry.AreaModelTasks, "error", streamErr)
+		return fallbackHandoffContent(plan), true, nil
+	}
+	return handoff, false, nil
 }
 
 func windowShape(msgs []*message.Message) telemetry.WindowShape {

@@ -1,17 +1,15 @@
-// Package sheets is the Sheets v4 JSON the vfs adapter reads and writes.
+// Package sheets is the Sheets v4 JSON the vfs adapter reads.
 package sheets
 
 // Spreadsheet is spreadsheets.get with grid data.
 type Spreadsheet struct {
-	SpreadsheetID string        `json:"spreadsheetId,omitempty"`
-	Sheets        []*Sheet      `json:"sheets,omitempty"`
-	NamedRanges   []*NamedRange `json:"namedRanges,omitempty"`
+	Sheets      []*Sheet      `json:"sheets,omitempty"`
+	NamedRanges []*NamedRange `json:"namedRanges,omitempty"`
 }
 
-// Sheet is one tab: its properties, merges and cells.
+// Sheet is one tab: its properties and cells.
 type Sheet struct {
 	Properties *SheetProperties `json:"properties,omitempty"`
-	Merges     []*GridRange     `json:"merges,omitempty"`
 	Data       []*GridData      `json:"data,omitempty"`
 }
 
@@ -117,33 +115,4 @@ type Border struct {
 	Style      string      `json:"style,omitempty"`
 	Color      *Color      `json:"color,omitempty"`
 	ColorStyle *ColorStyle `json:"colorStyle,omitempty"`
-}
-
-// BatchUpdateSpreadsheetRequest is spreadsheets.batchUpdate.
-type BatchUpdateSpreadsheetRequest struct {
-	Requests []*Request `json:"requests,omitempty"`
-}
-
-// Request is one batchUpdate edit.
-type Request struct {
-	RepeatCell *RepeatCellRequest `json:"repeatCell,omitempty"`
-}
-
-// RepeatCellRequest sets the Fields of Cell on every cell of Range.
-type RepeatCellRequest struct {
-	Range  *GridRange `json:"range,omitempty"`
-	Cell   *CellData  `json:"cell,omitempty"`
-	Fields string     `json:"fields,omitempty"`
-}
-
-// BatchUpdateValuesRequest is spreadsheets.values.batchUpdate.
-type BatchUpdateValuesRequest struct {
-	ValueInputOption string        `json:"valueInputOption,omitempty"`
-	Data             []*ValueRange `json:"data,omitempty"`
-}
-
-// ValueRange is the values of an A1 range.
-type ValueRange struct {
-	Range  string     `json:"range,omitempty"`
-	Values [][]string `json:"values,omitempty"`
 }

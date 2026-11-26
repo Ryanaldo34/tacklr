@@ -266,8 +266,7 @@ func (w *workflowRuntime) route() {
 // worker holding the session's harness is gone. The step runs again on the
 // worker the shared queue picks, which builds the harness.
 func (w *workflowRuntime) lostWorker(err error) bool {
-	var timeout *temporal.TimeoutError
-	if errors.As(err, &timeout) && timeout.TimeoutType() == enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START {
+	if timeout, ok := errors.AsType[*temporal.TimeoutError](err); ok && timeout.TimeoutType() == enumspb.TIMEOUT_TYPE_SCHEDULE_TO_START {
 		w.routed, w.liveURL = false, ""
 		return true
 	}
@@ -562,5 +561,3 @@ func (w *workflowRuntime) takeCancel() bool {
 func turnCanceled(ctx workflow.Context, err error) bool {
 	return ctx.Err() != nil || temporal.IsCanceledError(err) || errors.Is(err, workflow.ErrCanceled) || errors.Is(err, workflow.ErrSessionFailed)
 }
-
-var _ orchestrator.Runtime = (*workflowRuntime)(nil)

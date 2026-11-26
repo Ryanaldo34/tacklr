@@ -19,48 +19,19 @@ type Codec interface {
 	Decode(ctx context.Context, path, mediaType string, data []byte) (Document, error)
 }
 
-// Encoder is the optional write side of a Codec. Rich document codecs use it
-// to encode the edited canonical projection back to source bytes.
-type Encoder interface {
-	Encode(ctx context.Context, doc Document) ([]byte, error)
-}
-
-// Creator builds a new document from a create-mode Mutation.
-// Codecs that own a representation (blocks, grid) implement this.
-// MountSession looks up the codec by media type; it does not switch on vendors.
-type Creator interface {
-	Create(path, mediaType string, mut Mutation) (Document, error)
-}
-
-func (r *ContentRegistry) create(path, mediaType string, mut Mutation) (Document, error) {
-	if c, ok := r.codec(mediaType); ok {
-		if cr, ok := c.(Creator); ok {
-			return cr.Create(path, mediaType, mut)
-		}
-	}
-	if mut.Blocks != nil {
-		return nil, fmt.Errorf("vfs: blocks require a structured codec")
-	}
-	body := ""
-	if mut.Content != nil {
-		body = *mut.Content
-	}
-	return NewTextDocument(path, mediaType, "utf-8", body), nil
-}
-
 // IdentityCodec is a Codec whose persist form is the UTF-8 payload itself
 // (no container). TextCodec implements it. Office/cloud codecs (Word, Notion,
-// Google Docs) must not — the shell (vfs.Files) then refuses writes and the
-// write tool uses WriteDocument. Register those codecs under their native media types; do not
-// steal text/markdown.
+// Google Docs) must not — the shell (vfs.Files) then refuses writes.
+// Register those codecs under their native media types; do not steal
+// text/markdown.
 type IdentityCodec interface {
 	Codec
 	Identity()
 }
 
-// ContentRegistry maps media types to the codecs a MountSession reads and
-// writes documents with. It is immutable: NewContentRegistry builds one, and
-// a host adds codecs to its tree with OpenVFS.WithCodecs.
+// ContentRegistry maps media types to the codecs a MountSession reads
+// documents with. It is immutable: NewContentRegistry builds one, and a host
+// adds codecs to its tree with OpenVFS.WithCodecs.
 type ContentRegistry struct {
 	codecs map[string]Codec
 }
@@ -167,33 +138,13 @@ func (r *ContentRegistry) HasStructure(mediaType string) bool {
 	return normalizeMediaType(mediaType) == "text/markdown" || r.Projected(mediaType)
 }
 
-// Encode is doc as the bytes its codec stores, or its text when the codec
-// does not encode.
-func (r *ContentRegistry) Encode(ctx context.Context, doc Document) ([]byte, error) {
-	if doc == nil {
-		return nil, ErrNotTextual
-	}
-	if c, ok := r.codec(doc.MediaType()); ok {
-		if enc, ok := c.(Encoder); ok {
-			return enc.Encode(ctx, doc)
-		}
-	}
-	text, ok := doc.(Textual)
-	if !ok {
-		return nil, ErrNotTextual
-	}
-	return EncodeTextual(text)
-}
-
 // Lookup returns the codec bound to mediaType, if any.
 func (r *ContentRegistry) Lookup(mediaType string) (Codec, bool) {
 	return r.codec(mediaType)
 }
 
 func normalizeMediaType(mediaType string) string {
-	if i := strings.IndexByte(mediaType, ';'); i >= 0 {
-		mediaType = mediaType[:i]
-	}
+	mediaType, _, _ = strings.Cut(mediaType, ";")
 	return strings.ToLower(strings.TrimSpace(mediaType))
 }
 
@@ -231,6 +182,18 @@ func DetectMediaType(virtualPath string, sample []byte) string {
 	return "application/octet-stream"
 }
 
+// mediaTypeOf is the type a backend declared for a file (its parameters
+// dropped), or the type DetectMediaType finds from name and sample when the
+// backend declared none or only octet-stream, its "unknown".
+func mediaTypeOf(declared, name string, sample []byte) string {
+	t, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(declared)), ";")
+	t = strings.TrimSpace(t)
+	if t == "" || t == "application/octet-stream" || t == "binary/octet-stream" {
+		return DetectMediaType(name, sample)
+	}
+	return t
+}
+
 var extMediaTypes = map[string]string{
 	".txt": "text/plain", ".md": "text/markdown", ".markdown": "text/markdown",
 	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -252,8 +215,8 @@ func sniffBytes(sample []byte) string {
 		sample = sample[:512]
 	}
 	mt := http.DetectContentType(sample)
-	if i := strings.IndexByte(mt, ';'); i >= 0 {
-		mt = strings.TrimSpace(mt[:i])
+	if before, _, ok := strings.Cut(mt, ";"); ok {
+		mt = strings.TrimSpace(before)
 	}
 	if mt != "" && mt != "application/octet-stream" {
 		if strings.HasPrefix(mt, "text/") && !utf8.Valid(sample) {

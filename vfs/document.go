@@ -1,9 +1,5 @@
 package vfs
 
-import (
-	"strings"
-)
-
 // Document is the general content IR. Codecs produce Document values that are
 // independent of storage backends (local, S3, Drive, …).
 //
@@ -19,8 +15,6 @@ type Document interface {
 //
 // Text() is that plaintext (FUSE / encode). Line numbers are
 // 1-based. Lines(start, end) is half-open [start, end).
-// SetText / SetLine / ReplaceLines mutate this value; persist with WriteDocument.
-// SetText on Docs/Word applies HTML then SetBlocks; spreadsheets return ErrProjected.
 type Textual interface {
 	Document
 	Encoding() string
@@ -28,9 +22,6 @@ type Textual interface {
 	LineCount() int
 	Line(n int) (string, error)
 	Lines(start, end int) ([]string, error)
-	SetText(text string) error
-	SetLine(n int, line string) error
-	ReplaceLines(start, end int, replacement []string) error
 }
 
 // Structured is optional for documents with a block tree (Markdown headings,
@@ -80,53 +71,18 @@ type Block struct {
 	Style StyleMeta
 }
 
-// FindBlock looks up by ID or Style.Attributes["heading_path"] (exact).
-func FindBlock(blocks []Block, idOrPath string) (Block, bool) {
-	idOrPath = strings.TrimSpace(idOrPath)
-	if idOrPath == "" {
-		return Block{}, false
-	}
-	for _, b := range blocks {
-		if b.ID == idOrPath {
-			return b, true
-		}
-		if b.Style.Attributes != nil && b.Style.Attributes["heading_path"] == idOrPath {
-			return b, true
-		}
-	}
-	return Block{}, false
-}
-
-// BlockReplaceSpan returns half-open 1-based lines to replace for a block.
-// For headings, includeHeading false skips the heading line (body only).
-func BlockReplaceSpan(b Block, includeHeading bool) (start, end int, err error) {
-	start, end = b.Style.Span.StartLine, b.Style.Span.EndLine
-	if start < 1 || end < start {
-		return 0, 0, ErrLineOutOfRange
-	}
-	if b.Kind == BlockKindHeading && !includeHeading {
-		start++ // body only; an empty body gives start == end
-	}
-	return start, end, nil
-}
-
 // ir is the one document checkout. Codecs pick a body (text, blocks, or grid).
 // MountSession and tools see Path, MediaType, Textual, Structured, and optional
 // AsGrid / AsRich — not backends or concrete file types.
 type IR struct {
 	path, mediaType, encoding string
 	body                      body
-	hint                      persistHint
 }
 
 type body interface {
 	text() string
 	lineStarts() []int
-	setText(string) error
-	setLine(int, string) error
-	replaceLines(int, int, []string) error
 	blocks(mediaType string) []Block
-	fingerprint() string
 }
 
 type textBody struct {
@@ -142,9 +98,7 @@ func NewTextDocument(path, mediaType, encoding, text string) *IR {
 	if mediaType == "" {
 		mediaType = "text/plain"
 	}
-	d := &IR{path: path, mediaType: mediaType, encoding: encoding, body: &textBody{}}
-	_ = d.SetText(text)
-	return d
+	return &IR{path: path, mediaType: mediaType, encoding: encoding, body: &textBody{payload: text, starts: lineStartsOf(text)}}
 }
 
 // newIR is a UTF-8 checkout of body b.
@@ -164,10 +118,6 @@ func asIR(doc Document) (*IR, bool) {
 type Grid interface {
 	Sheets() []Sheet
 	NamedRanges() []NamedRange
-	Cell(key, a1 string) (Cell, error)
-	ReadRows(key string, start, end int) (Sheet, []string, error)
-	ReadCell(key, a1 string) (string, error)
-	ReadRangeTSV(key, a1 string) (string, error)
 }
 
 // AsGrid reports whether doc is represented as a spreadsheet grid.
@@ -192,8 +142,6 @@ func asGridBody(doc Document) (*gridBody, bool) {
 type Rich interface {
 	Tabs() []DocTab
 	Blocks() []Block
-	ReplaceBlock(id, text string, includeHeading bool) error
-	SetBlocks(blocks []Block)
 }
 
 // AsRich reports whether doc is represented as a block tree (Docs / Word).
@@ -249,20 +197,6 @@ func (d *IR) Lines(start, end int) ([]string, error) {
 	return out, nil
 }
 
-func (d *IR) SetText(text string) error {
-	return d.body.setText(text)
-}
-
-func (d *IR) SetLine(n int, line string) error {
-	return d.body.setLine(n, line)
-}
-
-func (d *IR) ReplaceLines(start, end int, replacement []string) error {
-	return d.body.replaceLines(start, end, replacement)
-}
-
-func (d *IR) ContentFingerprint() string { return d.body.fingerprint() }
-
 func (d *IR) bindPath(virtual string) { d.path = virtual }
 
 func lineAt(text string, starts []int, i int) string {
@@ -273,85 +207,8 @@ func lineAt(text string, starts []int, i int) string {
 	return text[start:]
 }
 
-func (b *textBody) text() string        { return b.payload }
-func (b *textBody) lineStarts() []int   { return b.starts }
-func (b *textBody) fingerprint() string { return ContentHash(b.payload) }
+func (b *textBody) text() string      { return b.payload }
+func (b *textBody) lineStarts() []int { return b.starts }
 func (b *textBody) blocks(mediaType string) []Block {
 	return structureFor(mediaType, b.payload, b.starts)
 }
-
-func (b *textBody) setText(text string) error {
-	b.payload = text
-	b.starts = lineStartsOf(text)
-	return nil
-}
-
-func (b *textBody) setLine(n int, line string) error {
-	return b.replaceLines(n, n+1, []string{line})
-}
-
-func (b *textBody) replaceLines(start, end int, replacement []string) error {
-	s, err := spliceLines(b.payload, b.starts, start, end, replacement)
-	if err != nil {
-		return err
-	}
-	return b.setText(s)
-}
-
-func spliceLines(text string, starts []int, start, end int, replacement []string) (string, error) {
-	n := len(starts)
-	if start < 1 || end < start || end > n+1 {
-		return "", ErrLineOutOfRange
-	}
-	for _, line := range replacement {
-		if strings.Contains(line, "\n") {
-			return "", ErrInvalidLine
-		}
-	}
-	if n == 0 {
-		return strings.Join(replacement, "\n"), nil
-	}
-
-	prefixLines := start - 1
-	suffixLines := n - (end - 1)
-	moreAfterPrefix := len(replacement) > 0 || suffixLines > 0
-
-	need := len(text) + 1
-	for _, line := range replacement {
-		need += len(line) + 1
-	}
-	var buf strings.Builder
-	buf.Grow(need)
-
-	if prefixLines > 0 {
-		if prefixLines == n {
-			buf.WriteString(text)
-			if moreAfterPrefix {
-				buf.WriteByte('\n')
-			}
-		} else if moreAfterPrefix {
-			buf.WriteString(text[:starts[prefixLines]])
-		} else {
-			buf.WriteString(text[:starts[prefixLines]-1])
-		}
-	}
-	for i, line := range replacement {
-		if i > 0 {
-			buf.WriteByte('\n')
-		}
-		buf.WriteString(line)
-	}
-	if suffixLines > 0 {
-		if len(replacement) > 0 {
-			buf.WriteByte('\n')
-		}
-		buf.WriteString(text[starts[end-1]:])
-	}
-	return buf.String(), nil
-}
-
-var (
-	_ Document   = (*IR)(nil)
-	_ Textual    = (*IR)(nil)
-	_ Structured = (*IR)(nil)
-)

@@ -30,9 +30,8 @@ func filesSession(t *testing.T) (*vfs.MountSession, vfs.Files) {
 		vfs.At("ro", vfs.Local(ro)).ReadOnly(),
 	).WithCodecs(adapters.Codecs()...)(t.Context(), t.Name(), vfs.Request{})
 	require.NoError(t, err)
-	spec := "<h1>Title</h1><p>text</p>"
-	_, err = ms.Apply(t.Context(), "/workspace/work/Spec.docx", vfs.Mutation{Content: &spec})
-	require.NoError(t, err)
+	spec := wordDocument(t, `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p><w:p><w:r><w:t>text</w:t></w:r></w:p>`)
+	require.NoError(t, ms.Route(t.Context(), "/workspace/work/Spec.docx").WriteFile(t.Context(), spec))
 	return ms, vfs.NewFiles(ms)
 }
 
@@ -198,21 +197,15 @@ func TestFiles_reportsAChangeItCannotWriteBack(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestFiles_refusesAHostFileItCannotReadAtOffsets: a binary host file that
-// only streams cannot be opened for ranged reads, and one the host cannot
-// read fails with the host's error.
+// TestFiles_refusesAHostFileItCannotReadAtOffsets: a binary host file
+// that only streams cannot be opened for ranged reads.
 func TestFiles_refusesAHostFileItCannotReadAtOffsets(t *testing.T) {
 	t.Parallel()
-	ms := richHostSession(t, richHostFS{
-		"stream": {mediaType: "application/octet-stream", size: 3, open: func() io.Reader { return strings.NewReader("abc") }},
-		"sealed": {mediaType: "application/octet-stream", size: 3},
-	}, nil)
-	files := vfs.NewFiles(ms)
+	ms := mountHost(t, hostFS{"stream": hostReader{
+		hostFile{info: vfs.FileInfo{Size: 3, MediaType: "application/octet-stream"}}, strings.NewReader("abc"),
+	}})
 
-	_, streamErr := files.Open(t.Context(), "/workspace/host/stream", vfs.OpenMode{})
-	_, sealedErr := files.Open(t.Context(), "/workspace/host/sealed", vfs.OpenMode{})
+	_, err := vfs.NewFiles(ms).Open(t.Context(), "/workspace/host/stream", vfs.OpenMode{})
 
-	require.ErrorIs(t, streamErr, vfs.ErrNotSupported)
-	require.Error(t, sealedErr)
-	require.NotErrorIs(t, sealedErr, vfs.ErrNotSupported)
+	require.ErrorIs(t, err, vfs.ErrNotSupported)
 }

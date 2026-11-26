@@ -6,8 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,12 +25,13 @@ import (
 // must meet.
 func TestHelixGraph_contract(t *testing.T) {
 	t.Parallel()
-	g := helixtest.Graph(t)
+	base := helixtest.Start(t)
+	g := helixtest.Open(t, base, nil)
 	graphtest.Run(t, func(t *testing.T, emb brain.Embedder) brain.Graph {
 		if emb == nil {
 			return g
 		}
-		return helixtest.Open(t, func(o *helixgraph.Options) { o.Embedding = brain.Embedding{Embedder: emb} })
+		return helixtest.Open(t, base, func(o *helixgraph.Options) { o.Embedding = brain.Embedding{Embedder: emb} })
 	})
 }
 
@@ -58,10 +59,10 @@ func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 
 	errs := map[string]error{}
 	helixProxy.failWith("brain_create_indexes", `{"text":{"kind":"unknown"}}`)
-	_, errs["index receipt"] = helixgraph.Open(ctx, helixProxy.client, helixtest.Options)
+	_, errs["index receipt"] = helixgraph.Open(ctx, helixProxy.client, helixtest.Options())
 	// Another Open's build of the index, which Helix does not know.
 	helixProxy.failWith("brain_create_indexes", `{"text":{"kind":"existing_operation","operation_id":"%s"}}`)
-	_, errs["another open's build"] = helixgraph.Open(ctx, helixProxy.client, helixtest.Options)
+	_, errs["another open's build"] = helixgraph.Open(ctx, helixProxy.client, helixtest.Options())
 	helixProxy.fail("brain_index_operation", http.StatusInternalServerError, "")
 	_, errs["index status request"] = helixgraph.Open(ctx, helixProxy.client, newIndex())
 	helixProxy.fail("brain_index_operation", http.StatusOK, `{"op":{}}`)
@@ -74,17 +75,17 @@ func TestOpen_failsUntilHelixHasBuiltEveryIndex(t *testing.T) {
 	cancel()
 	// Helix is not listening yet: Open waits for it until the deadline.
 	starting, cancel := context.WithTimeout(ctx, 3*indexPoll)
-	_, notListening := helixgraph.Open(starting, unreachable, helixtest.Options)
+	_, notListening := helixgraph.Open(starting, unreachable, helixtest.Options())
 	cancel()
 	// A gateway in front of Helix failed one request.
 	helixProxy.failOnce("brain_index_operation", http.StatusBadGateway)
 	_, afterGateway := helixgraph.Open(ctx, helixProxy.client, newIndex())
 	// Another Open is creating the same indexes.
 	helixProxy.failOnce("brain_create_indexes", http.StatusConflict)
-	_, afterConflict := helixgraph.Open(ctx, helixProxy.client, helixtest.Options)
+	_, afterConflict := helixgraph.Open(ctx, helixProxy.client, helixtest.Options())
 	helixProxy.fail("brain_create_indexes", http.StatusConflict, "")
 	conflicted, cancel := context.WithTimeout(ctx, 3*indexPoll)
-	_, keptConflicting := helixgraph.Open(conflicted, helixProxy.client, helixtest.Options)
+	_, keptConflicting := helixgraph.Open(conflicted, helixProxy.client, helixtest.Options())
 	cancel()
 
 	for name, err := range errs {
@@ -118,15 +119,20 @@ func TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	helixProxy := newHelixProxy(t)
-	g, err := helixgraph.Open(ctx, helixProxy.client, helixtest.Options)
+	g, err := helixgraph.Open(ctx, helixProxy.client, helixtest.Options())
 	if err != nil {
 		t.Fatal(err)
 	}
 	store := brain.NewMemoryStore()
-	var audited []string
+	var mu sync.Mutex
+	audited := map[uuid.UUID]bool{}
 	eng, err := brain.NewEngine(store, brain.WithGraph(g),
 		brain.WithAudit(func(ctx context.Context, ev brain.AuditEvent) error {
-			audited = append(audited, string(ev.Op))
+			mu.Lock()
+			defer mu.Unlock()
+			for _, id := range ev.ObjectIDs {
+				audited[id] = audited[id] || ev.Op == brain.AuditPut
+			}
 			return ctx.Err()
 		}))
 	if err != nil {
@@ -154,7 +160,6 @@ func TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	audited = nil
 	walked, walkedErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: doc.ID, Relations: []string{"references"}, Limit: 1})
 	_, bareErr := bare.Next(ctx, scope, walked.Rest, 1)
 	near := brain.SearchRequest{Query: "doc", Near: &brain.Near{ID: doc.ID}}
@@ -182,7 +187,6 @@ func TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth(t *testing.T) {
 	short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
 	_, hungErr := eng.Save(short, scope, brain.Object{Kind: "Document", Title: "hung"})
 	cancel()
-	writes := slices.DeleteFunc(slices.Clone(audited), func(op string) bool { return op == string(brain.AuditRead) })
 	helixProxy.fail("*", http.StatusBadRequest, "")
 	hung, _ := eng.Search(ctx, scope, brain.SearchRequest{Query: "hung"})
 	_, otherErr := eng.Open(ctx, scope, other.ID)
@@ -203,8 +207,12 @@ func TestEngine_aFailingHelixLeavesTheStoreTheSourceOfTruth(t *testing.T) {
 	if !errors.Is(hungErr, context.DeadlineExceeded) {
 		t.Errorf("save whose graph write outlives the caller = %v, want the deadline", hungErr)
 	}
-	if !slices.Equal(writes, []string{"put", "put", "put"}) {
-		t.Errorf("audited %v, want the three committed saves", writes)
+	for name, p := range map[string]brain.Page{"written": found, "hung": hung} {
+		for o := range p.Results.Objects() {
+			if !audited[o.ID] {
+				t.Errorf("the %s record's committed save on a failing graph was not audited", name)
+			}
+		}
 	}
 	if foundErr != nil || titles(found) != "written" || titles(hung) != "hung" || len(kids) != 0 {
 		t.Errorf("search on a failing graph = %q %v and %q, parts %v, want the store's written and hung records, and no parts", titles(found), foundErr, titles(hung), kids)
@@ -254,7 +262,7 @@ type helixProxy struct {
 
 func newHelixProxy(t *testing.T) helixProxy {
 	t.Helper()
-	target, err := url.Parse(helixtest.URL(t))
+	target, err := url.Parse(helixtest.Start(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,11 +309,11 @@ func (p helixProxy) hang(name string) {
 func TestGraph_searchPastMaxOverfetchRanksOnlyReadableElements(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	client, err := helix.NewClient(helixtest.URL(t))
+	client, err := helix.NewClient(helixtest.Start(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := helixtest.Options
+	opts := helixtest.Options()
 	opts.MaxOverfetch = 1
 	opts.Embedding = brain.Embedding{Embedder: graphtest.Embedder{}}
 	g, err := helixgraph.Open(ctx, client, opts)

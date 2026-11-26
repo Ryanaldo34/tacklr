@@ -44,7 +44,7 @@ type UserSelectionPayload struct {
 type UserSelectionInterrupt struct {
 	Question        string       `json:"question,omitempty"`
 	Options         []UserChoice `json:"options"`
-	ConfirmedChoice *UserChoice
+	ConfirmedChoice *UserChoice  `json:"confirmedChoice,omitempty"`
 }
 
 func (c *UserSelectionInterrupt) TypeName() string {
@@ -113,7 +113,7 @@ func (p *AuthExpired) Error() string {
 	return "credentials expired"
 }
 
-// ACP PermissionOptionKind values.
+// The kinds of a PermissionOption.
 const (
 	PermissionAllowOnce    = "allow_once"
 	PermissionAllowAlways  = "allow_always"
@@ -122,14 +122,14 @@ const (
 )
 
 // PermissionOption is a single choice offered when a tool requires user approval.
-// Field names match ACP session/request_permission options.
+// The answer to a ToolPermissionInterrupt names one by OptionID.
 type PermissionOption struct {
 	OptionID string `json:"optionId"`
 	Name     string `json:"name"`
 	Kind     string `json:"kind"`
 }
 
-// DefaultPermissionOptions are the standard ACP permission choices.
+// DefaultPermissionOptions are the standard permission choices.
 func DefaultPermissionOptions() []PermissionOption {
 	return []PermissionOption{
 		{OptionID: "allow-once", Name: "Allow once", Kind: PermissionAllowOnce},

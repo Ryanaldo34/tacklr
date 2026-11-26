@@ -1,10 +1,11 @@
 // Command worker runs the example's sessions: the session workflow and its
 // steps, the agent, and the live endpoint that streams a
-// session's deltas to the hosts. Run as many as you need; see README.md.
+// session's deltas to the backends. Run as many as you need; see README.md.
 //
-// Besides the variables of package stack it reads:
+// Besides the variables of package stack, and the model's (stack.Model), it
+// reads:
 //
-//	LIVE_URL       how hosts reach this worker's live endpoint, default http://localhost:8081
+//	LIVE_URL       how backends reach this worker's live endpoint, default http://localhost:8081
 //	LIVE_ADDR      where it listens, default :8081
 //	MAX_WINDOW     the context window in tokens, default the model's
 //	SANDBOX_ADDR   the sandbox supervisor (host:port); gives the agent run_command (optional)
@@ -46,7 +47,11 @@ func run(ctx context.Context) error {
 	}
 	defer st.Close()
 
-	opts := agent.Options(st.Model)
+	model, err := stack.Model()
+	if err != nil {
+		return err
+	}
+	opts := agent.Options(model)
 	if n := os.Getenv("MAX_WINDOW"); n != "" {
 		size, err := strconv.ParseUint(n, 10, 0)
 		if err != nil {

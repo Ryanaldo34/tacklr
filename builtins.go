@@ -49,30 +49,11 @@ var askUserChoiceTool = NewTool(ToolConfig{
 	Description: "Park the turn and ask the user a multiple-choice question when you need a discrete decision before continuing. Returns the selected title (and description when one was given) after the user answers. Fails if the question is empty or fewer than two distinct choice titles are provided.",
 	Category:    message.ToolCategoryThink,
 	Handler: func(ctx context.Context, args askUserChoiceArgs, cc *CallContext) (string, error) {
-		if strings.TrimSpace(args.Question) == "" {
-			return "", fmt.Errorf("question is required")
+		question, err := userSelection(args)
+		if err != nil {
+			return "", err
 		}
-		if len(args.Choices) < 2 {
-			return "", fmt.Errorf("at least 2 choices are required")
-		}
-		seen := make(map[string]struct{}, len(args.Choices))
-		options := make([]UserChoice, 0, len(args.Choices))
-		for i, c := range args.Choices {
-			title := strings.TrimSpace(c.Title)
-			if title == "" {
-				return "", fmt.Errorf("choice %d: title is required", i)
-			}
-			if _, ok := seen[title]; ok {
-				return "", fmt.Errorf("duplicate choice title %q", title)
-			}
-			seen[title] = struct{}{}
-			options = append(options, UserChoice{
-				Title:         title,
-				Description:   c.Description,
-				IsRecommended: c.IsRecommended,
-			})
-		}
-		intr, err := cc.Park(&UserSelectionInterrupt{Question: args.Question, Options: options})
+		intr, err := cc.Park(question)
 		if err != nil {
 			return "", err
 		}
@@ -86,6 +67,31 @@ var askUserChoiceTool = NewTool(ToolConfig{
 	},
 })
 
+// userSelection is the question ask_user_choice parks on: args with each
+// title trimmed, or why the model must ask again.
+func userSelection(args askUserChoiceArgs) (*UserSelectionInterrupt, error) {
+	if strings.TrimSpace(args.Question) == "" {
+		return nil, fmt.Errorf("question is required")
+	}
+	if len(args.Choices) < 2 {
+		return nil, fmt.Errorf("at least 2 choices are required")
+	}
+	seen := make(map[string]struct{}, len(args.Choices))
+	options := make([]UserChoice, 0, len(args.Choices))
+	for i, c := range args.Choices {
+		title := strings.TrimSpace(c.Title)
+		if title == "" {
+			return nil, fmt.Errorf("choice %d: title is required", i)
+		}
+		if _, ok := seen[title]; ok {
+			return nil, fmt.Errorf("duplicate choice title %q", title)
+		}
+		seen[title] = struct{}{}
+		options = append(options, UserChoice{Title: title, Description: c.Description, IsRecommended: c.IsRecommended})
+	}
+	return &UserSelectionInterrupt{Question: args.Question, Options: options}, nil
+}
+
 func newCreatePlanTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "create_plan",
@@ -93,12 +99,6 @@ func newCreatePlanTool() *Tool {
 		Description: "Install the project's plan and the linear todo list derived from it. Call once at the start of multi-step work. On success returns \"Plan created successfully\", installs the plan in context, marks the first incomplete todo in-progress, and unlocks write and command tools. Fails if a plan already exists, plan text is empty, or todos is empty.",
 		Category:    message.ToolCategoryThink,
 		Handler: func(ctx context.Context, args createTodosArgs, cc *CallContext) (ToolOutcome, error) {
-			if strings.TrimSpace(args.Plan) == "" {
-				return ToolOutcome{}, fmt.Errorf("plan document text is required")
-			}
-			if len(args.Todos) == 0 {
-				return ToolOutcome{}, fmt.Errorf("plan must include at least one todo")
-			}
 			return cc.changePlan(planOp{Create: &args})
 		},
 	})
@@ -115,17 +115,23 @@ func newListPlanTool() *Tool {
 			if len(plan) == 0 {
 				return "", fmt.Errorf("no plan exists yet; call create_plan first")
 			}
-			var b strings.Builder
-			fmt.Fprintf(&b, "Active plan (%d todos):\n", len(plan))
-			for i, todo := range plan {
-				fmt.Fprintf(&b, "%d. [%s] %s\n", i+1, todo.Status, todo.Title)
-				if todo.Description != "" {
-					fmt.Fprintf(&b, "   Description: %s\n", todo.Description)
-				}
-			}
-			return strings.TrimRight(b.String(), "\n"), nil
+			return formatPlan(plan), nil
 		},
 	})
+}
+
+// formatPlan is plan as list_plan returns it: numbered, each todo with its
+// status and description.
+func formatPlan(plan []Todo) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Active plan (%d todos):\n", len(plan))
+	for i, todo := range plan {
+		fmt.Fprintf(&b, "%d. [%s] %s\n", i+1, todo.Status, todo.Title)
+		if todo.Description != "" {
+			fmt.Fprintf(&b, "   Description: %s\n", todo.Description)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func newCompleteTodoTool() *Tool {
@@ -193,6 +199,12 @@ func (s *sessionManager) replayPlanOp(op planOp) {
 
 func createPlanChange(args createTodosArgs) planChange {
 	return func(existing []Todo, _ string) ([]Todo, string, ToolOutcome, error) {
+		if strings.TrimSpace(args.Plan) == "" {
+			return nil, "", ToolOutcome{}, fmt.Errorf("plan document text is required")
+		}
+		if len(args.Todos) == 0 {
+			return nil, "", ToolOutcome{}, fmt.Errorf("plan must include at least one todo")
+		}
 		if len(existing) > 0 {
 			return nil, "", ToolOutcome{}, fmt.Errorf("an active plan already exists (%d todos); use edit_plan to modify it or complete_todo to progress — do not call create_plan again", len(existing))
 		}

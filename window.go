@@ -16,6 +16,19 @@ import (
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
+// pressure is the tokens a request on a window of size tokens may fill
+// before the window collapses.
+func pressure(size int) int {
+	return int(float64(size) * pressureRatio)
+}
+
+// nearPressure reports whether a request whose bound is bound tokens may
+// reach the pressure of a window of size tokens: only then is it counted
+// before it commits.
+func nearPressure(bound, size int) bool {
+	return bound >= pressure(size)
+}
+
 // pressureRatio is the fraction of the window's size a commit may fill
 // before the window collapses into one summary. A collapse leaves the
 // window small, so the exact value matters little.
@@ -109,29 +122,39 @@ func (w *window) Fit(ctx context.Context, round []*message.Message, counted int)
 	if counted > 0 {
 		count = requestCount{Tokens: counted, Messages: len(msgs)}
 	}
-	threshold := int(float64(w.size) * pressureRatio)
-	if w.bound(count, msgs, round) < threshold {
+	if !nearPressure(w.bound(count, msgs, round), w.size) {
 		w.set(slices.Concat(msgs, round), count)
 		return nil
 	}
-	n, err := w.measure(ctx, count, msgs, round)
-	if err != nil {
-		return err
-	}
-	if n > threshold && len(msgs) > protectedPrefixLen(msgs) {
-		if msgs, err = w.collapse(ctx, msgs, len(msgs)); err != nil {
+	threshold := pressure(w.size)
+	collapsed := false
+	round = slices.Clone(round)
+	full, kept := map[int]string{}, map[int]int{}
+	for {
+		n, err := w.measure(ctx, count, msgs, round)
+		if err != nil {
 			return err
 		}
-		count = requestCount{}
-		round = withoutReasoning(round)
-		if n, err = w.measure(ctx, count, msgs, round); err != nil {
-			return err
+		if !collapsed && n > threshold && len(msgs) > protectedPrefixLen(msgs) {
+			if msgs, err = w.collapse(ctx, msgs, len(msgs)); err != nil {
+				return err
+			}
+			collapsed, count, round = true, requestCount{}, withoutReasoning(round)
+			continue
 		}
-	}
-	if n > w.size {
-		if round, err = w.trim(ctx, count, msgs, round, n); err != nil {
-			return err
+		if n <= w.size {
+			break
 		}
+		i := largestResult(round, kept)
+		if i < 0 {
+			return fmt.Errorf("%w: the round needs %d tokens and the context window holds %d", ErrFailed, n, w.size)
+		}
+		if _, ok := full[i]; !ok {
+			full[i], kept[i] = round[i].Content, len(round[i].Content)
+		}
+		cut := *round[i]
+		cut.Content, kept[i] = cutText(full[i], int(int64(kept[i])*int64(w.size)/int64(n)))
+		round[i] = &cut
 	}
 	w.set(slices.Concat(msgs, round), count)
 	return nil
@@ -262,48 +285,32 @@ func (w *window) measure(ctx context.Context, count requestCount, msgs, round []
 	return w.bound(count, msgs, round), nil
 }
 
-// trim cuts the round's largest results until the window and round fit
-// the window's size. A cut result says it was cut, so the agent runs a
-// narrower command for the rest.
-func (w *window) trim(ctx context.Context, count requestCount, msgs, round []*message.Message, n int) ([]*message.Message, error) {
-	round = slices.Clone(round)
-	full := map[int]string{}
-	kept := map[int]int{}
-	size := func(i int) int {
-		if k, ok := kept[i]; ok {
+// largestResult is the index of the round's largest tool result that
+// still has text, or -1. kept is how much of each result a cut left.
+func largestResult(round []*message.Message, kept map[int]int) int {
+	size := func(j int) int {
+		if k, ok := kept[j]; ok {
 			return k
 		}
-		return len(round[i].Content)
+		return len(round[j].Content)
 	}
-	for n > w.size {
-		i := -1
-		for j, m := range round {
-			if m.Role == message.RoleTool && size(j) > 0 && (i < 0 || size(j) > size(i)) {
-				i = j
-			}
-		}
-		if i < 0 {
-			return nil, fmt.Errorf("%w: the round needs %d tokens and the context window holds %d", ErrFailed, n, w.size)
-		}
-		if _, ok := full[i]; !ok {
-			full[i] = round[i].Content
-		}
-		// Scale the result by how far over the window is; n > size, so
-		// each pass keeps less.
-		keep := int(int64(size(i)) * int64(w.size) / int64(n))
-		for keep > 0 && !utf8.RuneStart(full[i][keep]) {
-			keep--
-		}
-		kept[i] = keep
-		cut := *round[i]
-		cut.Content = full[i][:keep] + truncationNote(keep, len(full[i]))
-		round[i] = &cut
-		var err error
-		if n, err = w.measure(ctx, count, msgs, round); err != nil {
-			return nil, err
+	i := -1
+	for j, m := range round {
+		if m.Role == message.RoleTool && size(j) > 0 && (i < 0 || size(j) > size(i)) {
+			i = j
 		}
 	}
-	return round, nil
+	return i
+}
+
+// cutText is the first keep bytes of full, back to a rune boundary, and a
+// note that it was cut and how to see the rest. It returns the bytes kept.
+func cutText(full string, keep int) (string, int) {
+	keep = min(keep, len(full))
+	for keep > 0 && keep < len(full) && !utf8.RuneStart(full[keep]) {
+		keep--
+	}
+	return full[:keep] + truncationNote(keep, len(full)), keep
 }
 
 // rows are the window as checkpoint rows: one per message, keyed by its

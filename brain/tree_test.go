@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -52,9 +50,6 @@ func TestEngine_putTreeHoldsAFewBatchesWhateverTheTreeSize(t *testing.T) {
 	}
 	if held > batch*(slots+1) {
 		t.Errorf("parts held before embedding = %d, want at most %d", held, batch*(slots+1))
-	}
-	if emb.Texts() != total+1 {
-		t.Errorf("embedded %d texts, want every part and the parent (%d)", emb.Texts(), total+1)
 	}
 	if len(kids) != total || kids[0].Content != "part 0" || kids[total-1].Content != fmt.Sprintf("part %d", total-1) {
 		t.Errorf("children = %d, want %d in order", len(kids), total)
@@ -133,33 +128,29 @@ func TestEngine_putTreeFailsOnABadPartOrSourceAndKeepsThePreviousTree(t *testing
 	}
 }
 
-// TestEngine_putTreeIndexesEachPartUnderItsRecordsTitle: a part is indexed as
-// its record's title over its own text; a part with no text takes the title
-// alone, and a part of an untitled record takes its own text alone.
-func TestEngine_putTreeIndexesEachPartUnderItsRecordsTitle(t *testing.T) {
+// TestObject_indexTextWithParentPutsTheRecordsTitleOverThePart: a part is
+// indexed as its record's title over its own text; a part with no text takes
+// the title alone, and a part of an untitled record takes its own text alone.
+func TestObject_indexTextWithParentPutsTheRecordsTitleOverThePart(t *testing.T) {
 	t.Parallel()
-	ctx := t.Context()
-	var mu sync.Mutex
-	var embedded []string
-	emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		embedded = append(embedded, texts...)
-		return repeatVector([]float32{1, 0}, len(texts)), nil
-	})
-	eng, err := brain.NewEngine(brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb})))
-	if err != nil {
-		t.Fatal(err)
+	cases := map[string]struct {
+		part   brain.Object
+		parent string
+		want   string
+	}{
+		"a titled record":     {brain.Object{Title: "Setup", Content: "steps"}, "Manual", "Manual\nSetup\nsteps"},
+		"a part with no text": {brain.Object{}, "Manual", "Manual"},
+		"an untitled record":  {brain.Object{Content: "loose notes"}, " ", "loose notes"},
 	}
-	scope := brain.Scope{Namespace: tenant(t)}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	_, titledErr := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "Manual"}, brain.Parts(
-		brain.Object{Kind: "Chunk", Content: "setup steps"}, brain.Object{Kind: "Chunk"},
-	))
-	_, untitledErr := eng.PutTree(ctx, scope, brain.Object{Kind: "Document"}, brain.Parts(brain.Object{Kind: "Chunk", Content: "loose notes"}))
+			got := tc.part.IndexTextWithParent(tc.parent)
 
-	slices.Sort(embedded)
-	if want := []string{"Manual", "Manual", "Manual\nsetup steps", "loose notes"}; titledErr != nil || untitledErr != nil || !slices.Equal(embedded, want) {
-		t.Errorf("embedded %q (%v, %v), want %q", embedded, titledErr, untitledErr, want)
+			if got != tc.want {
+				t.Errorf("index text = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

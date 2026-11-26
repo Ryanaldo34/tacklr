@@ -6,7 +6,6 @@ package awss3
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 
@@ -21,21 +20,12 @@ import (
 // API is a vfs.S3API over the AWS SDK v2 client (AWS S3, MinIO, and the S3
 // endpoint of R2).
 type API struct {
+	// Client is required.
 	Client *s3.Client
-}
-
-func (a API) require() error {
-	if a.Client == nil {
-		return fmt.Errorf("awss3: client required")
-	}
-	return nil
 }
 
 // Head implements vfs.S3API.
 func (a API) Head(ctx context.Context, bucket, key string) (vfs.S3Object, error) {
-	if err := a.require(); err != nil {
-		return vfs.S3Object{}, err
-	}
 	out, err := a.Client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -53,9 +43,6 @@ func (a API) Head(ctx context.Context, bucket, key string) (vfs.S3Object, error)
 
 // Get implements vfs.S3API.
 func (a API) Get(ctx context.Context, bucket, key string, off, n int64) (io.ReadCloser, error) {
-	if err := a.require(); err != nil {
-		return nil, err
-	}
 	in := &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -72,9 +59,6 @@ func (a API) Get(ctx context.Context, bucket, key string, off, n int64) (io.Read
 
 // Put implements vfs.S3API.
 func (a API) Put(ctx context.Context, bucket, key string, body io.Reader, size int64) error {
-	if err := a.require(); err != nil {
-		return err
-	}
 	in := &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -89,9 +73,6 @@ func (a API) Put(ctx context.Context, bucket, key string, body io.Reader, size i
 
 // Delete implements vfs.S3API.
 func (a API) Delete(ctx context.Context, bucket, key string) error {
-	if err := a.require(); err != nil {
-		return err
-	}
 	_, err := a.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
@@ -101,9 +82,6 @@ func (a API) Delete(ctx context.Context, bucket, key string) error {
 
 // List implements vfs.S3API with delimiter "/" for virtual directories.
 func (a API) List(ctx context.Context, bucket, prefix string) (keys []string, dirs []string, err error) {
-	if err := a.require(); err != nil {
-		return nil, nil, err
-	}
 	pager := s3.NewListObjectsV2Paginator(a.Client, &s3.ListObjectsV2Input{
 		Bucket:    aws.String(bucket),
 		Prefix:    aws.String(prefix),
@@ -132,12 +110,10 @@ func mapS3Error(err error) error {
 	if err == nil {
 		return nil
 	}
-	var nsk *types.NoSuchKey
-	if errors.As(err, &nsk) {
+	if _, ok := errors.AsType[*types.NoSuchKey](err); ok {
 		return vfs.ErrNotExist
 	}
-	var nsb *types.NotFound
-	if errors.As(err, &nsb) {
+	if _, ok := errors.AsType[*types.NotFound](err); ok {
 		return vfs.ErrNotExist
 	}
 	// HeadObject 404 / NoSuchKey often wrap as generic API errors.

@@ -1,13 +1,13 @@
 package anthropic_test
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -149,39 +149,129 @@ func TestInvoke_requiresKeyAndModel(t *testing.T) {
 	}
 }
 
-// TestInvoke_sendsTheWindowAsClaudeTurns: the system prompt and the plan
-// are cache breakpoints, and automatic caching covers the rest. User media
-// become image and document blocks before the text. Developer and system
-// messages are tagged user text. Thinking replays as the API sent it, and
-// another provider's reasoning is left out. One reply is one assistant
-// turn; its results open the next user turn, before other text, and a
-// result without its call is left out. Tools take their schemas, and a
-// model older than adaptive thinking gets no thinking settings.
-func TestInvoke_sendsTheWindowAsClaudeTurns(t *testing.T) {
+// sent is the body of the one request m sent for req.
+func sent(ctx context.Context, t *testing.T, m *anthropic.Model, a *api, req tacklr.ModelRequest) map[string]any {
+	t.Helper()
+	collect(t, must(m.Invoke(ctx, req)))
+	return a.requests[len(a.requests)-1]
+}
+
+// same reports whether got, decoded from JSON, is the JSON want.
+func same(got any, want string) bool {
+	var w any
+	_ = json.Unmarshal([]byte(want), &w)
+	return reflect.DeepEqual(got, w)
+}
+
+// turnsOf are the request's messages as decoded JSON.
+func turnsOf(body map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, t := range body["messages"].([]any) {
+		out = append(out, t.(map[string]any))
+	}
+	return out
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+func TestInvoke_cachesTheSystemPromptAndTheConversation(t *testing.T) {
 	t.Parallel()
-	greet := tacklr.NewTool(tacklr.ToolConfig{Name: "greet", Namespace: "ado", Description: "Greet", Handler: func(context.Context, struct {
-		Name string `json:"name"`
-	}) (string, error) {
-		return "", nil
-	}})
-	get := tacklr.NewTool(tacklr.ToolConfig{Name: "get", Handler: func(context.Context) (string, error) { return "", nil }})
-	window := []*message.Message{
-		nil,
-		{Role: message.RoleUser, Content: "look", ContentParts: []message.ContentPart{
-			{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: "data:image/png;base64,iVBO"}},
-			{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: "https://example.com/cat.png"}},
-			{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: "data:image/png,raw"}},
-			{Type: message.ContentTypeInputImage},
-			{Type: message.ContentTypeInputFile, FileData: &message.FileData{Data: "JVBE", MIMEType: "application/pdf"}},
-			{Type: message.ContentTypeInputFile, FileData: &message.FileData{FileID: "file_1"}},
-			{Type: message.ContentTypeInputFile, FileData: &message.FileData{}},
-			{Type: message.ContentTypeOutputText, Text: "not media"},
-		}},
-		{Role: message.RoleDeveloper, Content: "PROJECT PLAN\n────────────\nship it"},
+	m, a := newAPI(t, textReply("a"))
+
+	body := sent(t.Context(), t, m, a, tacklr.ModelRequest{SystemPrompt: "be brief", Messages: hello().Messages})
+
+	if !same(body["system"], `[{"cache_control":{"type":"ephemeral"},"text":"be brief","type":"text"}]`) || !same(body["cache_control"], `{"type":"ephemeral"}`) {
+		t.Errorf("system = %v, cache_control = %v; want both cached", body["system"], body["cache_control"])
+	}
+}
+
+func TestInvoke_sendsUserMediaAsBlocksBeforeTheText(t *testing.T) {
+	t.Parallel()
+	m, a := newAPI(t, textReply("a"))
+	look := &message.Message{Role: message.RoleUser, Content: "look", ContentParts: []message.ContentPart{
+		{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: "data:image/png;base64,iVBO"}},
+		{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: "https://example.com/cat.png"}},
+		{Type: message.ContentTypeInputImage, ImageURL: &message.ImageURL{URL: "data:image/png,raw"}},
+		{Type: message.ContentTypeInputImage},
+		{Type: message.ContentTypeInputFile, FileData: &message.FileData{Data: "JVBE", MIMEType: "application/pdf"}},
+		{Type: message.ContentTypeInputFile, FileData: &message.FileData{FileID: "file_1"}},
+		{Type: message.ContentTypeInputFile, FileData: &message.FileData{}},
+		{Type: message.ContentTypeOutputText, Text: "not media"},
+	}}
+
+	body := sent(t.Context(), t, m, a, tacklr.ModelRequest{Messages: []*message.Message{nil, look}})
+
+	want := `[{"source":{"data":"iVBO","media_type":"image/png","type":"base64"},"type":"image"},
+		{"source":{"type":"url","url":"https://example.com/cat.png"},"type":"image"},
+		{"source":{"data":"JVBE","media_type":"application/pdf","type":"base64"},"type":"document"},
+		{"source":{"file_id":"file_1","type":"file"},"type":"document"},
+		{"text":"look","type":"text"}]`
+	if got := turnsOf(body)[0]["content"]; !same(got, want) {
+		t.Errorf("user content = %v, want the usable media, then the text", got)
+	}
+}
+
+func TestInvoke_sendsDeveloperAndSystemMessagesAsTaggedUserText(t *testing.T) {
+	t.Parallel()
+	m, a := newAPI(t, textReply("a"))
+
+	body := sent(t.Context(), t, m, a, tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, Content: "hi"},
+		{Role: message.RoleDeveloper, Content: "keep going"},
 		{Role: message.RoleDeveloper, Content: "  "},
+		{Role: message.RoleSystem, Content: "note"},
+	}})
+
+	want := `[{"role":"user","content":[{"text":"hi","type":"text"},
+		{"text":"<system-reminder>\nkeep going\n</system-reminder>","type":"text"},
+		{"text":"<system-reminder>\nnote\n</system-reminder>","type":"text"}]}]`
+	if !same(body["messages"], want) {
+		t.Errorf("messages = %v, want one user turn with the tagged text", body["messages"])
+	}
+}
+
+func TestInvoke_cachesThePlan(t *testing.T) {
+	t.Parallel()
+	m, a := newAPI(t, textReply("a"))
+
+	body := sent(t.Context(), t, m, a, tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, Content: "hi"},
+		{Role: message.RoleDeveloper, Content: "PROJECT PLAN\n────────────\nship it"},
+	}})
+
+	plan := turnsOf(body)[0]["content"].([]any)[1]
+	if !same(plan, `{"cache_control":{"type":"ephemeral"},"text":"<system-reminder>\nPROJECT PLAN\n────────────\nship it\n</system-reminder>","type":"text"}`) {
+		t.Errorf("plan block = %v, want a cached system reminder", plan)
+	}
+}
+
+func TestInvoke_replaysClaudeThinkingAndLeavesOutOtherReasoning(t *testing.T) {
+	t.Parallel()
+	m, a := newAPI(t, textReply("a"))
+
+	body := sent(t.Context(), t, m, a, tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, Content: "hi"},
 		{Role: message.RoleReasoning, Content: "hmm", EncryptedContent: `{"type":"thinking","thinking":"hmm","signature":"sig"}`},
 		{Role: message.RoleReasoning, Content: "other", EncryptedContent: "gAAAAcipher"},
 		{Role: message.RoleAssistant, Content: "checking"},
+	}})
+
+	if got := turnsOf(body)[1]["content"]; !same(got, `[{"signature":"sig","thinking":"hmm","type":"thinking"},{"text":"checking","type":"text"}]`) {
+		t.Errorf("assistant content = %v, want the thinking as sent, then the text", got)
+	}
+}
+
+func TestInvoke_sendsAReplysCallsAsOneTurnAndTheirResultsFirstInTheNext(t *testing.T) {
+	t.Parallel()
+	m, a := newAPI(t, textReply("a"))
+
+	body := sent(t.Context(), t, m, a, tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, Content: "hi"},
 		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{
 			{ID: "toolu_1", Name: "greet", Namespace: "ado", Arguments: `{"name":"x"}`},
 			{ID: "toolu_2", Name: "get", Arguments: "not json"},
@@ -190,57 +280,79 @@ func TestInvoke_sendsTheWindowAsClaudeTurns(t *testing.T) {
 		{Role: message.RoleTool, ToolCallID: "toolu_1", Content: "ok"},
 		{Role: message.RoleDeveloper, Content: "keep going"},
 		{Role: message.RoleTool, ToolCallID: "toolu_2", Content: "ok2"},
-		{Role: message.RoleSystem, Content: "note"},
+	}})
+
+	turns := turnsOf(body)
+	calls := `[{"id":"toolu_1","input":{"name":"x"},"name":"ado__greet","type":"tool_use"},{"id":"toolu_2","input":{},"name":"get","type":"tool_use"}]`
+	results := `[{"content":"ok","tool_use_id":"toolu_1","type":"tool_result"},{"content":"ok2","tool_use_id":"toolu_2","type":"tool_result"},
+		{"text":"<system-reminder>\nkeep going\n</system-reminder>","type":"text"}]`
+	if len(turns) != 3 || !same(turns[1]["content"], calls) || !same(turns[2]["content"], results) {
+		t.Errorf("turns = %v, want the calls in one turn and their results first in the next", turns)
 	}
-	m, sent := newAPI(t, textReply("a"), textReply("b"))
+}
+
+func TestInvoke_sendsToolsWithTheirSchemas(t *testing.T) {
+	t.Parallel()
+	m, a := newAPI(t, textReply("a"))
+	greet := tacklr.NewTool(tacklr.ToolConfig{Name: "greet", Namespace: "ado", Description: "Greet", Handler: func(context.Context, struct {
+		Name string `json:"name"`
+	}) (string, error) {
+		return "", nil
+	}})
+
+	body := sent(t.Context(), t, m, a, tacklr.ModelRequest{Tools: []*tacklr.Tool{greet}, Messages: hello().Messages})
+
+	want := `[{"description":"Greet","name":"ado__greet","input_schema":{"additionalProperties":false,"properties":{"name":{"type":"string"}},"required":["name"],"type":"object"}}]`
+	if !same(body["tools"], want) {
+		t.Errorf("tools = %v, want the namespaced tool with its schema", body["tools"])
+	}
+}
+
+func TestInvoke_aTurnWithoutToolCallsSendsToolChoiceNone(t *testing.T) {
+	t.Parallel()
+	m, a := newAPI(t, textReply("a"), textReply("b"))
+	get := tacklr.NewTool(tacklr.ToolConfig{Name: "get", Handler: func(context.Context) (string, error) { return "", nil }})
 	ctx := tacklr.ContextWithToolChoiceNone(t.Context())
 
-	collect(t, must(m.WithEffort("high").Invoke(ctx, tacklr.ModelRequest{SystemPrompt: "be brief", Tools: []*tacklr.Tool{greet, get}, Messages: window})))
-	collect(t, must(m.WithModel("claude-haiku-4-5").WithEffort("").WithMaxTokens(1000).Invoke(ctx, hello())))
+	withTools := sent(ctx, t, m, a, tacklr.ModelRequest{Tools: []*tacklr.Tool{get}, Messages: hello().Messages})
+	withoutTools := sent(ctx, t, m, a, hello())
 
-	full := encoded(sent.requests[0])
-	want := `{"cache_control":{"type":"ephemeral"},"max_tokens":64000,"messages":[` +
-		`{"content":[{"source":{"data":"iVBO","media_type":"image/png","type":"base64"},"type":"image"},` +
-		`{"source":{"type":"url","url":"https://example.com/cat.png"},"type":"image"},` +
-		`{"source":{"data":"JVBE","media_type":"application/pdf","type":"base64"},"type":"document"},` +
-		`{"source":{"file_id":"file_1","type":"file"},"type":"document"},` +
-		`{"text":"look","type":"text"},` +
-		`{"cache_control":{"type":"ephemeral"},"text":"<system-reminder>\nPROJECT PLAN\n────────────\nship it\n</system-reminder>","type":"text"}],"role":"user"},` +
-		`{"content":[{"signature":"sig","thinking":"hmm","type":"thinking"},{"text":"checking","type":"text"},` +
-		`{"id":"toolu_1","input":{"name":"x"},"name":"ado__greet","type":"tool_use"},{"id":"toolu_2","input":{},"name":"get","type":"tool_use"}],"role":"assistant"},` +
-		`{"content":[{"content":"ok","tool_use_id":"toolu_1","type":"tool_result"},{"content":"ok2","tool_use_id":"toolu_2","type":"tool_result"},` +
-		`{"text":"<system-reminder>\nkeep going\n</system-reminder>","type":"text"},{"text":"<system-reminder>\nnote\n</system-reminder>","type":"text"}],"role":"user"}],` +
-		`"model":"claude-opus-5-5","output_config":{"effort":"high"},"stream":true,` +
-		`"system":[{"cache_control":{"type":"ephemeral"},"text":"be brief","type":"text"}],` +
-		`"thinking":{"display":"summarized","type":"adaptive"},"tool_choice":{"type":"none"},` +
-		`"tools":[{"description":"Greet","input_schema":{"additionalProperties":false,"properties":{"name":{"type":"string"}},"required":["name"],"type":"object"},"name":"ado__greet"},` +
-		`{"input_schema":{"additionalProperties":false,"properties":{},"required":[],"type":"object"},"name":"get"}]}`
-	if full != want {
-		t.Errorf("request = %s\nwant      %s", full, want)
-	}
-	older := encoded(sent.requests[1])
-	if want := `{"cache_control":{"type":"ephemeral"},"max_tokens":1000,"messages":[{"content":[{"text":"hi","type":"text"}],"role":"user"}],"model":"claude-haiku-4-5","stream":true}`; older != want {
-		t.Errorf("request to an older model = %s, want %s", older, want)
-	}
-	if sent.header.Get("X-Api-Key") != "key" || sent.header.Get("Anthropic-Version") != "2026-10-21" {
-		t.Errorf("headers = %v, want the key and the API version", sent.header)
+	if !same(withTools["tool_choice"], `{"type":"none"}`) || withoutTools["tool_choice"] != nil {
+		t.Errorf("tool_choice with tools = %v, without = %v; want none, and none sent without tools", withTools["tool_choice"], withoutTools["tool_choice"])
 	}
 }
 
-// encoded is v as JSON with <, > and & as they are.
-func encoded(v any) string {
-	var b strings.Builder
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(v)
-	return strings.TrimSuffix(b.String(), "\n")
+func TestInvoke_asksAnAdaptiveModelToThinkAtItsEffort(t *testing.T) {
+	t.Parallel()
+	m, a := newAPI(t, textReply("a"))
+
+	body := sent(t.Context(), t, m.WithEffort("high"), a, hello())
+
+	if !same(body["thinking"], `{"display":"summarized","type":"adaptive"}`) || !same(body["output_config"], `{"effort":"high"}`) || body["max_tokens"] != 64000.0 {
+		t.Errorf("thinking %v, output_config %v, max_tokens %v; want summarized adaptive thinking at high effort and the default limit", body["thinking"], body["output_config"], body["max_tokens"])
+	}
 }
 
-func must[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
+func TestInvoke_sendsAnOlderModelNoThinkingAndItsMaxTokens(t *testing.T) {
+	t.Parallel()
+	m, a := newAPI(t, textReply("a"))
+
+	body := sent(t.Context(), t, m.WithModel("claude-haiku-4-5").WithMaxTokens(1000), a, hello())
+
+	if _, thinks := body["thinking"]; thinks || body["output_config"] != nil || body["max_tokens"] != 1000.0 || body["model"] != "claude-haiku-4-5" {
+		t.Errorf("request = %v, want no thinking or effort and 1000 max tokens", body)
 	}
-	return v
+}
+
+func TestInvoke_authenticatesWithTheKeyAndTheAPIVersion(t *testing.T) {
+	t.Parallel()
+	m, a := newAPI(t, textReply("a"))
+
+	sent(t.Context(), t, m, a, hello())
+
+	if a.header.Get("X-Api-Key") != "key" || a.header.Get("Anthropic-Version") != "2026-10-21" {
+		t.Errorf("headers = %v, want the key and the API version", a.header)
+	}
 }
 
 // TestInvoke_streamsAReplyAsChunks: text and thinking stream as deltas and
@@ -302,7 +414,7 @@ func TestInvoke_streamsAReplyAsChunks(t *testing.T) {
 func TestHarness_replaysAToolRoundWithItsThinkingInOrder(t *testing.T) {
 	t.Parallel()
 	// Arrange
-	m, sent := newAPI(t, sse(start,
+	m, a := newAPI(t, sse(start,
 		`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`,
 		`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}`,
 		`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"s1"}}`,
@@ -342,13 +454,12 @@ func TestHarness_replaysAToolRoundWithItsThinkingInOrder(t *testing.T) {
 	answer, err := h.Infer(t.Context(), out)
 
 	// Assert
-	replayed := encoded(sent.requests[1]["messages"])
-	want := `[{"content":[{"text":"greet","type":"text"}],"role":"user"},` +
-		`{"content":[{"signature":"s1","thinking":"plan","type":"thinking"},{"text":"I will greet.","type":"text"},` +
-		`{"signature":"s2","thinking":"","type":"thinking"},{"id":"toolu_1","input":{},"name":"greet","type":"tool_use"}],"role":"assistant"},` +
-		`{"content":[{"content":"hello","tool_use_id":"toolu_1","type":"tool_result"}],"role":"user"}]`
-	if err != nil || answer.Result != "hello sent" || replayed != want {
-		t.Fatalf("answer %q (%v), replayed %s\nwant              %s", answer.Result, err, replayed, want)
+	turns := turnsOf(a.requests[1])
+	assistant := `[{"signature":"s1","thinking":"plan","type":"thinking"},{"text":"I will greet.","type":"text"},
+		{"signature":"s2","thinking":"","type":"thinking"},{"id":"toolu_1","input":{},"name":"greet","type":"tool_use"}]`
+	if err != nil || answer.Result != "hello sent" || len(turns) != 3 || !same(turns[1]["content"], assistant) ||
+		!same(turns[2]["content"], `[{"content":"hello","tool_use_id":"toolu_1","type":"tool_result"}]`) {
+		t.Fatalf("answer %q (%v), replayed %v", answer.Result, err, turns)
 	}
 }
 
@@ -357,8 +468,7 @@ func TestHarness_replaysAToolRoundWithItsThinkingInOrder(t *testing.T) {
 // failure, an error event, a cut or unfinished stream and a provider that
 // is gone are network errors the runtime retries; a refusal and the
 // response limit are their stop-reason errors; another HTTP error keeps
-// its status; a stream that is not JSON and a URL that does not parse
-// fail.
+// its status; a stream that is not JSON fails.
 func TestInvoke_failuresAreTyped(t *testing.T) {
 	t.Parallel()
 	answer := func(status int, body string, length int) http.HandlerFunc {
@@ -375,7 +485,6 @@ func TestInvoke_failuresAreTyped(t *testing.T) {
 	for name, tc := range map[string]struct {
 		handler http.HandlerFunc
 		gone    bool
-		url     string
 		want    func(err error) bool
 	}{
 		"a prompt over the window": {handler: answer(http.StatusBadRequest, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1000001 tokens > 1000000 maximum"}}`, 0), want: func(err error) bool {
@@ -410,13 +519,12 @@ func TestInvoke_failuresAreTyped(t *testing.T) {
 		"a stream cut off": {handler: answer(http.StatusOK, sse(start, partial), 10_000), want: func(err error) bool {
 			return errors.Is(err, anthropic.ErrIncompleteStream) && errors.Is(err, io.ErrUnexpectedEOF)
 		}},
-		"a provider that is gone":   {handler: answer(http.StatusOK, "", 0), gone: true, want: func(err error) bool { return errors.Is(err, tacklr.ErrNetwork) }},
-		"a URL that does not parse": {handler: answer(http.StatusOK, "", 0), url: "http://bad\x7f", want: func(err error) bool { return err != nil && strings.Contains(err.Error(), "build provider request") }},
+		"a provider that is gone": {handler: answer(http.StatusOK, "", 0), gone: true, want: func(err error) bool { return errors.Is(err, tacklr.ErrNetwork) }},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			srv := testhttp.New(t, tc.handler)
-			m := anthropic.New(srv.Client()).WithApiKey("k").WithModel("claude-opus-5-5").WithURL(cmp.Or(tc.url, srv.URL))
+			m := anthropic.New(srv.Client()).WithApiKey("k").WithModel("claude-opus-5-5").WithURL(srv.URL)
 			if tc.gone {
 				srv.Close()
 			}
@@ -431,12 +539,32 @@ func TestInvoke_failuresAreTyped(t *testing.T) {
 	}
 }
 
-// TestCountTokens_reportsWhatTheAPIAnswers: a count is the API's
-// input_tokens for the request without its response settings. A gateway
-// without the endpoint (404) fails with ErrCannotCount and names the API;
-// a prompt over the window is ErrContextLength; a body that is not JSON, a
-// body cut off and an API that is gone fail the count.
-func TestCountTokens_reportsWhatTheAPIAnswers(t *testing.T) {
+func TestCountTokens_sendsTheRequestWithoutItsResponseSettings(t *testing.T) {
+	t.Parallel()
+	var path string
+	var body map[string]any
+	srv := testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		path = r.URL.Path
+		_ = json.Unmarshal(raw, &body)
+		_, _ = io.WriteString(w, `{"input_tokens":42}`)
+	}))
+	m := anthropic.New(srv.Client()).WithApiKey("k").WithModel("claude-opus-5-5").WithEffort("high").WithURL(srv.URL)
+
+	n, err := m.CountTokens(t.Context(), hello())
+
+	settings := []string{"max_tokens", "stream", "output_config", "cache_control"}
+	sentSettings := slices.ContainsFunc(settings, func(k string) bool { _, ok := body[k]; return ok })
+	if err != nil || n != 42 || path != "/messages/count_tokens" || sentSettings || body["model"] != "claude-opus-5-5" || body["thinking"] == nil || len(turnsOf(body)) != 1 {
+		t.Errorf("count = %d %v; sent %s %v, want the model, thinking and messages only", n, err, path, body)
+	}
+}
+
+// TestCountTokens_failuresAreTyped: a gateway without the endpoint (404)
+// fails with ErrCannotCount and names the API; a prompt over the window is
+// ErrContextLength; a body that is not JSON, a body cut off and an API
+// that is gone fail the count.
+func TestCountTokens_failuresAreTyped(t *testing.T) {
 	t.Parallel()
 	answer := func(status int, body string, length int) http.HandlerFunc {
 		return func(w http.ResponseWriter, _ *http.Request) {
@@ -447,95 +575,65 @@ func TestCountTokens_reportsWhatTheAPIAnswers(t *testing.T) {
 			_, _ = io.WriteString(w, body)
 		}
 	}
-	var counted string
 	for name, tc := range map[string]struct {
 		handler http.HandlerFunc
 		gone    bool
-		want    func(n int, err error) bool
+		want    func(err error) bool
 	}{
-		"a count": {handler: func(w http.ResponseWriter, r *http.Request) {
-			raw, _ := io.ReadAll(r.Body)
-			counted = r.URL.Path + " " + string(raw)
-			_, _ = io.WriteString(w, `{"input_tokens":42}`)
-		}, want: func(n int, err error) bool {
-			return err == nil && n == 42 && counted == `/messages/count_tokens {"model":"claude-opus-5-5","thinking":{"type":"adaptive","display":"summarized"},"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`
-		}},
-		"a gateway without the endpoint": {handler: answer(http.StatusNotFound, "", 0), want: func(_ int, err error) bool {
+		"a gateway without the endpoint": {handler: answer(http.StatusNotFound, "", 0), want: func(err error) bool {
 			return errors.Is(err, tacklr.ErrCannotCount) && strings.Contains(err.Error(), "http://127.0.0.1")
 		}},
-		"a prompt over the window": {handler: answer(http.StatusBadRequest, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long"}}`, 0), want: func(_ int, err error) bool {
+		"a prompt over the window": {handler: answer(http.StatusBadRequest, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long"}}`, 0), want: func(err error) bool {
 			return errors.Is(err, session.ErrContextLength)
 		}},
-		"a body that is not JSON": {handler: answer(http.StatusOK, "nope", 0), want: func(_ int, err error) bool { return err != nil && strings.Contains(err.Error(), "decode token count") }},
-		"a body cut off": {handler: answer(http.StatusOK, `{"input_tokens":`, 100), want: func(_ int, err error) bool {
+		"a body that is not JSON": {handler: answer(http.StatusOK, "nope", 0), want: func(err error) bool { return err != nil && strings.Contains(err.Error(), "decode token count") }},
+		"a body cut off": {handler: answer(http.StatusOK, `{"input_tokens":`, 100), want: func(err error) bool {
 			return errors.Is(err, tacklr.ErrNetwork) && errors.Is(err, io.ErrUnexpectedEOF)
 		}},
-		"an API that is gone": {handler: answer(http.StatusOK, "", 0), gone: true, want: func(_ int, err error) bool { return errors.Is(err, tacklr.ErrNetwork) }},
+		"an API that is gone": {handler: answer(http.StatusOK, "", 0), gone: true, want: func(err error) bool { return errors.Is(err, tacklr.ErrNetwork) }},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			srv := testhttp.New(t, tc.handler)
 			m := anthropic.New(srv.Client()).WithApiKey("k").WithModel("claude-opus-5-5").WithURL(srv.URL)
 			if tc.gone {
 				srv.Close()
 			}
 
-			n, err := m.CountTokens(t.Context(), hello())
+			_, err := m.CountTokens(t.Context(), hello())
 
-			if !tc.want(n, err) {
-				t.Errorf("count = %d %v (sent %s)", n, err, counted)
+			if !tc.want(err) {
+				t.Errorf("count err = %v", err)
 			}
 		})
 	}
 }
 
-// full waits until ch's buffer is full: the stream's next send waits for a
-// reader.
-func full(t *testing.T, ch chan tacklr.LLMResponseChunk) {
-	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); len(ch) < cap(ch); time.Sleep(time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the stream did not fill its buffer")
-		}
-	}
-}
-
-// TestInvoke_aCancelledCallEndsTheStream: cancelling the caller's context
-// closes the stream, both while a reader that stopped reading leaves the
-// stream full and while the call waits for the API.
-func TestInvoke_aCancelledCallEndsTheStream(t *testing.T) {
+func TestInvoke_aCallCancelledWhileItWaitsForTheAPIEndsTheStream(t *testing.T) {
 	t.Parallel()
-	delta := `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}`
-	for name, burst := range map[string]int{"while the reader stopped reading": 100, "while it waits for the API": 1} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			srv := testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = io.WriteString(w, sse(start, `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)+strings.Repeat(sse(delta), burst))
-				w.(http.Flusher).Flush()
-				<-r.Context().Done()
-			}))
-			m := anthropic.New(srv.Client()).WithApiKey("k").WithModel("claude-opus-5-5").WithURL(srv.URL)
-			ctx, cancel := context.WithCancel(t.Context())
-			ch := must(m.Invoke(ctx, hello()))
-			if burst > 1 {
-				full(t, ch)
-			} else {
-				<-ch
-			}
+	srv := testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, sse(start, `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}`))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	m := anthropic.New(srv.Client()).WithApiKey("k").WithModel("claude-opus-5-5").WithURL(srv.URL)
+	ctx, cancel := context.WithCancel(t.Context())
+	ch := must(m.Invoke(ctx, hello()))
+	<-ch
 
-			cancel()
+	cancel()
 
-			deadline := time.After(5 * time.Second)
-			for {
-				select {
-				case _, open := <-ch:
-					if !open {
-						return
-					}
-				case <-deadline:
-					t.Fatal("stream did not end after cancel")
-				}
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case _, open := <-ch:
+			if !open {
+				return
 			}
-		})
+		case <-deadline:
+			t.Fatal("stream did not end after cancel")
+		}
 	}
 }

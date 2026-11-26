@@ -8,7 +8,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/storetest"
-	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
 // TestEval_fusedSearchLandsEachKindOfResultOnItsQuery is the ranking golden
@@ -21,7 +20,7 @@ import (
 func TestEval_fusedSearchLandsEachKindOfResultOnItsQuery(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Graph(t)), brain.WithKinds(
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(memoryGraph()), brain.WithKinds(
 		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}}},
 		brain.KindSpec{Kind: "Fact", IsParent: true},
 		brain.KindSpec{Kind: "Buyer", IsParent: true},

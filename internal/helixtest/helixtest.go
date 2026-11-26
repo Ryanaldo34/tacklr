@@ -1,12 +1,10 @@
-// Package helixtest runs the Helix server live tests use, and one graph
-// opened on it. Every test package of one go test run shares one server: a
-// reusable container by name, which Ryuk removes when the run ends. Tests
-// share its data, so each writes under a tenant of its own.
+// Package helixtest runs a Helix server for a live test and opens graphs on
+// it. Each Start is a server of the test's own, removed when the test ends,
+// so no test sees another's data.
 package helixtest
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
@@ -22,82 +20,49 @@ import (
 const Image = "ghcr.io/helixdb/helixdb:v0.0.12"
 
 // Options are Graph's options: vector indexes of graphtest.Dimension, and an
-// edge index on every relation a test searches. Graph has no Embedder, so it
-// ranks text only; Open can add one.
-var Options = helixgraph.Options{
-	Dimension:     graphtest.Dimension,
-	EdgeRelations: []string{graphtest.EdgeSearchLabel, graphtest.OtherEdgeSearchLabel, "about", "has_buyer"},
-}
-
-var (
-	serverOnce     sync.Once
-	serverURL      string
-	serverStartErr error
-	graphOnce      sync.Once
-	graph          *helixgraph.Graph
-	graphErr       error
-)
-
-// URL returns the shared Helix server's base URL, starting it on first use.
-func URL(t testing.TB) string {
-	t.Helper()
-	serverOnce.Do(func() {
-		ctx := context.Background()
-		ctr, err := testcontainers.Run(ctx, Image,
-			testcontainers.WithExposedPorts("8080/tcp"),
-			testcontainers.WithWaitStrategy(wait.ForHTTP("/readyz").WithPort("8080/tcp").WithStartupTimeout(2*time.Minute)),
-			// One container per go test run: every package of the run shares
-			// it (testcontainers.SessionID is the run's), and another run
-			// never reuses it, so one run's reaper cannot remove it under
-			// another run.
-			testcontainers.WithReuseByName("tacklr-helix-"+testcontainers.SessionID()),
-		)
-		if err != nil {
-			serverStartErr = err
-			return
-		}
-		serverURL, serverStartErr = ctr.PortEndpoint(ctx, "8080/tcp", "http")
-	})
-	if serverStartErr != nil {
-		t.Fatalf("helix container: %v", serverStartErr)
+// edge index on every relation a test searches. They have no Embedder, so a
+// graph ranks text only; Open can add one.
+func Options() helixgraph.Options {
+	return helixgraph.Options{
+		Dimension:     graphtest.Dimension,
+		EdgeRelations: []string{graphtest.EdgeSearchLabel, graphtest.OtherEdgeSearchLabel, "about", "has_buyer"},
 	}
-	return serverURL
 }
 
-// Open opens a graph over the container with Options as change sets them,
-// such as an Embedding or a Ranking. The indexes exist after Graph, so it
-// is cheap.
-func Open(t testing.TB, change func(*helixgraph.Options)) *helixgraph.Graph {
+// Start runs a Helix server for t and returns its base URL.
+func Start(t testing.TB) string {
 	t.Helper()
-	Graph(t)
-	client, err := helix.NewClient(URL(t))
+	ctx := context.Background()
+	ctr, err := testcontainers.Run(ctx, Image,
+		testcontainers.WithExposedPorts("8080/tcp"),
+		testcontainers.WithWaitStrategy(wait.ForHTTP("/readyz").WithPort("8080/tcp").WithStartupTimeout(2*time.Minute)),
+	)
+	testcontainers.CleanupContainer(t, ctr)
+	if err != nil {
+		t.Fatalf("helix container: %v", err)
+	}
+	url, err := ctr.PortEndpoint(ctx, "8080/tcp", "http")
+	if err != nil {
+		t.Fatalf("helix container: %v", err)
+	}
+	return url
+}
+
+// Open opens a graph over the server at url with Options as change sets
+// them, such as an Embedding or a Ranking; a nil change keeps them.
+func Open(t testing.TB, url string, change func(*helixgraph.Options)) *helixgraph.Graph {
+	t.Helper()
+	client, err := helix.NewClient(url)
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := Options
-	change(&opts)
+	opts := Options()
+	if change != nil {
+		change(&opts)
+	}
 	g, err := helixgraph.Open(t.Context(), client, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return g
-}
-
-// Graph is one text-only graph with Options, opened once over the container.
-// Tests share it, so each writes under a tenant of its own.
-func Graph(t testing.TB) *helixgraph.Graph {
-	t.Helper()
-	base := URL(t)
-	graphOnce.Do(func() {
-		client, err := helix.NewClient(base)
-		if err != nil {
-			graphErr = err
-			return
-		}
-		graph, graphErr = helixgraph.Open(context.Background(), client, Options)
-	})
-	if graphErr != nil {
-		t.Fatal(graphErr)
-	}
-	return graph
 }

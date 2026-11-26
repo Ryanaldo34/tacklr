@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ryanaldo34/tacklr/internal/azuritetest"
+	"github.com/ryanaldo34/tacklr/internal/s3test"
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/awss3"
@@ -33,7 +35,7 @@ func TestLocal_contract(t *testing.T) {
 // TestS3_contract: an S3 bucket meets the backend contract.
 func TestS3_contract(t *testing.T) {
 	t.Parallel()
-	client, bucket := startS3(t)
+	client, bucket := s3test.Start(t)
 	vfstest.Run(t, func(t *testing.T) vfstest.Backend {
 		return prefixedBackend(t, vfs.S3(awss3.API{Client: client}, bucket))
 	})
@@ -42,7 +44,7 @@ func TestS3_contract(t *testing.T) {
 // TestBlob_contract: an Azure Blob container meets the backend contract.
 func TestBlob_contract(t *testing.T) {
 	t.Parallel()
-	client, container := startAzurite(t)
+	client, container := azuritetest.Start(t)
 	vfstest.Run(t, func(t *testing.T) vfstest.Backend {
 		return prefixedBackend(t, vfs.Blob(azureblob.API{Client: client}, container))
 	})

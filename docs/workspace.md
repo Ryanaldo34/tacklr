@@ -41,18 +41,22 @@ A member's options: `.ReadOnly()` refuses writes, and `.NotIndexed()` keeps its 
 
 ## Users' own folders
 
-Google Drive and Microsoft 365 folders belong to the user, so the client sends the credentials. The client runs OAuth and sends a short-lived access token for each session. The server is not an OAuth client.
+Google Drive and Microsoft 365 folders belong to the user, so your backend sends the user's credentials: it runs OAuth (or takes the user's delegated token from your identity provider) and sends a short-lived access token with a prompt. Tacklr is not an OAuth client.
 
-Over ACP, the client uses these extension methods:
+A binding names the folder and carries its token. Send bindings in `session.Prompt.Auth` (or `session.Resume.Auth`):
 
-| Method | Does |
-|---|---|
-| `_tacklr/vfs/bind` | Adds a folder: `{sessionId, backends: [{provider, point, auth, params}]}`. `provider` is `gdrive` or `msgraph`, and `params.name` is the directory name under `/workspace`. |
-| `_tacklr/vfs/refresh` | Sends a new access token. |
-| `_tacklr/vfs/unbind` | Removes a folder by its name. |
-| `_tacklr/vfs/token` | Sent by the agent: asks the client for a new token after a 401, when the client said it can refresh. |
+```go
+err := sessions.Prompt(ctx, id, session.Prompt{
+	Text: "Summarize the spec",
+	Auth: session.AuthContext{Bindings: []mount.Binding{{
+		Provider: mount.ProviderGoogleDrive,
+		Params:   map[string]string{mount.ParamName: "drive", mount.ParamFolderID: folderID},
+		Auth:     mount.Credential{Token: accessToken, ExpiresAt: expiry},
+	}}},
+})
+```
 
-A change applies from the session's next prompt. A bound folder is read-only unless the client sets `"readOnly": false`.
+`mount.ParamName` is the directory name under `/workspace`. A binding with the same name replaces the earlier one, a binding with only a provider and a token refreshes every folder of that provider, and `AuthContext.Drop` removes folders by name or provider. A change applies from that prompt on.
 
 In your supervisor's `Workspace`, build the member from the turn's binding:
 
@@ -67,7 +71,7 @@ func open(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, e
 }
 ```
 
-The token goes to `session.SecretStorage`, sealed. It is never in the checkpoint, in Temporal history, or in the ACP wire store. It reaches the supervisor only for the length of a `run_command`, and never the VM. See [Sessions in production](session.md#credentials).
+The token goes to `session.SecretStorage`, sealed. It is never in the checkpoint or in Temporal history. It reaches the supervisor only for the length of a `run_command`, and never the VM. See [Sessions in production](session.md#credentials).
 
 When a token is near expiry, or Drive or Microsoft 365 refuses it, the supervisor asks the session runtime for a new one on the `run_command` stream. Set `sandbox.Client.Refresh` to answer: it gets the session ID and the binding (without its token) and returns a new `mount.Credential`, for example from your identity provider. Without `Refresh`, a source with an expired token fails, and a workspace that cannot open refuses the worker.
 
@@ -99,17 +103,15 @@ ms, err := vfs.Tree(vfs.At("work", vfs.Local("/srv/tacklr/work")))(ctx, "session
 note := ms.Route(ctx, "/workspace/work/note.txt")
 err = note.WriteFile(ctx, []byte("a\nb\nc\n"))
 
-doc, err := note.ReadText(ctx) // the file as an editable document
-err = doc.SetText(strings.ToUpper(doc.Text()))
-err = note.WriteDocument(ctx, doc)
+doc, err := note.ReadText(ctx) // the file as a document, through its codec
+fmt.Println(doc.Text())
 ```
 
 | `Route` method | Does |
 |---|---|
 | `ReadFile`, `WriteFile` | Whole files as bytes. |
 | `Open` | Streams a file, with range reads on remote sources. |
-| `ReadLines` | A window of lines from a large file, without reading all of it. Lines are 1-based. |
-| `ReadText`, `OpenDocument`, `WriteDocument` | A file as a document, through its codec. |
+| `ReadText`, `OpenDocument` | A file as a document, through its codec. A document cannot be written back. |
 | `Stat`, `ReadDir`, `MkdirAll`, `Remove` | The usual file operations. |
 
 `FileInfo.Version` changes when a file's content changes (an ETag on S3 and Azure Blob, a checksum on Drive, a content tag on Graph), so you can find changed files without reading them.
@@ -119,10 +121,7 @@ err = note.WriteDocument(ctx, doc)
 | Limit | Value |
 |---|---|
 | A whole-file read or write | 32 MiB (`vfs.MaxReadFileBytes`) |
-| One line | 1 MiB (`vfs.MaxLineBytes`) |
-| Lines in one `ReadLines` window | 500 |
-
-`Open` and `ReadLines` stream, so they have no file size limit.
+`Open` streams, so it has no file size limit.
 
 ### Errors
 
@@ -131,8 +130,6 @@ err = note.WriteDocument(ctx, doc)
 | `vfs.ErrNotExist` | The file does not exist. |
 | `vfs.ErrNotMounted` | The path is not under a mount. |
 | `vfs.ErrReadOnly` | The mount is read-only. |
-| `vfs.ErrStaleContent` | The file changed since it was read. Read it again. |
-| `vfs.ErrConflict` | Another writer changed the document first. |
 | `vfs.ErrTooLarge` | The file is over the size limit. |
 | `vfs.ErrNoCodec`, `vfs.ErrNotTextual` | The file's type cannot be read as a document. |
 | `vfs.ErrAuthExpired` | The user's token expired. The client must send a new one. |

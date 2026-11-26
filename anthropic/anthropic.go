@@ -33,8 +33,6 @@ var (
 	ErrIncompleteStream = provider.ErrIncompleteStream
 	// ErrMalformedStream is a stream event that is not valid JSON.
 	ErrMalformedStream = provider.ErrMalformedStream
-
-	_ tacklr.Model = (*Model)(nil)
 )
 
 // APIStatusError is an HTTP error answer from the API. Find it in a

@@ -1,19 +1,16 @@
 package telemetry
 
-// Span names. A turn is one trace, from the client's request to the
+// Span names. A turn is one trace, from the caller's request to the
 // answer, across every process and runtime it touches:
 //
-//	session/prompt                SERVER   the protocol request (rpc.*)
-//	  invoke_agent {agent}        INTERNAL the turn (gen_ai.* invoke_agent)
-//	    chat {model}              CLIENT   one model request (gen_ai.* chat)
-//	    execute_tool {tool}       INTERNAL one tool call (gen_ai.* execute_tool)
-//	    tacklr.context.handoff    INTERNAL a plan handoff, with its model request
-//	    invoke_agent {specialist} INTERNAL a child session's turn
-//	  session/request_permission  CLIENT   a question the agent asks the client
+//	invoke_agent {agent}        INTERNAL the turn (gen_ai.* invoke_agent)
+//	  chat {model}              CLIENT   one model request (gen_ai.* chat)
+//	  execute_tool {tool}       INTERNAL one tool call (gen_ai.* execute_tool)
+//	  tacklr.context.handoff    INTERNAL a plan handoff, with its model request
+//	  invoke_agent {specialist} INTERNAL a child session's turn
 //
 // The span names of the turn, the model request and the tool call are the
-// OpenTelemetry GenAI semantic conventions'; the protocol request's are
-// the RPC conventions' (rpc.system jsonrpc). Each name is the operation
+// OpenTelemetry GenAI semantic conventions'. Each name is the operation
 // and its static target, so names stay few.
 //
 // Attributes on spans are static and searchable: identifiers, closed enums,
@@ -34,7 +31,7 @@ const (
 )
 
 // Attribute keys of the OpenTelemetry semantic conventions.
-// https://opentelemetry.io/docs/specs/semconv/gen-ai/ and .../rpc/
+// https://opentelemetry.io/docs/specs/semconv/gen-ai/
 const (
 	AttrGenAIOperationName    = "gen_ai.operation.name"
 	AttrGenAIProviderName     = "gen_ai.provider.name"
@@ -51,10 +48,6 @@ const (
 	AttrGenAICacheWriteTokens = "gen_ai.usage.cache_write_tokens"
 	AttrErrorType             = "error.type"
 	AttrHTTPStatus            = "http.response.status_code"
-
-	AttrRPCSystem    = "rpc.system"
-	AttrRPCMethod    = "rpc.method"
-	AttrJSONRPCError = "rpc.jsonrpc.error_code"
 )
 
 // Tacklr's own attribute keys (static identifiers and closed enums).
@@ -64,10 +57,8 @@ const (
 	AttrParentSession = "tacklr.session.parent"
 	AttrToolNS        = "tacklr.tool.namespace"
 	AttrModelPhase    = "tacklr.model.phase" // turn | handoff | compress
-	AttrInterruptKind = "tacklr.interrupt.kind"
 	AttrOutcome       = "tacklr.outcome"
 	AttrErrorCode     = "tacklr.error.code" // the provider's error code
-	AttrStopReason    = "tacklr.stop_reason"
 )
 
 // Runtime values for AttrRuntime (closed enum).
@@ -97,9 +88,6 @@ const (
 	ToolTypeFunction  = "function"
 	ToolTypeExtension = "extension"
 )
-
-// RPC system of a protocol (rpc.system).
-const RPCSystemJSONRPC = "jsonrpc"
 
 // Error class buckets for error.type (closed enum).
 const (

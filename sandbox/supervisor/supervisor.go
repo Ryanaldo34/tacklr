@@ -72,9 +72,6 @@ type Config struct {
 	VCPUs int
 	// MemoryMiB is the memory of each VM. Zero is 512.
 	MemoryMiB int
-	// Init, if set, is the guest's first process and its arguments, in
-	// place of the worker. No argument may have a quote or a newline.
-	Init []string
 	// Log, if set, gets Firecracker's log and each guest's console.
 	Log io.Writer
 	// TLS is the server's TLS configuration. It must have the server
@@ -135,11 +132,7 @@ func New(config Config) (*Supervisor, error) {
 		rootfs:      config.Rootfs,
 		vcpus:       cmp.Or(config.VCPUs, defaultVCPUs),
 		memoryMiB:   cmp.Or(config.MemoryMiB, defaultMemoryMiB),
-		init:        config.Init,
 		log:         config.Log,
-	}
-	if _, err := m.bootArgs(); err != nil {
-		return nil, err
 	}
 	config.StopTimeout = cmp.Or(config.StopTimeout, defaultStopTimeout)
 	config.BootTimeout = cmp.Or(config.BootTimeout, defaultBootTimeout)

@@ -1,7 +1,7 @@
 package vfs_test
 
 import (
-	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -9,63 +9,90 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// A read-only Drive mount keeps the HTML export of a Google Doc per
-// modification time: a second read does not export again, a Doc that
-// Drive reports as modified exports again, and the oldest of more than
-// 32 exports is dropped first.
-func TestDrive_exportsAreKeptPerModificationTime(t *testing.T) {
-	t.Parallel()
+// readSpec mounts fx read-only, reads the Doc Spec once, and returns a
+// read of its first block.
+func readSpec(t *testing.T, fx *testdrive.FX) func() (string, error) {
+	t.Helper()
 	ctx := t.Context()
-	fx := testdrive.New()
-	fx.Add("", vfs.DriveMeta{ID: "root-a", Name: "Contracts", MimeType: "application/vnd.google-apps.folder"}, nil)
-	for i := range 34 {
-		id := fmt.Sprintf("d%d", i)
-		fx.Add("root-a", vfs.DriveMeta{ID: id, Name: id, MimeType: "application/vnd.google-apps.document"}, nil)
-		fx.Nodes[id].Export = []byte(fmt.Sprintf("<p>v1 %d</p>", i))
-	}
+	export(t, fx, "doc1", []byte("<p>v1</p>"))
 	ms := mountDrive(t, fx, false)
-	read := func(name string) string {
-		t.Helper()
-		doc, err := ms.Route(ctx, "/workspace/contracts/"+name).ReadText(ctx)
+	read := func() (string, error) {
+		doc, err := ms.Route(ctx, "/workspace/contracts/Spec").ReadText(ctx)
 		if err != nil {
-			t.Fatal(err)
+			return "", err
 		}
-		return doc.(vfs.Structured).Blocks()[0].Text
+		return doc.(vfs.Structured).Blocks()[0].Text, nil
 	}
+	if _, err := read(); err != nil {
+		t.Fatal(err)
+	}
+	return read
+}
 
-	read("d0")
-	again := read("d0")
-	exportsAfterTwoReads := fx.Exports
-	fx.Nodes["d0"].Export = []byte("<p>v2</p>")
-	fx.Nodes["d0"].Meta.ModTime = fx.Nodes["d0"].Meta.ModTime.Add(time.Second)
-	modified := read("d0")
-	for i := 1; i < 33; i++ {
-		read(fmt.Sprintf("d%d", i))
-	}
-	exportsBefore := fx.Exports
-	read("d1")
-	kept := fx.Exports
-	read("d0")
-	read("d33")
-	read("d0")
+// TestDrive_aReadOnlyMountReadsAnUnchangedDocWithoutAnExport: a second read
+// of a Google Doc that Drive reports unchanged reads while exports fail.
+func TestDrive_aReadOnlyMountReadsAnUnchangedDocWithoutAnExport(t *testing.T) {
+	t.Parallel()
+	fx := testdrive.Tree()
+	read := readSpec(t, fx)
+	fx.Fail(testdrive.Fault{Call: "files.export", ID: "doc1", Status: http.StatusInternalServerError})
 
-	if again != "v1 0" || exportsAfterTwoReads != 1 || modified != "v2" {
-		t.Fatalf("second read = %q after %d exports, modified read = %q", again, exportsAfterTwoReads, modified)
-	}
-	if kept != exportsBefore || fx.Exports != exportsBefore+2 {
-		t.Fatalf("exports = %d -> %d -> %d, want d1 kept and d0 and d33 exported", exportsBefore, kept, fx.Exports)
+	got, err := read()
+
+	if err != nil || got != "v1" {
+		t.Fatalf("second read = %q %v, want the kept v1", got, err)
 	}
 }
 
-// The version of a Google file is its Drive version, else its
-// modification time; a file with neither has no version.
+// TestDrive_aReadOnlyMountReadsAChangedDocsNewExport: a Doc that Drive
+// reports as modified reads its new export.
+func TestDrive_aReadOnlyMountReadsAChangedDocsNewExport(t *testing.T) {
+	t.Parallel()
+	fx := testdrive.Tree()
+	read := readSpec(t, fx)
+	fx.Edit(t, "doc1", func(n *testdrive.Node) {
+		n.Export = []byte("<p>v2</p>")
+		n.Meta.ModTime = n.Meta.ModTime.Add(time.Second)
+	})
+
+	got, err := read()
+
+	if err != nil || got != "v2" {
+		t.Fatalf("read after a change = %q %v, want v2", got, err)
+	}
+}
+
+// TestDrive_anUploadKeepsTheReadsOfOtherFiles: an upload over a file drops
+// what a writable Drive mount keeps for that file only: the Doc read before
+// it reads again without a Docs call.
+func TestDrive_anUploadKeepsTheReadsOfOtherFiles(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	fx := testdrive.Tree()
+	fx.SeedDoc("doc1", []vfs.DocsSpan{{Kind: "paragraph", Text: "Hello"}}, nil)
+	ms := mountDrive(t, fx, true)
+	if _, err := ms.Route(ctx, "/workspace/contracts/Spec").ReadText(ctx); err != nil {
+		t.Fatal(err)
+	}
+	fx.Fail(testdrive.Fault{Call: "documents.get", Status: http.StatusInternalServerError})
+
+	writeErr := ms.Route(ctx, "/workspace/contracts/nda.pdf").WriteFile(ctx, []byte("b"))
+	doc, readErr := ms.Route(ctx, "/workspace/contracts/Spec").ReadText(ctx)
+
+	if writeErr != nil || readErr != nil || !blockHasText(doc, "Hello") {
+		t.Fatalf("write = %v, read = %v", writeErr, readErr)
+	}
+}
+
+// TestDrive_googleFileVersions: the version of a Google file is its Drive
+// version, else its modification time; a file with neither has no version.
 func TestDrive_googleFileVersions(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	fx := testdrive.Tree()
 	mod := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	fx.Nodes["doc1"].Meta.Version, fx.Nodes["doc1"].Meta.ModTime = "", mod
-	fx.Nodes["sheet1"].Meta.Version, fx.Nodes["sheet1"].Meta.ModTime = "", time.Time{}
+	fx.Edit(t, "doc1", func(n *testdrive.Node) { n.Meta.Version, n.Meta.ModTime = "", mod })
+	fx.Edit(t, "sheet1", func(n *testdrive.Node) { n.Meta.Version, n.Meta.ModTime = "", time.Time{} })
 	ms := mountDrive(t, fx, false)
 
 	doc, docErr := ms.Route(ctx, "/workspace/contracts/Spec").Stat(ctx)

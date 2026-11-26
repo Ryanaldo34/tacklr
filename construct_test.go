@@ -156,10 +156,10 @@ func TestNewHarness_twoBuildsSendTheSameRequestPrefix(t *testing.T) {
 
 	sent := provider.sent()
 	one, two := sent[0], sent[1]
-	if !slices.Equal(one.toolNames(), two.toolNames()) || one.msgs[0].Content != two.msgs[0].Content {
+	if !slices.Equal(one.tools, two.tools) || one.msgs[0].Content != two.msgs[0].Content {
 		t.Fatal("two builds from the same inputs sent different request prefixes")
 	}
-	mcpTools := slices.DeleteFunc(one.toolNames(), func(n string) bool { return !strings.Contains(n, "__") })
+	mcpTools := slices.DeleteFunc(slices.Clone(one.tools), func(n string) bool { return !strings.Contains(n, "__") })
 	if !slices.Equal(mcpTools, []string{"svc__alpha", "svc__zeta"}) {
 		t.Fatalf("MCP tools = %v, want the reachable server's tools in name order", mcpTools)
 	}

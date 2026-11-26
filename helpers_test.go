@@ -19,16 +19,7 @@ import (
 // is its first message.
 type request struct {
 	msgs  []*message.Message
-	tools []*tacklr.Tool
-}
-
-// toolNames are the names the request offers the model, in order.
-func (r request) toolNames() []string {
-	var names []string
-	for _, t := range r.tools {
-		names = append(names, t.QualifiedName())
-	}
-	return names
+	tools []string
 }
 
 // provider is a model provider on a script: request n gets the n-th reply,
@@ -39,7 +30,7 @@ type provider struct {
 	requests []request
 }
 
-func (p *provider) respond(_ context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+func (p *provider) respond(_ context.Context, msgs []*message.Message, tools []string, ch chan<- tacklr.LLMResponseChunk) {
 	p.mu.Lock()
 	n := len(p.requests)
 	p.requests = append(p.requests, request{msgs: msgs, tools: tools})
@@ -69,8 +60,8 @@ func scripted(t *testing.T, replies ...[]tacklr.LLMResponseChunk) (tacklr.Model,
 }
 
 // counted is scripted on a provider that counts a request's tokens with
-// count. The provider also prices each response with count, so a script
-// that fails its n-th count counts those too.
+// count (nil: it cannot count). The provider also prices each response
+// with count, so a script that fails its n-th count counts those too.
 func counted(t *testing.T, count func([]*message.Message) (int, error), replies ...[]tacklr.LLMResponseChunk) (tacklr.Model, *provider) {
 	t.Helper()
 	p := &provider{replies: replies}

@@ -115,7 +115,7 @@ linters:
         # Keep exported API docs for the public SDK without ST1000 package spam.
         - name: exported
           disabled: true # enable later once public API docs are complete
-        # JSON wire fields often use Id (ACP / JSON-RPC conventions).
+        # JSON wire fields often use Id (JSON-RPC conventions).
         - name: var-naming
           disabled: true
         # fmt.Errorf("static") without %w is fine; do not force errors.New churn.
@@ -152,7 +152,7 @@ linters:
 
     misspell:
       locale: US
-      # Protocol / domain language (ACP stop reasons, British spelling in specs).
+      # Domain language (cancelled turns, British spelling in specs).
       ignore-rules:
         - cancelled
         - cancelling

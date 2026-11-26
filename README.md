@@ -22,7 +22,7 @@ Tacklr is a Linux-based, cloud-native operating and security system for AI agent
 - **Sandboxed code execution.** `run_command` runs bash scripts in a Firecracker microVM: its own kernel, a read-only root file system, no network device, and Firecracker in its own namespaces on the sandbox host. Documents read as their text and cannot be written.
 - **Security policies (planned).** Worker runtime monitoring and configurable policies, with risky calls sent to security teams to approve or deny.
 - **A knowledge store.** Hybrid search, an optional graph, and namespaces for multi-tenant data.
-- **Standard protocols.** Serve clients over [ACP](https://agentclientprotocol.com), connect [MCP](https://modelcontextprotocol.io) servers, and trace every turn with OpenTelemetry.
+- **Your own backend.** Drive sessions from your own API with `session.Client`: create, prompt, resume, cancel, and follow a session's events. Connect [MCP](https://modelcontextprotocol.io) servers, and trace every turn with OpenTelemetry.
 - **Small binaries.** Cloud adapters use plain HTTP instead of vendor SDKs, and the core builds for WebAssembly.
 
 ## Install
@@ -129,10 +129,10 @@ Dashed parts are planned and not built yet.
 
 ```mermaid
 flowchart LR
-    client["Clients<br/>ACP editors and apps"] <--> host["Hosts<br/>stateless, session.Client"]
-    host <--> runtime["Durable runtime<br/>Temporal, Durable Objects"]
+    client["Your users<br/>apps, bots, jobs"] <--> backend["Your backend<br/>stateless, session.Client"]
+    backend <--> runtime["Durable runtime<br/>Temporal, Durable Objects"]
     subgraph sessionworker["Session worker"]
-        core["Agent core<br/>agent loop, tools, plans,<br/>specialists, context window"]
+        core["Agent core<br/>orchestrator, agent loop, tools,<br/>plans, specialists, context window"]
     end
     runtime <--> core
     core --> models["Model APIs<br/>Claude, OpenAI"]
@@ -156,8 +156,9 @@ flowchart LR
     class scheduler,policy,proxy planned
 ```
 
-- **Hosts** serve clients and keep no session state. The **durable runtime** runs each session on a **session worker**, and every model request and tool call runs once, even across crashes.
-- The **agent core** calls the model, runs tools, and saves sessions and knowledge. Each turn is one trace.
+- **Your backend** drives sessions through `session.Client` and keeps no session state. The **durable runtime** runs each session on a **session worker**, and every model request and tool call runs once, even across crashes.
+- The **orchestrator** (`session/orchestrator`) decides each step of a session, the same way on every runtime: a runtime only records the steps and delivers prompts, answers and job ends to it.
+- The **agent core** calls the model, runs tools, and saves sessions and knowledge. Each turn is one trace, from your backend's request through the runtime, the model, the tools and the Postgres statements of each step.
 - `run_command` goes to a **supervisor** on a separate sandbox host. The supervisor opens the session's tree with the turn's bindings, boots a **microVM**, and refreshes a binding's token through the session runtime when it nears expiry.
 - The **worker** is the VM's init. It mounts `/workspace` over 9P from the supervisor and runs the script with native tools. The VM holds no credential and has no network: only the script's output leaves it.
 
@@ -174,7 +175,6 @@ See [Concepts](docs/concepts.md) for sessions, turns, rounds, and the context wi
 | [Workspace](docs/workspace.md) | The agent's `/workspace` on the sandbox host, its sources, and how scripts work on it |
 | [Knowledge](docs/knowledge.md) | The knowledge store: kinds, search, the graph, file indexing |
 | [Sessions in production](docs/session.md) | Temporal and Durable Objects, Postgres, credentials, specialists and jobs |
-| [Protocols](docs/protocol.md) | The ACP server, a turn from prompt to answer, writing a protocol |
 | [Context window](docs/context.md) | How each request is sized, collapsed, and cut |
 | [Telemetry](docs/telemetry.md) | Traces, logs, and metrics for every turn |
 
@@ -182,8 +182,9 @@ API reference: [pkg.go.dev/github.com/ryanaldo34/tacklr](https://pkg.go.dev/gith
 
 ## Examples
 
-- [examples/temporal](examples/temporal): a production layout on Temporal, with an ACP host, a worker, Postgres, and an end-to-end test.
-- [examples/cloudflare](examples/cloudflare): sessions as Durable Objects on Cloudflare Workers, with the same ACP server.
+- [examples/temporal](examples/temporal): a production layout on Temporal, with a backend, a worker, Postgres, a sandbox supervisor, and an end-to-end test.
+- [examples/cloudflare](examples/cloudflare): sessions as Durable Objects on Cloudflare Workers, with the same backend.
+- [examples/backend](examples/backend): the small HTTP and server-sent-events API both examples serve over `session.Client`.
 
 ## Contributing
 

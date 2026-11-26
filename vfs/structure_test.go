@@ -51,43 +51,11 @@ Dup title.
 	if blocks[1].ID != "title" || blocks[1].Style.Level != 1 || blocks[1].Text != "Title" {
 		t.Fatalf("title: %+v", blocks[1])
 	}
-	errBlock, ok := vfs.FindBlock(blocks, "title/api/errors")
-	if !ok || errBlock.Text != "Errors" {
-		t.Fatalf("title/api/errors: ok=%v blocks ids=%v", ok, gotIDs)
+	if errBlock := blocks[4]; errBlock.Text != "Errors" || errBlock.Style.Attributes["heading_path"] != "title/api/errors" {
+		t.Fatalf("title/api/errors: %+v", errBlock)
 	}
-	// heading_path attribute matches ID (FindBlock secondary key)
-	if _, ok := vfs.FindBlock(blocks, strings.TrimSpace(" title/api/errors ")); !ok {
-		t.Fatalf("FindBlock trim + heading_path: %v", gotIDs)
-	}
-
-	inst, ok := vfs.FindBlock(blocks, "title/install")
-	if !ok || inst.Text != "Install" {
-		t.Fatalf("title/install: ok=%v text=%q ids=%v", ok, inst.Text, gotIDs)
-	}
-	dup, ok := vfs.FindBlock(blocks, "title/install-2")
-	if !ok || dup.Text != "Install" {
-		t.Fatalf("title/install-2: ok=%v text=%q ids=%v", ok, dup.Text, gotIDs)
-	}
-
-	start, end, err := vfs.BlockReplaceSpan(inst, false)
-	if err != nil || start != inst.Style.Span.StartLine+1 || end != inst.Style.Span.EndLine {
-		t.Fatalf("body span: start=%d end=%d want start=%d end=%d err=%v",
-			start, end, inst.Style.Span.StartLine+1, inst.Style.Span.EndLine, err)
-	}
-	hs, he, err := vfs.BlockReplaceSpan(inst, true)
-	if err != nil || hs != inst.Style.Span.StartLine || he != inst.Style.Span.EndLine {
-		t.Fatalf("full span: %d %d err=%v", hs, he, err)
-	}
-
-	// edit body via ReplaceLines; Blocks() refreshes
-	if err := doc.ReplaceLines(start, end, []string{"New install body."}); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(doc.Text(), "New install body.") {
-		t.Fatal("body not updated")
-	}
-	if _, ok := vfs.FindBlock(doc.Blocks(), "title/install"); !ok {
-		t.Fatalf("outline after edit: %v", blockIDs(doc.Blocks()))
+	if inst, dup := blocks[2], blocks[5]; inst.Text != "Install" || dup.Text != "Install" {
+		t.Fatalf("install headings: %+v %+v", inst, dup)
 	}
 }
 
@@ -100,7 +68,7 @@ func blockIDs(blocks []vfs.Block) []string {
 }
 
 // TestTextDocument_markdownStructureEdges: empty/non-md, ATX quirks, fences,
-// empty titles → section, root-level id collision, FindBlock/ReplaceSpan edges.
+// empty titles → section, root-level id collision.
 func TestTextDocument_markdownStructureEdges(t *testing.T) {
 	t.Parallel()
 	// Non-markdown → no structure
@@ -145,35 +113,7 @@ func TestTextDocument_markdownStructureEdges(t *testing.T) {
 			t.Fatalf("fenced heading leaked: %v", ids)
 		}
 	}
-	root2, ok := vfs.FindBlock(blocks, "root-2")
-	if !ok || root2.Style.Level != 1 {
-		t.Fatalf("root-2: ok=%v %+v", ok, root2)
-	}
-	// Empty body under heading: start after heading line can equal end
-	// (BlockReplaceSpan body-only on empty section).
-	sec, ok := vfs.FindBlock(blocks, "section")
-	if !ok {
-		t.Fatalf("section missing: %v", ids)
-	}
-	start, end, err := vfs.BlockReplaceSpan(sec, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if start < sec.Style.Span.StartLine {
-		t.Fatalf("body start %d < heading %d", start, sec.Style.Span.StartLine)
-	}
-	_ = end
-
-	// FindBlock empty / miss
-	if _, ok := vfs.FindBlock(blocks, ""); ok {
-		t.Fatal("empty id should miss")
-	}
-	if _, ok := vfs.FindBlock(blocks, "nope"); ok {
-		t.Fatal("missing id")
-	}
-	// Invalid span on ReplaceSpan
-	bad := vfs.Block{Kind: vfs.BlockKindHeading, Style: vfs.StyleMeta{Span: vfs.Span{StartLine: 0, EndLine: 1}}}
-	if _, _, err := vfs.BlockReplaceSpan(bad, true); err == nil {
-		t.Fatal("want ErrLineOutOfRange for bad span")
+	if root2 := blocks[3]; root2.Style.Level != 1 {
+		t.Fatalf("root-2: %+v", root2)
 	}
 }

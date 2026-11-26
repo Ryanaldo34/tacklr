@@ -42,8 +42,6 @@ type Provider interface {
 // ErrUnknown is the error of Provider.Read for a name it has no skill of.
 var ErrUnknown = errors.New("skills: unknown skill")
 
-var _ Provider = Dir{}
-
 // Dir is the skills of the local directory Root: one per child directory,
 // with a SKILL.md (front matter with name and description, then the
 // instructions). Files and symlinked directories are not skills. An empty

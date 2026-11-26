@@ -8,7 +8,7 @@ A **session** is one long-lived conversation with an agent. You create it with `
 
 A session is durable. Its runtime records the result of each step, so after a crash or a deploy the session continues from the last finished step on any machine. A step that finished never runs again.
 
-`session.Client` is the only API a host needs:
+`session.Client` is the only API your backend needs:
 
 | Method | Does |
 |---|---|
@@ -74,13 +74,13 @@ The main agent can wait for a child's result, or continue and get the result lat
 
 A turn's error is an `EventError` whose `Error` you check with `errors.Is`: `session.ErrModelRefused`, `session.ErrMaxTokens`, `session.ErrContextLength`, or `context.Canceled`.
 
-## Host, worker, and runtime
+## Backend, worker, and runtime
 
 | Part | Runs | State |
 |---|---|---|
-| **Host** | Your API or protocol server. It calls `session.Client`. | None |
+| **Backend** | Your API. It calls `session.Client`. | None |
 | **Runtime** | Temporal, or Durable Objects. It keeps each session durable. | The session's history |
 | **Worker** | The process that runs the steps (on Temporal). | A cache of the harnesses it holds |
 | **Stores** | Postgres, or in-memory stores for tests. | Checkpoints, sealed credentials, events, knowledge |
 
-The host never imports the agent code, and a worker links only the adapters you import.
+Your backend never imports the agent code, and a worker links only the adapters you import.

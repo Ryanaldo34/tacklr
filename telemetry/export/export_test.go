@@ -102,7 +102,7 @@ func emit(ctx context.Context) {
 	}))
 	_, span := telemetry.Tracer().Start(parent, "export-test")
 	span.End()
-	telemetry.Metrics().RecordSessionCreated(ctx)
+	telemetry.Metrics().RecordCheckpointSave(ctx, telemetry.OutcomeOK)
 	telemetry.EmitEvent(ctx, telemetry.EventProviderFailed)
 }
 
@@ -235,7 +235,7 @@ func TestPrometheusMeterProvider_recordsIntoTheHostRegistry(t *testing.T) {
 	mp := export.PrometheusMeterProvider(reg, "", "")
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
-	telemetry.MustInstruments(mp.Meter(telemetry.InstrumentationName)).RecordSessionCreated(t.Context())
+	telemetry.MustInstruments(mp.Meter(telemetry.InstrumentationName)).RecordCheckpointSave(t.Context(), telemetry.OutcomeOK)
 	families, err := reg.Gather()
 
 	if err != nil {
@@ -253,7 +253,7 @@ func TestPrometheusMeterProvider_recordsIntoTheHostRegistry(t *testing.T) {
 			}
 		}
 	}
-	if got["tacklr_session_created_total"] != 1 || service != "tacklr" {
-		t.Fatalf("families = %v, service %q, want one session created for service tacklr", got, service)
+	if got["tacklr_checkpoint_save_total"] != 1 || service != "tacklr" {
+		t.Fatalf("families = %v, service %q, want one checkpoint save for service tacklr", got, service)
 	}
 }

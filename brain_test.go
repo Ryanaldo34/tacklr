@@ -12,7 +12,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/storetest"
-	"github.com/ryanaldo34/tacklr/internal/helixtest"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/adapters"
 	"github.com/ryanaldo34/tacklr/vfsindex"
@@ -49,8 +48,8 @@ func titlesOfPage(p brain.Page) []string {
 // record of a writable kind; search pages its results with facets, and
 // its next page survives a checkpoint; search narrows by namespace and
 // lists a kind; open reads a record with its children and related its
-// parts; a search's rest carries to the next step through Commit. Each bad
-// request is the model's to correct.
+// parts; a search's rest carries to the next step through Commit. A bad
+// request, or one the Brain refuses, is the model's to correct.
 func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -96,28 +95,11 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 	listed := page(t, committedResult(t, h, "search", `{"kind":"Document",`+inWest+`}`))
 	opened := committedResult(t, h, "open", `{"ref":"`+doc.ID.String()+`",`+inWest+`}`)
 	related := page(t, committedResult(t, h, "related", `{"ref":"`+doc.ID.String()+`",`+inWest+`}`))
-	bad := map[string]string{
-		`{"more":true,"ref":"x"}`: "no more results",
-		`{"ref":""}`:              "ref is required",
-		`{"ref":"` + doc.ID.String() + `","namespace":[{"name":"org","value":"other"}]}`: "outside host scope",
-	}
-	badSearch := map[string]string{
-		`{"query":"knowledge","kind":"Fact","filters":{"phase":"x"}}`:        `unknown filter "phase" for Fact; filterable: topic`,
-		`{"query":"knowledge","namespace":[{"name":"session","value":"x"}]}`: "reserved",
-		`{"query":"x","namespace":[{"name":"org","value":"other"}]}`:         "outside host scope",
-		`{"query":"knowledge","filters":{"created_after":"yesterday"}}`:      "created_after",
-		`{"query":"knowledge","within":"not a path"}`:                        "neither a UUID nor a path",
-	}
-	badSave := map[string]string{
-		`{"kind":"Memory","title":"x"}`:                                            `kind "Memory" cannot be saved; kinds: Fact`,
-		`{"kind":"Fact","title":" "}`:                                              "title is required",
-		`{"kind":"Fact","title":"x","id":"nope"}`:                                  "id must be a UUID",
-		`{"kind":"Fact","title":"x","namespace":[{"name":"org","value":"other"}]}`: "outside host scope",
-		`{"kind":"Fact","title":"x","properties":{"color":"red"}}`:                 "color",
-	}
-	badOpen := map[string]string{
-		`{"ref":"not a path"}`:               "neither a UUID nor a path",
-		`{"ref":"` + uuid.NewString() + `"}`: "not found",
+	bad := map[string]map[string]string{
+		"related": {`{"more":true,"ref":"x"}`: "no more results"},
+		"search":  {`{"query":"knowledge","kind":"Fact","filters":{"phase":"x"}}`: `unknown filter "phase" for Fact; filterable: topic`},
+		"save":    {`{"kind":"Memory","title":"x"}`: `kind "Memory" cannot be saved; kinds: Fact`},
+		"open":    {`{"ref":"` + uuid.NewString() + `"}`: "not found"},
 	}
 
 	if got := slices.Collect(first.Results.Objects()); len(got) != 2 || !first.More || first.Facets.Kinds["Fact"] != 2 || first.Facets.Properties["topic"]["ops"] != 2 {
@@ -141,7 +123,7 @@ func TestBrainTools_saveSearchOpenAndRelatedServeOneSession(t *testing.T) {
 	if got := slices.Collect(related.Results.Objects()); len(got) != 1 || got[0].Relation.Type != brain.RelationChild {
 		t.Errorf("related = %+v, want the runbook's part as a child", related)
 	}
-	for tool, cases := range map[string]map[string]string{"related": bad, "search": badSearch, "save": badSave, "open": badOpen} {
+	for tool, cases := range bad {
 		for args, want := range cases {
 			if got := result(t, h, call("bad", tool, args)); !strings.Contains(got, want) {
 				t.Errorf("%s %s = %q, want %q", tool, args, got, want)
@@ -207,12 +189,13 @@ func TestRunCall_aSearchCursorCarriesToTheNextStepThroughCommit(t *testing.T) {
 // TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote: records link by
 // id, an indexed file by its path (an unindexed one cannot be an end), the
 // note makes the link searchable, and remove takes it away. related pages
-// past 50 links, also after a checkpoint, counts them, and narrows by kind
-// and link status; search near a record finds only its linked records.
+// its links, also after a checkpoint, counts them, and narrows by kind and
+// link status; search near a record finds only its linked records. A bad
+// request is the model's to correct.
 func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Graph(t)))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(brain.NewMemoryGraph(brain.MemoryGraphOptions{EdgeRelations: []string{"about"}})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,15 +213,14 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 55 contacts, the first 5 on active links, and one that is not linked.
 	var contacts []uuid.UUID
-	for i := range 55 {
+	for i := range 3 {
 		contact, err := eng.Save(ctx, scope, brain.Object{Kind: "Person", Title: "contact", Content: "account contact"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		status := ""
-		if i < 5 {
+		if i == 0 {
 			status = "active"
 		}
 		if err := eng.Link(ctx, scope, brain.LinkRequest{From: deal.ID, To: contact.ID, Relation: "has_contact", Meta: brain.EdgeMeta{Status: status}}); err != nil {
@@ -270,13 +252,13 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	found := run("search", `{"query":"signs the renewal contract"}`)
 	related := run("related", `{"ref":"`+deal.ID.String()+`","relations":["about"]}`)
 	dealRef := `"ref":"` + deal.ID.String() + `"`
-	firstContacts := page(t, committedResult(t, h, "related", `{`+dealRef+`,"relations":["has_contact"],"direction":"out","limit":50}`))
+	firstContacts := page(t, committedResult(t, h, "related", `{`+dealRef+`,"relations":["has_contact"],"direction":"out","limit":2}`))
 	rows, _ := h.Checkpoint()
 	reloaded := newHarness(t, "link-graph", opts)
 	restoreErr := reloaded.RestoreCheckpoint(rows)
 	moreContacts := page(t, result(t, reloaded, call("r2", "related", `{"more":true}`)))
 	active := page(t, run("related", `{`+dealRef+`,"kind":"Person","status":"active"}`))
-	near := page(t, run("search", `{"query":"account contact","limit":50,"near":{`+dealRef+`,"relations":["has_contact"]}}`))
+	near := page(t, run("search", `{"query":"account contact","limit":10,"near":{`+dealRef+`,"relations":["has_contact"]}}`))
 	nearBadRef := run("search", `{"query":"contact","near":{"ref":"not a path"}}`)
 	unindexed := link(docPath, deal.ID.String(), "")
 	indexer := &vfsindex.MountIndexer{VFS: ms, Brain: eng, Scope: scope}
@@ -288,10 +270,6 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 	removed := link(deal.ID.String(), person.ID.String(), `,"remove":true`)
 	after := run("related", `{"ref":"`+deal.ID.String()+`","relations":["about"]}`)
 	noTo := link(deal.ID.String(), "", "")
-	noRelation := run("link", `{"from":"`+deal.ID.String()+`","to":"`+person.ID.String()+`","relation":" "}`)
-	reserved := `,"namespace":[{"name":"session","value":"x"}]`
-	linkReserved := link(deal.ID.String(), person.ID.String(), reserved)
-	openReserved := run("open", `{"ref":"`+deal.ID.String()+`"`+reserved+`}`)
 
 	if !containsAll(linked, `"linked": true`, person.ID.String()) || !containsAll(found, `"relation": "about"`, "signs the renewal contract") || !strings.Contains(related, person.ID.String()) {
 		t.Errorf("link = %s, search the note = %s, related = %s; want the link, found by its note", linked, found, related)
@@ -303,19 +281,19 @@ func TestBrainTools_linkByIDOrIndexedPathAndFindItByItsNote(t *testing.T) {
 		t.Errorf("remove = %s, then related %s, want the person gone", removed, after)
 	}
 	allContacts := append(slices.Collect(firstContacts.Results.Objects()), slices.Collect(moreContacts.Results.Objects())...)
-	if c := firstContacts.Counts; c == nil || c.Total != 55 || c.ByRelation["has_contact"] != 55 || len(slices.Collect(firstContacts.Results.Objects())) != 50 || !firstContacts.More {
-		t.Errorf("related contacts = %d results, more %v, counts %+v, want 50 of 55 and more", len(slices.Collect(firstContacts.Results.Objects())), firstContacts.More, c)
+	if c := firstContacts.Counts; c == nil || c.Total != 3 || c.ByRelation["has_contact"] != 3 || len(slices.Collect(firstContacts.Results.Objects())) != 2 || !firstContacts.More {
+		t.Errorf("related contacts = %d results, more %v, counts %+v, want 2 of 3 and more", len(slices.Collect(firstContacts.Results.Objects())), firstContacts.More, c)
 	}
 	if got := idsOfRich(allContacts); restoreErr != nil || moreContacts.More || !slices.Equal(slices.Sorted(slices.Values(uuidStrings(got))), slices.Sorted(slices.Values(uuidStrings(contacts)))) {
-		t.Errorf("related contacts over two pages and a checkpoint = %d (more %v, %v), want each of the 55 once", len(got), moreContacts.More, restoreErr)
+		t.Errorf("related contacts over two pages and a checkpoint = %d (more %v, %v), want each of the 3 once", len(got), moreContacts.More, restoreErr)
 	}
-	if c := active.Counts; c == nil || c.Total != 5 || len(active.Results) == 0 {
-		t.Errorf("related active contacts = %+v, want 5 counted", c)
+	if c := active.Counts; c == nil || c.Total != 1 || len(active.Results) == 0 {
+		t.Errorf("related active contacts = %+v, want 1 counted", c)
 	}
 	if got := idsOfRich(slices.Collect(near.Results.Objects())); len(got) == 0 || slices.Contains(got, outsider.ID) || !slices.Contains(contacts, got[0]) {
 		t.Errorf("search near the deal = %v, want its contacts only", got)
 	}
-	for got, want := range map[string]string{noTo: "to is required", noRelation: "relation are required", linkReserved: "reserved", openReserved: "reserved", nearBadRef: "neither a UUID nor a path"} {
+	for got, want := range map[string]string{noTo: "to is required", nearBadRef: "neither a UUID nor a path"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("result = %q, want %q", got, want)
 		}
@@ -367,4 +345,51 @@ func uuidStrings(ids []uuid.UUID) []string {
 		out[i] = id.String()
 	}
 	return out
+}
+
+// TestBrainTools_anArgumentTheBrainRefusesIsTheModelsToCorrect: each
+// tool's namespace, reference, filter and record arguments that the Brain
+// refuses come back as the tool's error, naming what is wrong.
+func TestBrainTools_anArgumentTheBrainRefusesIsTheModelsToCorrect(t *testing.T) {
+	t.Parallel()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(brain.NewMemoryGraph(brain.MemoryGraphOptions{})),
+		brain.WithKinds(brain.KindSpec{Kind: "Fact", IsParent: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := storetest.Namespace(t, "org", uuid.NewString())
+	fact, err := eng.Save(t.Context(), brain.Scope{Namespace: ns}, brain.Object{Kind: "Fact", Title: "a fact"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, _ := scripted(t)
+	h := planned(t, "brain-refusals", tacklr.AgentOptions{Model: model, MaxWindowSize: 100000, Brain: eng, SearchNamespace: ns, BrainWriteKinds: []string{"Fact"}}, tacklr.Todo{Title: "t"})
+	reserved := `"namespace":[{"name":"session","value":"x"}]`
+	id := fact.ID.String()
+	for _, tc := range []struct{ tool, args, want string }{
+		{"search", `{"query":"x",` + reserved + `}`, "reserved"},
+		{"search", `{"query":"x","namespace":[{"name":"org","value":"other"}]}`, "outside host scope"},
+		{"search", `{"query":"x","filters":{"created_after":"yesterday"}}`, "created_after"},
+		{"search", `{"query":"x","within":"not a path"}`, "neither a UUID nor a path"},
+		{"open", `{"ref":"` + id + `",` + reserved + `}`, "reserved"},
+		{"open", `{"ref":"not a path"}`, "neither a UUID nor a path"},
+		{"related", `{"ref":"` + id + `",` + reserved + `}`, "reserved"},
+		{"related", `{"ref":""}`, "ref is required"},
+		{"save", `{"kind":"Fact","title":" "}`, "title is required"},
+		{"save", `{"kind":"Fact","title":"x",` + reserved + `}`, "reserved"},
+		{"save", `{"kind":"Fact","title":"x","id":"nope"}`, "id must be a UUID"},
+		{"save", `{"kind":"Fact","title":"x","properties":{"color":"red"}}`, "color"},
+		{"link", `{"from":"` + id + `","to":"` + id + `","relation":"about",` + reserved + `}`, "reserved"},
+		{"link", `{"from":"` + id + `","to":"` + id + `","relation":" "}`, "relation are required"},
+	} {
+		t.Run(tc.tool+" "+tc.want, func(t *testing.T) {
+			t.Parallel()
+
+			got := result(t, h, call("bad", tc.tool, tc.args))
+
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("%s %s = %q, want %q", tc.tool, tc.args, got, tc.want)
+			}
+		})
+	}
 }

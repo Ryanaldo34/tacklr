@@ -48,9 +48,6 @@ func Graph(api GraphAPI, holder *TokenHolder, account string) Open {
 		panic("vfs: Graph requires a GraphAPI client")
 	}
 	return func(ctx context.Context, _ string, b mount.Binding) (Provider, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
 		h := holder
 		if h == nil && strings.TrimSpace(b.Auth.Token) != "" {
 			h = NewTokenHolder(b.Auth)
@@ -72,24 +69,16 @@ func Graph(api GraphAPI, holder *TokenHolder, account string) Open {
 		if err != nil {
 			return nil, err
 		}
-		return &graphProvider{
-			api: api, driveID: driveID, rootID: itemID, holder: h, writable: b.Writable,
-		}, nil
+		return &graphProvider{api: api, driveID: driveID, rootID: itemID, holder: h}, nil
 	}
 }
 
 type graphProvider struct {
-	api      GraphAPI
-	driveID  string
-	rootID   string
-	holder   *TokenHolder
-	writable bool
+	api     GraphAPI
+	driveID string
+	rootID  string
+	holder  *TokenHolder
 }
-
-var (
-	_ documentBackend = (*graphProvider)(nil)
-	_ filePutter      = (*graphProvider)(nil)
-)
 
 func graphAccount(factory, param string) (string, error) {
 	raw := strings.ToLower(strings.TrimSpace(param))
@@ -105,6 +94,8 @@ func graphAccount(factory, param string) (string, error) {
 		return "", fmt.Errorf("vfs: msgraph account %q is not organization or personal", raw)
 	}
 }
+
+func (*graphProvider) userOwned() {}
 
 func (p *graphProvider) call(ctx context.Context, fn func() error) error {
 	if err := p.holder.EnsureValid(ctx); err != nil {
@@ -155,11 +146,7 @@ func (p *graphProvider) lookupChild(ctx context.Context, parentID, name string) 
 	return p.getByPath(ctx, parentID, name)
 }
 
-func (p *graphProvider) resolve(ctx context.Context, name string) (GraphItem, error) {
-	rel, err := cleanRel(name)
-	if err != nil {
-		return GraphItem{}, err
-	}
+func (p *graphProvider) resolve(ctx context.Context, rel string) (GraphItem, error) {
 	if rel == "" {
 		root, err := p.getItem(ctx, p.rootID)
 		if err != nil {
@@ -175,11 +162,7 @@ func (p *graphProvider) resolve(ctx context.Context, name string) (GraphItem, er
 func graphFileInfo(item GraphItem) FileInfo {
 	mt := ""
 	if !item.IsDir {
-		if item.Mime != "" {
-			mt = item.Mime
-		} else {
-			mt = DetectMediaType(item.Name, nil)
-		}
+		mt = mediaTypeOf(item.Mime, item.Name, nil)
 	}
 	mode := fs.FileMode(0o644)
 	if item.IsDir {
@@ -204,24 +187,13 @@ func graphVersion(item GraphItem) string {
 	return item.CTag
 }
 
-func (p *graphProvider) Validate(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	item, err := p.getItem(ctx, p.rootID)
-	if err != nil {
-		return err
-	}
-	if !item.IsDir {
-		return fmt.Errorf("vfs: msgraph itemId is not a folder")
-	}
+// Validate implements Provider. Graph opens only a root that ResolveRoot
+// found to be a folder.
+func (p *graphProvider) Validate(context.Context) error {
 	return nil
 }
 
 func (p *graphProvider) Stat(ctx context.Context, name string) (FileInfo, error) {
-	if err := ctx.Err(); err != nil {
-		return FileInfo{}, err
-	}
 	item, err := p.resolve(ctx, name)
 	if err != nil {
 		return FileInfo{}, err
@@ -229,17 +201,9 @@ func (p *graphProvider) Stat(ctx context.Context, name string) (FileInfo, error)
 	return graphFileInfo(item), nil
 }
 
-func (p *graphProvider) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	_ = perm
-	if openWrites(flag) {
-		if !p.writable {
-			return nil, ErrReadOnly
-		}
-		return nil, ErrNotSupported
-	}
+// OpenFile implements Provider. It opens files for reading only, whatever
+// the flags; MountSession writes with PutFile.
+func (p *graphProvider) OpenFile(ctx context.Context, name string, _ int, _ fs.FileMode) (File, error) {
 	item, err := p.resolve(ctx, name)
 	if err != nil {
 		return nil, err
@@ -267,14 +231,7 @@ func (p *graphProvider) readBytes(ctx context.Context, item GraphItem) ([]byte, 
 		return nil, err
 	}
 	defer body.Close()
-	data, err := readCapped(body, MaxReadFileBytes, item.Size)
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > MaxReadFileBytes {
-		return nil, errFileExceeds(MaxReadFileBytes)
-	}
-	return data, nil
+	return readCapped(body, MaxReadFileBytes, item.Size)
 }
 
 // hasContent reports whether the item has file bytes. OneNote, Loop and
@@ -294,9 +251,6 @@ func (p *graphProvider) getContent(ctx context.Context, item GraphItem, off, n i
 }
 
 func (p *graphProvider) ReadDir(ctx context.Context, name string) ([]DirEntry, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	item, err := p.resolve(ctx, name)
 	if err != nil {
 		return nil, err
@@ -320,42 +274,15 @@ func (p *graphProvider) ReadDir(ctx context.Context, name string) ([]DirEntry, e
 }
 
 func (p *graphProvider) Remove(ctx context.Context, name string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	rel, err := cleanRel(name)
-	if err != nil {
-		return err
-	}
-	if rel == "" {
-		return ErrInvalidPath
-	}
 	item, err := p.resolve(ctx, name)
 	if err != nil {
 		return err
 	}
-	if !p.writable {
-		return ErrReadOnly
-	}
 	return p.call(ctx, func() error { return p.api.Delete(ctx, p.driveID, item.ID) })
 }
 
-func (p *graphProvider) MkdirAll(ctx context.Context, name string, perm fs.FileMode) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	_ = perm
-	rel, err := cleanRel(name)
-	if err != nil {
-		return err
-	}
-	if rel == "" {
-		return nil
-	}
-	if !p.writable {
-		return ErrReadOnly
-	}
-	_, err = p.ensureDir(ctx, rel)
+func (p *graphProvider) MkdirAll(ctx context.Context, name string, _ fs.FileMode) error {
+	_, err := p.ensureDir(ctx, name)
 	return err
 }
 
@@ -371,7 +298,7 @@ func (p *graphProvider) ensureDir(ctx context.Context, rel string) (GraphItem, e
 		child, err := p.lookupChild(ctx, parentID, part)
 		if err == nil {
 			if !child.IsDir {
-				return GraphItem{}, fmt.Errorf("%w: %q is not a folder", ErrNotSupported, part)
+				return GraphItem{}, fmt.Errorf("%w: %q", ErrNotDir, part)
 			}
 			cur = child
 			parentID = child.ID
@@ -395,10 +322,9 @@ func (p *graphProvider) ensureDir(ctx context.Context, rel string) (GraphItem, e
 	return cur, nil
 }
 
-// parentAndLeaf is name's parent folder, made if missing, and its last
-// element. The caller resolved name, so it is clean and not the root.
-func (p *graphProvider) parentAndLeaf(ctx context.Context, name string) (parentID, leaf string, err error) {
-	rel, _ := cleanRel(name)
+// parentAndLeaf is the parent folder of rel, made if missing, and its last
+// element.
+func (p *graphProvider) parentAndLeaf(ctx context.Context, rel string) (parentID, leaf string, err error) {
 	dir, leaf := path.Split(rel)
 	dir = strings.TrimSuffix(dir, "/")
 	if dir == "" {
@@ -416,9 +342,6 @@ func (p *graphProvider) parentAndLeaf(ctx context.Context, name string) (parentI
 }
 
 func (p *graphProvider) OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	item, err := p.resolve(ctx, name)
 	if err != nil {
 		return nil, err
@@ -435,30 +358,9 @@ func (p *graphProvider) OpenDocument(ctx context.Context, name string, reg *Cont
 	return decodeProviderDocument(ctx, name, fi, data, reg)
 }
 
-func (p *graphProvider) PutFile(ctx context.Context, name string, r io.Reader, size int64) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !p.writable {
-		return ErrReadOnly
-	}
-	if size > int64(MaxReadFileBytes) {
-		return errFileExceeds(MaxReadFileBytes)
-	}
-	rel, err := cleanRel(name)
-	if err != nil {
-		return err
-	}
-	if rel == "" {
-		return ErrInvalidPath
-	}
-	body, err := bufferUpload(r, size)
-	if err != nil {
-		return err
-	}
-	if int64(len(body)) > int64(MaxReadFileBytes) {
-		return errFileExceeds(MaxReadFileBytes)
-	}
+// PutFile writes the whole file in one upload, which a token refresh can
+// send again.
+func (p *graphProvider) PutFile(ctx context.Context, name string, body []byte) error {
 	item, err := p.resolve(ctx, name)
 	if err == nil {
 		return p.call(ctx, func() error {
@@ -477,18 +379,4 @@ func (p *graphProvider) PutFile(ctx context.Context, name string, r io.Reader, s
 		_, e := p.api.PutContent(ctx, p.driveID, "", leaf, parentID, bytes.NewReader(body), int64(len(body)))
 		return e
 	})
-}
-
-func (p *graphProvider) WriteDocument(ctx context.Context, name string, doc Document, reg *ContentRegistry) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !p.writable {
-		return ErrReadOnly
-	}
-	data, err := reg.Encode(ctx, doc)
-	if err != nil {
-		return err
-	}
-	return p.PutFile(ctx, name, bytes.NewReader(data), int64(len(data)))
 }

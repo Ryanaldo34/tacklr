@@ -8,24 +8,21 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// Metric names. The model's and the protocol server's are the semantic
-// conventions' (gen_ai.client.*, rpc.server.*); the rest are Tacklr's.
+// Metric names. The model's are the semantic conventions'
+// (gen_ai.client.*); the rest are Tacklr's.
 // Prometheus export writes '.' as '_'.
 const (
-	MetricTurnDuration    = "tacklr.turn.duration"
-	MetricTurnTotal       = "tacklr.turn.total"
-	MetricTurnActive      = "tacklr.turn.active"
-	MetricToolCalls       = "tacklr.tool.calls"
-	MetricToolDuration    = "tacklr.tool.duration"
-	MetricInterruptTotal  = "tacklr.interrupt.total"
-	MetricHandoffTotal    = "tacklr.context.handoff.total"
-	MetricCompressTotal   = "tacklr.context.compress.total"
-	MetricSessionCreated  = "tacklr.session.created.total"
-	MetricCheckpointSave  = "tacklr.checkpoint.save.total"
-	MetricConnections     = "tacklr.server.connections"
-	MetricModelDuration   = "gen_ai.client.operation.duration"
-	MetricTokenUsage      = "gen_ai.client.token.usage"
-	MetricRPCCallDuration = "rpc.server.call.duration"
+	MetricTurnDuration   = "tacklr.turn.duration"
+	MetricTurnTotal      = "tacklr.turn.total"
+	MetricTurnActive     = "tacklr.turn.active"
+	MetricToolCalls      = "tacklr.tool.calls"
+	MetricToolDuration   = "tacklr.tool.duration"
+	MetricInterruptTotal = "tacklr.interrupt.total"
+	MetricHandoffTotal   = "tacklr.context.handoff.total"
+	MetricCompressTotal  = "tacklr.context.compress.total"
+	MetricCheckpointSave = "tacklr.checkpoint.save.total"
+	MetricModelDuration  = "gen_ai.client.operation.duration"
+	MetricTokenUsage     = "gen_ai.client.token.usage"
 )
 
 // Label keys: closed enums and configuration ids only, never free text or
@@ -40,25 +37,21 @@ const (
 	LabelKind       = "kind" // interrupt kind
 	LabelModelPhase = AttrModelPhase
 	LabelErrorType  = AttrErrorType
-	LabelProtocol   = "protocol"
 )
 
 // Instruments holds cached metric instruments for one Meter.
 type Instruments struct {
-	turnDuration    metric.Float64Histogram
-	turnTotal       metric.Int64Counter
-	turnActive      metric.Int64UpDownCounter
-	toolCalls       metric.Int64Counter
-	toolDuration    metric.Float64Histogram
-	interruptTotal  metric.Int64Counter
-	handoffTotal    metric.Int64Counter
-	compressTotal   metric.Int64Counter
-	sessionCreated  metric.Int64Counter
-	checkpointSave  metric.Int64Counter
-	connections     metric.Int64UpDownCounter
-	modelDuration   metric.Float64Histogram
-	tokenUsage      metric.Int64Histogram
-	rpcCallDuration metric.Float64Histogram
+	turnDuration   metric.Float64Histogram
+	turnTotal      metric.Int64Counter
+	turnActive     metric.Int64UpDownCounter
+	toolCalls      metric.Int64Counter
+	toolDuration   metric.Float64Histogram
+	interruptTotal metric.Int64Counter
+	handoffTotal   metric.Int64Counter
+	compressTotal  metric.Int64Counter
+	checkpointSave metric.Int64Counter
+	modelDuration  metric.Float64Histogram
+	tokenUsage     metric.Int64Histogram
 }
 
 // MustInstruments builds instruments from m. Names are constants; the SDK
@@ -91,14 +84,8 @@ func MustInstruments(m metric.Meter) *Instruments {
 	i.compressTotal, _ = m.Int64Counter(MetricCompressTotal,
 		metric.WithDescription("Context window compressions under pressure"),
 	)
-	i.sessionCreated, _ = m.Int64Counter(MetricSessionCreated,
-		metric.WithDescription("Sessions created through a protocol server"),
-	)
 	i.checkpointSave, _ = m.Int64Counter(MetricCheckpointSave,
 		metric.WithDescription("Session checkpoint save attempts"),
-	)
-	i.connections, _ = m.Int64UpDownCounter(MetricConnections,
-		metric.WithDescription("Protocol connections open now"),
 	)
 	i.modelDuration, _ = m.Float64Histogram(MetricModelDuration,
 		metric.WithDescription("GenAI operation duration"),
@@ -107,10 +94,6 @@ func MustInstruments(m metric.Meter) *Instruments {
 	i.tokenUsage, _ = m.Int64Histogram(MetricTokenUsage,
 		metric.WithDescription("Provider-reported tokens of each GenAI operation"),
 		metric.WithUnit("{token}"),
-	)
-	i.rpcCallDuration, _ = m.Float64Histogram(MetricRPCCallDuration,
-		metric.WithDescription("Protocol request duration, from the request to its response"),
-		metric.WithUnit("s"),
 	)
 	return i
 }
@@ -194,32 +177,9 @@ func (i *Instruments) RecordCompress(ctx context.Context, agent string) {
 	i.compressTotal.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelAgent, agent)))
 }
 
-// RecordSessionCreated counts a session a protocol server created.
-func (i *Instruments) RecordSessionCreated(ctx context.Context) {
-	i.sessionCreated.Add(ctx, 1)
-}
-
 // RecordCheckpointSave counts a checkpoint save by outcome.
 func (i *Instruments) RecordCheckpointSave(ctx context.Context, outcome string) {
 	i.checkpointSave.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelOutcome, outcome)))
-}
-
-// RecordConnection adds delta (1 or -1) to the open connections of
-// protocol.
-func (i *Instruments) RecordConnection(ctx context.Context, protocol string, delta int64) {
-	i.connections.Add(ctx, delta, metric.WithAttributes(attribute.String(LabelProtocol, protocol)))
-}
-
-// recordRPC records one protocol request's duration.
-func (i *Instruments) recordRPC(ctx context.Context, method, errType string, d time.Duration) {
-	attrs := []attribute.KeyValue{
-		attribute.String(AttrRPCSystem, RPCSystemJSONRPC),
-		attribute.String(AttrRPCMethod, method),
-	}
-	if errType != "" {
-		attrs = append(attrs, attribute.String(LabelErrorType, errType))
-	}
-	i.rpcCallDuration.Record(ctx, d.Seconds(), metric.WithAttributes(attrs...))
 }
 
 // agentContextKey carries the agent's name for the spans and metrics of a

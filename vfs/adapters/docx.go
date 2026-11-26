@@ -33,41 +33,6 @@ func (DOCX) DecodeBlocks(ctx context.Context, path, _ string, data []byte) ([]vf
 	return parseDOCX(part)
 }
 
-func (DOCX) EncodeBlocks(ctx context.Context, blocks []vfs.Block) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	zb := newZipBuilder()
-	zb.add("[Content_Types].xml", []byte(contentTypesXML))
-	zb.add("_rels/.rels", []byte(relsXML))
-	zb.add("word/document.xml", []byte(docXML(blocks)))
-	return zb.bytes(), nil
-}
-
-// zipBuilder writes parts to a zip archive in memory. A zip writer on a
-// bytes.Buffer cannot fail: the buffer takes every write and Deflate is
-// always registered. So it has no errors to return.
-type zipBuilder struct {
-	buf bytes.Buffer
-	zw  *zip.Writer
-}
-
-func newZipBuilder() *zipBuilder {
-	zb := &zipBuilder{}
-	zb.zw = zip.NewWriter(&zb.buf)
-	return zb
-}
-
-func (zb *zipBuilder) add(name string, body []byte) {
-	w, _ := zb.zw.Create(name)
-	_, _ = w.Write(body)
-}
-
-func (zb *zipBuilder) bytes() []byte {
-	_ = zb.zw.Close()
-	return zb.buf.Bytes()
-}
-
 func zipPart(data []byte, name string) ([]byte, error) {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -202,45 +167,3 @@ func attr(e xml.StartElement, name string) string {
 	}
 	return ""
 }
-
-func docXML(blocks []vfs.Block) string {
-	var b strings.Builder
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>`)
-	for _, block := range blocks {
-		b.WriteString("<w:p>")
-		if block.Kind == vfs.BlockKindHeading && block.Style.Level > 0 {
-			b.WriteString(`<w:pPr><w:pStyle w:val="Heading` + strconv.Itoa(block.Style.Level) + `"/></w:pPr>`)
-		} else if block.Kind == vfs.BlockKindListItem || block.Kind == "list-item" {
-			b.WriteString(`<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>`)
-		}
-		runs := block.Runs
-		if len(runs) == 0 {
-			runs = vfs.ParseInline(block.Text)
-		}
-		for _, run := range runs {
-			b.WriteString("<w:r>")
-			if len(run.Marks) > 0 {
-				b.WriteString("<w:rPr>")
-				if run.Marks[vfs.MarkBold] == "true" {
-					b.WriteString("<w:b/>")
-				}
-				if run.Marks[vfs.MarkItalic] == "true" {
-					b.WriteString("<w:i/>")
-				}
-				if run.Marks[vfs.MarkStrike] == "true" {
-					b.WriteString("<w:strike/>")
-				}
-				b.WriteString("</w:rPr>")
-			}
-			b.WriteString(`<w:t xml:space="preserve">`)
-			_ = xml.EscapeText(&b, []byte(run.Text))
-			b.WriteString("</w:t></w:r>")
-		}
-		b.WriteString("</w:p>")
-	}
-	b.WriteString(`</w:body></w:document>`)
-	return b.String()
-}
-
-const contentTypesXML = `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`
-const relsXML = `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`

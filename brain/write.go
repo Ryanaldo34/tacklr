@@ -242,7 +242,11 @@ func (obj Object) IndexText() string {
 	return joinNonEmpty("\n", obj.Title, obj.Summary, obj.Content)
 }
 
-func (obj Object) entityIndexText(spec KindSpec, haveSpec bool) string {
+// EntityIndexText is a first-class object's index text: its title, summary,
+// the scalar properties spec does not skip as "key: value" lines in key
+// order (store properties never), then its content, each trimmed and only
+// when set.
+func (obj Object) EntityIndexText(spec KindSpec) string {
 	parts := make([]string, 0, 8)
 	if t := strings.TrimSpace(obj.Title); t != "" {
 		parts = append(parts, t)
@@ -253,7 +257,7 @@ func (obj Object) entityIndexText(spec KindSpec, haveSpec bool) string {
 	if len(obj.Properties) > 0 {
 		keys := slices.Sorted(maps.Keys(obj.Properties))
 		for _, k := range keys {
-			if skipIndexProperty(k, spec, haveSpec) {
+			if skipIndexProperty(k, spec) {
 				continue
 			}
 			line := formatPropertyLine(k, obj.Properties[k])
@@ -268,12 +272,9 @@ func (obj Object) entityIndexText(spec KindSpec, haveSpec bool) string {
 	return strings.Join(parts, "\n")
 }
 
-func skipIndexProperty(name string, spec KindSpec, haveSpec bool) bool {
+func skipIndexProperty(name string, spec KindSpec) bool {
 	if isReservedStoreProp(name) {
 		return true
-	}
-	if !haveSpec {
-		return false
 	}
 	f, ok := spec.Field(name)
 	return ok && f.SkipIndex
@@ -306,7 +307,6 @@ func formatPropertyLine(key string, v any) string {
 	case json.Number:
 		return key + ": " + string(x)
 	default:
-		// Skip nested maps/slices/blobs to keep entity nodes small and stable.
 		return ""
 	}
 }
@@ -350,8 +350,8 @@ func capRunes(s string, maxRunes int) string {
 func (e *Engine) indexText(obj Object, parent *Object) string {
 	var text string
 	if parent == nil {
-		spec, ok := e.catalog.Get(obj.Kind)
-		text = obj.entityIndexText(spec, ok)
+		spec, _ := e.catalog.Get(obj.Kind)
+		text = obj.EntityIndexText(spec)
 	} else {
 		text = obj.IndexTextWithParent(parent.Title)
 	}

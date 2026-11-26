@@ -131,17 +131,6 @@ func (p *Platform) Idle(ctx context.Context, id session.ID) error {
 	return p.host(id).obj.Idle(ctx)
 }
 
-// Keys is every key id's storage holds, in order.
-func (p *Platform) Keys(id session.ID) []string {
-	p.mu.Lock()
-	d := p.disks[id]
-	p.mu.Unlock()
-	if d == nil {
-		return nil
-	}
-	return d.Keys()
-}
-
 // FailWrites makes id's storage fail each write whose ops fail reports,
 // as an outage does; nil makes every write work again.
 func (p *Platform) FailWrites(id session.ID, fail func(ops []durableobject.Op) bool) {

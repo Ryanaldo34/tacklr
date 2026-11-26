@@ -76,5 +76,3 @@ func (s *Secrets) Delete(ctx context.Context, sessionID session.ID) error {
 	}
 	return nil
 }
-
-var _ session.SecretStorage = (*Secrets)(nil)

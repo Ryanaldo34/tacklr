@@ -168,5 +168,3 @@ func (s *Store) Delete(ctx context.Context, sessionID session.ID) error {
 }
 
 func revision(n int64) session.Revision { return session.Revision(strconv.FormatInt(n, 10)) }
-
-var _ session.Store = (*Store)(nil)

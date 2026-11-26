@@ -122,6 +122,7 @@ func NewObject(host Host, cfg Config) *Object {
 	cfg.StepAttempts = positive(cfg.StepAttempts, defaultStepAttempts)
 	cfg.RetryBackoff = positive(cfg.RetryBackoff, defaultRetryBackoff)
 	cfg.Watchdog = positive(cfg.Watchdog, defaultWatchdog)
+	host = storageHost{host}
 	ctx, stop := context.WithCancel(context.Background())
 	return &Object{
 		host:      host,
@@ -278,9 +279,6 @@ func (o *Object) Create(ctx context.Context, init Init) error {
 	if init.SessionID == "" {
 		return fmt.Errorf("%w: session id is required", session.ErrInvalid)
 	}
-	if init.Specialist != "" && init.Worker != "" {
-		return fmt.Errorf("%w: specialist and worker are exclusive", session.ErrInvalid)
-	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if err := o.load(); err != nil {
@@ -435,34 +433,6 @@ func (o *Object) Subscribe(ctx context.Context, after session.Seq) (session.Subs
 	return &subscription{ch: session.Merge(ctx, t.ch, deltas), tail: t, cancel: cancel}, nil
 }
 
-// Wire implements Ref.
-func (o *Object) Wire(context.Context) ([]byte, error) {
-	id, err := o.openID()
-	if err != nil {
-		return nil, err
-	}
-	raw, ok, err := o.host.Get(key(kindWire, id))
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, fmt.Errorf("%w: no wire state", session.ErrNotFound)
-	}
-	return raw, nil
-}
-
-// SetWire implements Ref.
-func (o *Object) SetWire(_ context.Context, raw []byte) error {
-	id, err := o.openID()
-	if err != nil {
-		return err
-	}
-	if raw == nil {
-		return o.host.Write(del(key(kindWire, id)))
-	}
-	return o.host.Write(put(key(kindWire, id), raw))
-}
-
 // openID is the id of the object's session unless it is unknown or closed.
 func (o *Object) openID() (session.ID, error) {
 	o.mu.Lock()
@@ -538,6 +508,44 @@ type stopped struct{ err error }
 
 // fail stops the run on err (stopped).
 func fail(err error) { panic(stopped{err}) }
+
+// storageError is an error of the object's storage. A step that meets one
+// stops the run instead of failing its turn: the alarm goes on with the
+// turn once storage works.
+type storageError struct{ err error }
+
+func (e storageError) Error() string { return e.err.Error() }
+
+func (e storageError) Unwrap() error { return e.err }
+
+// failOnStorage stops the run when err is the storage's.
+func failOnStorage(err error) {
+	if _, ok := errors.AsType[storageError](err); ok {
+		fail(err)
+	}
+}
+
+// storageHost is a Host whose storage errors are storageErrors.
+type storageHost struct{ Host }
+
+func (h storageHost) Get(key string) ([]byte, bool, error) {
+	v, ok, err := h.Host.Get(key)
+	return v, ok, storageErr(err)
+}
+
+func (h storageHost) Scan(prefix, after string, limit int) ([]Entry, error) {
+	entries, err := h.Host.Scan(prefix, after, limit)
+	return entries, storageErr(err)
+}
+
+func (h storageHost) Write(ops ...Op) error { return storageErr(h.Host.Write(ops...)) }
+
+func storageErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return storageError{err}
+}
 
 // runOnce runs the session from its storage once: it replays the journal,
 // then runs live until the session suspends or ends. ok is false when it
@@ -638,7 +646,7 @@ func (o *Object) leftovers(id session.ID, all bool) ([]Op, error) {
 	}
 	ops = append(ops, del(key(kindCarry, id)), del(key(kindMailboxHead, id)), del(key(kindSecrets, id)))
 	if all {
-		ops = append(ops, del(key(kindSnapshot, id)), del(key(kindEventHead, id)), del(key(kindWire, id)))
+		ops = append(ops, del(key(kindSnapshot, id)), del(key(kindEventHead, id)))
 	}
 	return ops, nil
 }

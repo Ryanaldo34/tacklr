@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/storetest"
-	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
 // TestPut_catalogEnforced: under a catalog, Save rejects an object that breaks
@@ -111,33 +109,37 @@ func TestSave_failsWhenTheEmbedderFails(t *testing.T) {
 	}
 }
 
-// TestSave_indexesTheHostsTextOverTheIndexedFields: a record is embedded and
-// put in the graph as the host's index text over its title, summary, indexed
-// properties in key order (each Go number type as its number) and content; a
-// SkipIndex field, a blank or missing value and the store's own properties
-// stay out of the text.
-func TestSave_indexesTheHostsTextOverTheIndexedFields(t *testing.T) {
+// TestObject_entityIndexTextListsTheIndexedFieldsInKeyOrder: a record's
+// index text is its title, summary, indexed properties in key order (each Go
+// number type as its number) and content; a SkipIndex field, a blank, nil or
+// nested value and the store's own properties stay out.
+func TestObject_entityIndexTextListsTheIndexedFieldsInKeyOrder(t *testing.T) {
+	t.Parallel()
+	spec := brain.KindSpec{Kind: "Deal", Fields: []brain.FieldSpec{{Name: "message_id", Type: brain.FieldTypeString, SkipIndex: true}}}
+	deal := brain.Object{
+		Kind: "Deal", Title: " Acme renewal ", Summary: "enterprise opportunity", Content: "the renewal terms",
+		Properties: map[string]any{
+			"stage": "open", "amount": 120000.0, "hot": true, "message_id": "msg-1", brain.PropSlug: "acme", "count": 7,
+			"share": float32(0.5), "rank": int32(3), "views": int64(4000), "seats": json.Number("12"), "owner": "  ", "lost": nil,
+			"meta": map[string]any{"a": 1},
+		},
+	}
+
+	got := deal.EntityIndexText(spec)
+
+	want := "Acme renewal\nenterprise opportunity\namount: 120000\ncount: 7\nhot: true\nrank: 3\nseats: 12\nshare: 0.5\nstage: open\nviews: 4000\nthe renewal terms"
+	if got != want {
+		t.Errorf("index text = %q, want %q", got, want)
+	}
+}
+
+// TestSave_indexesTheHostsRewriteOfTheIndexText: WithIndexText rewrites the
+// text a record is indexed by, and the record is saved unchanged.
+func TestSave_indexesTheHostsRewriteOfTheIndexText(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	var embedded []string
-	emb := embedFunc(func(_ context.Context, texts []string) ([][]float32, error) {
-		embedded = append(embedded, texts...)
-		return repeatVector([]float32{1, 0}, len(texts)), nil
-	})
-	g := helixtest.Graph(t)
-	eng, err := brain.NewEngine(brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb})), brain.WithIndex(g),
-		brain.WithKinds(brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
-			{Name: "stage", Type: brain.FieldTypeString},
-			{Name: "amount", Type: brain.FieldTypeNumber},
-			{Name: "hot", Type: brain.FieldTypeBoolean},
-			{Name: "message_id", Type: brain.FieldTypeString, SkipIndex: true},
-			{Name: "share", Type: brain.FieldTypeNumber},
-			{Name: "rank", Type: brain.FieldTypeNumber},
-			{Name: "views", Type: brain.FieldTypeNumber},
-			{Name: "seats", Type: brain.FieldTypeNumber},
-			{Name: "owner", Type: brain.FieldTypeString},
-			{Name: "lost", Type: brain.FieldTypeString},
-		}}),
+	g := memoryGraph()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithIndex(g),
 		brain.WithIndexText(func(_ brain.Object, defaultText string) string {
 			return "related: neighbor record\n" + defaultText
 		}),
@@ -147,21 +149,11 @@ func TestSave_indexesTheHostsTextOverTheIndexedFields(t *testing.T) {
 	}
 	scope := brain.Scope{Namespace: tenant(t)}
 
-	deal, err := eng.Save(ctx, scope, brain.Object{
-		Kind: "Deal", Title: "Acme renewal", Summary: "enterprise opportunity", Content: "the renewal terms",
-		Properties: map[string]any{
-			"stage": "open", "amount": 120000.0, "hot": true, "message_id": "msg-1", brain.PropSlug: "acme",
-			"share": float32(0.5), "rank": int32(3), "views": int64(4000), "seats": json.Number("12"), "owner": "  ", "lost": nil,
-		},
-	})
+	deal, err := eng.Save(ctx, scope, brain.Object{Kind: "Deal", Title: "Acme renewal", Content: "the renewal terms", Properties: map[string]any{"message_id": "msg-1"}})
 	hits, findErr := g.FindObjects(ctx, brain.ObjectSearch{Namespace: scope.Namespace, Query: "neighbor record", Limit: 5})
 
-	want := "related: neighbor record\nAcme renewal\nenterprise opportunity\namount: 120000\nhot: true\nrank: 3\nseats: 12\nshare: 0.5\nstage: open\nviews: 4000\nthe renewal terms"
-	if err != nil || !slices.Equal(embedded, []string{want}) {
-		t.Errorf("embedded %q %v, want %q", embedded, err, want)
-	}
-	if deal.Content != "the renewal terms" || deal.Properties["message_id"] != "msg-1" {
-		t.Errorf("saved = %+v, want the content and every property kept", deal)
+	if err != nil || deal.Content != "the renewal terms" || deal.Properties["message_id"] != "msg-1" {
+		t.Errorf("saved = %+v %v, want the content and every property kept", deal, err)
 	}
 	if findErr != nil || len(hits) != 1 || hits[0].ID != deal.ID {
 		t.Errorf("graph search for the host's text = %+v %v, want the deal", hits, findErr)
@@ -175,7 +167,7 @@ func TestLink_needsTwoVisibleRecordsARelationAndAGraph(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithGraph(helixtest.Graph(t)))
+	eng, err := brain.NewEngine(store, brain.WithGraph(memoryGraph()))
 	if err != nil {
 		t.Fatal(err)
 	}

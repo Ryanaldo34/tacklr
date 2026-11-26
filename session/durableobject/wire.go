@@ -39,6 +39,11 @@ var wireKinds = []struct {
 	{wireInvalid, http.StatusBadRequest, session.ErrInvalid},
 }
 
+// broken is the last line of a subscription's stream that broke: why.
+type broken struct {
+	Broken string `json:"broken"`
+}
+
 // wireError is an error as the protocol sends it.
 type wireError struct {
 	Kind    string `json:"error,omitempty"`
@@ -74,26 +79,6 @@ func Handler(ref Ref) http.Handler {
 		head, err := ref.Head(r.Context())
 		reply(w, head, err)
 	})
-	mux.HandleFunc("GET /wire", func(w http.ResponseWriter, r *http.Request) {
-		raw, err := ref.Wire(r.Context())
-		if err != nil {
-			reply(w, nil, err)
-			return
-		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write(raw)
-	})
-	mux.HandleFunc("PUT /wire", func(w http.ResponseWriter, r *http.Request) {
-		raw, err := io.ReadAll(r.Body)
-		if err != nil {
-			reply(w, nil, fmt.Errorf("%w: %w", session.ErrInvalid, err))
-			return
-		}
-		reply(w, nil, ref.SetWire(r.Context(), raw))
-	})
-	mux.HandleFunc("DELETE /wire", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, nil, ref.SetWire(r.Context(), nil))
-	})
 	mux.HandleFunc("GET /subscribe", func(w http.ResponseWriter, r *http.Request) {
 		after, err := strconv.ParseUint(r.URL.Query().Get("after"), 10, 64)
 		if err != nil {
@@ -115,6 +100,12 @@ func Handler(ref Ref) http.Handler {
 		for ev := range sub.Events() {
 			_ = enc.Encode(ev)
 			_ = flush.Flush()
+		}
+		if r.Context().Err() != nil {
+			return
+		}
+		if err := sub.Err(); err != nil {
+			_ = enc.Encode(broken{Broken: err.Error()})
 		}
 	})
 	return mux
@@ -186,29 +177,6 @@ func (r remote) Head(ctx context.Context) (session.Seq, error) {
 	var head session.Seq
 	err := r.call(ctx, http.MethodGet, "/head", nil, &head)
 	return head, err
-}
-
-// Wire implements Ref.
-func (r remote) Wire(ctx context.Context) ([]byte, error) {
-	resp, err := r.send(ctx, http.MethodGet, "/wire", "", nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	return io.ReadAll(resp.Body)
-}
-
-// SetWire implements Ref.
-func (r remote) SetWire(ctx context.Context, raw []byte) error {
-	method := http.MethodPut
-	if raw == nil {
-		method = http.MethodDelete
-	}
-	resp, err := r.do(ctx, method, "/wire", "", raw)
-	if err != nil {
-		return err
-	}
-	return resp.Body.Close()
 }
 
 // Subscribe implements Ref: the object's events after after, as they
@@ -303,6 +271,11 @@ func (s *remoteSubscription) read(ctx context.Context, body io.ReadCloser) {
 	sc := bufio.NewScanner(body)
 	sc.Buffer(nil, 64<<20)
 	for sc.Scan() {
+		var end broken
+		if json.Unmarshal(sc.Bytes(), &end) == nil && end.Broken != "" {
+			s.err = errors.New(end.Broken)
+			return
+		}
 		var ev session.Event
 		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
 			s.err = fmt.Errorf("durableobject: event: %w", err)

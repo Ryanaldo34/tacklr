@@ -1,31 +1,30 @@
 # Telemetry
 
-Each turn is one OpenTelemetry trace, from the client's request to the answer. The trace goes through every system the turn touches: the protocol server, the runtime (Temporal or Durable Objects), each worker or object that runs a step, the model provider, the MCP servers, Postgres, and each specialist's session.
+Each turn is one OpenTelemetry trace, from your backend's request to the answer. The trace goes through every system the turn touches: your backend's call on `session.Client`, the runtime (Temporal or Durable Objects), each worker or object that runs a step, the model provider, the MCP servers, Postgres, and each specialist's session.
 
-Tacklr follows the OpenTelemetry conventions: GenAI for the agent, model, and tool spans, RPC for the protocol, and the database conventions for Postgres. Span attributes are identifiers and closed enums. Values that change (lengths, counts, error text) go on logs that are linked to the span. Metric labels never include a session id.
+Tacklr follows the OpenTelemetry conventions: GenAI for the agent, model, and tool spans, and the database conventions for Postgres. Span attributes are identifiers and closed enums. Values that change (lengths, counts, error text) go on logs that are linked to the span. Metric labels never include a session id.
 
 ## The trace of a turn
 
 ```mermaid
 flowchart TB
-    client["client span<br/>(its traceparent)"]
-    prompt["session/prompt · SERVER<br/>rpc.* · gen_ai.conversation.id"]
+    prompt["your backend's prompt request<br/>(its span, or the traceparent it got)"]
+    answer["your backend's resume request"]
     turn1["invoke_agent releases<br/>tacklr.turn.kind prompt · outcome yield"]
     chat1["chat gpt-5-mini · CLIENT"]
     deploy["execute_tool deploy · outcome yield"]
-    ask["session/request_permission · CLIENT<br/>the time the user took"]
-    turn2["invoke_agent releases<br/>kind resume · link → the answered ask"]
+    turn2["invoke_agent releases<br/>kind resume · link → the resume request"]
     search["execute_tool search<br/>gen_ai.tool.type extension"]
     mcp[("MCP server<br/>gets the traceparent")]
     spawn["execute_tool spawn_specialist"]
     child["invoke_agent researcher<br/>tacklr.session.parent"]
-    db[("Postgres statements<br/>otelpgx, under each step")]
+    db[("Postgres statements<br/>under each step")]
 
-    client --> prompt --> turn1
+    prompt --> turn1
     turn1 --> chat1
     turn1 --> deploy
-    prompt --> ask
     prompt --> turn2
+    answer -.-> turn2
     turn2 --> search --> mcp
     turn2 --> spawn --> child
     turn1 -.-> db
@@ -33,14 +32,12 @@ flowchart TB
 
 | Span | Kind | Where | Static attributes | At its end |
 |------|------|-------|-------------------|------------|
-| `{method}`, such as `session/prompt` | SERVER | Protocol server | `rpc.system` jsonrpc, `rpc.method`, `gen_ai.conversation.id` | `rpc.jsonrpc.error_code`, `error.type`, `tacklr.stop_reason` |
-| `session/request_permission`, `elicitation/create` | CLIENT | Protocol server | the same, `tacklr.interrupt.kind` | the answer's error code |
 | `invoke_agent {agent}` | INTERNAL | Runtime (the workflow, or the session's object) | `gen_ai.operation.name` invoke_agent, `gen_ai.agent.name`, `gen_ai.conversation.id`, `tacklr.turn.kind`, `tacklr.runtime`, `tacklr.session.parent` | `tacklr.outcome` (ok, yield, cancelled, error), `error.type` |
 | `chat {model}` | CLIENT | Step | `gen_ai.operation.name` chat, `gen_ai.provider.name`, `gen_ai.request.model`, `tacklr.model.phase` | `gen_ai.usage.*`, `error.type`, `http.response.status_code`, `tacklr.error.code` |
 | `execute_tool {tool}` | INTERNAL | Step | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type`, `tacklr.tool.namespace` | `tacklr.outcome`, `error.type` |
 | `tacklr.context.handoff` | INTERNAL | Step | the session and agent | `tacklr.outcome` (ok, fallback, error) |
 
-The protocol request's span is the turn's root in the host: it lasts until the turn's end answers it, so its duration is what the user waited. A turn that parks ends its `invoke_agent` span with outcome `yield`. The resume is a second `invoke_agent` span in the same trace, with a link to the span of the question the user answered. A client that leaves ends the spans it had open with stop reason `disconnected`; the turn goes on, and a client that loads the session again is asked again.
+The span of your backend's call is the turn's parent: the turn's `invoke_agent` span is its child. A turn that parks ends its `invoke_agent` span with outcome `yield`. The resume is a second `invoke_agent` span in the same trace, with a link to the span of the `Resume` call that answered it.
 
 There are no other spans. A step has no span of its own: its model requests and tool calls are its spans. Temporal's plugin and its own spans are not needed (below).
 
@@ -48,12 +45,11 @@ There are no other spans. A step has no span of its own: its model requests and 
 
 | Hop | What carries the trace |
 |-----|------------------------|
-| Client → protocol server | The request's `_meta.traceparent` (and `tracestate`, `baggage`), else the WebSocket upgrade's `traceparent` header for the whole connection |
-| Protocol server → session | `session.Wake.Trace`: each `session.Client` writes the context of the call into the wake it sends (a Temporal signal, a Durable Object mailbox entry) |
+| Your backend → session | `session.Wake.Trace`: each `session.Client` writes the context of the call into the wake it sends (a Temporal signal, a Durable Object mailbox entry). Call it with the context of your request's span, or extract the caller's `traceparent` into it as `examples/backend` does |
 | Turn → its steps | The orchestrator keeps the turn's trace in `orchestrator.State` (and its `Carry`, across a park, a crash, a continue-as-new or an eviction). `Runtime.Begin` starts the turn's span once and records its context: on Temporal in a `workflow.SideEffect`, on Durable Objects as a journal entry, so a replay reuses it and starts no span. Each step's input carries it (a Temporal activity's input; on Durable Objects, the step's context) |
 | Turn → specialist or job | The child's start carries the turn's context (`protocol.Input.Trace`, `durableobject.Init.Trace`), and the child's first prompt starts its turn in it |
 | Step → model provider, MCP server | `telemetry.Transport` writes the `traceparent` header on each request (both model clients and MCP over HTTP use it), so a gateway or an MCP server continues the trace. It starts no span: `chat` and `execute_tool` are the client spans |
-| Step → Postgres | otelpgx: a span for each statement under the step's context, on a pool configured with `session/postgres.Configure` or `brain/postgres.Configure` |
+| Step → Postgres | A CLIENT span for each statement, batch and copy under the step's trace (the OpenTelemetry database conventions), on a pool configured with `session/postgres.Configure` or `brain/postgres.Configure` |
 
 Sampling is parent-based in every process (`export.Init`), so each process follows the decision of the trace it joins: a trace is whole or absent.
 
@@ -106,19 +102,17 @@ Tacklr's own diagnostics are `slog` records with their context (`slog.WarnContex
 | `tacklr.tool.calls`, `tacklr.tool.duration` | counter, histogram (s) | `gen_ai.agent.name`, `gen_ai.tool.name`, `tacklr.tool.namespace`, `status` |
 | `tacklr.interrupt.total` | counter | `gen_ai.agent.name`, `kind` |
 | `tacklr.context.handoff.total`, `tacklr.context.compress.total` | counter | `gen_ai.agent.name`, `outcome` |
-| `rpc.server.call.duration` | histogram (s) | `rpc.system`, `rpc.method`, `error.type` |
-| `tacklr.server.connections` | up-down counter | `protocol` |
-| `tacklr.session.created.total`, `tacklr.checkpoint.save.total` | counter | `outcome` |
+| `tacklr.checkpoint.save.total` | counter | `outcome` |
 | Temporal SDK metrics (`temporal_*`) | | Temporal's |
 
 A runtime counts a turn once: the turn's metrics are recorded with its span, which a replay does not start again.
 
 ## Cloudflare Workers
 
-A Worker's turn is one trace in the same way: the connection object reads the upgrade's or the request's `traceparent`, each wake and each child's `Init` carry the context between objects, and model and MCP requests send it. When the Worker's env names `OTEL_EXPORTER_OTLP_ENDPOINT` (and, for an API key, `OTEL_EXPORTER_OTLP_HEADERS`; `OTEL_SERVICE_NAME` names the Worker), the bridge installs a tracer that sends spans in batches to that endpoint as OTLP/HTTP in its JSON encoding (`telemetry/otlpjson`), over `fetch`. The OTLP exporters' protobuf and gRPC code would take the program past its size budget; this one adds under 1 MiB. The bridge sends what it holds when an object runs nothing, after each alarm, and when a connection ends, since the platform can stop an idle object.
+A Worker's turn is one trace in the same way: your Worker's handler calls the session objects in its request's context (`examples/backend` extracts the request's `traceparent`), each wake and each child's `Init` carry the context between objects, and model and MCP requests send it. When the Worker's env names `OTEL_EXPORTER_OTLP_ENDPOINT` (and, for an API key, `OTEL_EXPORTER_OTLP_HEADERS`; `OTEL_SERVICE_NAME` names the Worker), the bridge installs a tracer that sends spans in batches to that endpoint as OTLP/HTTP in its JSON encoding (`telemetry/otlpjson`), over `fetch`. The OTLP exporters' protobuf and gRPC code would take the program past its size budget; this one adds under 1 MiB. The bridge sends what it holds when an object runs nothing, after each alarm, since the platform can stop an idle object.
 
 On Workers only traces are exported: metrics and logs stay on Workers' own observability.
 
 ## For contributors
 
-Package `telemetry` depends only on the OpenTelemetry API, so it builds for WebAssembly. `telemetry/export` installs the SDK and the exporters in a host process. Start spans only with the package's starters (`StartTurn`, `StartModelSpan`, `StartToolSpan`, `StartRPC`, `StartHandoffSpan`), and carry a trace across a boundary with `telemetry.Inject` and `Carrier.Context`. `TestACP_aTurnIsOneTraceThroughEverySystemItTouches` in `server/acp` checks the whole trace on both runtimes.
+Package `telemetry` depends only on the OpenTelemetry API, so it builds for WebAssembly. `telemetry/export` installs the SDK and the exporters in a host process. Start spans only with the package's starters (`StartTurn`, `StartModelSpan`, `StartToolSpan`, `StartHandoffSpan`), and carry a trace across a boundary with `telemetry.Inject` and `Carrier.Context`. `TestATurnIsOneTraceThroughEverySystemItTouches` in `session` checks the whole trace on both runtimes.

@@ -290,18 +290,8 @@ func (cc *CallContext) Schedule(_ context.Context, job JobRequest) (Job, error) 
 // the child's output is the call's result.
 func (cc *CallContext) startJob(job JobRequest, specialist bool) (Job, error) {
 	name, task := strings.TrimSpace(job.Name), strings.TrimSpace(job.Task)
-	isSpecialist := cc.turn.specialists[name] != nil
-	switch {
-	case name == "":
-		return Job{}, fmt.Errorf("job name is required: %w", ErrInvalid)
-	case isSpecialist && !specialist:
-		return Job{}, fmt.Errorf("%w: %s is a specialist; the model starts specialists with spawn_specialist", ErrInvalid, name)
-	case !isSpecialist && specialist:
-		return Job{}, fmt.Errorf("%w: %s is not a specialist", ErrNotFound, name)
-	case !specialist && !slices.Contains(cc.turn.jobs, name):
-		return Job{}, fmt.Errorf("%w: %s is not a registered job", ErrNotFound, name)
-	case task == "":
-		return Job{}, fmt.Errorf("task is required: %w", ErrInvalid)
+	if err := validateJob(name, task, specialist, cc.turn.specialists[name] != nil, slices.Contains(cc.turn.jobs, name)); err != nil {
+		return Job{}, err
 	}
 	s := JobStart{ID: ChildID(cc.turn.sessionId, name, cc.CurrentToolCallID(), specialist), Name: name, Task: task, Specialist: specialist}
 	cc.mu.Lock()
@@ -316,6 +306,25 @@ func (cc *CallContext) startJob(job JobRequest, specialist bool) (Job, error) {
 		cc.call.Await = s.ID
 	}
 	return Job{ID: s.ID, Name: s.Name, State: JobRunning}, nil
+}
+
+// validateJob is why a job of name and task cannot start, or nil.
+// specialist says which kind it must name; isSpecialist and registered say
+// whether name is a registered specialist and a registered job.
+func validateJob(name, task string, specialist, isSpecialist, registered bool) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("job name is required: %w", ErrInvalid)
+	case isSpecialist && !specialist:
+		return fmt.Errorf("%w: %s is a specialist; the model starts specialists with spawn_specialist", ErrInvalid, name)
+	case !isSpecialist && specialist:
+		return fmt.Errorf("%w: %s is not a specialist", ErrNotFound, name)
+	case !specialist && !registered:
+		return fmt.Errorf("%w: %s is not a registered job", ErrNotFound, name)
+	case task == "":
+		return fmt.Errorf("task is required: %w", ErrInvalid)
+	}
+	return nil
 }
 
 // Jobs is the session's running children and the ones this call started

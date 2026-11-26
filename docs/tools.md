@@ -148,7 +148,7 @@ agent.MCPConfigs = []session.MCPServer{
 }
 ```
 
-Each server's tools are namespaced by its name (`github__create_issue`). A server connects when the session's harness is built. Clients can also name servers for a session: over ACP, in `mcpServers` on `session/new` or `session/load`.
+Each server's tools are namespaced by its name (`github__create_issue`). A server connects when the session's harness is built. Your backend can also name servers for a session, in `CreateSession.MCPServers` or `Prompt.MCPServers`.
 
 Credentials in `Env` and `Headers` are never stored. For a credential the session must keep, set `CredentialRef`, and resolve it with `AgentOptions.MCPCredentialResolver` just before each connection.
 

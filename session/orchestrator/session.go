@@ -77,10 +77,13 @@ func (s *runner) next(rt Runtime) session.Wake {
 }
 
 // pump handles every wake the driver has queued, without blocking; with
-// block, it first waits for one.
+// block, it first waits for one. It takes none after a suspend: the
+// restarted session takes them.
 func (s *runner) pump(rt Runtime, block bool) {
-	for w := rt.Next(block); w.Kind != "" && !s.turn.Suspended; w = rt.Next(false) {
-		s.handle(w, rt)
+	for w := rt.Next(block); w.Kind != ""; w = rt.Next(false) {
+		if s.handle(w, rt); s.turn.Suspended {
+			return
+		}
 	}
 }
 

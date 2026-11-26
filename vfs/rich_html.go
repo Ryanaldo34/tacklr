@@ -12,13 +12,6 @@ func DecodeHTMLBlocks(data []byte) ([]Block, error) {
 	return decodeDocsHTML(data)
 }
 
-// EncodeHTMLBlocks writes pretty HTML: one heading, paragraph, list item, or
-// table per line. Color style is emitted only when stored on the IR.
-func EncodeHTMLBlocks(blocks []Block) string {
-	s, _ := projectHTMLSpans(blocks, nil)
-	return s
-}
-
 func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 	titleOf := map[string]string{}
 	for _, t := range tabs {
@@ -201,12 +194,7 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 }
 
 func writeInlineHTML(write, writeEsc func(string), bl Block) {
-	runs := bl.inlineRuns()
-	if len(runs) == 0 {
-		writeEsc(bl.Text)
-		return
-	}
-	for _, r := range runs {
+	for _, r := range bl.Runs {
 		if href := r.Marks[MarkHref]; href != "" {
 			write(`<a href="`)
 			writeEsc(href)

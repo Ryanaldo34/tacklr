@@ -1,12 +1,13 @@
-// Package sandboxtest starts a sandbox supervisor that boots real
-// Firecracker microVMs for tests: a test certificate authority, a
-// supervisor on a loopback port, and guests written in Python that break
-// the protocol. The first test that needs the guest image builds it (make
-// sandbox-image) once per test binary. The tests need /dev/kvm.
+// Package sandboxtest starts sandbox supervisors for tests: a test
+// certificate authority, a supervisor on a loopback port, and FakeVM, a
+// stand-in for Firecracker whose guest follows a script. A test that boots
+// real Firecracker microVMs builds the guest image (make sandbox-image)
+// once per test binary, and needs /dev/kvm.
 package sandboxtest
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -89,7 +90,7 @@ func BuildImage(t *testing.T) Image {
 	return image.paths
 }
 
-// Client starts a supervisor with the real guest over workspace (nil: an
+// Client starts a supervisor that boots real VMs over workspace (nil: an
 // empty tree) and returns a client of it.
 func Client(t *testing.T, workspace vfs.OpenVFS) *sandbox.Client {
 	t.Helper()
@@ -104,17 +105,19 @@ type Host struct {
 	Stop func() error
 }
 
-// Start serves a supervisor on a loopback port. Empty fields of config get
-// the guest image and ca's server TLS. The VMs' log is in the test's
-// output when the test fails.
+// Start serves a supervisor on a loopback port with ca's server TLS. A
+// config with no Firecracker boots real VMs of the guest image
+// (BuildImage); one with a Firecracker (such as FakeVM) runs it with no
+// kernel or root file system. The VMs' log is in the test's output when
+// the test fails.
 func Start(t *testing.T, ca *Authority, config supervisor.Config) Host {
 	t.Helper()
-	paths := BuildImage(t)
 	if config.Firecracker == "" {
-		config.Firecracker = paths.Firecracker
+		paths := BuildImage(t)
+		config.Firecracker, config.Kernel, config.Rootfs = paths.Firecracker, paths.Kernel, paths.Rootfs
 	}
-	config.Kernel = paths.Kernel
-	config.Rootfs = paths.Rootfs
+	config.Kernel = cmp.Or(config.Kernel, "/dev/null")
+	config.Rootfs = cmp.Or(config.Rootfs, "/dev/null")
 	config.TLS = ca.ServerConfig(t)
 	log := &syncBuffer{}
 	config.Log = log
@@ -144,6 +147,41 @@ func Start(t *testing.T, ca *Authority, config supervisor.Config) Host {
 	return Host{Address: listener.Addr().String(), Stop: stop}
 }
 
+// fakeVM is the fakevm program, built once per test binary.
+var fakeVM struct {
+	once   sync.Once
+	err    error
+	binary string
+}
+
+// FakeVM is a Firecracker for a test that boots no VM: the fakevm program
+// (sandbox/sandboxtest/fakevm), which the supervisor starts as it starts
+// Firecracker, and which does steps (see the program) as the VM's guest.
+// It is named firecracker.
+func FakeVM(t *testing.T, steps ...string) string {
+	t.Helper()
+	fakeVM.once.Do(func() {
+		_, file, _, _ := runtime.Caller(0)
+		dir, err := os.MkdirTemp("", "tacklr-fakevm-")
+		if err != nil {
+			fakeVM.err = err
+			return
+		}
+		fakeVM.binary = filepath.Join(dir, "fakevm")
+		build := exec.Command("go", "build", "-o", fakeVM.binary, "./fakevm") //nolint:gosec // G204: builds this package's own program
+		build.Dir = filepath.Dir(file)
+		if output, err := build.CombinedOutput(); err != nil {
+			fakeVM.err = fmt.Errorf("build fakevm: %w\n%s", err, output)
+		}
+	})
+	require.NoError(t, fakeVM.err)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "firecracker")
+	require.NoError(t, os.Symlink(fakeVM.binary, path))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "steps.txt"), []byte(strings.Join(steps, "\n")+"\n"), 0o600))
+	return path
+}
+
 // syncBuffer is a buffer that the VMs write their log to concurrently.
 type syncBuffer struct {
 	mu  sync.Mutex
@@ -160,18 +198,6 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
-}
-
-// Guest is a guest init that takes the place of the worker: a Python
-// program that does not follow the protocol. It connects to the host's
-// control port as s, then runs each statement. send(m) writes the dict m
-// as one control frame. A statement may not have a double quote or a
-// newline.
-func Guest(statements ...string) []string {
-	setup := "import socket,struct,json,time,os;" +
-		"s=socket.socket(socket.AF_VSOCK,socket.SOCK_STREAM);s.connect((2,1024));" +
-		"send=lambda m:s.sendall(struct.pack('>IB',len(json.dumps(m)),1)+json.dumps(m).encode())"
-	return []string{"/usr/bin/python3", "-c", strings.Join(append([]string{setup}, statements...), ";")}
 }
 
 // Authority is a test certificate authority.

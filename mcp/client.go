@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/ryanaldo34/tacklr/session"
@@ -23,12 +23,13 @@ var errTransportNotSupported = errors.New("mcp transport not supported")
 // client wraps a connection to a single MCP server.
 type client struct {
 	config  session.MCPServer
+	log     *slog.Logger
 	sdk     *mcpsdk.Client
 	session *mcpsdk.ClientSession
 }
 
-func newClient(cfg session.MCPServer) *client {
-	return &client{config: cfg}
+func newClient(cfg session.MCPServer, log *slog.Logger) *client {
+	return &client{config: cfg, log: log}
 }
 
 func (c *client) connect(ctx context.Context) error {
@@ -117,7 +118,7 @@ func commandEnvironment(config session.MCPServer) []string {
 	for key := range values {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	out := make([]string, 0, len(keys))
 	for _, key := range keys {
 		out = append(out, key+"="+values[key])
@@ -142,7 +143,7 @@ func appendExplicitEnvironment(base []string, explicit []session.MCPEnv) []strin
 	for key := range values {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	out := make([]string, 0, len(keys))
 	for _, key := range keys {
 		out = append(out, key+"="+values[key])
@@ -204,8 +205,7 @@ func (c *client) callTool(ctx context.Context, name string, args map[string]any)
 }
 
 func (c *client) interpretError(operation string, err error) error {
-	var rpcErr *mcpjsonrpc.Error
-	if errors.As(err, &rpcErr) {
+	if rpcErr, ok := errors.AsType[*mcpjsonrpc.Error](err); ok {
 		suffix := ""
 		if len(rpcErr.Data) > 0 {
 			suffix = fmt.Sprintf(" (data: %s)", string(rpcErr.Data))
@@ -214,8 +214,7 @@ func (c *client) interpretError(operation string, err error) error {
 			c.config.Name, operation, rpcErr.Code, rpcErr.Message, suffix, err)
 	}
 
-	var httpErr *httpError
-	if errors.As(err, &httpErr) {
+	if httpErr, ok := errors.AsType[*httpError](err); ok {
 		return fmt.Errorf("mcp server %q: %s: HTTP error (status %d): %s: %w",
 			c.config.Name, operation, httpErr.Status, httpErr.Body, err)
 	}
@@ -233,12 +232,8 @@ func (c *client) close() error {
 	if err == nil {
 		return nil
 	}
-	// Some MCP endpoints do not support the session DELETE request that the
-	// streamable transport issues on close. A 405 here is benign; treat it as
-	// a clean close.
-	var httpErr *httpError
-	if errors.As(err, &httpErr) && httpErr.Status == http.StatusMethodNotAllowed {
-		slog.Warn("mcp server close returned 405, treating as successful", "server", c.config.Name)
+	if httpErr, ok := errors.AsType[*httpError](err); ok && httpErr.Status == http.StatusMethodNotAllowed {
+		c.log.Warn("mcp server close returned 405, treating as successful", "server", c.config.Name)
 		return nil
 	}
 	return c.interpretError("close", err)

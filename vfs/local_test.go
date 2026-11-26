@@ -9,7 +9,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"testing/iotest"
 
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
@@ -135,14 +134,14 @@ func TestLocal_diskFailuresBecomeVFSErrors(t *testing.T) {
 	}{
 		"a path through a file is not a directory": {stat("f.txt/x"), is(vfs.ErrNotDir)},
 		"a list of a file is not a directory":      {list("f.txt"), is(vfs.ErrNotDir)},
+		"a directory over a file already exists": {
+			func(ctx context.Context) error { return route("f.txt").MkdirAll(ctx) }, is(vfs.ErrExist),
+		},
 		"a write to a directory is a directory": {
 			func(ctx context.Context) error { return route("sub").WriteFile(ctx, []byte("x")) }, is(vfs.ErrIsDir),
 		},
-		"a document under a file is not a directory": {
-			func(ctx context.Context) error {
-				return ms.WriteDocument(ctx, vfs.NewTextDocument("/workspace/w/f.txt/sub/x.txt", "text/plain", "", "x"))
-			},
-			is(vfs.ErrNotDir),
+		"a write under a file is not a directory": {
+			func(ctx context.Context) error { return route("f.txt/sub/x.txt").WriteFile(ctx, []byte("x")) }, is(vfs.ErrNotDir),
 		},
 		"a list through a symlink out of the root is invalid": {list("out"), is(vfs.ErrInvalidPath)},
 		"a document the user cannot read is refused":          {openDoc("locked.txt"), is(vfs.ErrPermission)},
@@ -186,57 +185,51 @@ func TestLocal_diskFailuresBecomeVFSErrors(t *testing.T) {
 	})
 }
 
-// TestLocal_aWrappedProviderRefusesBadNamesAndFailedUploads: a host that
-// wraps the local provider calls it with names the mount session never
-// sends. A name that leaves the root or cancels to the root is invalid, a
-// canceled context stops the one-shot put and the document I/O, and an
-// upload whose reader fails returns that error.
-func TestLocal_aWrappedProviderRefusesBadNamesAndFailedUploads(t *testing.T) {
+// TestLocal_refusesABaseOrSubpathItCannotJail: a local open refuses a
+// subpath or session id that leaves the base, a base that is relative,
+// missing or a file, and a subpath it cannot make. A provider fails to
+// validate when its root is gone or is now a file.
+func TestLocal_refusesABaseOrSubpathItCannotJail(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	p, err := vfs.NewLocalProvider(t.TempDir())
+	file := filepath.Join(t.TempDir(), "notdir")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(moved, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	movedRoot, err := vfs.NewLocalProvider(moved)
 	if err != nil {
 		t.Fatal(err)
 	}
-	local := p.(backendProvider)
-	reg, err := vfs.NewContentRegistry()
-	if err != nil {
-		t.Fatal(err)
+	open := vfs.Local(t.TempDir())
+	opened := func(open vfs.Open, session string, params map[string]string) error {
+		_, err := open(ctx, session, mount.Binding{Params: params})
+		return err
 	}
-	doc := vfs.NewTextDocument("x.txt", "text/plain", "", "x")
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-	errUpload := errors.New("upload broke")
 
-	invalid := map[string]error{
-		"stat ..":          func() error { _, err := local.Stat(ctx, ".."); return err }(),
-		"stat a/..":        func() error { _, err := local.Stat(ctx, "a/.."); return err }(),
-		"open ..":          func() error { _, err := local.OpenFile(ctx, "..", os.O_RDONLY, 0); return err }(),
-		"put ..":           local.PutFile(ctx, "..", strings.NewReader("x"), 1),
-		"open document ..": func() error { _, err := local.OpenDocument(ctx, "..", reg); return err }(),
-		"list ..":          func() error { _, err := local.ReadDir(ctx, ".."); return err }(),
-		"remove ..":        local.Remove(ctx, ".."),
-		"mkdir ..":         local.MkdirAll(ctx, "..", 0o750),
+	refused := map[string]error{
+		"a subpath ..":            opened(open, "s", map[string]string{"subpath": ".."}),
+		"an absolute subpath":     opened(open, "s", map[string]string{"subpath": "/abs"}),
+		"a session id ..":         opened(open, "..", map[string]string{"session_scoped": "true"}),
+		"a relative base":         func() error { _, err := vfs.Tree(vfs.At("w", vfs.Local("rel")))(ctx, "s", vfs.Request{}); return err }(),
+		"a file as the base":      opened(vfs.Local(file), "s", nil),
+		"a relative provider":     func() error { _, err := vfs.NewLocalProvider("relative"); return err }(),
+		"a missing base":          opened(vfs.Local(filepath.Join(t.TempDir(), "missing")), "s", nil),
+		"a subpath under a file":  opened(vfs.Local(filepath.Dir(file)), "s", map[string]string{"subpath": "notdir/sub"}),
+		"a root that is gone":     func() error { _ = os.Remove(moved); return movedRoot.Validate(ctx) }(),
+		"a root that is now file": func() error { _ = os.WriteFile(moved, nil, 0o600); return movedRoot.Validate(ctx) }(),
 	}
-	stopped := map[string]error{
-		"put":            local.PutFile(canceled, "x.txt", strings.NewReader("x"), 1),
-		"open document":  func() error { _, err := local.OpenDocument(canceled, "x.txt", reg); return err }(),
-		"write document": local.WriteDocument(canceled, "x.txt", doc, reg),
-	}
-	uploadErr := local.PutFile(ctx, "up.txt", iotest.ErrReader(errUpload), 4)
 
-	for name, err := range invalid {
-		if !errors.Is(err, vfs.ErrInvalidPath) {
-			t.Errorf("%s = %v, want ErrInvalidPath", name, err)
+	for name, err := range refused {
+		if err == nil {
+			t.Errorf("%s succeeded, want it refused", name)
 		}
 	}
-	for name, err := range stopped {
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("canceled %s = %v", name, err)
-		}
-	}
-	if !errors.Is(uploadErr, errUpload) {
-		t.Errorf("failed upload = %v, want %v", uploadErr, errUpload)
+	if !errors.Is(refused["a missing base"], fs.ErrNotExist) || !errors.Is(refused["a subpath under a file"], vfs.ErrNotDir) {
+		t.Errorf("missing base = %v, subpath under a file = %v", refused["a missing base"], refused["a subpath under a file"])
 	}
 }
 

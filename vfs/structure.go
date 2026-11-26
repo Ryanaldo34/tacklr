@@ -35,7 +35,7 @@ func blocksFromMarkdown(text string, starts []int) []Block {
 	inFence := false
 	fenceMark := ""
 
-	for i := 0; i < nLines; i++ {
+	for i := range nLines {
 		line := lineAt(text, starts, i)
 		lineNo := i + 1
 		trim := strings.TrimSpace(line)

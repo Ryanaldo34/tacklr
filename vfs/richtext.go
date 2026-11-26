@@ -5,15 +5,14 @@ import (
 	"fmt"
 )
 
-// BlockNormalizer converts a source format to and from []Block.
+// BlockNormalizer converts a source format to []Block.
 type BlockNormalizer interface {
 	DecodeBlocks(ctx context.Context, path, mediaType string, data []byte) ([]Block, error)
-	EncodeBlocks(ctx context.Context, blocks []Block) ([]byte, error)
 }
 
 // BlockCodec adapts a BlockNormalizer to the VFS codec registry.
-// Decode yields a RichDocument. Encode writes native bytes (DOCX, …).
-// Not an IdentityCodec — FUSE is EROFS; persist via WriteDocument.
+// Decode yields a RichDocument. Not an IdentityCodec: the shell (vfs.Files)
+// reads its documents as text and refuses writes.
 type BlockCodec struct {
 	Types      []string
 	Normalizer BlockNormalizer
@@ -30,23 +29,4 @@ func (c BlockCodec) Decode(ctx context.Context, path, mediaType string, data []b
 		return nil, err
 	}
 	return NewRichDocument(path, mediaType, blocks), nil
-}
-
-func (c BlockCodec) Encode(ctx context.Context, doc Document) ([]byte, error) {
-	if c.Normalizer == nil {
-		return nil, fmt.Errorf("vfs: block normalizer required")
-	}
-	rd, ok := asRichBody(doc)
-	if !ok {
-		return nil, ErrNotTextual
-	}
-	return c.Normalizer.EncodeBlocks(ctx, rd.tree)
-}
-
-// Create lifts plaintext or blocks into a rich checkout.
-func (c BlockCodec) Create(path, mediaType string, mut Mutation) (Document, error) {
-	if mediaType == "" && len(c.Types) > 0 {
-		mediaType = c.Types[0]
-	}
-	return createRichDocument(path, mediaType, mut)
 }

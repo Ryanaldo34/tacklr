@@ -33,9 +33,9 @@ import (
 
 var traceOnce sync.Once
 
-// Spans records every span the test binary's sessions end, through the
-// standard SDK provider and the W3C propagator a host installs
-// (export.Init).
+// Spans records every span the test binary's sessions end, on either
+// runtime, through the standard SDK provider and the W3C propagator a
+// backend installs (export.Init). Runtime installs it.
 var Spans = tracetest.NewSpanRecorder()
 
 func trace(t testing.TB) {
@@ -57,7 +57,7 @@ func stores(t testing.TB) (session.Store, session.EventLog, session.SecretStorag
 	if err != nil {
 		t.Fatal(err)
 	}
-	// As a host does: each statement is a span of the turn that runs it.
+	// As a deployment does: each statement is a span of the turn that runs it.
 	sessionpg.Configure(cfg)
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
@@ -81,8 +81,7 @@ func stores(t testing.TB) (session.Store, session.EventLog, session.SecretStorag
 }
 
 // Runtime starts a worker against the shared Temporal Docker server, on the
-// Postgres session stores. As a host
-// serving ACP clients does, it connects MCP servers with mcp.Client unless
+// Postgres session stores. It connects MCP servers with mcp.Client unless
 // agent names another client.
 func Runtime(t testing.TB, agent tacklr.AgentOptions) session.Client {
 	t.Helper()
@@ -97,8 +96,9 @@ func Runtime(t testing.TB, agent tacklr.AgentOptions) session.Client {
 	t.Cleanup(c.Close)
 	tq := "tacklr-" + uuid.NewString()
 	store, log, secrets := stores(t)
-	// As a host does, the worker's live endpoint is served for clients to
-	// dial: the deltas of its model calls stream there, never stored.
+	// As a deployment does, the worker's live endpoint is served for
+	// session clients to dial: the deltas of its model calls stream there,
+	// never stored.
 	key := []byte("live-" + tq)
 	var live http.Handler
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { live.ServeHTTP(w, r) }))
@@ -120,16 +120,4 @@ func Runtime(t testing.TB, agent tacklr.AgentOptions) session.Client {
 		}
 	})
 	return rt
-}
-
-// Down is a session client whose Temporal connection is closed, as a host
-// whose Temporal cluster is gone: each call to it fails.
-func Down(t testing.TB) session.Client {
-	t.Helper()
-	c, err := temporal.Dial(client.Options{HostPort: temporaldocker.HostPort(t)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.Close()
-	return temporal.Open(c, temporal.Config{Store: session.NewMemoryStore(), Secrets: session.NewMemorySecretStorage(), DisableStreams: true})
 }

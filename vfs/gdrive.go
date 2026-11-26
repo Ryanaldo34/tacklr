@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -73,10 +72,7 @@ func DriveWith(api DriveAPI, docs DocsAPI, sheets SheetsAPI, holder *TokenHolder
 	if api == nil {
 		panic("vfs: Drive requires a DriveAPI client")
 	}
-	return func(ctx context.Context, _ string, b mount.Binding) (Provider, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
+	return func(_ context.Context, _ string, b mount.Binding) (Provider, error) {
 		h := holder
 		if h == nil && strings.TrimSpace(b.Auth.Token) != "" {
 			h = NewTokenHolder(b.Auth)
@@ -105,12 +101,12 @@ type driveProvider struct {
 	sheetCache *fifo[SheetsSnapshot]
 }
 
-var _ documentBackend = (*driveProvider)(nil)
-
 // codecs are the codecs of Drive's native Google Docs and Sheets.
 func (p *driveProvider) codecs() []Codec {
 	return []Codec{DocsCodec{}, SheetsCodec{}}
 }
+
+func (*driveProvider) userOwned() {}
 
 func (p *driveProvider) call(ctx context.Context, fn func() error) error {
 	staleToken := ""
@@ -183,14 +179,6 @@ func (m DriveMeta) dir() bool {
 	return m.IsDir || m.MimeType == mimeGoogleFolder
 }
 
-func (p *driveProvider) child(ctx context.Context, parentID, name string) (DriveMeta, error) {
-	return p.lookupChild(ctx, parentID, name, true)
-}
-
-func (p *driveProvider) childRaw(ctx context.Context, parentID, name string) (DriveMeta, error) {
-	return p.lookupChild(ctx, parentID, name, false)
-}
-
 func (p *driveProvider) lookupChild(ctx context.Context, parentID, name string, follow bool) (DriveMeta, error) {
 	kids, err := p.childrenNamed(ctx, parentID, name)
 	if err != nil {
@@ -240,16 +228,31 @@ func (p *driveProvider) follow(ctx context.Context, meta DriveMeta, depth int) (
 	return meta, nil
 }
 
-func (p *driveProvider) resolve(ctx context.Context, name string) (DriveMeta, error) {
-	rel, err := cleanRel(name)
+// root is the mount's folder, through a shortcut when the folder ID names
+// one.
+func (p *driveProvider) root(ctx context.Context) (DriveMeta, error) {
+	meta, err := p.getMeta(ctx, p.rootID)
 	if err != nil {
 		return DriveMeta{}, err
 	}
-	root, err := p.getMeta(ctx, p.rootID)
-	if err != nil {
-		return DriveMeta{}, err
-	}
-	root, err = p.follow(ctx, root, 4)
+	return p.follow(ctx, meta, 4)
+}
+
+// resolve is the item at rel, through any shortcut.
+func (p *driveProvider) resolve(ctx context.Context, rel string) (DriveMeta, error) {
+	return p.walk(ctx, rel, true)
+}
+
+// resolveLeaf is the item at rel, a shortcut itself rather than its
+// target.
+func (p *driveProvider) resolveLeaf(ctx context.Context, rel string) (DriveMeta, error) {
+	return p.walk(ctx, rel, false)
+}
+
+// walk is the item at rel. It follows the shortcuts of the folders on the
+// way, and of the item itself when followLast is set.
+func (p *driveProvider) walk(ctx context.Context, rel string, followLast bool) (DriveMeta, error) {
+	root, err := p.root(ctx)
 	if err != nil {
 		return DriveMeta{}, err
 	}
@@ -262,7 +265,7 @@ func (p *driveProvider) resolve(ctx context.Context, name string) (DriveMeta, er
 	parts := strings.Split(rel, "/")
 	var cur DriveMeta
 	for i, part := range parts {
-		child, err := p.child(ctx, parentID, part)
+		child, err := p.lookupChild(ctx, parentID, part, followLast || i < len(parts)-1)
 		if err != nil {
 			return DriveMeta{}, err
 		}
@@ -278,13 +281,7 @@ func (p *driveProvider) resolve(ctx context.Context, name string) (DriveMeta, er
 func driveFileInfo(meta DriveMeta) FileInfo {
 	mt := ""
 	if !meta.dir() {
-		if isGoogleNativeFile(meta.MimeType) {
-			mt = meta.MimeType
-		} else if t := s3KnownType(meta.MimeType); t != "" {
-			mt = t
-		} else {
-			mt = DetectMediaType(meta.Name, nil)
-		}
+		mt = mediaTypeOf(meta.MimeType, meta.Name, nil)
 	}
 	mode := fs.FileMode(0o644)
 	if meta.dir() {
@@ -312,14 +309,7 @@ func driveVersion(m DriveMeta) string {
 
 // Validate implements Provider.
 func (p *driveProvider) Validate(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	meta, err := p.getMeta(ctx, p.rootID)
-	if err != nil {
-		return err
-	}
-	meta, err = p.follow(ctx, meta, 4)
+	meta, err := p.root(ctx)
 	if err != nil {
 		return err
 	}
@@ -331,9 +321,6 @@ func (p *driveProvider) Validate(ctx context.Context) error {
 
 // Stat implements Provider.
 func (p *driveProvider) Stat(ctx context.Context, name string) (FileInfo, error) {
-	if err := ctx.Err(); err != nil {
-		return FileInfo{}, err
-	}
 	meta, err := p.resolve(ctx, name)
 	if err != nil {
 		return FileInfo{}, err
@@ -341,19 +328,9 @@ func (p *driveProvider) Stat(ctx context.Context, name string) (FileInfo, error)
 	return driveFileInfo(meta), nil
 }
 
-// OpenFile implements Provider (read-only).
-func (p *driveProvider) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	_ = perm
-	write := flag&(os.O_WRONLY|os.O_RDWR|os.O_APPEND) != 0 || flag&os.O_CREATE != 0 || flag&os.O_TRUNC != 0
-	if write {
-		if !p.writable {
-			return nil, ErrReadOnly
-		}
-		return nil, ErrNotSupported
-	}
+// OpenFile implements Provider. It opens files for reading only, whatever
+// the flags; MountSession writes with PutFile.
+func (p *driveProvider) OpenFile(ctx context.Context, name string, _ int, _ fs.FileMode) (File, error) {
 	meta, err := p.resolve(ctx, name)
 	if err != nil {
 		return nil, err
@@ -371,9 +348,6 @@ func (p *driveProvider) OpenFile(ctx context.Context, name string, flag int, per
 
 // ReadDir implements Provider.
 func (p *driveProvider) ReadDir(ctx context.Context, name string) ([]DirEntry, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	meta, err := p.resolve(ctx, name)
 	if err != nil {
 		return nil, err
@@ -399,15 +373,6 @@ func (p *driveProvider) ReadDir(ctx context.Context, name string) ([]DirEntry, e
 
 // Remove implements Provider. Drive trash; does not follow shortcuts.
 func (p *driveProvider) Remove(ctx context.Context, name string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !p.writable {
-		if _, err := p.resolve(ctx, name); err != nil {
-			return err
-		}
-		return ErrReadOnly
-	}
 	meta, err := p.resolveLeaf(ctx, name)
 	if err != nil {
 		return err
@@ -421,30 +386,13 @@ func (p *driveProvider) Remove(ctx context.Context, name string) error {
 }
 
 // MkdirAll implements Provider.
-func (p *driveProvider) MkdirAll(ctx context.Context, name string, perm fs.FileMode) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	_ = perm
-	rel, err := cleanRel(name)
-	if err != nil {
-		return err
-	}
-	if rel == "" {
-		return nil
-	}
-	if !p.writable {
-		return ErrReadOnly
-	}
-	_, err = p.ensureDir(ctx, rel)
+func (p *driveProvider) MkdirAll(ctx context.Context, name string, _ fs.FileMode) error {
+	_, err := p.ensureDir(ctx, name)
 	return err
 }
 
 // OpenDocument implements documentBackend.
 func (p *driveProvider) OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	meta, err := p.resolve(ctx, name)
 	if err != nil {
 		return nil, err
@@ -472,9 +420,6 @@ func (p *driveProvider) OpenDocument(ctx context.Context, name string, reg *Cont
 	_ = body.Close()
 	if err != nil {
 		return nil, err
-	}
-	if len(data) > MaxReadFileBytes {
-		return nil, errFileExceeds(MaxReadFileBytes)
 	}
 	fi := driveFileInfo(meta)
 	fi.Size = int64(len(data))
@@ -630,8 +575,8 @@ func escapeDriveQ(id string) string {
 
 // mapDriveError maps a Drive reply error to the vfs errors.
 func mapDriveError(err error) error {
-	var gerr *rest.Error
-	if !errors.As(err, &gerr) {
+	gerr, ok := errors.AsType[*rest.Error](err)
+	if !ok {
 		return err
 	}
 	msg := strings.ToLower(gerr.Message)

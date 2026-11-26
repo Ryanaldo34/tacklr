@@ -144,5 +144,3 @@ func (l *MemoryEventLog) CloseSession(_ context.Context, sessionID ID) error {
 	s.changed = make(chan struct{})
 	return nil
 }
-
-var _ EventLog = (*MemoryEventLog)(nil)

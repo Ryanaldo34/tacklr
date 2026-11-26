@@ -1,7 +1,6 @@
 package vfs
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -25,6 +24,9 @@ func (r Route) Stat(ctx context.Context) (FileInfo, error) {
 func (r Route) Open(ctx context.Context) (File, error) {
 	if r.err != nil {
 		return nil, r.err
+	}
+	if r.Rel == "" {
+		return nil, ErrIsDir
 	}
 	if r.Provider == nil {
 		return nil, ErrNotExist
@@ -76,35 +78,34 @@ func (r Route) WriteFile(ctx context.Context, data []byte) error {
 	if r.err != nil {
 		return r.err
 	}
+	if r.Rel == "" {
+		return ErrIsDir
+	}
 	if r.Provider == nil {
 		return ErrNotExist
 	}
 	if r.Spec.ReadOnly {
 		return ErrReadOnly
 	}
-	return writeProvider(ctx, r.Provider, r.Rel, bytes.NewReader(data), int64(len(data)))
-}
-
-func writeProvider(ctx context.Context, p Provider, name string, rd io.Reader, size int64) error {
-	if size > int64(MaxReadFileBytes) {
+	if len(data) > MaxReadFileBytes {
 		return errFileExceeds(MaxReadFileBytes)
 	}
-	if putter, ok := p.(filePutter); ok {
-		return putter.PutFile(ctx, name, rd, size)
+	if putter, ok := r.Provider.(filePutter); ok {
+		return putter.PutFile(ctx, r.Rel, data)
 	}
-	f, err := p.OpenFile(ctx, name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := r.Provider.OpenFile(ctx, r.Rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if size == 0 {
+	if len(data) == 0 {
 		return nil
 	}
 	w, ok := f.(io.Writer)
 	if !ok {
 		return ErrReadOnly
 	}
-	_, err = io.Copy(w, io.LimitReader(rd, size))
+	_, err = w.Write(data)
 	return err
 }
 
@@ -164,6 +165,9 @@ func (r Route) OpenDocument(ctx context.Context) (Document, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
+	if r.Rel == "" {
+		return nil, ErrIsDir
+	}
 	if r.Provider == nil {
 		return nil, ErrNotExist
 	}
@@ -187,23 +191,5 @@ func (r Route) ReadText(ctx context.Context) (Textual, error) {
 	if !ok {
 		return nil, ErrNotTextual
 	}
-	r.sess.rememberRev(t.Path(), ContentToken(t))
 	return t, nil
-}
-
-func (r Route) WriteDocument(ctx context.Context, doc Document) error {
-	if r.err != nil {
-		return r.err
-	}
-	if r.Provider == nil {
-		return ErrNotSupported
-	}
-	if r.Spec.ReadOnly {
-		return ErrReadOnly
-	}
-	db, ok := r.Provider.(documentBackend)
-	if !ok {
-		return ErrNotSupported
-	}
-	return db.WriteDocument(ctx, r.Rel, doc, r.sess.codecs)
 }

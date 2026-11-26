@@ -171,8 +171,8 @@ func Open(ctx context.Context, client *helix.Client, opts Options) (*Graph, erro
 // transient reports a failure that clears on its own: Helix not listening
 // yet, a reset connection, or a gateway that could not reach it.
 func transient(err error) bool {
-	var helixErr *helix.HelixError
-	if !errors.As(err, &helixErr) {
+	helixErr, ok := errors.AsType[*helix.HelixError](err)
+	if !ok {
 		return false
 	}
 	switch helixErr.Kind {

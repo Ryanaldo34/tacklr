@@ -129,5 +129,3 @@ func (s *MemoryStore) Delete(_ context.Context, sessionID ID) error {
 	delete(s.calls, sessionID)
 	return nil
 }
-
-var _ Store = (*MemoryStore)(nil)

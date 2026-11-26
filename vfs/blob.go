@@ -13,10 +13,7 @@ import (
 // The object model matches S3: a container is the bucket, blob names are keys,
 // and delimiter "/" listing gives virtual directories.
 func Blob(client S3API, defaultContainer string) Open {
-	return func(ctx context.Context, _ string, b mount.Binding) (Provider, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
+	return func(_ context.Context, _ string, b mount.Binding) (Provider, error) {
 		if client == nil {
 			return nil, fmt.Errorf("vfs: blob client required")
 		}

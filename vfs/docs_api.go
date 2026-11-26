@@ -1,7 +1,6 @@
 package vfs
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -17,17 +16,14 @@ import (
 // DocsAPI is the Docs subset used by the provider.
 type DocsAPI interface {
 	Get(ctx context.Context, documentID string) (DocsSnapshot, error)
-	BatchUpdate(ctx context.Context, documentID string, req DocsBatch) (DocsBatchResult, error)
 }
 
-// DocsSnapshot is the checkout used to build IR and persistHint.
+// DocsSnapshot is the checkout used to build IR.
 type DocsSnapshot struct {
-	DocumentID string
-	RevisionID string
-	Title      string
-	Tabs       []DocTab
-	Body       []DocsSpan
-	Lists      map[string]DocsListProps
+	Title string
+	Tabs  []DocTab
+	Body  []DocsSpan
+	Lists map[string]DocsListProps
 }
 
 // DocsListProps is list metadata from documents.get: the glyph type of each
@@ -36,11 +32,9 @@ type DocsListProps struct {
 	GlyphTypes []string
 }
 
-// DocsSpan is one IR-mapped (or structural) span from a tab body.
+// DocsSpan is one IR-mapped span from a tab body.
 type DocsSpan struct {
 	TabID      string
-	StartIndex int
-	EndIndex   int
 	Kind       string
 	ObjectID   string
 	Level      int
@@ -48,115 +42,14 @@ type DocsSpan struct {
 	ListID     string
 	Nesting    int
 	Text       string
-	Cells      []DocsCell
-}
-
-// DocsCell is one table cell's first paragraph.
-type DocsCell struct {
-	Row, Col             int
-	StartIndex, EndIndex int
-	Text                 string
-}
-
-// DocsBatch is one documents.batchUpdate call.
-type DocsBatch struct {
-	RequiredRevisionID string
-	TabID              string
-	Requests           []DocsRequest
-}
-
-// DocsRequest is one batchUpdate request. Exactly one field is set; the
-// field names are the Docs API request names.
-type DocsRequest struct {
-	DeleteContentRange     *DocsRange
-	InsertText             *DocsInsertText
-	UpdateParagraphStyle   *DocsParagraphStyle
-	CreateParagraphBullets *DocsBullets
-	InsertTable            *DocsInsertTable
-	UpdateTextStyle        *DocsTextStyle
-}
-
-// DocsRange is the Docs body indexes [StartIndex, EndIndex) of one tab. An
-// empty TabID is the batch's tab.
-type DocsRange struct {
-	StartIndex, EndIndex int
-	TabID                string
-}
-
-// DocsLocation is one Docs body index of one tab. An empty TabID is the
-// batch's tab.
-type DocsLocation struct {
-	Index int
-	TabID string
-}
-
-// DocsInsertText inserts Text at Location.
-type DocsInsertText struct {
-	Location DocsLocation
-	Text     string
-}
-
-// DocsParagraphStyle sets the named style (NORMAL_TEXT, HEADING_1, …) of the
-// paragraphs in Range.
-type DocsParagraphStyle struct {
-	Range          DocsRange
-	NamedStyleType string
-}
-
-// DocsBullets makes the paragraphs in Range a list with BulletPreset.
-type DocsBullets struct {
-	Range        DocsRange
-	BulletPreset string
-}
-
-// DocsInsertTable inserts an empty Rows × Columns table at Location.
-type DocsInsertTable struct {
-	Location      DocsLocation
-	Rows, Columns int
-}
-
-// DocsTextStyle sets bold, italic, strikethrough and the link of the text in
-// Range. An empty Link removes the link.
-type DocsTextStyle struct {
-	Range                       DocsRange
-	Bold, Italic, Strikethrough bool
-	Link                        string
-}
-
-// DocsBatchResult is writeControl.requiredRevisionId after apply.
-type DocsBatchResult struct {
-	RevisionID string
 }
 
 func snapshotToRich(path string, snap DocsSnapshot) *IR {
 	blocks := make([]Block, 0, len(snap.Body))
-	locs := make([]blockLocation, 0, len(snap.Body))
-	var structural []structuralSpan
 	for _, sp := range snap.Body {
-		switch sp.Kind {
-		case "sectionBreak", "tableOfContents":
-			structural = append(structural, structuralSpan{
-				tabID: sp.TabID, startIndex: sp.StartIndex, endIndex: sp.EndIndex, kind: sp.Kind,
-			})
-			continue
-		}
-		b := spanToBlock(sp, snap.Lists)
-		blocks = append(blocks, b)
-		locs = append(locs, spanToLocation(sp))
+		blocks = append(blocks, spanToBlock(sp, snap.Lists))
 	}
-	d := newRichDocument(path, mimeGoogleDocument, blocks, snap.Tabs)
-	if rb, ok := asRichBody(d); ok {
-		for i := range locs {
-			if i < len(rb.tree) {
-				locs[i].id = rb.tree[i].ID
-			}
-		}
-	}
-	attachPersistHint(d, persistHint{
-		fileID: snap.DocumentID, revisionID: snap.RevisionID,
-		locations: locs, structural: structural,
-	})
-	return d
+	return newRichDocument(path, mimeGoogleDocument, blocks, snap.Tabs)
 }
 
 func spanToBlock(sp DocsSpan, lists map[string]DocsListProps) Block {
@@ -199,19 +92,6 @@ func spanToBlock(sp DocsSpan, lists map[string]DocsListProps) Block {
 	return b
 }
 
-func spanToLocation(sp DocsSpan) blockLocation {
-	loc := blockLocation{
-		tabID: sp.TabID, startIndex: sp.StartIndex, endIndex: sp.EndIndex,
-		kind: sp.Kind, objectID: sp.ObjectID,
-	}
-	for _, c := range sp.Cells {
-		loc.cells = append(loc.cells, cellLocation{
-			row: c.Row, col: c.Col, startIndex: c.StartIndex, endIndex: c.EndIndex,
-		})
-	}
-	return loc
-}
-
 func glyphOrdered(glyphType string) bool {
 	switch glyphType {
 	case "DECIMAL", "ZERO_DECIMAL", "UPPER_ALPHA", "ALPHA", "UPPER_ROMAN", "ROMAN",
@@ -246,68 +126,9 @@ func (g googleDocs) Get(ctx context.Context, documentID string) (DocsSnapshot, e
 	return snapshotFromDocument(&d), nil
 }
 
-// BatchUpdate implements DocsAPI. Returns only writeControl.requiredRevisionId.
-func (g googleDocs) BatchUpdate(ctx context.Context, documentID string, req DocsBatch) (DocsBatchResult, error) {
-	call := docs.BatchUpdateDocumentRequest{Requests: make([]*docs.Request, 0, len(req.Requests))}
-	for i := range req.Requests {
-		call.Requests = append(call.Requests, docsRequestToAPI(req.Requests[i], req.TabID))
-	}
-	if req.RequiredRevisionID != "" {
-		call.WriteControl = &docs.WriteControl{RequiredRevisionID: req.RequiredRevisionID}
-	}
-	var resp docs.BatchUpdateDocumentResponse
-	if err := g.c.Call(ctx, http.MethodPost, "v1/documents/"+url.PathEscape(documentID)+":batchUpdate", nil, call, &resp); err != nil {
-		return DocsBatchResult{}, mapDocsError(err)
-	}
-	rev := ""
-	if resp.WriteControl != nil {
-		rev = resp.WriteControl.RequiredRevisionID
-	}
-	return DocsBatchResult{RevisionID: rev}, nil
-}
-
-// docsRequestToAPI is r as a Docs API request, on tabID where r names no
-// tab.
-func docsRequestToAPI(r DocsRequest, tabID string) *docs.Request {
-	rng := func(x DocsRange) *docs.Range {
-		return &docs.Range{StartIndex: int64(x.StartIndex), EndIndex: int64(x.EndIndex), TabID: cmp.Or(x.TabID, tabID)}
-	}
-	loc := func(x DocsLocation) *docs.Location {
-		return &docs.Location{Index: int64(x.Index), TabID: cmp.Or(x.TabID, tabID)}
-	}
-	out := &docs.Request{}
-	switch {
-	case r.DeleteContentRange != nil:
-		out.DeleteContentRange = &docs.DeleteContentRangeRequest{Range: rng(*r.DeleteContentRange)}
-	case r.InsertText != nil:
-		out.InsertText = &docs.InsertTextRequest{Location: loc(r.InsertText.Location), Text: r.InsertText.Text}
-	case r.UpdateParagraphStyle != nil:
-		out.UpdateParagraphStyle = &docs.UpdateParagraphStyleRequest{
-			Range:          rng(r.UpdateParagraphStyle.Range),
-			ParagraphStyle: &docs.ParagraphStyle{NamedStyleType: r.UpdateParagraphStyle.NamedStyleType},
-			Fields:         "namedStyleType",
-		}
-	case r.CreateParagraphBullets != nil:
-		out.CreateParagraphBullets = &docs.CreateParagraphBulletsRequest{Range: rng(r.CreateParagraphBullets.Range), BulletPreset: r.CreateParagraphBullets.BulletPreset}
-	case r.InsertTable != nil:
-		out.InsertTable = &docs.InsertTableRequest{Location: loc(r.InsertTable.Location), Rows: int64(r.InsertTable.Rows), Columns: int64(r.InsertTable.Columns)}
-	case r.UpdateTextStyle != nil:
-		st := &docs.TextStyle{
-			Bold:          r.UpdateTextStyle.Bold,
-			Italic:        r.UpdateTextStyle.Italic,
-			Strikethrough: r.UpdateTextStyle.Strikethrough,
-		}
-		if r.UpdateTextStyle.Link != "" {
-			st.Link = &docs.Link{URL: r.UpdateTextStyle.Link}
-		}
-		out.UpdateTextStyle = &docs.UpdateTextStyleRequest{Range: rng(r.UpdateTextStyle.Range), TextStyle: st, Fields: "bold,italic,strikethrough,link"}
-	}
-	return out
-}
-
 func mapDocsError(err error) error {
-	var gerr *rest.Error
-	if !errors.As(err, &gerr) {
+	gerr, ok := errors.AsType[*rest.Error](err)
+	if !ok {
 		return err
 	}
 	switch gerr.Code {
@@ -320,15 +141,6 @@ func mapDocsError(err error) error {
 			return ErrPermission
 		}
 		return fmt.Errorf("%w: %s", ErrPermission, gerr.Message)
-	case 400:
-		msg := strings.ToLower(gerr.Message)
-		if strings.Contains(msg, "revision") &&
-			(strings.Contains(msg, "requiredrevisionid") ||
-				strings.Contains(msg, "must be the latest") ||
-				strings.Contains(msg, "not the latest revision")) {
-			return ErrConflict
-		}
-		return ErrInvalidWrite
 	default:
 		return fmt.Errorf("vfs: docs %w", gerr)
 	}
@@ -377,10 +189,8 @@ func allDocumentTabs(d *docs.Document) []tabBody {
 
 func snapshotFromDocument(d *docs.Document) DocsSnapshot {
 	snap := DocsSnapshot{
-		DocumentID: d.DocumentID,
-		RevisionID: d.RevisionID,
-		Title:      d.Title,
-		Lists:      map[string]DocsListProps{},
+		Title: d.Title,
+		Lists: map[string]DocsListProps{},
 	}
 	tabs := allDocumentTabs(d)
 	for _, tb := range tabs {
@@ -431,18 +241,7 @@ func walkBodySpans(tb tabBody) []DocsSpan {
 }
 
 func structuralToSpans(el *docs.StructuralElement, tb tabBody) []DocsSpan {
-	base := DocsSpan{
-		TabID:      tb.ID,
-		StartIndex: int(el.StartIndex),
-		EndIndex:   int(el.EndIndex),
-	}
 	switch {
-	case el.SectionBreak != nil:
-		base.Kind = "sectionBreak"
-		return []DocsSpan{base}
-	case el.TableOfContents != nil:
-		base.Kind = "tableOfContents"
-		return []DocsSpan{base}
 	case el.Table != nil:
 		return []DocsSpan{tableSpan(el, tb)}
 	case el.Paragraph != nil:
@@ -454,12 +253,7 @@ func structuralToSpans(el *docs.StructuralElement, tb tabBody) []DocsSpan {
 
 func tableSpan(el *docs.StructuralElement, tb tabBody) DocsSpan {
 	t := el.Table
-	span := DocsSpan{
-		TabID:      tb.ID,
-		StartIndex: int(el.StartIndex),
-		EndIndex:   int(el.EndIndex),
-		Kind:       "table",
-	}
+	span := DocsSpan{TabID: tb.ID, Kind: "table"}
 	var rows [][]string
 	for r, row := range t.TableRows {
 		if row == nil {
@@ -469,10 +263,7 @@ func tableSpan(el *docs.StructuralElement, tb tabBody) DocsSpan {
 			if cell == nil {
 				continue
 			}
-			text, ps, pe := firstCellParagraph(cell)
-			span.Cells = append(span.Cells, DocsCell{
-				Row: r, Col: c, StartIndex: ps, EndIndex: pe, Text: sanitizeCell(text),
-			})
+			text := firstCellParagraph(cell)
 			for len(rows) <= r {
 				rows = append(rows, nil)
 			}
@@ -486,16 +277,14 @@ func tableSpan(el *docs.StructuralElement, tb tabBody) DocsSpan {
 	return span
 }
 
-func firstCellParagraph(cell *docs.TableCell) (text string, start, end int) {
-	start, end = int(cell.StartIndex), int(cell.EndIndex)
+func firstCellParagraph(cell *docs.TableCell) string {
 	for _, el := range cell.Content {
 		if el == nil || el.Paragraph == nil {
 			continue
 		}
-		text = paragraphText(el.Paragraph)
-		return text, int(el.StartIndex), int(el.EndIndex)
+		return paragraphText(el.Paragraph)
 	}
-	return "", start, end
+	return ""
 }
 
 func paragraphSpans(el *docs.StructuralElement, tb tabBody) []DocsSpan {
@@ -509,13 +298,7 @@ func paragraphSpans(el *docs.StructuralElement, tb tabBody) []DocsSpan {
 		}
 		if e.InlineObjectElement != nil {
 			oid := e.InlineObjectElement.InlineObjectID
-			img := DocsSpan{
-				TabID:      tb.ID,
-				StartIndex: int(e.StartIndex),
-				EndIndex:   int(e.EndIndex),
-				Kind:       "image",
-				ObjectID:   oid,
-			}
+			img := DocsSpan{TabID: tb.ID, Kind: "image", ObjectID: oid}
 			if obj, ok := tb.Objs[oid]; ok && obj.InlineObjectProperties != nil &&
 				obj.InlineObjectProperties.EmbeddedObject != nil &&
 				obj.InlineObjectProperties.EmbeddedObject.ImageProperties != nil {
@@ -534,12 +317,7 @@ func paragraphSpans(el *docs.StructuralElement, tb tabBody) []DocsSpan {
 	if onlyImage && len(images) > 0 && strings.TrimSpace(text) == "" {
 		return images
 	}
-	span := DocsSpan{
-		TabID:      tb.ID,
-		StartIndex: int(el.StartIndex),
-		EndIndex:   int(el.EndIndex),
-		Text:       text,
-	}
+	span := DocsSpan{TabID: tb.ID, Text: text}
 	named := ""
 	if p.ParagraphStyle != nil {
 		named = p.ParagraphStyle.NamedStyleType

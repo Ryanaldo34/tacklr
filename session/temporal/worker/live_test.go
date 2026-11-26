@@ -3,12 +3,10 @@ package worker
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -16,9 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/testsuite"
@@ -30,18 +28,17 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/message"
+	"github.com/ryanaldo34/tacklr/sandbox"
 	"github.com/ryanaldo34/tacklr/sandbox/sandboxtest"
+	"github.com/ryanaldo34/tacklr/sandbox/supervisor"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/postgres"
 	"github.com/ryanaldo34/tacklr/session/temporal"
 	"github.com/ryanaldo34/tacklr/session/temporal/internal/protocol"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/telemetry/export"
-	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
-
-var liveSeq atomic.Int64
 
 type liveStack struct {
 	Client    session.Client
@@ -50,6 +47,7 @@ type liveStack struct {
 	TaskQueue string
 	Worker    sdkworker.Worker
 	Secrets   session.SecretStorage
+	Log       session.EventLog
 	// cfg is the worker's Config, so a restart builds the same worker.
 	cfg Config
 	// live serves the worker's live endpoint when cfg.Live has a key: a
@@ -84,8 +82,7 @@ func newLiveStack(t *testing.T, agent tacklr.AgentOptions, change ...func(*Confi
 		t.Fatalf("dial %s: %v", addr, err)
 	}
 	t.Cleanup(c.Close)
-	n := liveSeq.Add(1)
-	tq := fmt.Sprintf("tacklr-live-%d", n)
+	tq := "tacklr-live-" + uuid.NewString()
 	store := session.NewMemoryStore()
 	log := session.NewMemoryEventLog()
 	secrets := session.NewMemorySecretStorage()
@@ -95,7 +92,7 @@ func newLiveStack(t *testing.T, agent tacklr.AgentOptions, change ...func(*Confi
 	}
 	// A lost worker's steps go elsewhere after two seconds, not ten.
 	rt := temporal.Open(c, temporal.Config{TaskQueue: tq, Store: store, Fallback: log, Secrets: secrets, WorkerQueueTimeout: 2 * time.Second, Live: temporal.Live{Key: cfg.Live.Key}})
-	s := &liveStack{Client: rt, Store: store, Temporal: c, TaskQueue: tq, Secrets: secrets, cfg: cfg}
+	s := &liveStack{Client: rt, Store: store, Temporal: c, TaskQueue: tq, Secrets: secrets, Log: log, cfg: cfg}
 	s.startWorker(t)
 	return s
 }
@@ -137,9 +134,6 @@ func (s *liveStack) RestartWorker(t *testing.T) {
 	s.startWorker(t)
 }
 
-// spans records every span the package's sessions end.
-var spans = tracetest.NewSpanRecorder()
-
 func TestMain(m *testing.M) {
 	shutdown, err := export.Init(context.Background(), export.Config{})
 	if err != nil {
@@ -147,7 +141,7 @@ func TestMain(m *testing.M) {
 	}
 	// The standard SDK provider: a turn's span starts once, in a side
 	// effect, so it needs no replay-safe provider.
-	telemetry.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)))
+	telemetry.SetTracerProvider(sdktrace.NewTracerProvider())
 	code := m.Run()
 	_ = shutdown(context.Background())
 	temporaldocker.Stop()
@@ -171,7 +165,13 @@ func waitTurn(t *testing.T, rt session.Client, id session.ID, sub session.Subscr
 	got := waitContains(t, sub, timeout, func(ev session.Event) bool {
 		return ev.Type == session.EventComplete || ev.Type == session.EventError || ev.Type == session.EventInterrupt
 	})
-	testkit.AssertStatusMatchesEvent(t, rt, id, got[len(got)-1])
+	st, err := rt.Status(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if last := got[len(got)-1].Type; (last == session.EventComplete) != (st.State == session.Complete) || (last == session.EventError) != (st.State == session.Failed) || (last == session.EventInterrupt) != st.Waiting {
+		t.Fatalf("turn ended with %s but Status %+v", last, st)
+	}
 	return got
 }
 
@@ -196,17 +196,17 @@ func waitContains(t *testing.T, sub session.Subscription, timeout time.Duration,
 	}
 }
 
-// TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages: a
-// client dials the live endpoint of the worker that runs the model call and
-// gets the reply's deltas there; the session's stream keeps only the whole
-// message. After the worker goes away, the next turn's deltas come from the
-// worker that took the session. A request without the session's token is
-// refused, and one without a session is not found.
-func TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages(t *testing.T) {
+// TestLive_aClientGetsDeltasFromTheWorkerThatRunsTheModelCall: a client
+// dials the live endpoint of the worker that runs the model call and gets
+// the reply's deltas there, then the whole message. After the worker goes
+// away, the next turn's deltas come from the worker that took the session.
+// A request without the session's token is refused, and one without a
+// session is not found.
+func TestLive_aClientGetsDeltasFromTheWorkerThatRunsTheModelCall(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	var stacks atomic.Pointer[liveStack]
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, _ []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, _ []string, ch chan<- tacklr.LLMResponseChunk) {
 		// The reply streams once the client listens on this worker.
 		select {
 		case <-*stacks.Load().listening.Load():
@@ -258,12 +258,6 @@ func TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages(t *testi
 	}
 
 	first := turn()
-	stored, err := stack.Client.Subscribe(ctx, id, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	logged := waitTurn(t, stack.Client, id, stored, 10*time.Second)
-	_ = stored.Close()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, stack.live.URL+protocol.LivePath+string(id), nil)
 	req.Header.Set("Authorization", "Bearer "+protocol.LiveToken([]byte("other-key"), id))
 	refused, err := http.DefaultClient.Do(req)
@@ -281,9 +275,6 @@ func TestLive_aClientGetsDeltasFromTheWorkerAndTheLogKeepsWholeMessages(t *testi
 
 	if deltas(first) != "Hello world" || !slices.Equal(whole(first), []string{"Hello world"}) {
 		t.Fatalf("first turn %+v; want the deltas live, then the whole message", first)
-	}
-	if !slices.EqualFunc(logged, slices.DeleteFunc(slices.Clone(first), func(ev session.Event) bool { return ev.Delta }), sameEvent) {
-		t.Fatalf("the stream from its start %+v; want the first turn's events without its deltas", logged)
 	}
 	if refused.StatusCode != http.StatusUnauthorized || unknown.StatusCode != http.StatusNotFound {
 		t.Fatalf("a request with another key's token got %d, one with no session %d; want 401 and 404", refused.StatusCode, unknown.StatusCode)
@@ -308,8 +299,8 @@ func TestLive_workerRestartWhileParkedThenResumeGetsTheNewToken(t *testing.T) {
 		}
 		return "bound: " + strings.Join(out, ","), nil
 	}})
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		if last := lastMsg(msgs); last != nil && last.Role == message.RoleTool {
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []string, ch chan<- tacklr.LLMResponseChunk) {
+		if last := testkit.LastMessage(msgs); last != nil && last.Role == message.RoleTool {
 			if strings.Contains(last.Content, "bound: ") {
 				ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: last.Content, IsComplete: true}
 				return
@@ -391,18 +382,14 @@ func TestLive_workerRestartWhileParkedThenResumeGetsTheNewToken(t *testing.T) {
 	})
 }
 
-// TestLive_sandboxGivesTheAgentRunCommandOnItsWorkspace: with a sandbox
-// client the agent gets run_command, which runs in a sandboxed worker over
-// the session's workspace. An empty command gets a correction; a command
-// reads the workspace.
-func TestLive_sandboxGivesTheAgentRunCommandOnItsWorkspace(t *testing.T) {
+// TestLive_sandboxGivesTheAgentRunCommand: with a sandbox client the agent
+// gets run_command, which runs its command on the sandbox (a fake VM whose
+// guest is the real worker). An empty command gets a correction; a command
+// runs and its output reaches the model.
+func TestLive_sandboxGivesTheAgentRunCommand(t *testing.T) {
 	t.Parallel()
 	// Arrange
 	ctx := t.Context()
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-shell"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	runCommand := func(id, command string) tacklr.LLMResponseChunk {
 		return tacklr.LLMResponseChunk{
 			Type:       session.EventFunctionCall,
@@ -410,20 +397,22 @@ func TestLive_sandboxGivesTheAgentRunCommandOnItsWorkspace(t *testing.T) {
 			IsComplete: true,
 		}
 	}
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		last := lastMsg(msgs)
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []string, ch chan<- tacklr.LLMResponseChunk) {
+		last := testkit.LastMessage(msgs)
 		switch {
 		case last.Role != message.RoleTool:
 			ch <- runCommand("empty", "  ")
 		case strings.Contains(last.Content, "command is required"):
-			ch <- runCommand("cat", "cat docs/hello.txt")
+			ch <- runCommand("print", "printf from-shell")
 		default:
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: last.Content, IsComplete: true}
 		}
 	})
 	agent := liveAgent(t, model, tacklr.AgentOptions{AllowTools: []string{"run_command"}})
 	stack := newLiveStack(t, agent, func(cfg *Config) {
-		cfg.Sandbox = sandboxtest.Client(t, vfs.Tree(vfs.At("docs", vfs.Local(dir))))
+		ca := sandboxtest.NewAuthority(t)
+		host := sandboxtest.Start(t, ca, supervisor.Config{Firecracker: sandboxtest.FakeVM(t, "connect", "serve")})
+		cfg.Sandbox = sandbox.NewClient(host.Address, sandboxtest.ClientConfig(t, ca, ca))
 	})
 	id, err := stack.Client.CreateSession(ctx, session.CreateSession{})
 	if err != nil {
@@ -445,7 +434,7 @@ func TestLive_sandboxGivesTheAgentRunCommandOnItsWorkspace(t *testing.T) {
 	if !slices.ContainsFunc(got, func(ev session.Event) bool {
 		return ev.Type == session.EventMessage && strings.Contains(ev.Content, "exit=0") && strings.Contains(ev.Content, "from-shell")
 	}) {
-		t.Fatalf("want the shell's read of the workspace, got %+v", got)
+		t.Fatalf("want the command's output, got %+v", got)
 	}
 }
 
@@ -463,8 +452,8 @@ func TestLive_historyHoldsNoSecretsOrToolResults(t *testing.T) {
 	header := "Bearer mcp-secret-9c1e"
 	result := func(n int) string { return fmt.Sprintf("result-%d-", n) + strings.Repeat("x", 100<<10) }
 	var seen []string
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		if got := toolResults(msgs); len(got) > 0 {
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []string, ch chan<- tacklr.LLMResponseChunk) {
+		if got := testkit.ToolResults(msgs); len(got) > 0 {
 			seen = got
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "ok", IsComplete: true}
 			return
@@ -557,134 +546,6 @@ func TestLive_historyHoldsNoSecretsOrToolResults(t *testing.T) {
 	if !slices.Equal(gone, []string{"", "", "", ""}) {
 		t.Fatalf("replayed results %q, want four events without their deleted content", gone)
 	}
-
-	// A store whose database is gone ends the subscription with that error.
-	pool, err := pgxpool.New(ctx, "postgres://tacklr@127.0.0.1:1/tacklr")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pool.Close()
-	db, err := postgres.New(pool, postgres.Options{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	down := temporal.Open(stack.Temporal, temporal.Config{TaskQueue: stack.TaskQueue, Store: db.Store(), Secrets: stack.Secrets})
-	broken, err := down.Subscribe(ctx, id, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = broken.Close() })
-	for range broken.Events() {
-	}
-	if broken.Err() == nil || !strings.Contains(broken.Err().Error(), "closed pool") {
-		t.Fatalf("subscription error = %v, want the closed pool's", broken.Err())
-	}
-}
-
-// TestLive_theHostAPIServesSessionsAndTheirJobs: CreateSession rejects a
-// specialist and a worker together, an empty state key, and state JSON
-// cannot hold; Prompt and Resume reject such state too. A session's head
-// follows its stream, and Jobs lists its running specialist and worker
-// with their kinds. An unknown session has no status or jobs. Close
-// deletes the session's secrets and record, and after it the session has
-// no status or jobs and takes no prompt.
-func TestLive_theHostAPIServesSessionsAndTheirJobs(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	release, let := releaseLater(t)
-	// running has a value for each job that runs and waits for release.
-	running := make(chan struct{}, 2)
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		last := lastMsg(msgs)
-		switch {
-		case last != nil && last.Content == "child-task":
-			running <- struct{}{}
-			<-release
-			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "child-done", IsComplete: true}
-		case last != nil && last.Role == message.RoleUser && last.Content == "go":
-			ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true, ToolCalls: []message.ToolCall{
-				{ID: "sp1", CallID: "sp1", Name: "spawn_specialist", Arguments: `{"specialist":"researcher","task_description_and_context":"child-task","block":false}`},
-				{ID: "ci1", CallID: "ci1", Name: "start", Arguments: `{}`},
-			}}
-		default:
-			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "waiting", IsComplete: true}
-		}
-	})
-	start := tacklr.NewTool(tacklr.ToolConfig{Name: "start", Handler: func(ctx context.Context, cc *tacklr.CallContext) (string, error) {
-		job, err := cc.Schedule(ctx, tacklr.JobRequest{Name: "ci", Task: "build"})
-		return job.ID, err
-	}})
-	agent := liveAgent(t, model, tacklr.AgentOptions{Tools: []*tacklr.Tool{start}, Specialists: []*tacklr.Specialist{{Name: "researcher", Model: model}}})
-	stack := newLiveStack(t, agent, func(c *Config) {
-		c.Jobs = map[string]session.JobHandler{"ci": func(context.Context, string) (string, error) {
-			running <- struct{}{}
-			<-release
-			return "built", nil
-		}}
-	})
-	t.Cleanup(let) // before the stack stops its worker
-	rt := stack.Client
-	bad := map[string]any{"c": make(chan int)}
-	_, both := rt.CreateSession(ctx, session.CreateSession{Specialist: "researcher", Worker: "ci"})
-	_, emptyKey := rt.CreateSession(ctx, session.CreateSession{State: map[string]any{"": 1}})
-	_, unencodable := rt.CreateSession(ctx, session.CreateSession{State: bad})
-	id, err := rt.CreateSession(ctx, session.CreateSession{State: map[string]any{"mode": "fast"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sub, err := rt.Subscribe(ctx, id, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = sub.Close() })
-	if err := rt.Prompt(ctx, id, session.Prompt{Text: "go"}); err != nil {
-		t.Fatal(err)
-	}
-	// The turn waits on both jobs; it ends only once they finish.
-	for range 2 {
-		select {
-		case <-running:
-		case <-time.After(60 * time.Second):
-			t.Fatal("the session's jobs did not start")
-		}
-	}
-	jobs, jobsErr := rt.Jobs(ctx, id)
-	head, headErr := rt.Head(ctx, id)
-	badPrompt := rt.Prompt(ctx, id, session.Prompt{Text: "x", State: bad})
-	badResume := rt.Resume(ctx, id, session.Resume{State: bad})
-	_, noJobs := rt.Jobs(ctx, "no-such-session")
-	_, noStatus := rt.Status(ctx, "no-such-session")
-	let()
-	if err := rt.Close(ctx, id); err != nil {
-		t.Fatal(err)
-	}
-	_, closed := rt.Status(ctx, id)
-	_, closedJobs := rt.Jobs(ctx, id)
-	closedPrompt := rt.Prompt(ctx, id, session.Prompt{Text: "again"})
-	kept, keptErr := stack.Secrets.Get(ctx, id)
-	_, _, record := stack.Store.Load(ctx, id)
-
-	for name, err := range map[string]error{"specialist and worker": both, "an empty state key": emptyKey, "unencodable state": unencodable, "a prompt's unencodable state": badPrompt, "a resume's unencodable state": badResume} {
-		if !errors.Is(err, session.ErrInvalid) {
-			t.Errorf("%s = %v, want ErrInvalid", name, err)
-		}
-	}
-	kinds := map[string]bool{}
-	for _, j := range jobs {
-		kinds[j.Kind] = true
-	}
-	if headErr != nil || head == 0 || jobsErr != nil || !kinds[session.KindSpecialist] || !kinds[session.KindWorker] {
-		t.Fatalf("head %d %v, jobs %+v %v; want the stream's offset and both running jobs with their kinds", head, headErr, jobs, jobsErr)
-	}
-	for name, err := range map[string]error{"jobs of an unknown session": noJobs, "status of an unknown session": noStatus,
-		"status of a closed session": closed, "jobs of a closed session": closedJobs, "a prompt to a closed session": closedPrompt, "the record of a closed session": record} {
-		if !errors.Is(err, session.ErrNotFound) {
-			t.Errorf("%s = %v, want ErrNotFound", name, err)
-		}
-	}
-	if keptErr != nil || len(kept.Auth.Bindings) != 0 {
-		t.Errorf("secrets of a closed session = %+v %v, want an empty bag", kept, keptErr)
-	}
 }
 
 // unreachable is a real Temporal client for a server that is not there.
@@ -752,15 +613,6 @@ func mustPanic(t *testing.T, fn func()) {
 	fn()
 }
 
-func lastMsg(msgs []*message.Message) *message.Message {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i] != nil {
-			return msgs[i]
-		}
-	}
-	return nil
-}
-
 func drainLog(t *testing.T, log session.EventLog, id session.ID) []session.Event {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
@@ -789,12 +641,6 @@ func querySession(t *testing.T, env *testsuite.TestWorkflowEnvironment) session.
 	return st
 }
 
-// sameEvent reports whether two events have the same type, content and
-// delta flag.
-func sameEvent(a, b session.Event) bool {
-	return a.Type == b.Type && a.Content == b.Content && a.Delta == b.Delta
-}
-
 func newActs(agent tacklr.AgentOptions, log session.EventLog, disableStreams bool) *activities {
 	return &activities{
 		Agent:          agent,
@@ -803,5 +649,53 @@ func newActs(agent tacklr.AgentOptions, log session.EventLog, disableStreams boo
 		DisableStreams: disableStreams,
 		Secrets:        session.NewMemorySecretStorage(),
 		harnesses:      newHarnessCache(time.Minute, 0),
+	}
+}
+
+// TestLive_aSubscriberWhoseStoreIsDownGetsTheStoresError: a subscriber
+// whose client reads tool results back from a store whose database is gone
+// ends with that error.
+func TestLive_aSubscriberWhoseStoreIsDownGetsTheStoresError(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	ctx := t.Context()
+	lookup := tacklr.NewTool(tacklr.ToolConfig{Name: "lookup", Handler: func(context.Context) (string, error) { return "42", nil }})
+	stack := newLiveStack(t, liveAgent(t, testkit.ScriptedModel(t, testkit.CallThenAnswer("lookup", `{}`)), tacklr.AgentOptions{Tools: []*tacklr.Tool{lookup}}))
+	id, err := stack.Client.CreateSession(ctx, session.CreateSession{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := stack.Client.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Close() })
+	if err := stack.Client.Prompt(ctx, id, session.Prompt{Text: "look"}); err != nil {
+		t.Fatal(err)
+	}
+	waitTurn(t, stack.Client, id, sub, time.Minute)
+	pool, err := pgxpool.New(ctx, "postgres://tacklr@127.0.0.1:1/tacklr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	db, err := postgres.New(pool, postgres.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	down := temporal.Open(stack.Temporal, temporal.Config{TaskQueue: stack.TaskQueue, Store: db.Store(), Secrets: stack.Secrets})
+
+	// Act
+	broken, err := down.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = broken.Close() })
+	for range broken.Events() {
+	}
+
+	// Assert
+	if broken.Err() == nil || !strings.Contains(broken.Err().Error(), "closed pool") {
+		t.Fatalf("subscription error = %v, want the closed pool's", broken.Err())
 	}
 }

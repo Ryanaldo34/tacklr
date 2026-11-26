@@ -49,8 +49,8 @@ type Options struct {
 
 // Configure sets what every connection of the Store's pool needs: the
 // search_path (opts.Schema, then public), the server-side statement
-// timeout, statements prepared once per connection and cached, and an
-// otelpgx tracer that emits a span per statement under the caller's
+// timeout, statements prepared once per connection and cached, and a
+// tracer that emits a span per statement under the caller's
 // context. Call it on the host's pool config before pgxpool.NewWithConfig,
 // with the Options passed to Open. One pool configured this way also serves
 // session/postgres, which qualifies its own tables.

@@ -3,6 +3,8 @@ package tacklr_test
 import (
 	"encoding/json"
 	"errors"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,37 +13,61 @@ import (
 	"github.com/ryanaldo34/tacklr"
 )
 
-// TestUserSelection_returnsTheChosenOption: a user selection serializes its
-// question and options, takes an in-range selectionIdx as the chosen
-// option, and refuses an answer that is not JSON, has no selectionIdx, has
-// one of the wrong type, or one out of range.
-func TestUserSelection_returnsTheChosenOption(t *testing.T) {
+// TestUserSelection_serializesTheQuestionForTheUser: a user selection
+// serializes its question and options, and no choice before an answer;
+// as an error it reads as the same question.
+func TestUserSelection_serializesTheQuestionForTheUser(t *testing.T) {
 	t.Parallel()
 	usi := &tacklr.UserSelectionInterrupt{Question: "which?", Options: []tacklr.UserChoice{{Title: "A", IsRecommended: true}, {Title: "B"}}}
 
 	wire, err := usi.Serialize()
-	invalid := []error{
-		usi.Return([]byte(`not-json`)),
-		usi.Return([]byte(`{}`)),
-		usi.Return([]byte(`{"selectionIdx":"x"}`)),
-		usi.Return([]byte(`{"selectionIdx":99}`)),
-		usi.Return([]byte(`{"selectionIdx":-1}`)),
-	}
-	chosen := usi.Return([]byte(`{"selectionIdx":1}`))
 
-	if want := `{"question":"which?","options":[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}],"ConfirmedChoice":null}`; err != nil || string(wire) != want {
-		t.Fatalf("serialize = %s %v, want %s", wire, err, want)
+	var got map[string]any
+	if err := errors.Join(err, json.Unmarshal(wire, &got)); err != nil {
+		t.Fatal(err)
 	}
-	for i, err := range invalid[:3] {
-		if !errors.Is(err, tacklr.ErrInvalidPayload) {
-			t.Errorf("answer %d = %v, want ErrInvalidPayload", i, err)
-		}
+	if want := []string{"options", "question"}; !slices.Equal(slices.Sorted(maps.Keys(got)), want) || got["question"] != "which?" {
+		t.Fatalf("serialize = %s, want the question and its options only", wire)
 	}
-	if !strings.Contains(invalid[1].Error(), "selectionIdx") || invalid[3] == nil || invalid[4] == nil {
-		t.Fatalf("answers = %v, want the missing field named and each out-of-range index refused", invalid)
+	if usi.Error() != string(wire) {
+		t.Fatalf("error = %s, want %s", usi.Error(), wire)
 	}
-	if chosen != nil || usi.ConfirmedChoice.Title != "B" || !strings.Contains(usi.Error(), `"title":"B"`) {
-		t.Fatalf("choose = %v giving %+v, error text %s; want B", chosen, usi.ConfirmedChoice, usi.Error())
+}
+
+// TestUserSelection_returnsTheChosenOption: an in-range selectionIdx is
+// the chosen option.
+func TestUserSelection_returnsTheChosenOption(t *testing.T) {
+	t.Parallel()
+	usi := &tacklr.UserSelectionInterrupt{Options: []tacklr.UserChoice{{Title: "A"}, {Title: "B"}}}
+
+	err := usi.Return([]byte(`{"selectionIdx":1}`))
+
+	if err != nil || usi.ConfirmedChoice == nil || usi.ConfirmedChoice.Title != "B" {
+		t.Fatalf("choose = %v giving %+v, want B", err, usi.ConfirmedChoice)
+	}
+}
+
+// TestUserSelection_refusesAnInvalidAnswer: an answer that is not JSON,
+// has no selectionIdx, has one of the wrong type, or one out of range is
+// refused.
+func TestUserSelection_refusesAnInvalidAnswer(t *testing.T) {
+	t.Parallel()
+	for name, answer := range map[string]string{
+		"not JSON":        `not-json`,
+		"no selectionIdx": `{}`,
+		"a wrong type":    `{"selectionIdx":"x"}`,
+		"out of range":    `{"selectionIdx":2}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			usi := &tacklr.UserSelectionInterrupt{Options: []tacklr.UserChoice{{Title: "A"}, {Title: "B"}}}
+
+			err := usi.Return([]byte(answer))
+
+			if err == nil || usi.ConfirmedChoice != nil {
+				t.Fatalf("answer %s = %v choosing %+v, want it refused", answer, err, usi.ConfirmedChoice)
+			}
+		})
 	}
 }
 

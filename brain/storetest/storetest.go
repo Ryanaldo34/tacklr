@@ -141,6 +141,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		_, errs["purge session"] = s.PurgeSessionMessages(ctx, nil, time.Now())
 		_, errs["save session"] = s.SaveSessionMessages(ctx, nil, "s", "k", []brain.SessionMessage{{Role: "user"}})
 		_, errs["put without an id"] = s.Put(ctx, f.scopeA, indexed(noID))
+		_, errs["put tree without an id"] = s.PutTree(ctx, f.scopeA, indexed(noID), parts())
 		_, errs["put without a kind"] = s.Put(ctx, f.scopeA, indexed(noKind))
 		_, errs["put outside the scope"] = s.Put(ctx, f.scopeA, indexed(newDoc(f.b, "x")))
 		_, errs["search with a bad filter"] = s.Search(ctx, f.scopeA, brain.RecordSearch{Query: "shared", Filters: brain.Filter{UpdatedAfter: "not-a-time"}, Limit: 10})
@@ -356,6 +357,7 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		_, putErr := s.Put(ctx, f.scopeA, indexed(poisoned))
 		tree := newDoc(f.a, "doc")
 		_, treeErr := s.PutTree(ctx, f.scopeA, indexed(tree), parts(newChunk(tree, "poison part", 0)))
+		_, parentErr := s.PutTree(ctx, f.scopeA, indexed(newDoc(f.a, "poison parent")), parts())
 		_, getErr := s.Get(ctx, f.scopeA, poisoned.ID)
 		_, saveErr := s.SaveSessionMessages(ctx, f.a, "s1", "k", []brain.SessionMessage{{Role: "user", SearchText: "poison transcript"}})
 		hits, _ := s.Search(ctx, brain.Scope{Namespace: f.a, SessionID: "s1"}, brain.RecordSearch{Query: "transcript", Exact: true, Limit: 10})
@@ -364,8 +366,8 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		if searchErr != nil || !slices.Equal(scoredIDs(byWords), []uuid.UUID{f.chunkA}) {
 			t.Errorf("search whose query does not embed = %v %v, want the lexical hit", scoredIDs(byWords), searchErr)
 		}
-		if putErr == nil || treeErr == nil || !errors.Is(getErr, brain.ErrNotFound) {
-			t.Errorf("writes with a failing embedder = %v, %v, then get %v, want them to fail and store nothing", putErr, treeErr, getErr)
+		if putErr == nil || treeErr == nil || parentErr == nil || !errors.Is(getErr, brain.ErrNotFound) {
+			t.Errorf("writes with a failing embedder = %v, %v, %v, then get %v, want them to fail and store nothing", putErr, treeErr, parentErr, getErr)
 		}
 		if saveErr != nil || len(hits) != 1 {
 			t.Errorf("session save with a failing embedder = %v, then %d hits, want it saved and found", saveErr, len(hits))
@@ -518,6 +520,81 @@ func Run(t *testing.T, newStore func(t *testing.T, emb brain.Embedder) brain.Sto
 		}
 		if sessErr != nil || purgedSessions != 1 {
 			t.Errorf("purge session messages = %d %v, want 1", purgedSessions, sessErr)
+		}
+	})
+
+	t.Run("a session's window joins its session's searches until deleted, and a retried save keeps its generation", func(t *testing.T) {
+		t.Parallel()
+		ctx, s, f := arrange(t, newStore, nil)
+		const sid = "sess.with/dots"
+		session := brain.Scope{Namespace: f.a, SessionID: sid}
+		fact := newDoc(f.a, "zebra fact")
+		fact.Kind = "Fact"
+		_, err := s.Put(ctx, f.scopeA, indexed(fact))
+		must(t, err)
+		msg := []brain.SessionMessage{{Role: "tool", Body: []byte(`{"role":"tool","content":"zebra"}`), SearchText: "zebra onlyinsession"}}
+		malformed := []brain.SessionMessage{{Role: "user", Body: []byte(`{"role":"user"}`), SearchText: "ok"}, {Role: "user", Body: []byte(`{not json`), SearchText: "broken"}}
+		saveErr := func(_ int, err error) error { return err }
+		search := func(scope brain.Scope, q brain.RecordSearch) []uuid.UUID {
+			q.Limit = 10
+			hits, err := s.Search(ctx, scope, q)
+			must(t, err)
+			return scoredIDs(hits)
+		}
+		only := func(ids []uuid.UUID, not uuid.UUID) uuid.UUID {
+			for _, id := range ids {
+				if id != not {
+					return id
+				}
+			}
+			return uuid.Nil
+		}
+
+		invalid := map[string]error{
+			"no session":       saveErr(s.SaveSessionMessages(ctx, f.a, " ", "k", msg)),
+			"no key":           saveErr(s.SaveSessionMessages(ctx, f.a, sid, " ", msg)),
+			"no messages":      saveErr(s.SaveSessionMessages(ctx, f.a, sid, "k", nil)),
+			"a malformed body": saveErr(s.SaveSessionMessages(ctx, f.a, sid, "bad", malformed)),
+		}
+		blankGen, blankErr := s.SaveSessionMessages(ctx, f.a, sid, "blank", []brain.SessionMessage{{Role: "user", SearchText: "blankbody"}})
+		gen, genErr := s.SaveSessionMessages(ctx, f.a, sid, "key-1", msg)
+		again, againErr := s.SaveSessionMessages(ctx, f.a, sid, "key-1", msg)
+		merged := search(session, brain.RecordSearch{Query: "zebra"})
+		message, openErr := s.Get(ctx, session, only(merged, fact.ID))
+		both, manyErr := s.GetMany(ctx, session, merged)
+		_, missingErr := s.Get(ctx, session, uuid.New())
+		exact := search(session, brain.RecordSearch{Query: "onlyinsession", Exact: true})
+		blank := search(session, brain.RecordSearch{Query: "blankbody"})
+		blankMessage, blankOpenErr := s.Get(ctx, session, only(blank, uuid.Nil))
+		other := search(brain.Scope{Namespace: f.a, SessionID: "other"}, brain.RecordSearch{Query: "zebra"})
+		deleteErr := s.DeleteSessionMessages(ctx, f.a, sid)
+		afterDelete := search(session, brain.RecordSearch{Query: "zebra"})
+		restart, restartErr := s.SaveSessionMessages(ctx, f.a, sid, "key-3", msg)
+
+		for name, err := range invalid {
+			if err == nil {
+				t.Errorf("save with %s succeeded, want an error", name)
+			}
+		}
+		if blankErr != nil || blankGen != 1 || genErr != nil || gen != 2 || againErr != nil || again != gen {
+			t.Errorf("generations = %d %v, then %d %v, retry %d %v, want 1, 2 and 2", blankGen, blankErr, gen, genErr, again, againErr)
+		}
+		if len(merged) != 2 || !slices.Contains(merged, fact.ID) || openErr != nil || message.Kind != brain.KindSessionMessage || !strings.Contains(message.Content, "zebra") {
+			t.Errorf("search the session = %v, its message = %+v %v, want the fact and the message with its body", merged, message, openErr)
+		}
+		if manyErr != nil || len(both) != 2 || !errors.Is(missingErr, brain.ErrNotFound) {
+			t.Errorf("get the fact and the message = %d %v, an unknown id = %v, want both and ErrNotFound", len(both), manyErr, missingErr)
+		}
+		if len(exact) != 1 || len(blank) != 1 || blankOpenErr != nil || blankMessage.Title != "user" {
+			t.Errorf("exact token = %v, blank body = %v (%+v %v), want one message each", exact, blank, blankMessage, blankOpenErr)
+		}
+		for name, got := range map[string][]uuid.UUID{"another session": other, "the session after delete": afterDelete} {
+			if !slices.Equal(got, []uuid.UUID{fact.ID}) {
+				t.Errorf("search %s = %v, want the fact alone", name, got)
+			}
+		}
+		if deleteErr != nil || restartErr != nil || restart != 1 {
+			t.Errorf("delete = %v, next generation %d %v, want 1", deleteErr, restart, restartErr)
 		}
 	})
 

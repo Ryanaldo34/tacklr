@@ -403,7 +403,7 @@ func chunkPart(kind, title, blockID string, ch chunk) brain.Object {
 func lineStarts(text string) []int {
 	starts := make([]int, 1, strings.Count(text, "\n")+1)
 	starts[0] = 0
-	for i := 0; i < len(text); i++ {
+	for i := range len(text) {
 		if text[i] == '\n' {
 			starts = append(starts, i+1)
 		}

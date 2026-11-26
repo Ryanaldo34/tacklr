@@ -156,7 +156,7 @@ Each specialist runs as its own child session. See [Sessions in production](sess
 
 In production the client and the worker run in different processes, and they share Postgres:
 
-- **Hosts** call `temporal.Open` and serve your clients, for example with the ACP server in `server/acp`. They keep no session state, so you can run any number behind a load balancer.
+- **Your backend** calls `temporal.Open` and drives sessions through the `session.Client` it returns, behind your own API and users. It keeps no session state, so you can run any number behind a load balancer. `examples/backend` is a small one: HTTP and server-sent events.
 - **Workers** call `worker.New` and run the sessions. A session's steps go to the worker that already has the session loaded. If that worker stops, any other worker continues the session from Postgres.
 
 Both use the stores from `session/postgres`:

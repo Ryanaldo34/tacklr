@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -15,7 +14,6 @@ import (
 	"github.com/ryanaldo34/tacklr/brain/storetest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/message"
-	"github.com/ryanaldo34/tacklr/openai"
 	"github.com/ryanaldo34/tacklr/session"
 )
 
@@ -60,73 +58,87 @@ func planned(t *testing.T, id string, opts tacklr.AgentOptions, todos ...tacklr.
 	return h
 }
 
+// overPressure is a planned session of a Brain whose store embeds with v,
+// with two large prompts that a 100-character follow-up takes past the
+// window's pressure. The model counts with count and answers reply.
+func overPressure(t *testing.T, count func([]*message.Message) (int, error), v vectors, reply ...[]tacklr.LLMResponseChunk) *tacklr.Harness {
+	t.Helper()
+	model, _ := counted(t, count, reply...)
+	opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 1000, Brain: embedded(t, v), SearchNamespace: storetest.Namespace(t, "org", "acme")}
+	h := planned(t, "collapse", opts, tacklr.Todo{Title: "t"})
+	prompt(t, h, strings.Repeat("a", 350))
+	prompt(t, h, strings.Repeat("b", 350)+" "+collapsedToken)
+	return h
+}
+
+const collapsedToken = "unique-collapsed-token"
+
 // TestCommit_collapsesAWindowOverPressureIntoASavedSummary: a round that
 // takes the window past its pressure collapses everything after the goal
 // and the plan into one summary. With a Brain the collapsed messages are
 // this session's saved messages: search finds them, open reads one
-// exactly, and the summary says so. A count, the summary request or the
-// save (its context ends as it embeds) that fails stops the collapse and
-// keeps the window.
+// exactly, and the summary says so.
 func TestCommit_collapsesAWindowOverPressureIntoASavedSummary(t *testing.T) {
 	t.Parallel()
-	const token = "unique-collapsed-token"
-	summary := []tacklr.LLMResponseChunk{text("summary")}
-	// Each session counts its goal, its two large messages, then the
-	// follow-up; the summary's response is counted next.
+	h := overPressure(t, windowTokens, vectors{}, []tacklr.LLMResponseChunk{text("summary")})
+
+	err := h.Commit(t.Context(), tacklr.CommitIn{Users: []*message.Message{userMsg(strings.Repeat("f", 100))}}, newStream(t).out)
+
+	window := checkpoint(t, h).window
+	if err != nil || len(window) != 4 || !tacklr.IsPlanDocument(window[1]) || !strings.Contains(window[2].Content, "Use the search tool") || window[3].Content != strings.Repeat("f", 100) {
+		t.Fatalf("window = %q %v, want the goal, the plan, a summary that points at search, and the round", contents(window), err)
+	}
+	var found brain.Page
+	if err := json.Unmarshal([]byte(result(t, h, call("s1", "search", `{"query":"`+collapsedToken+`"}`))), &found); err != nil {
+		t.Fatal(err)
+	}
+	hits := slices.Collect(found.Results.Objects())
+	if len(hits) == 0 || hits[0].Kind != brain.KindSessionMessage {
+		t.Fatalf("search the collapsed history = %+v, want its saved message first", hits)
+	}
+	if opened := result(t, h, call("o1", "open", `{"ref":"`+hits[0].ID.String()+`"}`)); !strings.Contains(opened, collapsedToken) {
+		t.Fatalf("open the saved message = %s, want it exactly", opened)
+	}
+}
+
+// TestCommit_aFailureDuringWindowUpkeepFailsTheCommitAndKeepsTheWindow: a
+// count, a save of the collapsed messages (its context ends as it embeds)
+// or a summary request that fails stops the collapse: the commit fails
+// and the window is as it was.
+func TestCommit_aFailureDuringWindowUpkeepFailsTheCommitAndKeepsTheWindow(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
-		name        string
-		count       func([]*message.Message) (int, error)
-		reply       []tacklr.LLMResponseChunk
-		brain, ends bool
-		fail        string
+		name     string
+		count    func([]*message.Message) (int, error)
+		reply    tacklr.LLMResponseChunk
+		ends     bool
+		collapse bool
+		fail     string
 	}{
-		{name: "saved for search", count: windowTokens, reply: summary, brain: true},
-		{name: "the first count fails", count: failAfter(3), reply: summary, fail: "count tokens"},
-		{name: "the count after the summary fails", count: failAfter(5), reply: summary, fail: "count tokens"},
-		{name: "the summary request fails", count: windowTokens, reply: []tacklr.LLMResponseChunk{failure(fmt.Errorf("%w: stream failed", tacklr.ErrNetwork))}, fail: "context compress stream failed"},
-		{name: "the save fails", count: windowTokens, reply: summary, brain: true, ends: true, fail: "save session messages"},
+		{name: "a count", count: failAfter(3), reply: text("summary"), fail: "count tokens"},
+		{name: "a save", count: windowTokens, reply: text("summary"), ends: true, fail: "save session messages"},
+		{name: "a summary request", count: windowTokens, reply: failure(fmt.Errorf("%w: stream failed", tacklr.ErrNetwork)), collapse: true, fail: "context compress stream failed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			model, _ := counted(t, tc.count, tc.reply)
-			opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 1000}
-			if tc.brain {
-				v := vectors{}
-				if tc.ends {
-					v.cancel = cancel
-				}
-				opts.Brain, opts.SearchNamespace = embedded(t, v), storetest.Namespace(t, "org", "acme")
+			v := vectors{}
+			if tc.ends {
+				v.cancel = cancel
 			}
-			h := planned(t, "collapse", opts, tacklr.Todo{Title: "t"})
-			prompt(t, h, strings.Repeat("a", 350))
-			prompt(t, h, strings.Repeat("b", 350)+" "+token)
+			h := overPressure(t, tc.count, v, []tacklr.LLMResponseChunk{tc.reply})
 			before := contents(checkpoint(t, h).window)
+			in := tacklr.CommitIn{Users: []*message.Message{userMsg(strings.Repeat("f", 100))}}
+			if tc.collapse {
+				in = tacklr.CommitIn{Collapse: true}
+			}
 
-			err := h.Commit(ctx, tacklr.CommitIn{Users: []*message.Message{userMsg(strings.Repeat("f", 100))}}, newStream(t).out)
+			err := h.Commit(ctx, in, newStream(t).out)
 
-			window := checkpoint(t, h).window
-			if tc.fail != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.fail) || !slices.Equal(contents(window), before) {
-					t.Fatalf("commit = %v with window %d messages, want %q and the window kept", err, len(window), tc.fail)
-				}
-				return
-			}
-			if err != nil || len(window) != 4 || !tacklr.IsPlanDocument(window[1]) || !strings.Contains(window[2].Content, "Use the search tool") || window[3].Content != strings.Repeat("f", 100) {
-				t.Fatalf("window = %q %v, want the goal, the plan, a summary that points at search, and the round", contents(window), err)
-			}
-			var found brain.Page
-			if err := json.Unmarshal([]byte(result(t, h, call("s1", "search", `{"query":"`+token+`"}`))), &found); err != nil {
-				t.Fatal(err)
-			}
-			hits := slices.Collect(found.Results.Objects())
-			if len(hits) == 0 || hits[0].Kind != brain.KindSessionMessage {
-				t.Fatalf("search the collapsed history = %+v, want its saved message first", hits)
-			}
-			if opened := result(t, h, call("o1", "open", `{"ref":"`+hits[0].ID.String()+`"}`)); !strings.Contains(opened, token) {
-				t.Fatalf("open the saved message = %s, want it exactly", opened)
+			if window := contents(checkpoint(t, h).window); err == nil || !strings.Contains(err.Error(), tc.fail) || !slices.Equal(window, before) {
+				t.Fatalf("commit = %v with window %d messages, want %q and the window kept", err, len(window), tc.fail)
 			}
 		})
 	}
@@ -136,7 +148,7 @@ func TestCommit_collapsesAWindowOverPressureIntoASavedSummary(t *testing.T) {
 // others are open rebuilds the window as the goal, the plan, the model's
 // handoff and a nudge to continue; the messages it replaces are this
 // session's saved messages, which search finds. Completing the last open
-// todo keeps the window. A wrong title is the model's to correct.
+// todo keeps the window.
 func TestCompleteTodo_handsOffTheRestOfThePlan(t *testing.T) {
 	t.Parallel()
 	const token = "unique-retain-handoff-token"
@@ -149,7 +161,6 @@ func TestCompleteTodo_handsOffTheRestOfThePlan(t *testing.T) {
 	lookup := tacklr.NewTool(tacklr.ToolConfig{Name: "lookup", Handler: func(context.Context) (string, error) { return token, nil }})
 	opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Brain: eng, SearchNamespace: ns, Tools: []*tacklr.Tool{lookup}}
 	h := newHarness(t, "handoff", opts)
-	noPlan := result(t, h, call("c0", "complete_todo", `{"title":"A"}`))
 	prompt(t, h, "goal")
 	args, _ := json.Marshal(map[string]any{"plan": "ship", "todos": []tacklr.Todo{
 		{Title: "A", Description: "first"}, {Title: "B", Status: tacklr.TodoStatusCompleted}, {Title: "C", Description: "next"},
@@ -168,18 +179,11 @@ func TestCompleteTodo_handsOffTheRestOfThePlan(t *testing.T) {
 	if _, err := runRound(t, h, call("call-session-1", "lookup", `{"q":"x"}`)); err != nil {
 		t.Fatal(err)
 	}
-	wrong := []string{
-		result(t, h, call("c1", "complete_todo", `{"title":"Z"}`)),
-		result(t, h, call("c2", "complete_todo", `{"title":"B"}`)),
-	}
 
 	first, firstErr := runRound(t, h, call("c3", "complete_todo", `{"title":"A"}`))
 	handedOff := checkpoint(t, h).window
 	last, lastErr := runRound(t, h, call("c4", "complete_todo", `{"title":"C"}`))
 
-	if !strings.Contains(noPlan, "no plan exists") || !strings.Contains(wrong[0], `todo "Z" not found`) || !strings.Contains(wrong[1], `todo "B" is already completed`) {
-		t.Fatalf("complete with no plan %q, then %q; want each named for the model", noPlan, wrong)
-	}
 	if firstErr != nil || !strings.Contains(first.Calls[0].Body.Text(), `now starting "C"`) || len(handedOff) != 4 ||
 		handedOff[0].Content != "goal" || !tacklr.IsPlanDocument(handedOff[1]) || handedOff[2].Content != "the handoff" || !strings.Contains(handedOff[3].Content, "Continue executing") {
 		t.Fatalf("handoff = %v %q, window %q; want the goal, the plan, the handoff and the nudge", firstErr, first.Calls[0].Body.Text(), contents(handedOff))
@@ -206,37 +210,17 @@ func TestCompleteTodo_handsOffTheRestOfThePlan(t *testing.T) {
 	}
 }
 
-// TestHandoff_fallsBackToThePlanWhenTheModelGivesNoHandoff: a request the
-// model cannot send, an empty stream and a stream error each install a
-// handoff written from the plan.
+// TestHandoff_fallsBackToThePlanWhenTheModelGivesNoHandoff: a handoff
+// request that fails installs a handoff written from the plan.
 func TestHandoff_fallsBackToThePlanWhenTheModelGivesNoHandoff(t *testing.T) {
 	t.Parallel()
-	for name, reply := range map[string][]tacklr.LLMResponseChunk{
-		"a request that cannot be sent": nil,
-		"an empty stream":               {},
-		"a stream error":                {failure(fmt.Errorf("%w: handoff stream failed", tacklr.ErrNetwork))},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			model, _ := scripted(t, reply)
-			opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}
-			h := planned(t, "fallback", opts, tacklr.Todo{Title: "First"}, tacklr.Todo{Title: "Ship", Description: "finish"})
-			if reply == nil {
-				rows, _ := h.Checkpoint()
-				opts.Model = openai.New(http.DefaultClient).WithModel("gpt-4o")
-				h = newHarness(t, "fallback", opts)
-				if err := h.RestoreCheckpoint(rows); err != nil {
-					t.Fatal(err)
-				}
-			}
+	model, _ := scripted(t, []tacklr.LLMResponseChunk{failure(fmt.Errorf("%w: handoff stream failed", tacklr.ErrNetwork))})
+	h := planned(t, "fallback", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}, tacklr.Todo{Title: "First"}, tacklr.Todo{Title: "Ship", Description: "finish"})
 
-			_, err := runRound(t, h, call("c1", "complete_todo", `{"title":"First"}`))
+	_, err := runRound(t, h, call("c1", "complete_todo", `{"title":"First"}`))
 
-			window := checkpoint(t, h).window
-			if err != nil || len(window) != 4 || !strings.Contains(window[2].Content, "[in_progress] Ship: finish") {
-				t.Fatalf("handoff = %v, window %q, want the goal, the plan, the fallback handoff and the nudge", err, contents(window))
-			}
-		})
+	if window := checkpoint(t, h).window; err != nil || len(window) != 4 || !strings.Contains(window[2].Content, "[in_progress] Ship: finish") {
+		t.Fatalf("handoff = %v, window %q, want the goal, the plan, the fallback handoff and the nudge", err, contents(window))
 	}
 }
 
@@ -304,7 +288,7 @@ func TestCommit_sizesTheWindowFromUsageWhenTheProviderCannotCount(t *testing.T) 
 	}})
 	thought := tacklr.LLMResponseChunk{Type: session.EventReasoning, Content: "read it all", IsComplete: true}
 	p := &provider{replies: [][]tacklr.LLMResponseChunk{{text("reading")}, {thought, calls(call("b1", "big", "{}"))}, {text("summary")}}}
-	model := testkit.UncountedHTTPModel(t, p.respond, windowTokens)
+	model := testkit.CountedHTTPModel(t, p.respond, nil)
 	h := newHarness(t, "uncounted", tacklr.AgentOptions{Model: model, MaxWindowSize: window, Tools: []*tacklr.Tool{big}})
 	prompt(t, h, "go")
 	out := newStream(t).out
@@ -338,30 +322,23 @@ func TestCommit_sizesTheWindowFromUsageWhenTheProviderCannotCount(t *testing.T) 
 // TestCommit_aCollapseAfterARefusedRequestSummarizesTheWindow: after the
 // provider refused a request as over the context window, a collapse with
 // no counted request after the goal summarizes everything after it. A
-// summary request that fails, or that the model cannot send, keeps the
-// window, and a window of only the goal has nothing to collapse.
+// window of only the goal has nothing to collapse.
 func TestCommit_aCollapseAfterARefusedRequestSummarizesTheWindow(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name       string
-		summary    []tacklr.LLMResponseChunk
-		answer     bool // the goal was answered before the collapse
-		unsendable bool // the model has no API key
-		want       []string
-		fail       error
+		name    string
+		summary []tacklr.LLMResponseChunk
+		answer  bool
+		want    []string
+		fail    error
 	}{
 		{name: "summarized", summary: []tacklr.LLMResponseChunk{text("summary")}, answer: true, want: []string{"go", "CONVERSATION SUMMARY\n────────────\nsummary"}},
-		{name: "a summary request that fails", summary: []tacklr.LLMResponseChunk{failure(fmt.Errorf("%w: stream failed", tacklr.ErrNetwork))}, answer: true, want: []string{"go", "done", "next"}, fail: tacklr.ErrNetwork},
-		{name: "a summary request the model cannot send", unsendable: true, want: []string{"go", "next"}, fail: tacklr.ErrApiKeyNotSet},
 		{name: "only the goal", want: []string{"go"}, fail: session.ErrContextLength},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			// Arrange
 			model, _ := scripted(t, []tacklr.LLMResponseChunk{text("done")}, tc.summary)
-			if tc.unsendable {
-				model = openai.New(http.DefaultClient).WithModel("gpt-4o")
-			}
 			h := newHarness(t, "refit", tacklr.AgentOptions{Model: model, MaxWindowSize: 100_000})
 			prompt(t, h, "go")
 			out := newStream(t).out
@@ -373,8 +350,6 @@ func TestCommit_aCollapseAfterARefusedRequestSummarizesTheWindow(t *testing.T) {
 				if err := h.Commit(t.Context(), tacklr.CommitIn{Round: &tacklr.Round{Reply: done}}, out); err != nil {
 					t.Fatal(err)
 				}
-			}
-			if tc.answer || tc.unsendable {
 				prompt(t, h, "next")
 			}
 

@@ -8,15 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
-	"testing/iotest"
 	"time"
 
 	"github.com/ryanaldo34/tacklr/vfs/mount"
@@ -26,86 +23,63 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs/adapters"
 )
 
-// graphNode is one drive item of the Graph fixture.
+// graphNode is one drive item of the Graph fixture. A file with no mime
+// has a file facet without a type; pkg makes it a package (OneNote).
 type graphNode struct {
 	id, name, parent, mime, pkg string
 	folder                      bool
 	size                        int64
 	body                        []byte
-	// wholeBody makes content ignore Range and answer HTTP 200.
-	wholeBody bool
-	// serve, when set, answers content requests in place of the body.
-	serve func(w http.ResponseWriter)
 }
 
-// graphFX is an in-memory OneDrive that speaks the Graph driveItem REST API.
+// graphFX is an in-memory OneDrive that speaks the Graph driveItem REST
+// API. It pages children one at a time, so every listing of two or more
+// follows a next link.
 type graphFX struct {
-	mu       sync.Mutex
-	base     string // next links point here
-	meDrive  string
-	sites    map[string]string // site id → drive id
-	drives   map[string]string // drive id → root item id
-	nodes    map[string]*graphNode
-	fail     map[string]int // "<item id>" or "<item id>/<tail>" → HTTP status of every request
-	once     map[string]int // the same, for the next request only
-	pageSize int
+	mu      sync.Mutex
+	base    string // next links point here
+	meDrive string
+	sites   map[string]string // site id → drive id
+	drives  map[string]string // drive id → root item id
+	nodes   map[string]*graphNode
+	// answers answer the next request of "<METHOD> <item id>/<tail>" in
+	// place of the fixture.
+	answers map[string]func(http.ResponseWriter, *http.Request)
 }
 
 // startGraph serves the Graph fixture:
 //
-//	drv root     a.txt "one", c.txt "c", Budget.xlsx, Notebook (OneNote),
-//	             bare.bin (no MIME type), huge.bin (over the read cap),
-//	             whole.txt (ignores Range), lost.txt (content 404),
-//	             exp.txt (content 401), deny.txt (403), boom.txt (500),
-//	             cut.txt (content cut short), liar.txt (content over the
-//	             cap, size 1), locked/ (children 403), vanish/
+//	drv root     a.txt "one"
 //	drv          file.txt (a file item outside the root)
 //	site-1 root  note.txt "from-site"
 func startGraph(t *testing.T) (*graphFX, *httptest.Server) {
 	t.Helper()
 	g := &graphFX{
-		meDrive:  "drv",
-		sites:    map[string]string{"site-1": "site-drv"},
-		drives:   map[string]string{"drv": "root", "site-drv": "root-site"},
-		nodes:    map[string]*graphNode{},
-		once:     map[string]int{},
-		pageSize: 2,
-		fail: map[string]int{
-			"lost/content": http.StatusNotFound, "exp/content": http.StatusUnauthorized,
-			"deny": http.StatusForbidden, "boom": http.StatusInternalServerError,
-			"locked/children": http.StatusForbidden,
-		},
-	}
-	text := func(id, name, body string) *graphNode {
-		return &graphNode{id: id, name: name, parent: "root", mime: "text/plain", body: []byte(body)}
+		meDrive: "drv",
+		sites:   map[string]string{"site-1": "site-drv"},
+		drives:  map[string]string{"drv": "root", "site-drv": "root-site"},
+		nodes:   map[string]*graphNode{},
+		answers: map[string]func(http.ResponseWriter, *http.Request){},
 	}
 	for _, n := range []*graphNode{
 		{id: "root", folder: true},
 		{id: "root-site", folder: true},
 		{id: "fs", name: "note.txt", parent: "root-site", mime: "text/plain", body: []byte("from-site")},
 		{id: "txt1", name: "file.txt", mime: "text/plain", body: []byte("nope")},
-		{id: "xlsx1", name: "Budget.xlsx", parent: "root", mime: adapters.XLSXMediaType},
-		{id: "note1", name: "Notebook", parent: "root", pkg: "oneNote"},
-		{id: "bare", name: "bare.bin", parent: "root", body: []byte("x")},
-		{id: "huge", name: "huge.bin", parent: "root", mime: "application/octet-stream", size: int64(vfs.MaxReadFileBytes) + 1},
-		{id: "whole", name: "whole.txt", parent: "root", mime: "text/plain", body: []byte("abc"), wholeBody: true},
-		{id: "cut", name: "cut.txt", parent: "root", mime: "text/plain", size: 10, serve: func(w http.ResponseWriter) {
-			w.Header().Set("Content-Length", "10")
-			_, _ = w.Write([]byte("abc"))
-		}},
-		{id: "liar", name: "liar.txt", parent: "root", mime: "text/plain", size: 1, serve: func(w http.ResponseWriter) {
-			_, _ = io.Copy(w, io.LimitReader(zeros{}, int64(vfs.MaxReadFileBytes)+1))
-		}},
-		{id: "locked", name: "locked", parent: "root", folder: true},
-		{id: "vanish", name: "vanish", parent: "root", folder: true},
-		text("f1", "a.txt", "one"), text("c2", "c.txt", "c"), text("lost", "lost.txt", "x"),
-		text("exp", "exp.txt", "x"), text("deny", "deny.txt", "x"), text("boom", "boom.txt", "x"),
+		{id: "f1", name: "a.txt", parent: "root", mime: "text/plain", body: []byte("one")},
 	} {
-		g.add(n)
+		g.put(n)
 	}
 	srv := testhttp.New(t, g)
 	g.base = srv.URL
 	return g, srv
+}
+
+// put adds or replaces n. Its size is its body's unless it has one.
+func (g *graphFX) put(n *graphNode) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.add(n)
 }
 
 func (g *graphFX) add(n *graphNode) {
@@ -113,6 +87,19 @@ func (g *graphFX) add(n *graphNode) {
 		n.size = int64(len(n.body))
 	}
 	g.nodes[n.id] = n
+}
+
+// answer has the next request of method on the item id (and tail) answered
+// by fn.
+func (g *graphFX) answer(method, id, tail string, fn func(http.ResponseWriter, *http.Request)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.answers[method+" "+id+"/"+tail] = fn
+}
+
+// status is an answer with status code and no body.
+func status(code int) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(code) }
 }
 
 func (g *graphFX) json(n *graphNode) map[string]any {
@@ -167,21 +154,6 @@ func (g *graphFX) lookup(itemID, rel string) *graphNode {
 	return cur
 }
 
-// status is the HTTP status the fixture fails a request on n's tail with,
-// or 0.
-func (g *graphFX) status(n *graphNode, tail string) int {
-	for _, key := range []string{n.id, n.id + "/" + tail} {
-		if st, ok := g.once[key]; ok {
-			delete(g.once, key)
-			return st
-		}
-		if st := g.fail[key]; st != 0 {
-			return st
-		}
-	}
-	return 0
-}
-
 func (g *graphFX) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -206,8 +178,10 @@ func (g *graphFX) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	n := g.lookup(itemID, rel)
 	if n != nil {
-		if st := g.status(n, tail); st != 0 {
-			w.WriteHeader(st)
+		key := r.Method + " " + n.id + "/" + tail
+		if fn, ok := g.answers[key]; ok {
+			delete(g.answers, key)
+			fn(w, r)
 			return
 		}
 	}
@@ -216,9 +190,6 @@ func (g *graphFX) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if n == nil && g.nodes[itemID] != nil {
 			n = &graphNode{id: "new-" + itemID + "-" + rel, name: rel, parent: itemID, mime: "text/plain"}
-			if bytes.Contains(body, []byte("word/document.xml")) {
-				n.mime = adapters.DOCXMediaType
-			}
 		}
 		if n == nil {
 			w.WriteHeader(http.StatusNotFound)
@@ -229,22 +200,13 @@ func (g *graphFX) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeGraphJSON(w, g.json(n))
 	case n == nil:
 		w.WriteHeader(http.StatusNotFound)
-	case tail == "content" && n.serve != nil:
-		n.serve(w)
-	case tail == "content" && n.wholeBody:
-		_, _ = w.Write(n.body)
 	case tail == "content" && r.URL.Query().Get("direct") == "":
-		// Graph answers a content GET with a redirect to the download URL.
 		http.Redirect(w, r, p+"?direct=1", http.StatusFound)
 	case tail == "content":
 		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(n.body))
 	case tail == "children" && r.Method == http.MethodPost:
 		var folder struct{ Name string }
 		_ = json.NewDecoder(r.Body).Decode(&folder)
-		if g.lookup(n.id, folder.Name) != nil {
-			w.WriteHeader(http.StatusConflict)
-			return
-		}
 		created := &graphNode{id: "dir-" + folder.Name, name: folder.Name, parent: n.id, folder: true}
 		g.add(created)
 		writeGraphJSON(w, g.json(created))
@@ -258,20 +220,17 @@ func (g *graphFX) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveChildren pages the children pageSize at a time with a next link.
+// serveChildren answers one child per page, with a next link to the rest.
 func (g *graphFX) serveChildren(w http.ResponseWriter, r *http.Request, itemID string) {
-	page, out := g.kids(itemID), map[string]any{}
-	if len(page) > g.pageSize {
-		if r.URL.Query().Get("skip") != "" {
-			page = page[g.pageSize:]
-		} else {
-			page = page[:g.pageSize]
-			out["@odata.nextLink"] = g.base + r.URL.Path + "?skip=1"
-		}
+	kids := g.kids(itemID)
+	var skip int
+	_, _ = fmt.Sscan(r.URL.Query().Get("skip"), &skip)
+	out, value := map[string]any{}, []any{}
+	if skip < len(kids) {
+		value = append(value, g.json(kids[skip]))
 	}
-	value := make([]any, 0, len(page))
-	for _, k := range page {
-		value = append(value, g.json(k))
+	if skip+1 < len(kids) {
+		out["@odata.nextLink"] = fmt.Sprintf("%s%s?skip=%d", g.base, r.URL.Path, skip+1)
 	}
 	out["value"] = value
 	writeGraphJSON(w, out)
@@ -309,6 +268,8 @@ func mustGraph(srv *httptest.Server, holder *vfs.TokenHolder, account string) vf
 	return vfs.Graph(vfs.NewMicrosoftGraph(holder, srv.URL+"/", srv.Client()), holder, account)
 }
 
+// mountGraphHTTP mounts the personal drive of srv at /workspace/legal with
+// the Word and Excel codecs.
 func mountGraphHTTP(t *testing.T, srv *httptest.Server, writable bool) (*vfs.MountSession, *vfs.TokenHolder) {
 	t.Helper()
 	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok"})
@@ -323,330 +284,263 @@ func mountGraphHTTP(t *testing.T, srv *httptest.Server, writable bool) (*vfs.Mou
 	return ms, holder
 }
 
-// A Graph mount follows content redirects, refreshes a token Graph refuses,
-// makes nested folders, writes names with spaces, and writes HTML as Word.
-// Content Graph refuses fails with the matching vfs error, and a read-only
-// mount reads but does not write.
-func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	fx, srv := startGraph(t)
-	ms, holder := mountGraphHTTP(t, srv, true)
-	read := func(name string) string {
-		t.Helper()
-		got, err := ms.Route(ctx, "/workspace/legal/"+name).ReadFile(ctx)
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		return string(got)
-	}
-
-	// n < 0 reads from the offset to the end of the content.
-	tail, err := vfs.NewMicrosoftGraph(holder, srv.URL+"/", srv.Client()).GetContent(ctx, "site-drv", "fs", 5, -1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rest, _ := io.ReadAll(tail)
-	_ = tail.Close()
-	if string(rest) != "site" {
-		t.Fatalf("content from offset 5 = %q", rest)
-	}
-
-	if err := ms.Route(ctx, "/workspace/legal/a.txt").WriteFile(ctx, []byte("two")); err != nil {
-		t.Fatal(err)
-	}
-	fx.mu.Lock()
-	fx.once["f1/content"] = http.StatusUnauthorized
-	fx.mu.Unlock()
-	holder.SetRefresh(func(context.Context) (mount.Credential, error) {
-		return mount.Credential{Token: "fresh"}, nil
-	})
-	if got := read("a.txt"); got != "two" {
-		t.Fatalf("read after a refresh = %q", got)
-	}
-
-	if err := ms.Route(ctx, "/workspace/legal/sub/dir/c.txt").WriteFile(ctx, []byte("nested")); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Route(ctx, "/workspace/legal/my file.txt").WriteFile(ctx, []byte("hello")); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.WriteDocument(ctx, vfs.NewTextDocument("/workspace/legal/note.md", "text/markdown", "utf-8", "# hi\n")); err != nil {
-		t.Fatal(err)
-	}
-	if got := read("sub/dir/c.txt") + "|" + read("my file.txt") + "|" + read("note.md"); got != "nested|hello|# hi\n" {
-		t.Fatalf("written files read %q", got)
-	}
-
-	html := "<h1>x</h1>"
-	if _, err := ms.Apply(ctx, "/workspace/legal/SPIKE", vfs.Mutation{Content: &html}); err != nil {
-		t.Fatal(err)
-	}
-	word, err := ms.Route(ctx, "/workspace/legal/SPIKE").ReadText(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rd, ok := vfs.AsRich(word); word.MediaType() != adapters.DOCXMediaType || !ok || len(rd.Blocks()) == 0 || rd.Blocks()[0].Text != "x" {
-		t.Fatalf("extensionless HTML write = %s %+v", word.MediaType(), word)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/legal/Notebook").ReadText(ctx); !errors.Is(err, vfs.ErrNoCodec) {
-		t.Fatalf("OneNote: %v", err)
-	}
-	if _, err := ms.Route(ctx, "/workspace/legal/lost.txt").ReadFile(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("content 404: %v", err)
-	}
-	if _, err := ms.Route(ctx, "/workspace/legal/exp.txt").ReadFile(ctx); !errors.Is(err, vfs.ErrAuthExpired) {
-		t.Fatalf("content 401: %v", err)
-	}
-	if err := ms.Route(ctx, "/workspace/legal/big.bin").WriteFile(ctx, make([]byte, vfs.MaxReadFileBytes+1)); !errors.Is(err, vfs.ErrTooLarge) {
-		t.Fatalf("oversize put: %v", err)
-	}
-	if err := ms.Route(ctx, "/workspace/legal/Budget.xlsx/nope").MkdirAll(ctx); !errors.Is(err, vfs.ErrNotSupported) {
-		t.Fatalf("mkdir through a file: %v", err)
-	}
-
-	ro, _ := mountGraphHTTP(t, srv, false)
-	if got, err := ro.Route(ctx, "/workspace/legal/c.txt").ReadFile(ctx); err != nil || string(got) != "c" {
-		t.Fatalf("read-only read = %q err=%v", got, err)
-	}
-	if err := ro.Route(ctx, "/workspace/legal/c.txt").WriteFile(ctx, []byte("nope")); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("read-only put: %v", err)
-	}
-}
-
-// TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail: a file item
-// id, an organization binding without a site or drive, an unknown account
-// and a binding with no token for a factory with no holder fail; a site
+// TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail: a site
 // binding opens that site's library and a personal one /me/drive with the
-// binding's token.
+// binding's token. A file item id, an organization binding without a site
+// or drive, an unknown account, a site or item Graph does not find, a drive
+// with no id and a binding with no token for a factory with no holder fail.
 func TestGraphFactory_aBindingsParamsChooseTheDriveAndBadOnesFail(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	fx, srv := startGraph(t)
+	_, srv := startGraph(t)
+	noDriveFX, noDriveSrv := startGraph(t)
+	noDriveFX.mu.Lock()
+	noDriveFX.meDrive = ""
+	noDriveFX.mu.Unlock()
 	open := mustGraph(srv, nil, "")
-	personal := mustGraph(srv, nil, vfs.AccountPersonal)
-	// unheld takes the token of each binding.
 	unheld := vfs.Graph(vfs.NewMicrosoftGraph(vfs.NewTokenHolder(mount.Credential{Token: "tok"}), srv.URL+"/", srv.Client()), nil, vfs.AccountPersonal)
 	bind := func(params map[string]string) mount.Binding {
 		return mount.Binding{Auth: mount.Credential{Token: "tok"}, Params: params}
 	}
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-
 	siteMS, err := vfs.Tree(vfs.At("lib", open))(ctx, "s", vfs.Request{Bindings: []mount.Binding{
 		bind(map[string]string{mount.ParamName: "lib", mount.ParamSiteID: "site-1"}),
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := siteMS.Route(ctx, "/workspace/lib/note.txt").ReadFile(ctx); err != nil || string(got) != "from-site" {
-		t.Fatalf("site bind = %q err=%v", got, err)
-	}
-	if p, err := unheld(ctx, "s", bind(nil)); err != nil || p == nil {
-		t.Fatalf("personal /me/drive = %v err=%v", p, err)
-	}
 
-	for name, c := range map[string]struct {
+	site, siteErr := siteMS.Route(ctx, "/workspace/lib/note.txt").ReadFile(ctx)
+	personal, personalErr := unheld(ctx, "s", bind(nil))
+	refused := map[string]struct {
 		open vfs.Open
-		ctx  context.Context
 		b    mount.Binding
 		want string
 	}{
-		"file item":            {open, ctx, bind(map[string]string{mount.ParamDriveID: "drv", mount.ParamItemID: "txt1"}), "not a folder"},
-		"default organization": {open, ctx, bind(nil), "siteId or driveId"},
-		"bad account":          {open, ctx, bind(map[string]string{mount.ParamAccount: "nope"}), "not organization or personal"},
-		"unknown site":         {open, ctx, bind(map[string]string{mount.ParamSiteID: "no-site"}), vfs.ErrNotExist.Error()},
-		"missing item":         {open, ctx, bind(map[string]string{mount.ParamDriveID: "drv", mount.ParamItemID: "missing"}), vfs.ErrNotExist.Error()},
-		"canceled":             {personal, canceled, bind(nil), context.Canceled.Error()},
-		"no token":             {unheld, ctx, mount.Binding{}, "access token required"},
-	} {
-		if _, err := c.open(c.ctx, "s", c.b); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Fatalf("%s: %v, want %q", name, err, c.want)
+		"a file item":            {open, bind(map[string]string{mount.ParamDriveID: "drv", mount.ParamItemID: "txt1"}), "not a folder"},
+		"a default organization": {open, bind(nil), "siteId or driveId"},
+		"a bad account":          {open, bind(map[string]string{mount.ParamAccount: "nope"}), "not organization or personal"},
+		"an unknown site":        {open, bind(map[string]string{mount.ParamSiteID: "no-site"}), vfs.ErrNotExist.Error()},
+		"a missing item":         {open, bind(map[string]string{mount.ParamDriveID: "drv", mount.ParamItemID: "missing"}), vfs.ErrNotExist.Error()},
+		"a drive with no id":     {mustGraph(noDriveSrv, nil, vfs.AccountPersonal), bind(nil), "drive id missing"},
+		"no token":               {unheld, mount.Binding{}, "access token required"},
+	}
+
+	if siteErr != nil || string(site) != "from-site" {
+		t.Fatalf("site binding read = %q %v", site, siteErr)
+	}
+	if personalErr != nil || personal == nil {
+		t.Fatalf("personal binding = %v %v, want /me/drive", personal, personalErr)
+	}
+	for name, c := range refused {
+		if _, err := c.open(ctx, "s", c.b); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", name, err, c.want)
 		}
 	}
+}
 
-	fx.mu.Lock()
-	fx.meDrive = ""
-	fx.mu.Unlock()
-	if _, err := personal(ctx, "s", bind(nil)); err == nil || !strings.Contains(err.Error(), "drive id missing") {
-		t.Fatalf("drive without an id: %v", err)
+// TestGraph_aTokenGraphRefusesRefreshesOnceOrExpires: a token Graph refuses
+// refreshes once through the holder and the read succeeds. With no refresh,
+// or with no token, the read fails as expired.
+func TestGraph_aTokenGraphRefusesRefreshesOnceOrExpires(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]struct {
+		refresh func(context.Context) (mount.Credential, error)
+		token   string
+		want    error
+	}{
+		"a refresh reads": {
+			refresh: func(context.Context) (mount.Credential, error) { return mount.Credential{Token: "fresh"}, nil },
+			token:   "tok",
+		},
+		"no refresh expires": {token: "tok", want: vfs.ErrAuthExpired},
+		"no token expires":   {want: vfs.ErrAuthExpired},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			fx, srv := startGraph(t)
+			ms, holder := mountGraphHTTP(t, srv, false)
+			holder.SetRefresh(c.refresh)
+			holder.Set(mount.Credential{Token: c.token})
+			fx.answer(http.MethodGet, "f1", "content", status(http.StatusUnauthorized))
+
+			got, err := ms.Route(ctx, "/workspace/legal/a.txt").ReadFile(ctx)
+
+			if !errors.Is(err, c.want) || (c.want == nil && string(got) != "one") {
+				t.Fatalf("read = %q %v, want %v", got, err, c.want)
+			}
+		})
 	}
 }
 
-func openGraphProvider(t *testing.T, srv *httptest.Server, holder *vfs.TokenHolder, itemID string, writable bool) backendProvider {
-	t.Helper()
-	p, err := mustGraph(srv, holder, vfs.AccountPersonal)(t.Context(), "s", mount.Binding{
-		Params: map[string]string{mount.ParamDriveID: "drv", mount.ParamItemID: itemID}, Writable: writable,
-	})
-	if err != nil {
-		t.Fatal(err)
+// TestGraph_contentGraphCannotServeDoesNotRead: an item with no content
+// type or a OneNote package has no codec, a size or a body over the read
+// cap is too large, a body cut short ends early, content Graph does not find
+// is not found, and a reply that ignores the requested range is refused
+// rather than read at the wrong offset.
+func TestGraph_contentGraphCannotServeDoesNotRead(t *testing.T) {
+	t.Parallel()
+	overCap := func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.Copy(w, io.LimitReader(zeros{}, int64(vfs.MaxReadFileBytes)+1))
 	}
-	return p.(backendProvider)
+	cut := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "10")
+		_, _ = w.Write([]byte("abc"))
+	}
+	wholeBody := func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("abc")) }
+	readAt := func(ctx context.Context, r vfs.Route) error {
+		f, err := r.Open(ctx)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = f.(io.ReaderAt).ReadAt(make([]byte, 1), 1)
+		return err
+	}
+	for name, c := range map[string]struct {
+		node   graphNode
+		answer func(http.ResponseWriter, *http.Request)
+		read   func(context.Context, vfs.Route) error
+		want   func(error) bool
+	}{
+		"an item with no type has no codec":    {node: graphNode{body: []byte("x")}, read: routeOps["open"], want: is(vfs.ErrNoCodec)},
+		"an item with no type has no document": {node: graphNode{body: []byte("x")}, read: routeOps["text"], want: is(vfs.ErrNoCodec)},
+		"a OneNote package has no codec":       {node: graphNode{pkg: "oneNote"}, read: routeOps["text"], want: is(vfs.ErrNoCodec)},
+		"a size over the cap is too large": {
+			node: graphNode{mime: "text/plain", size: int64(vfs.MaxReadFileBytes) + 1}, read: routeOps["text"], want: is(vfs.ErrTooLarge),
+		},
+		"a body over the cap is too large": {
+			node: graphNode{mime: "text/plain", body: []byte("x")}, answer: overCap, read: routeOps["text"], want: is(vfs.ErrTooLarge),
+		},
+		"a body cut short ends early": {
+			node: graphNode{mime: "text/plain", size: 10}, answer: cut, read: routeOps["text"], want: is(io.ErrUnexpectedEOF),
+		},
+		"content Graph does not find is not found": {
+			node: graphNode{mime: "text/plain", body: []byte("x")}, answer: status(http.StatusNotFound), read: routeOps["text"], want: is(vfs.ErrNotExist),
+		},
+		"a reply that ignores the range is refused": {
+			node: graphNode{mime: "text/plain", body: []byte("abc")}, answer: wholeBody, read: readAt,
+			want: func(err error) bool { return err != nil && strings.Contains(err.Error(), "answered with HTTP 200") },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			fx, srv := startGraph(t)
+			node := c.node
+			node.id, node.name, node.parent = "item", "item.bin", "root"
+			fx.put(&node)
+			if c.answer != nil {
+				fx.answer(http.MethodGet, "item", "content", c.answer)
+			}
+			ms, _ := mountGraphHTTP(t, srv, false)
+
+			err := c.read(ctx, ms.Route(ctx, "/workspace/legal/item.bin"))
+
+			if !c.want(err) {
+				t.Fatalf("read = %v", err)
+			}
+		})
+	}
 }
 
-// TestGraphProvider_returnPaths: every provider call fails with the vfs
-// error that matches what Graph answered, a path outside the root, a
-// read-only mount, an oversize or unreadable upload, a root that is gone,
-// a canceled context and an empty token.
-func TestGraphProvider_returnPaths(t *testing.T) {
+// TestGraph_aFileReadsAsTheTypeGraphReports: a file with no extension
+// decodes with the media type Graph reports for it.
+func TestGraph_aFileReadsAsTheTypeGraphReports(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	fx, srv := startGraph(t)
-	fx.add(&graphNode{id: "flip", folder: true})
-	codecs, err := vfs.NewContentRegistry()
-	if err != nil {
-		t.Fatal(err)
-	}
-	holder := vfs.NewTokenHolder(mount.Credential{Token: "tok"})
-	p := openGraphProvider(t, srv, holder, "root", true)
-	ro := openGraphProvider(t, srv, holder, "root", false)
-	gone := openGraphProvider(t, srv, holder, "vanish", true)
-	flipped := openGraphProvider(t, srv, holder, "flip", true)
-	fx.mu.Lock()
-	delete(fx.nodes, "vanish")
-	fx.nodes["flip"].folder = false
-	fx.mu.Unlock()
-	text := vfs.NewTextDocument("a.txt", "text/plain", "utf-8", "x")
-	put := func(p backendProvider, name string) func(context.Context) error {
-		return func(ctx context.Context) error { return p.PutFile(ctx, name, bytes.NewReader([]byte("x")), 1) }
-	}
-	open := func(p backendProvider, name string, flag int) func(context.Context) error {
-		return func(ctx context.Context) error { _, err := p.OpenFile(ctx, name, flag, 0); return err }
-	}
-	doc := func(name string) func(context.Context) error {
-		return func(ctx context.Context) error { _, err := p.OpenDocument(ctx, name, codecs); return err }
-	}
-	stat := func(p backendProvider, name string) func(context.Context) error {
-		return func(ctx context.Context) error { _, err := p.Stat(ctx, name); return err }
-	}
-	list := func(name string) func(context.Context) error {
-		return func(ctx context.Context) error { _, err := p.ReadDir(ctx, name); return err }
-	}
-	mkdir := func(p backendProvider, name string) func(context.Context) error {
-		return func(ctx context.Context) error { return p.MkdirAll(ctx, name, fs.ModeDir) }
-	}
+	fx.put(&graphNode{id: "w", name: "SPIKE", parent: "root", mime: adapters.DOCXMediaType, body: wordDocument(t, `<w:p><w:r><w:t>x</w:t></w:r></w:p>`)})
+	ms, _ := mountGraphHTTP(t, srv, false)
 
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-	for i, call := range []func(context.Context) error{
-		p.Validate, stat(p, "a.txt"), open(p, "a.txt", os.O_RDONLY), list("."), mkdir(p, "sub"), doc("a.txt"), put(p, "a.txt"),
-		func(ctx context.Context) error { return p.Remove(ctx, "a.txt") },
-		func(ctx context.Context) error { return p.WriteDocument(ctx, "a.txt", text, codecs) },
-	} {
-		if err := call(canceled); !errors.Is(err, context.Canceled) {
-			t.Fatalf("canceled call %d = %v", i, err)
-		}
-	}
+	doc, err := ms.Route(ctx, "/workspace/legal/SPIKE").ReadText(ctx)
 
+	if err != nil || doc.MediaType() != adapters.DOCXMediaType {
+		t.Fatalf("read text = %v %v, want a Word document", doc, err)
+	}
+	if rd, ok := vfs.AsRich(doc); !ok || len(rd.Blocks()) == 0 || rd.Blocks()[0].Text != "x" {
+		t.Fatalf("blocks of %+v, want the paragraph x", doc)
+	}
+}
+
+// TestGraph_aCallGraphRefusesFailsTheOperation: a read, list, write, upload,
+// new folder or removal whose Graph call is refused fails with ErrPermission,
+// and a folder that another writer made first is ErrExist.
+func TestGraph_aCallGraphRefusesFailsTheOperation(t *testing.T) {
+	t.Parallel()
+	write := func(ctx context.Context, r vfs.Route) error { return r.WriteFile(ctx, []byte("x")) }
 	for name, c := range map[string]struct {
-		call func(context.Context) error
-		want error
+		method, id, tail string
+		code             int
+		path             string
+		op               func(context.Context, vfs.Route) error
 	}{
-		"open without MIME":                  {open(p, "bare.bin", os.O_RDONLY), vfs.ErrNoCodec},
-		"document without MIME":              {doc("bare.bin"), vfs.ErrNoCodec},
-		"document over the cap":              {doc("huge.bin"), vfs.ErrTooLarge},
-		"document of a folder":               {doc("."), vfs.ErrIsDir},
-		"document missing":                   {doc("missing"), vfs.ErrNotExist},
-		"document content 404":               {doc("lost.txt"), vfs.ErrNotExist},
-		"document cut short":                 {doc("cut.txt"), io.ErrUnexpectedEOF},
-		"document over its size and the cap": {doc("liar.txt"), vfs.ErrTooLarge},
-		"open for write":                     {open(p, "a.txt", os.O_WRONLY), vfs.ErrNotSupported},
-		"read-only open":                     {open(ro, "a.txt", os.O_WRONLY), vfs.ErrReadOnly},
-		"read-only remove":                   {func(ctx context.Context) error { return ro.Remove(ctx, "a.txt") }, vfs.ErrReadOnly},
-		"read-only mkdir":                    {mkdir(ro, "sub"), vfs.ErrReadOnly},
-		"read-only put":                      {put(ro, "a.txt"), vfs.ErrReadOnly},
-		"read-only document":                 {func(ctx context.Context) error { return ro.WriteDocument(ctx, "a.txt", text, codecs) }, vfs.ErrReadOnly},
-		"remove the root":                    {func(ctx context.Context) error { return p.Remove(ctx, "") }, vfs.ErrInvalidPath},
-		"remove missing":                     {func(ctx context.Context) error { return p.Remove(ctx, "missing") }, vfs.ErrNotExist},
-		"put the root":                       {put(p, ""), vfs.ErrInvalidPath},
-		"put denied":                         {put(p, "deny.txt"), vfs.ErrPermission},
-		"put over the cap":                   {func(ctx context.Context) error { return p.PutFile(ctx, "big.bin", nil, int64(vfs.MaxReadFileBytes)+1) }, vfs.ErrTooLarge},
-		"put an unsized body over the cap": {func(ctx context.Context) error {
-			return p.PutFile(ctx, "big.bin", io.LimitReader(zeros{}, int64(vfs.MaxReadFileBytes)+1), 0)
-		}, vfs.ErrTooLarge},
-		"mkdir through denied":  {mkdir(p, "deny.txt/x"), vfs.ErrPermission},
-		"list missing":          {list("missing"), vfs.ErrNotExist},
-		"list a file":           {list("a.txt"), vfs.ErrNotDir},
-		"list locked":           {list("locked"), vfs.ErrPermission},
-		"write nil document":    {func(ctx context.Context) error { return p.WriteDocument(ctx, "a.txt", nil, codecs) }, vfs.ErrNotTextual},
-		"validate a gone root":  {gone.Validate, vfs.ErrNotExist},
-		"stat a gone root":      {stat(gone, "."), vfs.ErrNotExist},
-		"mkdir in a gone root":  {mkdir(gone, "sub"), vfs.ErrNotExist},
-		"put nested, gone root": {put(gone, "sub/a.txt"), vfs.ErrNotExist},
-		"put leaf, gone root":   {put(gone, "a.txt"), vfs.ErrNotExist},
+		"a stat":                    {http.MethodGet, "f1", "", http.StatusForbidden, "a.txt", routeOps["stat"]},
+		"a stat of the root":        {http.MethodGet, "root", "", http.StatusForbidden, "", routeOps["stat"]},
+		"a list":                    {http.MethodGet, "root", "children", http.StatusForbidden, "", routeOps["list"]},
+		"a lookup before a write":   {http.MethodGet, "f1", "", http.StatusForbidden, "a.txt", write},
+		"an upload over a file":     {http.MethodPut, "f1", "content", http.StatusForbidden, "a.txt", write},
+		"the root of a new file":    {http.MethodGet, "root", "", http.StatusForbidden, "new.txt", write},
+		"the root of a nested file": {http.MethodGet, "root", "", http.StatusForbidden, "sub/new.txt", write},
+		"a lookup before a mkdir":   {http.MethodGet, "f1", "", http.StatusForbidden, "a.txt/x", routeOps["mkdir"]},
+		"a new folder":              {http.MethodPost, "root", "children", http.StatusForbidden, "sub", routeOps["mkdir"]},
+		"a removal":                 {http.MethodDelete, "f1", "", http.StatusForbidden, "a.txt", routeOps["remove"]},
+		"a folder made first":       {http.MethodPost, "root", "children", http.StatusConflict, "sub", routeOps["mkdir"]},
 	} {
-		if err := c.call(ctx); !errors.Is(err, c.want) {
-			t.Fatalf("%s = %v, want %v", name, err, c.want)
-		}
-	}
-	for name, call := range map[string]func(context.Context) error{
-		"stat outside the root":   stat(p, ".."),
-		"remove outside the root": func(ctx context.Context) error { return p.Remove(ctx, "..") },
-		"mkdir outside the root":  mkdir(p, ".."),
-		"put outside the root":    put(p, ".."),
-		"put an unreadable body": func(ctx context.Context) error {
-			return p.PutFile(ctx, "x.bin", iotest.ErrReader(errors.New("read fail")), 0)
-		},
-	} {
-		if err := call(ctx); err == nil {
-			t.Fatalf("%s succeeded", name)
-		}
-	}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			fx, srv := startGraph(t)
+			ms, _ := mountGraphHTTP(t, srv, true)
+			fx.answer(c.method, c.id, c.tail, status(c.code))
+			want := vfs.ErrPermission
+			if c.code == http.StatusConflict {
+				want = vfs.ErrExist
+			}
 
-	if err := flipped.Validate(ctx); err == nil || !strings.Contains(err.Error(), "not a folder") {
-		t.Fatalf("validate a root that is now a file: %v", err)
+			err := c.op(ctx, ms.Route(ctx, "/workspace/legal/"+c.path))
+
+			if !errors.Is(err, want) {
+				t.Fatalf("err = %v, want %v", err, want)
+			}
+		})
 	}
-	if st, err := p.Stat(ctx, "."); err != nil || !st.IsDir {
-		t.Fatalf("stat root = %+v err=%v", st, err)
-	}
-	if st, err := p.Stat(ctx, "bare.bin"); err != nil || st.MediaType == "" {
-		t.Fatalf("a file without MIME has no detected type: %+v err=%v", st, err)
-	}
-	if err := p.MkdirAll(ctx, "", 0); err != nil {
-		t.Fatalf("mkdir root: %v", err)
-	}
-	if err := p.MkdirAll(ctx, "locked", 0); err != nil {
-		t.Fatalf("mkdir of an existing folder: %v", err)
-	}
-	// Another writer makes the folder between the lookup and the create.
-	fx.mu.Lock()
-	fx.once["root/children"] = http.StatusConflict
-	fx.mu.Unlock()
-	if err := p.MkdirAll(ctx, "raced", 0); !errors.Is(err, vfs.ErrExist) {
-		t.Fatalf("mkdir conflict: %v", err)
-	}
-	if _, err := p.Stat(ctx, "boom.txt"); err == nil || !strings.Contains(err.Error(), "msgraph HTTP 500") {
-		t.Fatalf("stat 500: %v", err)
-	}
-	// A next link to another host would get the bearer token; it is refused.
+}
+
+// TestGraph_aNextLinkToAnotherHostIsRefused: a page link off the Graph
+// base would get the bearer token, so the listing fails.
+func TestGraph_aNextLinkToAnotherHostIsRefused(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	fx, srv := startGraph(t)
+	fx.put(&graphNode{id: "f2", name: "b.txt", parent: "root", mime: "text/plain"})
 	fx.mu.Lock()
 	fx.base = "https://elsewhere.example/v1.0"
 	fx.mu.Unlock()
-	if _, err := p.ReadDir(ctx, "."); err == nil || !strings.Contains(err.Error(), "is not under") {
-		t.Fatalf("foreign next link: %v", err)
-	}
+	ms, _ := mountGraphHTTP(t, srv, false)
 
-	// The server ignores Range and sends the whole body; the read fails
-	// instead of returning the wrong bytes.
-	whole, err := p.OpenFile(ctx, "whole.txt", os.O_RDONLY, 0)
+	_, err := ms.Route(ctx, "/workspace/legal").ReadDir(ctx)
+
+	if err == nil || !strings.Contains(err.Error(), "is not under") {
+		t.Fatalf("ReadDir = %v, want the foreign link refused", err)
+	}
+}
+
+// TestGraph_contentFromAnOffsetReadsToTheEnd: GetContent with n < 0 reads
+// from the offset to the end.
+func TestGraph_contentFromAnOffsetReadsToTheEnd(t *testing.T) {
+	t.Parallel()
+	_, srv := startGraph(t)
+	api := vfs.NewMicrosoftGraph(vfs.NewTokenHolder(mount.Credential{Token: "tok"}), srv.URL+"/", srv.Client())
+
+	body, err := api.GetContent(t.Context(), "site-drv", "fs", 5, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := whole.(io.ReaderAt).ReadAt(make([]byte, 1), 1); err == nil || !strings.Contains(err.Error(), "answered with HTTP 200") {
-		t.Fatalf("range ignored: %v", err)
-	}
-	_ = whole.Close()
+	defer body.Close()
+	rest, err := io.ReadAll(body)
 
-	// Graph refuses the token, and the holder has no refresh.
-	fx.mu.Lock()
-	fx.once["f1"] = http.StatusUnauthorized
-	fx.mu.Unlock()
-	if _, err := p.Stat(ctx, "a.txt"); !errors.Is(err, vfs.ErrAuthExpired) {
-		t.Fatalf("refused token without a refresh: %v", err)
-	}
-	holder.Set(mount.Credential{})
-	if _, err := p.Stat(ctx, "a.txt"); !errors.Is(err, vfs.ErrAuthExpired) {
-		t.Fatalf("empty token: %v", err)
+	if err != nil || string(rest) != "site" {
+		t.Fatalf("content from offset 5 = %q %v", rest, err)
 	}
 }

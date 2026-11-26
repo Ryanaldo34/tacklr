@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -28,13 +27,10 @@ const (
 // device, so every guest has the same one.
 const guestCID = 3
 
-// workerInit is the worker's path in the root file system image.
-const workerInit = "/sbin/tacklr-sandbox-worker"
-
-// bootArgs are the guest kernel's arguments before init: the serial
-// console (the VM's log), a reboot that ends Firecracker, and a reboot
-// one second after a panic, such as the end of init.
-const bootArgs = "console=ttyS0 reboot=k panic=1 pci=off"
+// bootArgs are the guest kernel's arguments: the serial console (the VM's
+// log), a reboot that ends Firecracker, a reboot one second after a panic,
+// such as the end of init, and the worker as init.
+const bootArgs = "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/tacklr-sandbox-worker"
 
 // vmmUID and vmmGID are the IDs of Firecracker inside its user namespace
 // (nobody). They are not 0, so Firecracker has no capabilities in its
@@ -57,7 +53,6 @@ type machine struct {
 	rootfs      string
 	vcpus       int
 	memoryMiB   int
-	init        []string
 	log         io.Writer
 }
 
@@ -85,29 +80,6 @@ type vmDrive struct {
 	IsReadOnly   bool   `json:"is_read_only"`
 }
 
-// bootArgs is the kernel command line: bootArgs, then init and its
-// arguments. An argument with a space is quoted.
-func (m machine) bootArgs() (string, error) {
-	command := m.init
-	if len(command) == 0 {
-		command = []string{workerInit}
-	}
-	args := []string{bootArgs, "init=" + command[0]}
-	if len(command) > 1 {
-		args = append(args, "--")
-	}
-	for _, arg := range command[1:] {
-		if strings.ContainsAny(arg, "\"\n") {
-			return "", fmt.Errorf("supervisor: the init argument %q has a quote or a newline", arg)
-		}
-		if strings.Contains(arg, " ") {
-			arg = `"` + arg + `"`
-		}
-		args = append(args, arg)
-	}
-	return strings.Join(args, " "), nil
-}
-
 // process is one running VM: its Firecracker process, and the guest's
 // connections to the host.
 type process struct {
@@ -128,10 +100,6 @@ type process struct {
 // empty environment. Its stdout (its log and the guest's console) goes to
 // m.log. The guest connects to the listeners of the VM's vsock ports.
 func startProcess(m machine) (_ *process, err error) {
-	args, err := m.bootArgs()
-	if err != nil {
-		return nil, err
-	}
 	dir, err := os.MkdirTemp("", "tacklr-vm-")
 	if err != nil {
 		return nil, fmt.Errorf("supervisor: the VM directory: %w", err)
@@ -152,7 +120,7 @@ func startProcess(m machine) (_ *process, err error) {
 	}
 	var config vmConfig
 	config.BootSource.KernelImagePath = m.kernel
-	config.BootSource.BootArgs = args
+	config.BootSource.BootArgs = bootArgs
 	config.Drives = []vmDrive{{DriveID: "root", PathOnHost: m.rootfs, IsRootDevice: true, IsReadOnly: true}}
 	config.Machine.VCPUCount = m.vcpus
 	config.Machine.MemSizeMiB = m.memoryMiB

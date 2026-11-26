@@ -179,12 +179,13 @@ func (e *objectRuntime) replay(kind string, out any) (ok bool, err error) {
 // write journals a call's result in the call's one write: with ops, the
 // step's durable events, the wakes it took, the session's status, and
 // letters for other objects. It returns the error as the journal keeps
-// it, so a live call and its replay see the same error. A failed write
-// stops the run.
+// it, so a live call and its replay see the same error. A call that failed
+// on storage, and a failed write, stop the run.
 func (e *objectRuntime) write(kind string, value any, err error, ops []Op, letters ...letter) error {
 	if cerr := e.o.ctx.Err(); cerr != nil {
 		fail(cerr)
 	}
+	failOnStorage(err)
 	en := entry{Kind: kind, Err: encodeErr(err), Taken: e.pending}
 	if value != nil {
 		raw, merr := json.Marshal(value)
@@ -566,6 +567,9 @@ func (e *objectRuntime) runCall(ctx context.Context, h *tacklr.Harness, c tacklr
 	if turnCtx.Err() != nil {
 		return ran, false, nil
 	}
+	if _, ok := errors.AsType[storageError](callErr); ok {
+		return ran, false, callErr
+	}
 	raw, err := json.Marshal(journaled(ran))
 	if err != nil {
 		return ran, false, err
@@ -763,5 +767,3 @@ func (e *objectRuntime) finish(result string, runErr error) {
 	}
 	o.sendLocked()
 }
-
-var _ orchestrator.Runtime = (*objectRuntime)(nil)

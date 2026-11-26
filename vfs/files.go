@@ -53,7 +53,7 @@ func (f Files) stat(ctx context.Context, p string) (FileInfo, []byte, error) {
 		body := []byte(text.Text())
 		st.Size = int64(len(body))
 		return st, body, nil
-	case !errors.Is(err, ErrNoCodec) && !errors.Is(err, ErrNotTextual):
+	case !errors.Is(err, ErrNoCodec) && !errors.Is(err, ErrNotTextual) && !errors.Is(err, ErrNotSupported):
 		return FileInfo{}, nil, err
 	}
 	return st, nil, nil

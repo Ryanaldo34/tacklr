@@ -39,7 +39,6 @@ type Stack struct {
 	Store     session.Store
 	Secrets   session.SecretStorage
 	Events    *sessionpg.EventLog
-	Model     tacklr.Model
 	TaskQueue string
 	LiveKey   []byte
 	// flush sends what telemetry holds and stops it.
@@ -51,11 +50,6 @@ type Stack struct {
 //	DATABASE_URL      Postgres (required)
 //	SEAL_KEY          32 bytes in base64: seals users' tokens (required)
 //	LIVE_KEY          base64: signs live delta streams (required)
-//	MODEL             the model id (required)
-//	ANTHROPIC_API_KEY the key of a Claude model, or
-//	OPENAI_API_KEY    the key of an OpenAI-compatible model (one is required)
-//	ANTHROPIC_BASE_URL, OPENAI_BASE_URL
-//	                  the model's endpoint (optional)
 //	TEMPORAL_ADDRESS  default localhost:7233
 //	TASK_QUEUE        default tacklr
 //	OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_PROTOCOL
@@ -94,10 +88,6 @@ func open(ctx context.Context) (*Stack, error) {
 	if err != nil || len(live) == 0 {
 		return nil, errors.New("LIVE_KEY must be set, in base64")
 	}
-	model, err := newModel()
-	if err != nil {
-		return nil, err
-	}
 	cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
 	if err != nil {
 		return nil, fmt.Errorf("DATABASE_URL: %w", err)
@@ -130,7 +120,6 @@ func open(ctx context.Context) (*Stack, error) {
 		Store:     db.Store(),
 		Secrets:   db.Secrets(sealer),
 		Events:    db.EventLog(),
-		Model:     model,
 		TaskQueue: cmp.Or(os.Getenv("TASK_QUEUE"), "tacklr"),
 		LiveKey:   live,
 	}, nil
@@ -146,9 +135,14 @@ func (s *Stack) Close() {
 	_ = s.flush(ctx)
 }
 
-// newModel is the model the environment names: a Claude model with
-// ANTHROPIC_API_KEY, else an OpenAI-compatible one with OPENAI_API_KEY.
-func newModel() (tacklr.Model, error) {
+// Model is the model the environment names:
+//
+//	MODEL             the model id (required)
+//	ANTHROPIC_API_KEY the key of a Claude model, or
+//	OPENAI_API_KEY    the key of an OpenAI-compatible model (one is required)
+//	ANTHROPIC_BASE_URL, OPENAI_BASE_URL
+//	                  the model's endpoint (optional)
+func Model() (tacklr.Model, error) {
 	id := os.Getenv("MODEL")
 	httpClient := &http.Client{Timeout: 5 * time.Minute}
 	switch {

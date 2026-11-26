@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"io"
 	"io/fs"
 	"path"
 	"slices"
@@ -17,16 +16,10 @@ import (
 // MaxReadFileBytes caps full-file reads and writes.
 const MaxReadFileBytes = 32 << 20 // 32 MiB
 
-// MaxLineBytes caps a single line when streaming (ReadLines) or scanning.
-const MaxLineBytes = 1 << 20 // 1 MiB
-
-// See also MaxLineScanBytes and MaxLinesPerWindow in lines.go (streaming budgets,
-// distinct from MaxReadFileBytes full-materialize cap).
-
-// filePutter is implemented by providers that can write a full object in one shot
-// (avoids S3 Open→buffer→Put double buffering).
+// filePutter is a provider that writes a whole file in one call, so
+// WriteFile needs no write handle.
 type filePutter interface {
-	PutFile(ctx context.Context, name string, r io.Reader, size int64) error
+	PutFile(ctx context.Context, name string, data []byte) error
 }
 
 // MountSession groups providers for one session. Route returns the provider
@@ -34,16 +27,15 @@ type filePutter interface {
 // Tree creates the session and mounts /workspace. The agent harness only
 // borrows the pointer.
 type MountSession struct {
-	mu      sync.Mutex
-	id      string
-	mounts  map[string]mountEntry
-	lastRev map[string]string
-	// codecs read and write the session's documents; set before the
-	// session is shared (Tree, OpenVFS.WithCodecs) and not changed after.
+	mu     sync.Mutex
+	id     string
+	mounts map[string]mountEntry
+	// codecs read the session's documents; set before the session is
+	// shared (Tree, OpenVFS.WithCodecs) and not changed after.
 	codecs *ContentRegistry
 }
 
-// Codecs is the registry the session reads and writes documents with.
+// Codecs is the registry the session reads documents with.
 func (m *MountSession) Codecs() *ContentRegistry {
 	return m.codecs
 }
@@ -51,21 +43,6 @@ func (m *MountSession) Codecs() *ContentRegistry {
 type mountEntry struct {
 	provider Provider
 	spec     MountSpec
-}
-
-func (m *MountSession) rememberRev(virtualPath, hash string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.lastRev == nil {
-		m.lastRev = map[string]string{}
-	}
-	m.lastRev[virtualPath] = hash
-}
-
-func (m *MountSession) storedRev(virtualPath string) string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.lastRev[virtualPath]
 }
 
 // NewMountSession binds a session id. Hosts use Tree.

@@ -192,8 +192,8 @@ func graphItemPath(driveID, itemID, rel string) string {
 
 // mapGraphError maps a Graph reply error to the vfs errors.
 func mapGraphError(err error) error {
-	var rerr *rest.Error
-	if !errors.As(err, &rerr) {
+	rerr, ok := errors.AsType[*rest.Error](err)
+	if !ok {
 		return err
 	}
 	switch rerr.Code {

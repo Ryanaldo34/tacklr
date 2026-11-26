@@ -282,5 +282,3 @@ func (l *EventLog) wakeAll() {
 		}
 	}
 }
-
-var _ session.EventLog = (*EventLog)(nil)

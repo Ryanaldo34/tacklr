@@ -36,7 +36,8 @@ func (e *hookEmbedder) Embed(ctx context.Context, texts []string) ([][]float32, 
 	return e.Embedder.Embed(ctx, texts)
 }
 
-// harness indexes the local mount /workspace/work into a fresh engine.
+// harness indexes the local mount /workspace/work, beside the NotIndexed
+// local mount /workspace/off, into a fresh engine.
 type harness struct {
 	dir   string
 	ms    *vfs.MountSession
@@ -49,7 +50,7 @@ type harness struct {
 func newHarness(t *testing.T, opts ...brain.EngineOption) harness {
 	t.Helper()
 	dir := t.TempDir()
-	ms := treeLocal(t, vfs.At("work", vfs.Local(dir)))
+	ms := treeLocal(t, vfs.At("work", vfs.Local(dir)), vfs.At("off", vfs.Local(t.TempDir())).NotIndexed())
 	emb := &hookEmbedder{}
 	// One text a batch: chunks embed while the file is still read.
 	store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: emb, BatchSize: 1}))

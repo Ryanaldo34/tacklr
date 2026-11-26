@@ -65,6 +65,15 @@ type CreateSession struct {
 	State map[string]any
 }
 
+// Validate reports a session no runtime can create: one that is both a
+// specialist and a worker (ErrInvalid).
+func (req CreateSession) Validate() error {
+	if req.Worker != "" && req.Specialist != "" {
+		return fmt.Errorf("%w: specialist and worker are exclusive", ErrInvalid)
+	}
+	return nil
+}
+
 // Prompt is the typed input for Runtime.Prompt.
 type Prompt struct {
 	Text        string

@@ -12,8 +12,8 @@ import (
 )
 
 // Options is the agent every session runs on model: a tool of its own
-// (lookup), a researcher specialist, and the MCP servers an ACP client names
-// for its session. The window is the model's unless the caller sets one.
+// (lookup), a researcher specialist, and the MCP servers a session's
+// creator names. The window is the model's unless the caller sets one.
 func Options(model tacklr.Model) tacklr.AgentOptions {
 	lookup := tacklr.NewTool(tacklr.ToolConfig{
 		Name:        "lookup",

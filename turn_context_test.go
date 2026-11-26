@@ -3,7 +3,6 @@ package tacklr_test
 import (
 	"context"
 	"encoding/json"
-	"slices"
 	"strings"
 	"testing"
 
@@ -12,7 +11,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/storetest"
-	"github.com/ryanaldo34/tacklr/internal/helixtest"
 	"github.com/ryanaldo34/tacklr/vfs/mount"
 )
 
@@ -77,14 +75,13 @@ func TestCallContext_givesAToolItsSessionCredentialsAndPlan(t *testing.T) {
 	}
 }
 
-// TestBrainTools_saveAndLinkFollowTheHostSchema: save describes each kind
-// it writes with its fields; link offers only the host's relations, says
-// which kinds each joins, keeps a link's role, and refuses another
-// relation or a link between other kinds.
-func TestBrainTools_saveAndLinkFollowTheHostSchema(t *testing.T) {
+// TestBrainTools_linkFollowsTheHostSchema: link keeps a link's role and
+// note, and refuses another relation, a link between other kinds, or one
+// to or from a record that does not exist.
+func TestBrainTools_linkFollowsTheHostSchema(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Graph(t)))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(brain.NewMemoryGraph(brain.MemoryGraphOptions{})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,8 +94,7 @@ func TestBrainTools_saveAndLinkFollowTheHostSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := storetest.Namespace(t, "org", uuid.NewString())
-	inner, _ := scripted(t)
-	model := &toolsSeen{Model: inner}
+	model, _ := scripted(t)
 	h := planned(t, "schema", tacklr.AgentOptions{
 		Model: model, MaxWindowSize: 100000, Brain: eng, SearchNamespace: ns,
 		BrainWriteKinds: []string{"Deal", "Person", "Memory"},
@@ -107,13 +103,6 @@ func TestBrainTools_saveAndLinkFollowTheHostSchema(t *testing.T) {
 			{Relation: "mentions"},
 		},
 	}, tacklr.Todo{Title: "record"})
-	if _, err := h.Infer(ctx, newStream(t).out); err != nil {
-		t.Fatal(err)
-	}
-	tools := map[string]*tacklr.Tool{}
-	for _, tool := range model.tools {
-		tools[tool.QualifiedName()] = tool
-	}
 	run := func(name, args string) string { return result(t, h, call("s", name, args)) }
 	id := func(out string) string {
 		var obj struct{ ID string }
@@ -137,17 +126,6 @@ func TestBrainTools_saveAndLinkFollowTheHostSchema(t *testing.T) {
 	missingTo := link(deal, uuid.NewString(), "stakeholder", "")
 	missingFrom := link(uuid.NewString(), person, "stakeholder", "")
 
-	save, linkTool := tools["save"].Description(), tools["link"].Description()
-	if !containsAll(save, "Kinds you may save:", "- Deal: An open opportunity.", "status (string, required, one of open|closed) Where it stands.", "- Person", "- Memory") {
-		t.Errorf("save description = %q, want each kind with its description and fields", save)
-	}
-	if !containsAll(linkTool, "Relations (from → to):", "- stakeholder (Deal → Person): a person on the deal", "- mentions (any → any)") {
-		t.Errorf("link description = %q, want each relation with its ends", linkTool)
-	}
-	raw, _ := json.Marshal(tools["link"].Parameters())
-	if !strings.Contains(string(raw), `"enum":["stakeholder","mentions"]`) {
-		t.Errorf("link parameters = %s, want relation to be one of the host's relations", raw)
-	}
 	if !containsAll(linked, `"linked": true`, `"role": "champion"`) || !containsAll(related, `"role": "champion"`, "pushes it internally") {
 		t.Errorf("link = %s, related = %s; want the link kept with its role and note", linked, related)
 	}
@@ -162,32 +140,5 @@ func TestBrainTools_saveAndLinkFollowTheHostSchema(t *testing.T) {
 	}
 	if !strings.Contains(missingTo, "link: to ") || !strings.Contains(missingFrom, "link: from ") {
 		t.Errorf("a link to a missing record = %q, from one = %q; want both refused", missingTo, missingFrom)
-	}
-}
-
-// toolsSeen is a model that keeps the tools of the last request it got.
-type toolsSeen struct {
-	tacklr.Model
-	tools []*tacklr.Tool
-}
-
-func (m *toolsSeen) Invoke(ctx context.Context, req tacklr.ModelRequest) (chan tacklr.LLMResponseChunk, error) {
-	m.tools = req.Tools
-	return m.Model.Invoke(ctx, req)
-}
-
-// TestRelationSpec_endsNamesTheKindsEachSideTakes covers a spec with only
-// a target kind.
-func TestRelationSpec_endsNamesTheKindsEachSideTakes(t *testing.T) {
-	t.Parallel()
-	spec := brain.RelationSpec{Relation: "about", To: []string{"Deal", "Account"}}
-	if err := spec.Ends("Email", "Deal"); err != nil {
-		t.Errorf("about from an Email to a Deal = %v, want it allowed", err)
-	}
-	if err := spec.Ends("Email", "Person"); err == nil || !strings.Contains(err.Error(), "about links to Deal or Account, not Person") {
-		t.Errorf("about to a Person = %v, want it refused", err)
-	}
-	if !slices.Equal(spec.To, []string{"Deal", "Account"}) {
-		t.Errorf("Ends changed the spec: %v", spec.To)
 	}
 }

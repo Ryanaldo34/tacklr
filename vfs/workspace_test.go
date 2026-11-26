@@ -2,8 +2,6 @@ package vfs_test
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/vfs/mount"
@@ -12,11 +10,14 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
+// TestWorkspace_listsAndReadsEachDriveFolderAtItsName: two Drive folders
+// mount under /workspace by their names, their files read there and not
+// at the old top-level path, and a shortcut to a folder walks by the
+// shortcut's name.
+func TestWorkspace_listsAndReadsEachDriveFolderAtItsName(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	api := testdrive.Tree()
-	open := testdrive.Open(t, api, nil)
+	open := testdrive.Open(t, testdrive.Tree(), nil)
 	ms, err := vfs.Tree(
 		vfs.At("contracts", open),
 		vfs.At("notes", open),
@@ -28,131 +29,54 @@ func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if ents, err := ms.Route(ctx, mount.WorkspacePoint).
-		ReadDir(ctx); err != nil || len(ents) != 2 || ents[0].Name != "contracts" || ents[1].Name != "notes" || !ents[0].IsDir {
-		t.Fatalf("ReadDir /workspace = %+v err=%v", ents, err)
-	}
+	ents, listErr := ms.Route(ctx, mount.WorkspacePoint).ReadDir(ctx)
+	nda, ndaErr := ms.Route(ctx, "/workspace/contracts/nda.pdf").ReadFile(ctx)
+	_, oldErr := ms.Route(ctx, "/contracts/nda.pdf").ReadFile(ctx)
+	note, noteErr := ms.Route(ctx, "/workspace/notes/alias/note.md").ReadFile(ctx)
 
-	if got, err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
-		ReadFile(ctx); err != nil || string(got) != "%PDF" {
-		t.Fatalf("ReadFile = %q err=%v", got, err)
+	if listErr != nil || len(ents) != 2 || ents[0].Name != "contracts" || ents[1].Name != "notes" || !ents[0].IsDir {
+		t.Fatalf("ReadDir /workspace = %+v %v", ents, listErr)
 	}
-
-	if _, err := ms.Route(ctx, "/contracts/nda.pdf").
-		ReadFile(ctx); !errors.Is(err, vfs.ErrNotMounted) {
-		t.Fatalf("old /contracts path: %v", err)
+	if ndaErr != nil || string(nda) != "%PDF" || !errors.Is(oldErr, vfs.ErrNotMounted) {
+		t.Fatalf("nda.pdf = %q %v, at the old path = %v", nda, ndaErr, oldErr)
 	}
-
-	if err := ms.Route(ctx, "/workspace/nope").
-		MkdirAll(ctx); !errors.Is(err, vfs.ErrNotSupported) {
-		t.Fatalf("mkdir alias: %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/contracts").
-		Remove(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
-		t.Fatalf("remove alias: %v", err)
+	if noteErr != nil || string(note) != "# hi\n\n" {
+		t.Fatalf("read through the shortcut = %q %v", note, noteErr)
 	}
 }
 
-// A local member writes and a read-only one refuses writes. A path in a
-// member that is not mounted is not found, and / lists the workspace.
-func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
+// TestWorkspace_aMemberThatIsNotMountedIsNotFoundAndTheRootListsTheWorkspace:
+// every call on a path of a member that is not mounted fails, as not found
+// or, for a new directory, as not supported, / lists the workspace, and
+// /workspace is a directory.
+func TestWorkspace_aMemberThatIsNotMountedIsNotFoundAndTheRootListsTheWorkspace(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	host := t.TempDir()
-	if err := os.WriteFile(filepath.Join(host, "a.txt"), []byte("one"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.Tree(
-		vfs.At("legal", vfs.Local(host)),
-		vfs.At("ro", vfs.Local(host)).ReadOnly(),
-	)(ctx, t.Name(), vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("legal", vfs.Local(t.TempDir())))(ctx, t.Name(), vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := ms.Route(ctx, "/workspace/legal/b.txt").
-		WriteFile(ctx, []byte("two")); err != nil {
-		t.Fatal(err)
+	root, rootErr := ms.Route(ctx, "/").ReadDir(ctx)
+	workspace, workspaceErr := ms.Route(ctx, "/workspace").Stat(ctx)
+	failed := map[string]error{}
+	for name, op := range routeOps {
+		failed[name] = op(ctx, ms.Route(ctx, "/workspace/missing/x"))
 	}
 
-	if got, err := ms.Route(ctx, "/workspace/legal/b.txt").
-		ReadFile(ctx); err != nil || string(got) != "two" {
-		t.Fatalf("write legal = %q err=%v", got, err)
+	if rootErr != nil || len(root) != 1 || root[0].Name != "workspace" || !root[0].IsDir {
+		t.Fatalf("list / = %+v %v, want [workspace]", root, rootErr)
 	}
-
-	if err := ms.Route(ctx, "/workspace/ro/a.txt").
-		WriteFile(ctx, []byte("nope")); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("ro write = %v", err)
+	if workspaceErr != nil || !workspace.IsDir {
+		t.Fatalf("stat /workspace = %+v %v, want a directory", workspace, workspaceErr)
 	}
-
-	if err := ms.Route(ctx, "/workspace/ro/sub").
-		MkdirAll(ctx); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("ro mkdir = %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/ro/a.txt").
-		Remove(ctx); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("ro remove = %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace").
-		MkdirAll(ctx); err != nil {
-		t.Fatalf("mkdir workspace root: %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/root.txt").
-		WriteFile(ctx, []byte("x")); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("write at workspace file = %v", err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace").
-		Open(ctx); err == nil {
-		t.Fatal("open workspace root as file")
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/missing/x").
-		Open(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("open missing = %v", err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/missing").
-		Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("stat missing member = %v", err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/missing").
-		ReadDir(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("list missing member = %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/missing/x").
-		Remove(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("remove in missing member = %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/missing/x").
-		WriteDocument(ctx, vfs.NewTextDocument("/workspace/missing/x", "text/plain", "", "x")); !errors.Is(err, vfs.ErrNotSupported) {
-		t.Fatalf("write document in missing member = %v", err)
-	}
-
-	if ents, err := ms.Route(ctx, "/").
-		ReadDir(ctx); err != nil || len(ents) != 1 || ents[0].Name != "workspace" || !ents[0].IsDir {
-		t.Fatalf("list / = %+v err=%v, want [workspace]", ents, err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace").
-		OpenDocument(ctx); err == nil {
-		t.Fatal("opendoc workspace root")
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/missing/x").
-		OpenDocument(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("opendoc missing = %v", err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/legal/a.txt").
-		OpenDocument(ctx); err != nil && !errors.Is(err, vfs.ErrNotSupported) {
-		t.Fatalf("opendoc local = %v", err)
+	for name, err := range failed {
+		want := vfs.ErrNotExist
+		if name == "mkdir" {
+			want = vfs.ErrNotSupported
+		}
+		if !errors.Is(err, want) {
+			t.Errorf("%s = %v, want %v", name, err, want)
+		}
 	}
 }

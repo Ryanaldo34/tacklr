@@ -16,8 +16,6 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-var _ brain.Store = (*Store)(nil)
-
 // Store is the Postgres brain.Store. Hosts open it with Open and inject it
 // into brain.NewEngine. Run Setup before serving; it creates whatever schema
 // is missing and is safe to run from many processes at once. It embeds with

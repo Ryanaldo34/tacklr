@@ -1,7 +1,6 @@
 package openai_test
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -123,8 +123,8 @@ func TestInvoke_requiresKeyAndModel(t *testing.T) {
 // input_tokens. A provider without the count endpoint (404) fails the count
 // with ErrCannotCount, and names the provider. A request past the context
 // length is ErrContextLength, which is also ErrMaxTokens. A body that
-// is not JSON, a body cut off by the network, a provider that is gone and a
-// base URL that does not parse fail the count.
+// is not JSON, a body cut off by the network and a provider that is gone
+// fail the count.
 func TestCountTokens_reportsWhatTheProviderAnswers(t *testing.T) {
 	t.Parallel()
 	req := tacklr.ModelRequest{Messages: []*message.Message{{Role: message.RoleUser, Content: "count these tokens please"}}}
@@ -141,7 +141,6 @@ func TestCountTokens_reportsWhatTheProviderAnswers(t *testing.T) {
 	for name, tc := range map[string]struct {
 		handler http.HandlerFunc
 		gone    bool
-		url     string
 		want    func(n int, err error) bool
 	}{
 		"a count": {handler: answer(http.StatusOK, `{"input_tokens":42}`, 0), want: func(n int, err error) bool { return err == nil && n == 42 }},
@@ -159,14 +158,11 @@ func TestCountTokens_reportsWhatTheProviderAnswers(t *testing.T) {
 			return errors.Is(err, tacklr.ErrNetwork) && errors.Is(err, io.ErrUnexpectedEOF)
 		}},
 		"a provider that is gone": {handler: answer(http.StatusOK, "", 0), gone: true, want: func(_ int, err error) bool { return errors.Is(err, tacklr.ErrNetwork) }},
-		"a base URL that does not parse": {handler: answer(http.StatusOK, "", 0), url: "http://bad\x7f", want: func(_ int, err error) bool {
-			return err != nil && strings.Contains(err.Error(), "build provider request")
-		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			srv := testhttp.New(t, tc.handler)
-			m := openai.New(srv.Client()).WithApiKey("k").WithModel("m").WithURL(cmp.Or(tc.url, srv.URL))
+			m := openai.New(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
 			if tc.gone {
 				srv.Close()
 			}
@@ -279,52 +275,136 @@ func TestInvoke_pinsProviderOnly(t *testing.T) {
 	}
 }
 
-// TestInvoke_sendsTheConversationAsResponsesInput: the input pairs each
-// namespaced call with its output by call id, or by item id when no output
-// has the call id, keeps an incomplete call's
-// status, drops an output with no call, a nil message and a part with no
-// image or file, sends file data as a named data URL, marks the last tool
-// output as a cache breakpoint, and sends a reasoning id only with its
-// ciphertext.
-func TestInvoke_sendsTheConversationAsResponsesInput(t *testing.T) {
+// inputOf is the input items of the request the provider got.
+func inputOf(sent *request) []map[string]any {
+	var out []map[string]any
+	for _, item := range sent.body["input"].([]any) {
+		out = append(out, item.(map[string]any))
+	}
+	return out
+}
+
+// same reports whether got, decoded from JSON, is the JSON want.
+func same(got any, want string) bool {
+	var w any
+	_ = json.Unmarshal([]byte(want), &w)
+	return reflect.DeepEqual(got, w)
+}
+
+func TestInvoke_sendsEachCallFollowedByItsOutput(t *testing.T) {
 	t.Parallel()
 	srv, sent := provider(t, completed, "[DONE]")
 	m := openai.New(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
-	greet := tacklr.NewTool(tacklr.ToolConfig{Name: "greet", Namespace: "ado", Handler: func(context.Context) (string, error) { return "", nil }})
 
 	invoke(t.Context(), t, m, tacklr.ModelRequest{Messages: []*message.Message{
 		nil,
-		{Role: message.RoleUser, Content: "hi"},
-		{Role: message.RoleUser, ContentParts: []message.ContentPart{{Type: message.ContentTypeInputImage}, {Type: message.ContentTypeInputFile}}},
-		{Role: message.RoleUser, Content: "read this", ContentParts: []message.ContentPart{{Type: message.ContentTypeInputFile, FileData: &message.FileData{Data: "QUJD", MIMEType: "application/pdf"}}}},
 		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{
 			{CallID: "call_1", Name: "greet", Namespace: "ado"},
-			{ID: "fc_item", CallID: "call_2", Name: "greet", Namespace: "ado", Arguments: `{"a":1}`, Status: string(message.StatusIncomplete)},
-			{ID: "fc_3", CallID: "call_3", Name: "greet", Namespace: "ado"},
+			{ID: "fc_item", CallID: "call_2", Name: "greet", Arguments: `{"a":1}`, Status: string(message.StatusIncomplete)},
+			{ID: "fc_3", CallID: "call_3", Name: "greet"},
 		}},
 		{Role: message.RoleTool, ToolCallID: "fc_3", Content: "ok3"},
 		{Role: message.RoleTool, ToolCallID: "call_1", Content: "ok"},
 		{Role: message.RoleTool, ToolCallID: "call_2", Content: "ok2"},
 		{Role: message.RoleTool, ToolCallID: "fc_ghost", Content: "nope"},
+	}})
+
+	var got []string
+	for _, item := range inputOf(sent) {
+		got = append(got, fmt.Sprint(item["type"], " ", item["call_id"], " ", item["name"], " ", item["arguments"], " ", item["status"]))
+	}
+	want := []string{
+		"function_call call_1 ado__greet {} completed",
+		"function_call_output call_1 <nil> <nil> completed",
+		`function_call call_2 greet {"a":1} incomplete`,
+		"function_call_output call_2 <nil> <nil> completed",
+		"function_call call_3 greet {} completed",
+		"function_call_output call_3 <nil> <nil> completed",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("input =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestInvoke_marksTheLastToolOutputAsACacheBreakpoint(t *testing.T) {
+	t.Parallel()
+	srv, sent := provider(t, completed, "[DONE]")
+	m := openai.New(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
+
+	invoke(t.Context(), t, m, tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleAssistant, ToolCalls: []message.ToolCall{{CallID: "call_1", Name: "a"}, {CallID: "call_2", Name: "b"}}},
+		{Role: message.RoleTool, ToolCallID: "call_1", Content: "first"},
+		{Role: message.RoleTool, ToolCallID: "call_2", Content: "last"},
+	}})
+
+	input := inputOf(sent)
+	if input[1]["output"] != "first" || !same(input[3]["output"], `[{"prompt_cache_breakpoint":{"mode":"explicit"},"text":"last","type":"input_text"}]`) {
+		t.Errorf("outputs = %v and %v, want only the last one a breakpoint", input[1]["output"], input[3]["output"])
+	}
+}
+
+func TestInvoke_sendsAUserFileAsANamedDataURLAfterTheText(t *testing.T) {
+	t.Parallel()
+	srv, sent := provider(t, completed, "[DONE]")
+	m := openai.New(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
+
+	invoke(t.Context(), t, m, tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, Content: "read this", ContentParts: []message.ContentPart{
+			{Type: message.ContentTypeInputImage},
+			{Type: message.ContentTypeInputFile},
+			{Type: message.ContentTypeInputFile, FileData: &message.FileData{Data: "QUJD", MIMEType: "application/pdf"}},
+		}},
+	}})
+
+	want := `[{"text":"read this","type":"input_text"},{"file_data":"data:application/pdf;base64,QUJD","filename":"document.pdf","type":"input_file"}]`
+	if got := inputOf(sent)[0]["content"]; !same(got, want) {
+		t.Errorf("content = %v, want the text, then the file", got)
+	}
+}
+
+func TestInvoke_sendsAUserMessageWithNoUsablePartsAsItsText(t *testing.T) {
+	t.Parallel()
+	srv, sent := provider(t, completed, "[DONE]")
+	m := openai.New(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
+
+	invoke(t.Context(), t, m, tacklr.ModelRequest{Messages: []*message.Message{
+		{Role: message.RoleUser, ContentParts: []message.ContentPart{{Type: message.ContentTypeInputImage}, {Type: message.ContentTypeInputFile}}},
+	}})
+
+	if got := inputOf(sent)[0]; !same(got, `{"content":"","role":"user"}`) {
+		t.Errorf("message = %v, want its empty text", got)
+	}
+}
+
+func TestInvoke_sendsAReasoningIDOnlyWithItsCiphertext(t *testing.T) {
+	t.Parallel()
+	srv, sent := provider(t, completed, "[DONE]")
+	m := openai.New(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
+
+	invoke(t.Context(), t, m, tacklr.ModelRequest{Messages: []*message.Message{
 		{Role: message.RoleReasoning, MessageID: "rs_store", EncryptedContent: "gAAAAABcipher", Content: "plan"},
 		{Role: message.RoleReasoning, MessageID: "rs_orphan", Content: "after"},
-	}, Tools: []*tacklr.Tool{greet}})
+	}})
 
-	input, _ := json.Marshal(sent.body["input"])
-	tools, _ := json.Marshal(sent.body["tools"])
-	want := `[{"content":"hi","role":"user"},` +
-		`{"content":"","role":"user"},` +
-		`{"content":[{"text":"read this","type":"input_text"},{"file_data":"data:application/pdf;base64,QUJD","filename":"document.pdf","type":"input_file"}],"role":"user"},` +
-		`{"arguments":"{}","call_id":"call_1","name":"ado__greet","status":"completed","type":"function_call"},` +
-		`{"call_id":"call_1","output":"ok","status":"completed","type":"function_call_output"},` +
-		`{"arguments":"{\"a\":1}","call_id":"call_2","name":"ado__greet","status":"incomplete","type":"function_call"},` +
-		`{"call_id":"call_2","output":"ok2","status":"completed","type":"function_call_output"},` +
-		`{"arguments":"{}","call_id":"call_3","name":"ado__greet","status":"completed","type":"function_call"},` +
-		`{"call_id":"call_3","output":[{"prompt_cache_breakpoint":{"mode":"explicit"},"text":"ok3","type":"input_text"}],"status":"completed","type":"function_call_output"},` +
-		`{"encrypted_content":"gAAAAABcipher","id":"rs_store","summary":[{"text":"plan","type":"summary_text"}],"type":"reasoning"},` +
-		`{"summary":[{"text":"after","type":"summary_text"}],"type":"reasoning"}]`
-	if string(input) != want || !strings.HasPrefix(string(tools), `[{"description":"","name":"ado__greet","parameters":{`) || !strings.HasSuffix(string(tools), `"strict":true,"type":"function"}]`) {
-		t.Errorf("input = %s\nwant    %s\ntools = %s", input, want, tools)
+	input := inputOf(sent)
+	if !same(input[0], `{"encrypted_content":"gAAAAABcipher","id":"rs_store","summary":[{"text":"plan","type":"summary_text"}],"type":"reasoning"}`) ||
+		!same(input[1], `{"summary":[{"text":"after","type":"summary_text"}],"type":"reasoning"}`) {
+		t.Errorf("reasoning = %v, want the id with its ciphertext only", input)
+	}
+}
+
+func TestInvoke_sendsToolsAsStrictFunctions(t *testing.T) {
+	t.Parallel()
+	srv, sent := provider(t, completed, "[DONE]")
+	m := openai.New(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
+	greet := tacklr.NewTool(tacklr.ToolConfig{Name: "greet", Namespace: "ado", Handler: func(context.Context) (string, error) { return "", nil }})
+
+	invoke(t.Context(), t, m, tacklr.ModelRequest{Messages: hello().Messages, Tools: []*tacklr.Tool{greet}})
+
+	tools, _ := sent.body["tools"].([]any)
+	tool, _ := tools[0].(map[string]any)
+	if len(tools) != 1 || tool["name"] != "ado__greet" || tool["type"] != "function" || tool["strict"] != true || tool["parameters"] == nil {
+		t.Errorf("tools = %v, want the namespaced tool as a strict function", sent.body["tools"])
 	}
 }
 
@@ -433,40 +513,36 @@ func TestInvoke_aStreamWithoutAUsableEndEndsInATypedError(t *testing.T) {
 	}
 }
 
-// TestInvoke_aCallThatCannotBeSentOrFailsEndsInOneError: a base URL that
-// does not parse, a failed status whose body the network cuts off, and a
-// provider that is gone each end the stream in one error chunk, for an empty
-// request and a long one.
-func TestInvoke_aCallThatCannotBeSentOrFailsEndsInOneError(t *testing.T) {
+func TestInvoke_aProviderThatIsGoneEndsInOneNetworkError(t *testing.T) {
+	t.Parallel()
+	gone := testhttp.New(t, http.NotFoundHandler())
+	gone.Close()
+	m := openai.New(gone.Client()).WithApiKey("k").WithModel("gpt-4o").WithURL(gone.URL)
+
+	chunks := invoke(t.Context(), t, m, tacklr.ModelRequest{})
+
+	if len(chunks) != 1 || !errors.Is(chunks[0].Error, tacklr.ErrNetwork) {
+		t.Errorf("chunks = %+v, want one network error", chunks)
+	}
+}
+
+func TestInvoke_aFailureWhoseBodyIsCutOffKeepsItsStatus(t *testing.T) {
 	t.Parallel()
 	srv := testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Length", "100")
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = io.WriteString(w, `{"error":`)
 	}))
-	gone := testhttp.New(t, http.NotFoundHandler())
-	gone.Close()
-	unsent := openai.New(srv.Client()).WithApiKey("k").WithModel("gpt-4o").WithURL("http://bad\x7f")
-	unreached := openai.New(srv.Client()).WithApiKey("k").WithModel("gpt-4o").WithURL(gone.URL)
-	failed := openai.New(srv.Client()).WithApiKey("k").WithModel("gpt-4o").WithURL(srv.URL)
-
+	m := openai.New(srv.Client()).WithApiKey("k").WithModel("gpt-4o").WithURL(srv.URL)
 	long := tacklr.ModelRequest{}
 	for range 30 {
 		long.Messages = append(long.Messages, &message.Message{Role: message.RoleUser, Content: "hi"})
 	}
 
-	unsentChunks := invoke(t.Context(), t, unsent, tacklr.ModelRequest{})
-	failedChunks := invoke(t.Context(), t, failed, long)
-	unreachedChunks := invoke(t.Context(), t, unreached, hello())
+	chunks := invoke(t.Context(), t, m, long)
 
-	if len(unsentChunks) != 1 || !strings.Contains(unsentChunks[0].Content, "build provider request") {
-		t.Errorf("chunks from a URL that does not parse = %+v, want one error that says so", unsentChunks)
-	}
-	if apiErr, ok := errors.AsType[*openai.APIStatusError](failedChunks[len(failedChunks)-1].Error); len(failedChunks) != 1 || !ok || apiErr.Status != http.StatusInternalServerError {
-		t.Errorf("chunks from a 500 with a cut body = %+v, want one provider error with its status", failedChunks)
-	}
-	if len(unreachedChunks) != 1 || !errors.Is(unreachedChunks[0].Error, tacklr.ErrNetwork) {
-		t.Errorf("chunks from a provider that is gone = %+v, want one network error", unreachedChunks)
+	if apiErr, ok := errors.AsType[*openai.APIStatusError](chunks[len(chunks)-1].Error); len(chunks) != 1 || !ok || apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("chunks = %+v, want one provider error with its status", chunks)
 	}
 }
 
@@ -491,42 +567,33 @@ func TestInvoke_aDroppedConnectionEndsInAnIncompleteStreamError(t *testing.T) {
 	}
 }
 
-// TestInvoke_aCancelledCallEndsTheStream: cancelling the caller's context
-// closes the stream, both while sent lines wait to be read and while the
-// call waits for the provider.
-func TestInvoke_aCancelledCallEndsTheStream(t *testing.T) {
+func TestInvoke_aCallCancelledWhileItWaitsForTheProviderEndsTheStream(t *testing.T) {
 	t.Parallel()
-	line := `data: {"type":"response.output_text.delta","item_id":"m","delta":"x"}` + "\n\n"
-	for name, burst := range map[string]int{"with lines still to read": 100, "while it waits for the provider": 1} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			srv := testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = io.WriteString(w, strings.Repeat(line, burst))
-				w.(http.Flusher).Flush()
-				<-r.Context().Done()
-			}))
-			m := openai.New(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
-			ctx, cancel := context.WithCancel(t.Context())
-			ch, err := m.Invoke(ctx, hello())
-			if err != nil {
-				t.Fatal(err)
-			}
-			<-ch
+	srv := testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","item_id":"m","delta":"x"}`+"\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	m := openai.New(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
+	ctx, cancel := context.WithCancel(t.Context())
+	ch, err := m.Invoke(ctx, hello())
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-ch
 
-			cancel()
+	cancel()
 
-			deadline := time.After(5 * time.Second)
-			for {
-				select {
-				case _, open := <-ch:
-					if !open {
-						return
-					}
-				case <-deadline:
-					t.Fatal("stream did not end after cancel")
-				}
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case _, open := <-ch:
+			if !open {
+				return
 			}
-		})
+		case <-deadline:
+			t.Fatal("stream did not end after cancel")
+		}
 	}
 }

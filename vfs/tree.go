@@ -120,7 +120,7 @@ func Tree(members ...Member) OpenVFS {
 			if cs, ok := p.(codecSource); ok {
 				ms.codecs = ms.codecs.adding(cs.codecs())
 			}
-			writable := memberWritable(m, b)
+			writable := memberWritable(m, b, p)
 			params := maps.Clone(b.Params)
 			if params == nil {
 				params = map[string]string{}
@@ -141,8 +141,15 @@ func Tree(members ...Member) OpenVFS {
 	}
 }
 
-func memberWritable(m Member, b mount.Binding) bool {
-	if strings.TrimSpace(b.Auth.Token) != "" {
+// userOwned is a provider of a user's own cloud folder (Drive, Graph),
+// whose mount takes writes only when its binding is Writable.
+type userOwned interface{ userOwned() }
+
+// memberWritable reports whether m's mount takes writes: a user's folder
+// (a user-owned provider, or a binding with a token) when its binding is
+// Writable, and a host member unless it is ReadOnly.
+func memberWritable(m Member, b mount.Binding, p Provider) bool {
+	if _, ok := p.(userOwned); ok || strings.TrimSpace(b.Auth.Token) != "" {
 		return b.Writable
 	}
 	return !m.readOnly

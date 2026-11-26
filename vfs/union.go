@@ -23,9 +23,6 @@ type unionProvider struct {
 // Tree(At("skills", Union(...))) when skills live on the workspace.
 func Union(opens ...Open) Open {
 	return func(ctx context.Context, sessionID string, b mount.Binding) (Provider, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
 		if len(opens) == 0 {
 			return nil, fmt.Errorf("vfs: Union requires members")
 		}
@@ -58,51 +55,36 @@ func (p unionProvider) Validate(ctx context.Context) error {
 }
 
 func (p unionProvider) Stat(ctx context.Context, name string) (FileInfo, error) {
-	rel, err := cleanRel(name)
-	if err != nil {
-		return FileInfo{}, err
-	}
-	if rel == "" {
+	if name == "" {
 		return FileInfo{Name: ".", Mode: fs.ModeDir | 0o755, IsDir: true}, nil
 	}
-	m, err := p.owner(ctx, rel)
+	m, err := p.owner(ctx, name)
 	if err != nil {
 		return FileInfo{}, err
 	}
-	return m.Stat(ctx, rel)
+	return m.Stat(ctx, name)
 }
 
 func (p unionProvider) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error) {
 	if openWrites(flag) {
 		return nil, ErrReadOnly
 	}
-	rel, err := cleanRel(name)
+	m, err := p.owner(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	if rel == "" {
-		return nil, fmt.Errorf("vfs: cannot open mount root as file")
-	}
-	m, err := p.owner(ctx, rel)
-	if err != nil {
-		return nil, err
-	}
-	return m.OpenFile(ctx, rel, flag, perm)
+	return m.OpenFile(ctx, name, flag, perm)
 }
 
 func (p unionProvider) ReadDir(ctx context.Context, name string) ([]DirEntry, error) {
-	rel, err := cleanRel(name)
-	if err != nil {
-		return nil, err
-	}
-	if rel == "" {
+	if name == "" {
 		return p.mergeRoot(ctx)
 	}
-	m, err := p.owner(ctx, rel)
+	m, err := p.owner(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	return m.ReadDir(ctx, rel)
+	return m.ReadDir(ctx, name)
 }
 
 func (p unionProvider) Remove(context.Context, string) error {
@@ -114,14 +96,7 @@ func (p unionProvider) MkdirAll(context.Context, string, fs.FileMode) error {
 }
 
 func (p unionProvider) OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error) {
-	rel, err := cleanRel(name)
-	if err != nil {
-		return nil, err
-	}
-	if rel == "" {
-		return nil, fmt.Errorf("vfs: cannot open mount root as file")
-	}
-	m, err := p.owner(ctx, rel)
+	m, err := p.owner(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -129,11 +104,7 @@ func (p unionProvider) OpenDocument(ctx context.Context, name string, reg *Conte
 	if !ok {
 		return nil, ErrNotSupported
 	}
-	return db.OpenDocument(ctx, rel, reg)
-}
-
-func (p unionProvider) WriteDocument(context.Context, string, Document, *ContentRegistry) error {
-	return ErrReadOnly
+	return db.OpenDocument(ctx, name, reg)
 }
 
 func (p unionProvider) mergeRoot(ctx context.Context) ([]DirEntry, error) {

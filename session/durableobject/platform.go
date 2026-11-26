@@ -62,13 +62,6 @@ type Ref interface {
 	Jobs(ctx context.Context) ([]session.ID, error)
 	Head(ctx context.Context) (session.Seq, error)
 	Subscribe(ctx context.Context, after session.Seq) (session.Subscription, error)
-	// Wire is the wire state a protocol server keeps with the session
-	// (the payload of server.ProtocolWireStore). It is session.ErrNotFound
-	// when the object holds no session, or no wire state.
-	Wire(ctx context.Context) ([]byte, error)
-	// SetWire replaces the session's wire state; nil deletes it. A close
-	// of the session deletes it too.
-	SetWire(ctx context.Context, raw []byte) error
 }
 
 // Platform reaches session objects by id. An object starts on first use.

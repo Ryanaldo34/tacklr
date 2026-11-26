@@ -35,23 +35,23 @@ type Node struct {
 
 // FX is an in-memory Drive tree that speaks Drive v3, Docs, and Sheets HTTP.
 type FX struct {
-	mu      sync.Mutex
-	Nodes   map[string]*Node
-	Exports int
-	faults  []*Fault
-	seq     int
+	mu     sync.Mutex
+	nodes  map[string]*Node
+	faults []*Fault
+	seq    int
 
-	docs  map[string]*vfs.DocsSnapshot
-	books *vfs.MemorySheets
+	// docs and books are the documents.get and spreadsheets.get replies,
+	// as JSON values.
+	docs  map[string]any
+	books map[string]any
 	mux   *http.ServeMux
 }
 
 // Fault is one planned failure of a call to the fixture.
 type Fault struct {
 	// Call is the API method that fails: files.get, files.media,
-	// files.list, files.export, files.create, files.update, documents.get,
-	// documents.batchUpdate, spreadsheets.get, spreadsheets.batchUpdate or
-	// spreadsheets.values.batchUpdate.
+	// files.list, files.export, files.create, files.update, documents.get
+	// or spreadsheets.get.
 	Call string
 	// ID is the file, document or spreadsheet the call names (the folder
 	// for files.list). An empty ID matches every call.
@@ -73,9 +73,9 @@ type Fault struct {
 // New returns an empty fixture.
 func New() *FX {
 	d := &FX{
-		Nodes: make(map[string]*Node),
-		docs:  make(map[string]*vfs.DocsSnapshot),
-		books: vfs.NewMemorySheets(),
+		nodes: make(map[string]*Node),
+		docs:  make(map[string]any),
+		books: make(map[string]any),
 	}
 	d.mux = d.routes()
 	return d
@@ -100,7 +100,7 @@ func Tree() *FX {
 		TargetID: "sub", TargetMime: folderMIME,
 	}, nil)
 	d.Add("root-a", vfs.DriveMeta{ID: "huge", Name: "huge.bin", MimeType: "application/octet-stream", Size: int64(vfs.MaxReadFileBytes) + 1}, nil)
-	d.Nodes["huge"].Body, d.Nodes["huge"].Meta.MD5 = hugeBody()
+	d.nodes["huge"].Body, d.nodes["huge"].Meta.MD5 = hugeBody()
 	return d
 }
 
@@ -124,7 +124,20 @@ func (d *FX) Add(parent string, meta vfs.DriveMeta, body []byte) {
 	}
 	meta.IsDir = meta.MimeType == folderMIME
 	meta.MD5 = checksum(meta.MimeType, body)
-	d.Nodes[meta.ID] = &Node{Meta: meta, Parent: parent, Body: append([]byte(nil), body...)}
+	d.nodes[meta.ID] = &Node{Meta: meta, Parent: parent, Body: append([]byte(nil), body...)}
+}
+
+// Edit changes the node id with fn, as another Drive client would. It
+// fails t when there is no such node.
+func (d *FX) Edit(t testing.TB, id string, fn func(*Node)) {
+	t.Helper()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n, ok := d.nodes[id]
+	if !ok {
+		t.Fatalf("testdrive: no node %q", id)
+	}
+	fn(n)
 }
 
 // checksum is Drive's md5Checksum: set for files with bytes, never for
@@ -184,7 +197,6 @@ func (d *FX) routes() *http.ServeMux {
 		})
 	}
 	file := func(r *http.Request) string { return r.PathValue("id") }
-	rpc := func(r *http.Request) string { id, _, _ := strings.Cut(r.PathValue("rpc"), ":"); return id }
 	parent := func(r *http.Request) string { return listQuery(r).parent }
 	none := func(*http.Request) string { return "" }
 
@@ -196,10 +208,7 @@ func (d *FX) routes() *http.ServeMux {
 	handle("PATCH /drive/v3/files/{id}", "files.update", file, d.withNode(d.servePatch))
 	handle("PATCH /upload/drive/v3/files/{id}", "files.update", file, d.withNode(d.servePatch))
 	handle("GET /v1/documents/{id}", "documents.get", file, d.serveDocsGet)
-	handle("POST /v1/documents/{rpc}", "documents.batchUpdate", rpc, d.serveDocsBatch)
 	handle("GET /v4/spreadsheets/{id}", "spreadsheets.get", file, d.serveSheetsGet)
-	handle("POST /v4/spreadsheets/{id}/values:batchUpdate", "spreadsheets.values.batchUpdate", file, d.serveSheetsValues)
-	handle("POST /v4/spreadsheets/{rpc}", "spreadsheets.batchUpdate", rpc, d.serveSheetsBatch)
 	return mux
 }
 
@@ -236,7 +245,7 @@ func (d *FX) fault(w http.ResponseWriter, call, id string) bool {
 // with the node.
 func (d *FX) withNode(h func(http.ResponseWriter, *http.Request, *Node)) func(http.ResponseWriter, *http.Request, string) {
 	return func(w http.ResponseWriter, r *http.Request, id string) {
-		n, ok := d.Nodes[id]
+		n, ok := d.nodes[id]
 		if !ok {
 			writeDriveErr(w, http.StatusNotFound, "not found")
 			return
@@ -260,7 +269,7 @@ func listQuery(r *http.Request) fileQuery {
 func (d *FX) serveList(w http.ResponseWriter, r *http.Request, parent string) {
 	name := listQuery(r).name
 	var nodes []*Node
-	for _, n := range d.Nodes {
+	for _, n := range d.nodes {
 		if n.Parent == parent && (name == "" || n.Meta.Name == name) {
 			nodes = append(nodes, n)
 		}
@@ -292,15 +301,13 @@ func (d *FX) serveGet(w http.ResponseWriter, r *http.Request, n *Node) {
 }
 
 func (d *FX) serveExport(w http.ResponseWriter, _ *http.Request, n *Node) {
-	d.Exports++
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Length", strconv.Itoa(len(n.Export)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(n.Export)
 }
 
-// serveCreate answers files.create. A new Google Doc or Sheet starts empty
-// in the Docs and Sheets state.
+// serveCreate answers files.create.
 func (d *FX) serveCreate(w http.ResponseWriter, r *http.Request, _ string) {
 	meta, media := readDriveUpload(r)
 	name, _ := meta["name"].(string)
@@ -320,7 +327,7 @@ func (d *FX) serveCreate(w http.ResponseWriter, r *http.Request, _ string) {
 			IsDir: mimeType == folderMIME, MD5: checksum(mimeType, media),
 		},
 	}
-	d.Nodes[id] = n
+	d.nodes[id] = n
 	writeDriveJSON(w, http.StatusOK, fileJSON(n))
 }
 
@@ -328,7 +335,7 @@ func (d *FX) serveCreate(w http.ResponseWriter, r *http.Request, _ string) {
 func (d *FX) servePatch(w http.ResponseWriter, r *http.Request, n *Node) {
 	meta, media := readDriveUpload(r)
 	if trashed, _ := meta["trashed"].(bool); trashed {
-		delete(d.Nodes, n.Meta.ID)
+		delete(d.nodes, n.Meta.ID)
 		writeDriveJSON(w, http.StatusOK, fileJSON(n))
 		return
 	}

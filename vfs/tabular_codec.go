@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"encoding/csv"
 	"fmt"
 	"path"
 	"strconv"
@@ -14,14 +13,13 @@ import (
 	"golang.org/x/net/html"
 )
 
-// SheetNormalizer converts a workbook format to and from []Sheet.
+// SheetNormalizer converts a workbook format to []Sheet.
 type SheetNormalizer interface {
 	DecodeSheets(ctx context.Context, path, mediaType string, data []byte) ([]Sheet, []NamedRange, error)
-	EncodeSheets(ctx context.Context, sheets []Sheet, named []NamedRange) ([]byte, error)
 }
 
 // TabularCodec adapts a SheetNormalizer to the VFS codec registry.
-// Decode yields a grid checkout. Encode writes native bytes (xlsx, …).
+// Decode yields a grid checkout.
 type TabularCodec struct {
 	Types      []string
 	Normalizer SheetNormalizer
@@ -49,41 +47,6 @@ func (c TabularCodec) Decode(ctx context.Context, virtualPath, mediaType string,
 	return adoptTabularDocument(virtualPath, mediaType, sheets, named)
 }
 
-func (c TabularCodec) Encode(ctx context.Context, doc Document) ([]byte, error) {
-	if c.Normalizer == nil {
-		return nil, fmt.Errorf("vfs: sheet normalizer required")
-	}
-	g, ok := AsGrid(doc)
-	if !ok {
-		return nil, ErrNotTextual
-	}
-	return c.Normalizer.EncodeSheets(ctx, g.Sheets(), g.NamedRanges())
-}
-
-func (c TabularCodec) Create(virtualPath, mediaType string, mut Mutation) (Document, error) {
-	if mediaType == "" && len(c.Types) > 0 {
-		mediaType = c.Types[0]
-	}
-	title := strings.TrimSuffix(path.Base(virtualPath), path.Ext(virtualPath))
-	if title == "" || title == "." {
-		title = "Sheet1"
-	}
-	var sheets []Sheet
-	if mut.Blocks != nil {
-		sheets = sheetsFromBlocks(mut.Blocks, title)
-	} else {
-		body := ""
-		if mut.Content != nil {
-			body = *mut.Content
-		}
-		if looksLikeHTML(body) {
-			return nil, fmt.Errorf("vfs: HTML content is not accepted; use blocks")
-		}
-		sheets = liftTabular(title, body)
-	}
-	return adoptTabularDocument(virtualPath, mediaType, sheets, nil)
-}
-
 // SheetsHTML decodes Google Sheets HTML ZIP export (Drive RO).
 type SheetsHTML struct{}
 
@@ -93,10 +56,6 @@ func (SheetsHTML) DecodeSheets(_ context.Context, _, _ string, data []byte) ([]S
 		return nil, nil, err
 	}
 	return sheets, nil, nil
-}
-
-func (SheetsHTML) EncodeSheets(context.Context, []Sheet, []NamedRange) ([]byte, error) {
-	return nil, ErrNotSupported
 }
 
 func sheetsTabularCodec() TabularCodec {
@@ -112,10 +71,6 @@ func (SheetsCodec) MediaTypes() []string {
 
 func (SheetsCodec) Decode(ctx context.Context, virtualPath, mediaType string, data []byte) (Document, error) {
 	return sheetsTabularCodec().Decode(ctx, virtualPath, mediaType, data)
-}
-
-func (SheetsCodec) Create(path, mediaType string, mut Mutation) (Document, error) {
-	return sheetsTabularCodec().Create(path, mediaType, mut)
 }
 
 func decodeSheetsHTML(data []byte) ([]Sheet, error) {
@@ -306,59 +261,4 @@ func firstHTMLTitle(n *html.Node) string {
 		}
 	}
 	return ""
-}
-
-func liftTabular(title, body string) []Sheet {
-	grid := parseDelimited(body)
-	sh := Sheet{Title: title, Cells: cellsFromStrings(grid)}
-	trimSheet(&sh)
-	return []Sheet{sh}
-}
-
-func parseDelimited(body string) [][]string {
-	body = strings.TrimRight(body, "\r\n")
-	if body == "" {
-		return nil
-	}
-	comma := ','
-	if strings.Contains(body, "\t") {
-		comma = '\t'
-	}
-	r := csv.NewReader(strings.NewReader(body))
-	r.Comma = comma
-	r.LazyQuotes = true
-	r.FieldsPerRecord = -1
-	// With LazyQuotes, a free field count and a strings.Reader, ReadAll
-	// cannot fail.
-	rows, _ := r.ReadAll()
-	return padStringGrid(rows)
-}
-
-// sheetsFromBlocks lifts the sheet blocks. fallback (never empty) titles a
-// block without a title or ID, and the one sheet when there are no sheet blocks.
-func sheetsFromBlocks(blocks []Block, fallback string) []Sheet {
-	out := make([]Sheet, 0, len(blocks))
-	for _, b := range blocks {
-		if b.Kind != "" && b.Kind != BlockKindSheet {
-			continue
-		}
-		title := blockAttr(b, "title")
-		if title == "" {
-			title = b.ID
-		}
-		if title == "" {
-			title = fallback
-		}
-		sh := Sheet{
-			ID:    blockAttr(b, "sheet_id"),
-			Title: title,
-			Cells: cellsFromStrings(parseToolTSV(b.Text)),
-		}
-		trimSheet(&sh)
-		out = append(out, sh)
-	}
-	if len(out) == 0 {
-		out = []Sheet{{Title: fallback}}
-	}
-	return out
 }

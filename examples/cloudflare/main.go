@@ -1,9 +1,9 @@
 //go:build js && wasm
 
 // Command cloudflare is an example Worker that runs Tacklr sessions as
-// Durable Objects, and serves ACP over WebSocket from a connection object
-// for each socket. Build it with worker/build.sh and run it with wrangler;
-// see README.md.
+// Durable Objects, and serves the examples' backend (examples/backend) over
+// them. Build it with worker/build.sh and run it with wrangler; see
+// README.md.
 package main
 
 import (
@@ -15,9 +15,8 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/anthropic"
-	"github.com/ryanaldo34/tacklr/examples/host"
+	"github.com/ryanaldo34/tacklr/examples/backend"
 	"github.com/ryanaldo34/tacklr/openai"
-	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/durableobject"
 	"github.com/ryanaldo34/tacklr/session/durableobject/cloudflare"
@@ -25,17 +24,15 @@ import (
 
 func main() {
 	cloudflare.Serve(cloudflare.App{
-		Sessions:    "SESSIONS",
-		Connections: "CONNECTIONS",
-		Config:      config,
-		// The same ACP server as the Temporal example's host. Each
-		// session's object keeps its ACP wire state.
-		Server: func(env cloudflare.Env, c *durableobject.Client) (*server.Server, error) {
+		Sessions: "SESSIONS",
+		Config:   config,
+		// The same backend as the Temporal example's.
+		Handler: func(env cloudflare.Env, c *durableobject.Client) (http.Handler, error) {
 			token := env.String("API_TOKEN")
 			if token == "" {
 				return nil, errors.New("API_TOKEN is not set")
 			}
-			return host.New(c, newModel(env), c.WireStore(), token), nil
+			return backend.New(c, token), nil
 		},
 	})
 }

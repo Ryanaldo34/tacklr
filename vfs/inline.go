@@ -79,15 +79,6 @@ func (b Block) PlainText() string {
 	return PlainInline(b.Text)
 }
 
-// inlineRuns is the marked runs of a text block. Callers never pass an image
-// or a table block: those have no inline marks.
-func (b Block) inlineRuns() []Run {
-	if len(b.Runs) > 0 {
-		return b.Runs
-	}
-	return ParseInline(b.Text)
-}
-
 func normalizeInline(b *Block) {
 	if b == nil || b.Kind == BlockKindImage {
 		return
@@ -244,7 +235,7 @@ func escapeInline(s string) string {
 	}
 	var b strings.Builder
 	b.Grow(len(s) + 4)
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		switch s[i] {
 		case '\\', '*', '_', '~', '[', ']':
 			b.WriteByte('\\')

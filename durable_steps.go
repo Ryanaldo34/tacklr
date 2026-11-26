@@ -77,15 +77,7 @@ func (a *Harness) Infer(ctx context.Context, out chan session.Event) (Reply, err
 	if afterTools {
 		turnCtx = telemetry.ContextWithAfterTools(ctx)
 	}
-	events, err := a.invokeTurn(turnCtx)
-	if err != nil {
-		outErr := fmt.Errorf("model request failed: %w", err)
-		if afterTools {
-			outErr = fmt.Errorf("%w: %w", ErrModelAfterTools, err)
-		}
-		out <- session.Event{Type: session.EventError, Error: outErr}
-		return Reply{}, outErr
-	}
+	events := a.invokeTurn(turnCtx)
 	asm := newStreamAssembler()
 	var reply []*message.Message
 	var toolCalls []message.ToolCall
@@ -204,12 +196,12 @@ func (a *Harness) executeToolCall(ctx context.Context, cc *CallContext, out chan
 		ArgsJSON:    tc.Arguments,
 		CallContext: cc,
 	})
-	var parked Interrupt
-	if err != nil && !errors.As(err, &parked) && errors.Is(err, ErrAuthExpired) {
+	if _, isParked := errors.AsType[Interrupt](err); err != nil && !isParked && errors.Is(err, ErrAuthExpired) {
 		err = cc.park(&AuthExpired{Tool: tc.Name})
 	}
+	parked, isParked := errors.AsType[Interrupt](err)
 	switch {
-	case errors.As(err, &parked):
+	case isParked:
 		serialized, _ := parked.Serialize()
 		data, _ := json.Marshal(map[string]any{
 			"interruptId": c.Key(),

@@ -45,3 +45,21 @@ func TestApplyAuth_dropsRebindsAndGivesTheTurnTheTokenOfEachRecipe(t *testing.T)
 		t.Fatalf("bindings = %+v, want docs with tok-2, its folder and writable", binds)
 	}
 }
+
+// TestBindingsForTurn_bindsOnlyTheRecipesWhoseProviderHasAToken: a recipe
+// whose provider brought no token this turn gets no binding, and one
+// without params gets just its name.
+func TestBindingsForTurn_bindsOnlyTheRecipesWhoseProviderHasAToken(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	recipes := []session.MountRecipe{{Provider: "gdrive", Alias: "docs"}, {Provider: "s3", Alias: "bucket"}}
+	auth := session.AuthContext{Bindings: []mount.Binding{{Provider: "gdrive", Auth: mount.Credential{Token: "tok"}}}}
+
+	// Act
+	binds := BindingsForTurn(recipes, auth)
+
+	// Assert
+	if len(binds) != 1 || binds[0].Alias() != "docs" || binds[0].Auth.Token != "tok" || len(binds[0].Params) != 1 {
+		t.Fatalf("bindings = %+v, want docs alone, with its name and the token", binds)
+	}
+}

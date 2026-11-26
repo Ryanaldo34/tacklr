@@ -2,8 +2,6 @@ package testdrive
 
 import (
 	"cmp"
-	"context"
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,63 +13,33 @@ import (
 
 // SeedSheet sets spreadsheets.get state for id.
 func (d *FX) SeedSheet(id string, snap vfs.SheetsSnapshot) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.books.Seed(id, snap)
+	d.SeedSheetJSON(id, spreadsheetJSON(snap))
 }
 
-// SheetSnap is a copy of the seeded workbook (CAS / out-of-band mutation tests).
-func (d *FX) SheetSnap(id string) vfs.SheetsSnapshot {
+// SeedSheetJSON sets the spreadsheets.get reply for id to book, a JSON
+// value as the Sheets API sends it.
+func (d *FX) SeedSheetJSON(id string, book any) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	s, _ := d.books.Get(context.Background(), id) // MemorySheets fails only on a done context
-	return s
+	d.books[id] = book
 }
 
+// serveSheetsGet answers spreadsheets.get. A Sheet that was not seeded is
+// empty.
 func (d *FX) serveSheetsGet(w http.ResponseWriter, _ *http.Request, id string) {
-	snap, _ := d.books.Get(context.Background(), id)
-	writeDriveJSON(w, http.StatusOK, spreadsheetJSON(snap))
-}
-
-func (d *FX) serveSheetsValues(w http.ResponseWriter, r *http.Request, id string) {
-	var body sheets.BatchUpdateValuesRequest
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	req := vfs.SheetsValuesBatch{}
-	for _, vr := range body.Data {
-		req.Data = append(req.Data, vfs.SheetsValueRange{Range: vr.Range, Values: vr.Values})
+	book, ok := d.books[id]
+	if !ok {
+		book = spreadsheetJSON(vfs.SheetsSnapshot{})
 	}
-	_ = d.books.BatchUpdateValues(context.Background(), id, req)
-	writeDriveJSON(w, http.StatusOK, map[string]any{})
-}
-
-func (d *FX) serveSheetsBatch(w http.ResponseWriter, r *http.Request, id string) {
-	var body sheets.BatchUpdateSpreadsheetRequest
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	req := vfs.SheetsBatch{}
-	for _, call := range body.Requests {
-		rng := call.RepeatCell.Range
-		req.Requests = append(req.Requests, vfs.SheetsRepeatCell{
-			SheetID:  rng.SheetID,
-			StartRow: int(rng.StartRowIndex), StartCol: int(rng.StartColumnIndex),
-			EndRow: int(rng.EndRowIndex), EndCol: int(rng.EndColumnIndex),
-			Format: formatFromSheets(call.RepeatCell.Cell.UserEnteredFormat),
-		})
-	}
-	_ = d.books.BatchUpdate(context.Background(), id, req)
-	writeDriveJSON(w, http.StatusOK, map[string]any{})
+	writeDriveJSON(w, http.StatusOK, book)
 }
 
 // spreadsheetJSON is snap as spreadsheets.get answers it with grid data.
 func spreadsheetJSON(snap vfs.SheetsSnapshot) sheets.Spreadsheet {
-	out := sheets.Spreadsheet{SpreadsheetID: snap.SpreadsheetID}
+	var out sheets.Spreadsheet
 	for _, sh := range snap.Sheets {
 		sid, _ := strconv.ParseInt(sh.ID, 10, 64)
 		item := &sheets.Sheet{Properties: &sheets.SheetProperties{SheetID: sid, Title: sh.Title, Index: int64(sh.Index)}}
-		for _, m := range sh.MergeBounds() {
-			item.Merges = append(item.Merges, &sheets.GridRange{
-				StartRowIndex: int64(m[0]), StartColumnIndex: int64(m[1]), EndRowIndex: int64(m[2]), EndColumnIndex: int64(m[3]),
-			})
-		}
 		grid := &sheets.GridData{RowData: make([]*sheets.RowData, len(sh.Cells))}
 		for r, row := range sh.Cells {
 			vals := make([]*sheets.CellData, len(row))
@@ -158,59 +126,3 @@ func rgbJSON(hex string) *sheets.Color {
 	r, g, b, _ := vfs.ParseRGB(hex)
 	return &sheets.Color{Red: float64(r) / 255, Green: float64(g) / 255, Blue: float64(b) / 255}
 }
-
-// formatFromSheets is the vfs format of a repeatCell format.
-func formatFromSheets(f *sheets.CellFormat) vfs.CellFormat {
-	out := vfs.CellFormat{
-		Fill:   hexOf(f.BackgroundColorStyle),
-		Align:  strings.ToLower(f.HorizontalAlignment),
-		VAlign: strings.ToLower(f.VerticalAlignment),
-		Wrap:   map[string]string{"WRAP": "wrap", "CLIP": "clip", "OVERFLOW_CELL": "overflow"}[f.WrapStrategy],
-	}
-	if f.NumberFormat != nil {
-		out.Number = f.NumberFormat.Pattern
-	}
-	if tf := f.TextFormat; tf != nil {
-		out.Bold, out.Italic, out.Strike, out.Underline = tf.Bold, tf.Italic, tf.Strikethrough, tf.Underline
-		out.Color = hexOf(tf.ForegroundColorStyle)
-	}
-	if f.Borders != nil {
-		out.Border = borderFromReq(f.Borders)
-	}
-	return out
-}
-
-// hexOf is the #rrggbb of a color style, or "" for none.
-func hexOf(c *sheets.ColorStyle) string {
-	if c == nil || c.RGBColor == nil {
-		return ""
-	}
-	return vfs.FormatRGB(uint8(c.RGBColor.Red*255+0.5), uint8(c.RGBColor.Green*255+0.5), uint8(c.RGBColor.Blue*255+0.5))
-}
-
-// borderFromReq is the vfs border of the edges that are not NONE: the
-// style and color of the first, on each such edge.
-func borderFromReq(b *sheets.Borders) *vfs.CellBorder {
-	type edge struct {
-		name string
-		b    *sheets.Border
-	}
-	var out *vfs.CellBorder
-	var names []string
-	for _, e := range []edge{{"top", b.Top}, {"bottom", b.Bottom}, {"left", b.Left}, {"right", b.Right}} {
-		if e.b == nil || e.b.Style == "" || e.b.Style == "NONE" {
-			continue
-		}
-		if out == nil {
-			out = &vfs.CellBorder{Style: cmp.Or(vfsBorderStyles[e.b.Style], "thin"), Color: hexOf(e.b.ColorStyle)}
-		}
-		names = append(names, e.name)
-	}
-	if out != nil && len(names) < 4 {
-		out.Edges = strings.Join(names, ",")
-	}
-	return out
-}
-
-// vfsBorderStyles maps Sheets border styles to vfs; any other style is thin.
-var vfsBorderStyles = map[string]string{"SOLID_MEDIUM": "medium", "SOLID_THICK": "thick", "DASHED": "dashed", "DOTTED": "dotted", "DOUBLE": "double"}

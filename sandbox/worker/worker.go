@@ -65,9 +65,9 @@ func (r Runner) Run(script string, output func(kind byte, data []byte) error) (i
 	if cause := context.Cause(ctx); cause != nil {
 		return -1, cause
 	}
-	var exit *exec.ExitError
+	exit, exited := errors.AsType[*exec.ExitError](err)
 	switch {
-	case errors.As(err, &exit):
+	case exited:
 		if status, _ := exit.Sys().(syscall.WaitStatus); status.Signaled() {
 			return 128 + int(status.Signal()), nil
 		}

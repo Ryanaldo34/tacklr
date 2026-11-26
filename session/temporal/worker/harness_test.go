@@ -88,8 +88,8 @@ func TestSessionWorkflow_aSessionsStepsShareOneHarness(t *testing.T) {
 	t.Parallel()
 	env := newTestWorkflow(t)
 	first, second := newMCPServer(t, "first"), newMCPServer(t, "second")
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		if last := lastMsg(msgs); last != nil && last.Role == message.RoleTool {
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []string, ch chan<- tacklr.LLMResponseChunk) {
+		if last := testkit.LastMessage(msgs); last != nil && last.Role == message.RoleTool {
 			ch <- tacklr.LLMResponseChunk{Type: session.EventMessage, Content: "done", IsComplete: true}
 			return
 		}
@@ -150,7 +150,7 @@ func TestActivities_aWorkerSeesWhatAnotherCommittedAndFailsOnceTheSnapshotIsDele
 	t.Parallel()
 	// Arrange
 	var seen []string
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []string, ch chan<- tacklr.LLMResponseChunk) {
 		seen = seen[:0]
 		for _, m := range msgs {
 			if m.Role == message.RoleUser {

@@ -106,8 +106,8 @@ type mcpToolConfig struct {
 }
 
 var timeType = reflect.TypeOf(time.Time{})
-var harnessRuntimeType = reflect.TypeOf((*CallContext)(nil))
-var ctxType = reflect.TypeOf((*context.Context)(nil)).Elem()
+var harnessRuntimeType = reflect.TypeFor[*CallContext]()
+var ctxType = reflect.TypeFor[context.Context]()
 
 func NewTool(cfg ToolConfig) *Tool {
 	if cfg.Name == "" {
@@ -121,7 +121,7 @@ func NewTool(cfg ToolConfig) *Tool {
 	if fnType.NumOut() != 2 {
 		panic(fmt.Sprintf("tool %q: handler must return (T, error)", cfg.Name))
 	}
-	if !fnType.Out(1).Implements(reflect.TypeOf((*error)(nil)).Elem()) {
+	if !fnType.Out(1).Implements(reflect.TypeFor[error]()) {
 		panic(fmt.Sprintf("tool %q: handler must return (T, error)", cfg.Name))
 	}
 
@@ -376,7 +376,7 @@ func typeToJSONSchema(rt reflect.Type, depth int, strict bool) map[string]any {
 		properties := map[string]any{}
 		required := []string{}
 
-		for i := 0; i < rt.NumField(); i++ {
+		for i := range rt.NumField() {
 			f := rt.Field(i)
 			if !f.IsExported() {
 				continue
@@ -550,8 +550,7 @@ func Correction(cause error, msg string) error {
 	if msg == "" {
 		return ErrCorrection
 	}
-	var a *correctionError
-	if errors.As(cause, &a) {
+	if _, ok := errors.AsType[*correctionError](cause); ok {
 		return cause
 	}
 	return &correctionError{msg: msg, cause: cause}
@@ -566,8 +565,7 @@ func Correctionf(cause error, format string, args ...any) error {
 // the tool. A park, a cancel, a correction, and a service failure
 // (ErrFailed) pass through as they are.
 func presentToolError(name string, err error) error {
-	var intr Interrupt
-	if errors.As(err, &intr) || errors.Is(err, context.Canceled) || errors.Is(err, ErrCorrection) || errors.Is(err, ErrFailed) {
+	if _, ok := errors.AsType[Interrupt](err); ok || errors.Is(err, context.Canceled) || errors.Is(err, ErrCorrection) || errors.Is(err, ErrFailed) {
 		return err
 	}
 	msg := strings.TrimPrefix(err.Error(), "vfs: ")

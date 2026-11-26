@@ -1,7 +1,6 @@
 package durableobject
 
 import (
-	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -59,11 +58,4 @@ func (s *MemStorage) Write(ops ...Op) error {
 		s.m[op.Key] = slices.Clone(op.Value)
 	}
 	return nil
-}
-
-// Keys is every key the storage holds, in order.
-func (s *MemStorage) Keys() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return slices.Sorted(maps.Keys(s.m))
 }

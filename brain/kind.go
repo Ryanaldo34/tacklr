@@ -322,11 +322,6 @@ func (e *Engine) ApplyKinds(ctx context.Context, specs ...KindSpec) error {
 	return e.catalog.replaceNormalized(batch)
 }
 
-// SyncKindsToStore pushes the process catalog to the store.
-func (e *Engine) SyncKindsToStore(ctx context.Context) error {
-	return PersistKinds(ctx, e.store, e.catalog.All()...)
-}
-
 // LoadKindsFromStore replaces the process catalog from the store.
 func (e *Engine) LoadKindsFromStore(ctx context.Context) error {
 	rows, err := e.store.ListKinds(ctx)

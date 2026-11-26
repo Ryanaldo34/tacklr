@@ -135,8 +135,8 @@ func Open(c client.Client, cfg Config) *Client {
 // CreateSession implements session.Client. A worker name no worker
 // registered fails the session when it runs.
 func (r *Client) CreateSession(ctx context.Context, req session.CreateSession) (session.ID, error) {
-	if req.Worker != "" && req.Specialist != "" {
-		return "", fmt.Errorf("%w: specialist and worker are exclusive", session.ErrInvalid)
+	if err := req.Validate(); err != nil {
+		return "", err
 	}
 	id := req.SessionID
 	if id == "" {

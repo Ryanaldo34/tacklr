@@ -40,7 +40,7 @@
 // Property, trigram, and created/updated indexes are not created: those queries
 // do not use them. pg_trgm and pgvector are always created.
 //
-// The Store's pool emits otelpgx spans under the caller context after export.Init (package telemetry/export).
+// The Store's pool emits a span for each statement under the caller's trace after export.Init (package telemetry/export).
 // Package brain does not import this package. MemoryStore stays in brain for
 // tests and offline hosts.
 package postgres

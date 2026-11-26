@@ -24,29 +24,8 @@ var (
 	ErrAlreadyRegistered = errors.New("vfs: media type already registered")
 	ErrNotTextual        = errors.New("vfs: not a textual document")
 	ErrLineOutOfRange    = errors.New("vfs: line out of range")
-	// ErrUnknownBlock is a block_id (heading, block, sheet) the file does not have.
-	ErrUnknownBlock = errors.New("vfs: unknown block_id")
 	// ErrInvalidA1 is a cell or range address that is not A1 notation.
 	ErrInvalidA1   = errors.New("vfs: invalid A1 address")
 	ErrInvalidUTF8 = errors.New("vfs: invalid utf-8")
-	ErrInvalidLine = errors.New("vfs: line contains newline")
-	ErrLineTooLong = errors.New("vfs: line too long")
 	ErrTooLarge    = errors.New("vfs: file too large")
-	// ErrProjected is returned when a line/HTML/SetText mutation is applied to a
-	// projected spreadsheet. Docs/Word accept HTML line and full-content writes.
-	ErrProjected = errors.New("that write is not supported on this file type")
-	// ErrConflict is a provider-level compare-and-swap failure.
-	// Apply retries Docs/Word persist once; leftover conflict becomes ErrInvalidWrite.
-	ErrConflict = errors.New("the file changed on the server since it was last read")
-	// ErrStaleContent is tool/host optimistic concurrency (expected hash ≠ current).
-	ErrStaleContent = errors.New("the file changed since last read")
-	// ErrInvalidWrite is a persist that cannot apply (bad insert location, etc.).
-	// Never wrap provider SDK errors in this; the agent should retry the write.
-	ErrInvalidWrite = errors.New("the document was not saved; read it and write the HTML again")
-	// ErrUseHTML is a non-HTML full replace on an existing Docs/Word path.
-	ErrUseHTML = errors.New("write HTML, not plain text")
-	// ErrEmptyReplace is HTML or blocks that decoded to no headings, paragraphs, lists, or tables.
-	ErrEmptyReplace = errors.New("that HTML had no headings, paragraphs, lists, or tables; put the text in <p> or <h1> tags")
-	// ErrTabIDRequired is a replace on a multi-tab Doc/Word file without tab_id.
-	ErrTabIDRequired = errors.New("this document has more than one tab; pass tab_id for the tab you want to replace")
 )

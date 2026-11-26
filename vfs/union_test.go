@@ -111,25 +111,6 @@ func TestMountSession_unionMergesBackends(t *testing.T) {
 		OpenDocument(ctx); err != nil {
 		t.Fatalf("OpenDocument local = %v", err)
 	}
-
-	if err := ms.WriteDocument(ctx, text); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("WriteDocument = %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/skills/new.md").
-		WriteFile(ctx, []byte("x")); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("WriteFile = %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/skills/alpha/SKILL.md").
-		Remove(ctx); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("Remove = %v", err)
-	}
-
-	if err := ms.Route(ctx, "/workspace/skills/new").
-		MkdirAll(ctx); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("MkdirAll = %v", err)
-	}
 }
 
 // A name that two union members both have is ambiguous: at mount, and when
@@ -182,107 +163,19 @@ func TestUnion_constructErrors(t *testing.T) {
 	}
 }
 
-// A name no member has is not found, the union root is no file, and a
-// canceled context stops every call.
-func TestMountSession_unionMissingAndCanceled(t *testing.T) {
+// A name no member has is not found.
+func TestMountSession_unionNameNoMemberHasIsNotFound(t *testing.T) {
 	t.Parallel()
+	ctx := t.Context()
 	ms := unionSession(t, t.TempDir())
-	ctx := t.Context()
 
-	if _, err := ms.Route(ctx, "/workspace/skills/nope").
-		Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("Stat = %v", err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/skills/nope").
-		ReadDir(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("ReadDir = %v", err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/skills").
-		Open(ctx); err == nil {
-		t.Fatal("open root")
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/skills/nope.md").
-		OpenDocument(ctx); err == nil {
-		t.Fatal("OpenDocument missing")
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/skills/nope").
-		Open(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("Open missing = %v", err)
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/skills").
-		ReadText(ctx); err == nil {
-		t.Fatal("ReadText root")
-	}
-
-	if _, err := ms.Route(ctx, "/workspace/skills/nope").
-		ReadText(ctx); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("ReadText missing = %v", err)
-	}
-
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-
-	if _, err := ms.Route(canceled, "/workspace/skills").
-		Stat(canceled); err == nil {
-		t.Fatal("Stat canceled")
-	}
-
-	if _, err := ms.Route(canceled, "/workspace/skills").
-		ReadDir(canceled); err == nil {
-		t.Fatal("ReadDir canceled")
-	}
-
-	if _, err := ms.Route(canceled, "/workspace/skills/x").
-		Open(canceled); err == nil {
-		t.Fatal("Open canceled")
-	}
-
-	if _, err := ms.Route(canceled, "/workspace/skills/x").
-		ReadText(canceled); err == nil {
-		t.Fatal("ReadText canceled")
-	}
-
-	if _, err := vfs.Tree(vfs.At("skills", vfs.Union(vfs.Local(t.TempDir()))))(canceled, "union-cancel", vfs.Request{}); err == nil {
-		t.Fatal("Tree canceled")
-	}
-}
-
-// The union provider refuses every write and a name that leaves its root.
-func TestUnion_providerRejectsWritesAndInvalidPaths(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	p, err := vfs.Union(vfs.Local(t.TempDir()))(ctx, t.Name(), mount.Binding{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Remove(ctx, "x"); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("Remove = %v", err)
-	}
-	if err := p.MkdirAll(ctx, "x", 0o755); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("MkdirAll = %v", err)
-	}
-	if _, err := p.OpenFile(ctx, "x", os.O_WRONLY, 0); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("OpenFile write = %v", err)
-	}
-	if _, err := p.Stat(ctx, ".."); err == nil {
-		t.Fatal("Stat invalid")
-	}
-	if _, err := p.OpenFile(ctx, "..", os.O_RDONLY, 0); err == nil {
-		t.Fatal("OpenFile invalid")
-	}
-	if _, err := p.ReadDir(ctx, ".."); err == nil {
-		t.Fatal("ReadDir invalid")
-	}
-	docs := p.(interface {
-		OpenDocument(ctx context.Context, name string, reg *vfs.ContentRegistry) (vfs.Document, error)
-	})
-	if _, err := docs.OpenDocument(ctx, "..", nil); !errors.Is(err, vfs.ErrInvalidPath) {
-		t.Fatalf("OpenDocument invalid = %v", err)
+	for name, op := range routeOps {
+		if name == "write" || name == "remove" || name == "mkdir" {
+			continue
+		}
+		if err := op(ctx, ms.Route(ctx, "/workspace/skills/nope")); !errors.Is(err, vfs.ErrNotExist) {
+			t.Errorf("%s = %v, want ErrNotExist", name, err)
+		}
 	}
 }
 
@@ -290,7 +183,7 @@ func TestUnion_providerRejectsWritesAndInvalidPaths(t *testing.T) {
 // the user cannot list fails the mount. A first name that a member cannot
 // stat, for example a symlink out of its root, fails the lookup. A member with
 // no document I/O has no documents, and a union that the tree mounts
-// writable still refuses a document write.
+// writable still refuses every change.
 func TestUnion_aMemberFailureFailsTheUnion(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
@@ -314,9 +207,6 @@ func TestUnion_aMemberFailureFailsTheUnion(t *testing.T) {
 	if err := os.Symlink(t.TempDir(), filepath.Join(linked, "out")); err != nil {
 		t.Fatal(err)
 	}
-	host := func(context.Context, string, mount.Binding) (vfs.Provider, error) {
-		return hostProvider{open: opens(hostFile{})}, nil
-	}
 	tree := func(member vfs.Open) (*vfs.MountSession, error) {
 		return vfs.Tree(vfs.At("skills", vfs.Union(member)))(ctx, t.Name(), vfs.Request{})
 	}
@@ -327,7 +217,7 @@ func TestUnion_aMemberFailureFailsTheUnion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hosted, err := tree(host)
+	hosted, err := tree(hostOpen(hostFS{"f": hostFile{}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +226,11 @@ func TestUnion_aMemberFailureFailsTheUnion(t *testing.T) {
 	_, lockedErr := tree(vfs.Local(locked))
 	_, linkErr := links.Route(ctx, "/workspace/skills/out/x").Stat(ctx)
 	_, hostDocErr := hosted.Route(ctx, "/workspace/skills/f").OpenDocument(ctx)
-	writeErr := links.WriteDocument(ctx, vfs.NewTextDocument("/workspace/skills/new.md", "text/markdown", "", "x"))
+	changes := map[string]error{
+		"write":  links.Route(ctx, "/workspace/skills/new.md").WriteFile(ctx, []byte("x")),
+		"remove": links.Route(ctx, "/workspace/skills/out").Remove(ctx),
+		"mkdir":  links.Route(ctx, "/workspace/skills/new").MkdirAll(ctx),
+	}
 
 	if !errors.Is(goneErr, fs.ErrNotExist) {
 		t.Fatalf("mount with a gone member root = %v", goneErr)
@@ -350,7 +244,9 @@ func TestUnion_aMemberFailureFailsTheUnion(t *testing.T) {
 	if !errors.Is(hostDocErr, vfs.ErrNotSupported) {
 		t.Fatalf("document of a member with no document I/O = %v", hostDocErr)
 	}
-	if !errors.Is(writeErr, vfs.ErrReadOnly) {
-		t.Fatalf("document write to a writable union = %v", writeErr)
+	for name, err := range changes {
+		if !errors.Is(err, vfs.ErrReadOnly) {
+			t.Errorf("%s on a writable union = %v, want ErrReadOnly", name, err)
+		}
 	}
 }

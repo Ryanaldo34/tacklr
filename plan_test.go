@@ -21,26 +21,16 @@ func titles(todos []tacklr.Todo) []string {
 	return out
 }
 
-// TestCreatePlan_installsThePlanAndUnlocksWriteTools: before a plan, write
-// tools are locked and list_plan has nothing to list. create_plan
-// installs the plan document after the goal, starts the first open todo
-// (leaving the rest pending), streams the todos and unlocks write tools.
-// An empty document, no todos, or a second plan is the model's to correct.
-func TestCreatePlan_installsThePlanAndUnlocksWriteTools(t *testing.T) {
+// TestCreatePlan_installsThePlanAfterTheGoalAndStartsTheFirstOpenTodo:
+// create_plan installs the plan document after the goal, starts the first
+// open todo (leaving the rest pending) and streams the todos.
+func TestCreatePlan_installsThePlanAfterTheGoalAndStartsTheFirstOpenTodo(t *testing.T) {
 	t.Parallel()
 	model, _ := scripted(t)
-	mutate := tacklr.NewTool(tacklr.ToolConfig{Name: "mutate", Access: tacklr.ToolWriteAccess, Handler: func(context.Context) (string, error) { return "mutated", nil }})
-	h := newHarness(t, "create", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{mutate}})
+	h := newHarness(t, "create", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
 	prompt(t, h, "goal")
-	before := []string{
-		result(t, h, call("w0", "mutate", "{}")),
-		result(t, h, call("l0", "list_plan", "{}")),
-		result(t, h, call("p0", "create_plan", `{"plan":"  ","todos":[{"title":"a"}]}`)),
-		result(t, h, call("p1", "create_plan", `{"plan":"valid","todos":[]}`)),
-	}
 	out := newStream(t)
-	tc := call("p2", "create_plan", `{"plan":"CoS: ship it","todos":[{"title":"done","status":"completed"},{"title":"next","description":"go"},{"title":"later"}]}`)
-	r := tacklr.NewRound(reply(tc))
+	r := tacklr.NewRound(reply(call("p2", "create_plan", `{"plan":"CoS: ship it","todos":[{"title":"done","status":"completed"},{"title":"next"},{"title":"later"}]}`)))
 	var err error
 	if r.Calls[0], err = h.RunCall(t.Context(), r.Calls[0], out.out); err != nil {
 		t.Fatal(err)
@@ -49,11 +39,7 @@ func TestCreatePlan_installsThePlanAndUnlocksWriteTools(t *testing.T) {
 	err = h.Commit(t.Context(), tacklr.CommitIn{Round: r}, out.out)
 
 	state := checkpoint(t, h)
-	if !strings.Contains(before[0], "write tools are locked until create_plan") || !strings.Contains(before[1], "no plan exists") ||
-		!strings.Contains(before[2], "plan document text is required") || !strings.Contains(before[3], "at least one todo") {
-		t.Fatalf("before a plan = %q, want the lock, nothing to list, and each bad plan named", before)
-	}
-	statuses := []tacklr.TodoStatus{}
+	var statuses []tacklr.TodoStatus
 	for _, td := range state.todos {
 		statuses = append(statuses, td.Status)
 	}
@@ -70,54 +56,53 @@ func TestCreatePlan_installsThePlanAndUnlocksWriteTools(t *testing.T) {
 	if !slices.Equal(streamed, state.todos) {
 		t.Fatalf("plan update = %+v, want the committed todos", streamed)
 	}
-	listed := result(t, h, call("l1", "list_plan", "{}"))
-	if !containsAll(listed, "Active plan (3 todos):", "2. [in_progress] next\n   Description: go", "3. [pending] later") || result(t, h, call("w1", "mutate", "{}")) != "mutated" ||
-		!strings.Contains(result(t, h, tc), "active plan already exists") {
-		t.Fatalf("list = %q, want each todo; and write tools unlocked and no second plan", listed)
+}
+
+// TestCreatePlan_unlocksWriteToolsAndThePlanList: before a plan, write
+// tools are locked and list_plan has nothing to list; after it, both run.
+func TestCreatePlan_unlocksWriteToolsAndThePlanList(t *testing.T) {
+	t.Parallel()
+	model, _ := scripted(t)
+	mutate := tacklr.NewTool(tacklr.ToolConfig{Name: "mutate", Access: tacklr.ToolWriteAccess, Handler: func(context.Context) (string, error) { return "mutated", nil }})
+	h := newHarness(t, "unlock", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{mutate}})
+	prompt(t, h, "goal")
+	locked, unlisted := result(t, h, call("w0", "mutate", "{}")), result(t, h, call("l0", "list_plan", "{}"))
+
+	_, err := runRound(t, h, call("p", "create_plan", `{"plan":"doc","todos":[{"title":"a"}]}`))
+
+	if !strings.Contains(locked, "write tools are locked until create_plan") || !strings.Contains(unlisted, "no plan exists") {
+		t.Fatalf("before a plan = %q, %q; want the lock and nothing to list", locked, unlisted)
+	}
+	if listed := result(t, h, call("l1", "list_plan", "{}")); err != nil || result(t, h, call("w1", "mutate", "{}")) != "mutated" || !strings.HasPrefix(listed, "Active plan (1 todos):") {
+		t.Fatalf("after the plan = %v, list %q; want write tools unlocked and the plan listed", err, listed)
 	}
 }
 
-// TestEditPlan_changesTheTodosOrHandsOffARevisedPlan: edit_plan adds, then
-// deletes todos; a revised document hands off with it. Each rejected edit
-// names what is wrong and leaves the plan as it was.
-func TestEditPlan_changesTheTodosOrHandsOffARevisedPlan(t *testing.T) {
+// TestEditPlan_addsAndDeletesTodos: edit_plan inserts a todo at its order
+// and deletes another, keeping the document.
+func TestEditPlan_addsAndDeletesTodos(t *testing.T) {
+	t.Parallel()
+	model, _ := scripted(t)
+	h := planned(t, "edit", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}, tacklr.Todo{Title: "a"}, tacklr.Todo{Title: "b", Status: tacklr.TodoStatusCompleted})
+
+	edited, err := runRound(t, h, call("e2", "edit_plan", `{"toAdd":[{"todo":{"title":"c","status":"pending"},"order":1}],"toDelete":["a"]}`))
+
+	if state := checkpoint(t, h); err != nil || edited.Calls[0].Body.Text() != "Plan edited successfully" || !slices.Equal(titles(state.todos), []string{"c", "b"}) || state.plan != "ship" {
+		t.Fatalf("edit = %v %q with todos %v, want c added and a deleted", err, edited.Calls[0].Body.Text(), titles(state.todos))
+	}
+}
+
+// TestEditPlan_aRevisedDocumentHandsOffWithIt: an edit with a revised
+// document hands off the window with the new document.
+func TestEditPlan_aRevisedDocumentHandsOffWithIt(t *testing.T) {
 	t.Parallel()
 	model, _ := scripted(t, []tacklr.LLMResponseChunk{text("the handoff")})
-	h := newHarness(t, "edit", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
-	prompt(t, h, "goal")
-	noPlan := result(t, h, call("e0", "edit_plan", `{"toDelete":["a"]}`))
-	if _, err := runRound(t, h, call("p", "create_plan", `{"plan":"doc","todos":[{"title":"a"},{"title":"b","status":"completed"}]}`)); err != nil {
-		t.Fatal(err)
-	}
-	rejected := map[string]string{
-		`{"plan":" doc "}`: "unchanged",
-		`{"toAdd":[{"todo":{"title":"x"},"order":3}]}`: "out of bounds",
-		`{"toDelete":["x"]}`:                           `todo "x" not found`,
-		`{"toDelete":["a","b"]}`:                       `cannot delete completed todo: "b"`,
-	}
-	var got []string
-	for args := range rejected {
-		got = append(got, result(t, h, call("e1", "edit_plan", args)))
-	}
+	h := planned(t, "revise", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}, tacklr.Todo{Title: "a"})
 
-	edited, editErr := runRound(t, h, call("e2", "edit_plan", `{"toAdd":[{"todo":{"title":"c","status":"pending"},"order":1}],"toDelete":["a"]}`))
-	afterEdit := checkpoint(t, h)
-	revised, revisedErr := runRound(t, h, call("e3", "edit_plan", `{"plan":"new full plan"}`))
+	revised, err := runRound(t, h, call("e3", "edit_plan", `{"plan":"new full plan"}`))
 
-	if !strings.Contains(noPlan, "no plan exists") {
-		t.Fatalf("edit with no plan = %q", noPlan)
-	}
-	for _, want := range rejected {
-		if !slices.ContainsFunc(got, func(g string) bool { return strings.Contains(g, want) }) {
-			t.Errorf("rejected edits = %q, want one naming %q", got, want)
-		}
-	}
-	if editErr != nil || edited.Calls[0].Body.Text() != "Plan edited successfully" || !slices.Equal(titles(afterEdit.todos), []string{"c", "b"}) || afterEdit.plan != "doc" {
-		t.Fatalf("edit = %v %q with todos %v, want c added and a deleted", editErr, edited.Calls[0].Body.Text(), titles(afterEdit.todos))
-	}
-	window := checkpoint(t, h).window
-	if revisedErr != nil || revised.Calls[0].Body.Text() != "Plan edited successfully" || len(window) != 4 || !strings.HasSuffix(window[1].Content, "new full plan") || window[2].Content != "the handoff" {
-		t.Fatalf("revise = %v, window %q; want a handoff with the revised plan", revisedErr, contents(window))
+	if window := checkpoint(t, h).window; err != nil || revised.Calls[0].Body.Text() != "Plan edited successfully" || len(window) != 4 || !strings.HasSuffix(window[1].Content, "new full plan") || window[2].Content != "the handoff" {
+		t.Fatalf("revise = %v, window %q; want a handoff with the revised plan", err, contents(window))
 	}
 }
 

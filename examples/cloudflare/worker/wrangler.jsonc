@@ -6,13 +6,11 @@
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
-      { "name": "SESSIONS", "class_name": "Session" },
-      { "name": "CONNECTIONS", "class_name": "Connection" }
+      { "name": "SESSIONS", "class_name": "Session" }
     ]
   },
-  // The Free plan has SQLite-backed objects only; a connection object
-  // stores nothing.
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Session", "Connection"] }],
+  // The Free plan has SQLite-backed objects only.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Session"] }],
   // A request may use up to five minutes of CPU (Workers Paid).
   "limits": { "cpu_ms": 300000 }
 }

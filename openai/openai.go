@@ -44,8 +44,6 @@ var (
 	ErrIncompleteStream = provider.ErrIncompleteStream
 	// ErrMalformedStream is a stream event that is not valid JSON.
 	ErrMalformedStream = provider.ErrMalformedStream
-
-	_ tacklr.Model = (*Model)(nil)
 )
 
 // promptCache resolves the cache profile for this strategy's model and
@@ -283,8 +281,8 @@ func requestInput(req tacklr.ModelRequest, cache promptCache) (items []json.RawM
 func (s *Model) parseSSEResponse(ctx context.Context, body io.Reader, chunks provider.Chunks, inputSummary string) {
 	// Match main-branch classification: output_text is always a message chunk.
 	// DeepSeek on Foundry streams thinking inside output_text (e.g. <think> tags);
-	// reclassifying those deltas as session.EventReasoning broke ACP clients that
-	// already handled thinking correctly from agent_message_chunk on main.
+	// reclassifying those deltas as session.EventReasoning broke clients that
+	// already handled thinking correctly from message events.
 	sse := provider.NewSSE(body)
 	var currentItemID string
 	terminal := false
@@ -621,7 +619,7 @@ func (s *Model) emitFunctionCallChunk(raw json.RawMessage, chunks provider.Chunk
 		namespace, name = ns, n
 	}
 	// llama.cpp (and some local servers) only set call_id; OpenAI often sets both.
-	// Normalize so ACP toolCallId / harness CurrentToolCallID are never empty when
+	// Normalize so the tool call ID / harness CurrentToolCallID are never empty when
 	// either field is present.
 	id := fc.ID
 	callID := fc.CallID
@@ -974,7 +972,7 @@ func (openRouterCache) headers(http.Header)           {}
 func (openRouterCache) breakpoints() bool             { return false }
 
 // Model media capability is prefix match against the selected model id.
-// Unknown models accept text only (safe default for ACP ads and prompt reject).
+// Unknown models accept text only (a safe default).
 
 // Prefixes that imply vision / image input on OpenAI-compatible stacks.
 var visionModelPrefixes = []string{

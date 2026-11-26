@@ -3,6 +3,7 @@ package brain
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -162,6 +163,11 @@ func (s *MemoryStore) SaveSessionMessages(ctx context.Context, host Namespace, s
 	}
 	if len(messages) == 0 {
 		return 0, fmt.Errorf("%w: window is empty", ErrInvalid)
+	}
+	for i, msg := range messages {
+		if len(msg.Body) > 0 && !json.Valid(msg.Body) {
+			return 0, fmt.Errorf("%w: message %d body is not JSON", ErrInvalid, i)
+		}
 	}
 	if err := host.Validate(); err != nil {
 		return 0, err

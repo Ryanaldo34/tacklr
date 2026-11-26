@@ -10,9 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/brain/helixgraph"
 	"github.com/ryanaldo34/tacklr/brain/storetest"
-	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
 // TestRelated_listsARecordsChildrenOrAPartsParentAndNearbyParts: Related lists
@@ -100,13 +98,13 @@ func TestSearch_theStoreDecidesGraphHitsLinkOnlyPagesAndRelationlessGraphs(t *te
 	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithGraph(helixtest.Graph(t)), brain.WithReranker(func(_ context.Context, _ string, objs []brain.RichObject) ([]brain.RichObject, error) {
+	eng, err := brain.NewEngine(store, brain.WithGraph(memoryGraph()), brain.WithReranker(func(_ context.Context, _ string, objs []brain.RichObject) ([]brain.RichObject, error) {
 		return objs, nil
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	bare, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(helixtest.Open(t, func(o *helixgraph.Options) { o.EdgeRelations = nil })))
+	bare, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(brain.NewMemoryGraph(brain.MemoryGraphOptions{})))
 	if err != nil {
 		t.Fatal(err)
 	}

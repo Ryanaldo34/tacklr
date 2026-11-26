@@ -188,8 +188,8 @@ func (m *Message) MIMETypes() []string {
 // NormalizeMIME lowercases a MIME type and strips parameters (after ';').
 func NormalizeMIME(mime string) string {
 	mime = strings.TrimSpace(strings.ToLower(mime))
-	if i := strings.IndexByte(mime, ';'); i >= 0 {
-		mime = strings.TrimSpace(mime[:i])
+	if before, _, ok := strings.Cut(mime, ";"); ok {
+		mime = strings.TrimSpace(before)
 	}
 	return mime
 }
@@ -207,9 +207,7 @@ func MIMEFromDataURL(u string) string {
 		return ""
 	}
 	rest := strings.TrimPrefix(u, "data:")
-	if i := strings.Index(rest, ","); i >= 0 {
-		rest = rest[:i]
-	}
+	rest, _, _ = strings.Cut(rest, ",")
 	rest = strings.TrimSuffix(rest, ";base64")
 	return NormalizeMIME(rest)
 }

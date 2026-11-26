@@ -65,3 +65,9 @@ func repeatVector(v []float32, n int) [][]float32 {
 	}
 	return out
 }
+
+// memoryGraph is an empty graph that ranks the edge notes of the relations
+// these tests search.
+func memoryGraph() *brain.MemoryGraph {
+	return brain.NewMemoryGraph(brain.MemoryGraphOptions{EdgeRelations: []string{"about", "has_buyer"}})
+}

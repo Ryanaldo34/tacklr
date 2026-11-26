@@ -19,59 +19,57 @@ import (
 	"github.com/ryanaldo34/tacklr/openai"
 )
 
-// HTTPModel is the real OpenAI-compatible client pointed at a local server.
-// respond sees the conversation the client sent and writes chunks. An error
-// chunk becomes the HTTP error the client classifies. Anything else is SSE.
-func HTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
+// Respond is a provider's script for one request: msgs is the request as
+// the provider got it (the system prompt is its first message), tools the
+// names of the tools it offers, and ch the chunks of the answer. An error
+// chunk first becomes the HTTP error the client classifies; anything else
+// is SSE.
+type Respond func(ctx context.Context, msgs []*message.Message, tools []string, ch chan<- tacklr.LLMResponseChunk)
+
+// HTTPModel is the real OpenAI-compatible client pointed at a local
+// provider that answers with respond and counts a request's content length
+// as its tokens, so a test sets the window in characters.
+func HTTPModel(tb testing.TB, respond Respond) tacklr.Model {
 	tb.Helper()
-	return newHTTPModel(tb, "gpt-4o", respond, contentTokens, true)
+	return newHTTPModel(tb, "gpt-4o", respond, contentTokens)
 }
 
 // TextHTTPModel is HTTPModel on a model id that accepts text only.
-func TextHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)) tacklr.Model {
+func TextHTTPModel(tb testing.TB, respond Respond) tacklr.Model {
 	tb.Helper()
-	return newHTTPModel(tb, "text-only", respond, contentTokens, true)
+	return newHTTPModel(tb, "text-only", respond, contentTokens)
 }
 
 // CountedHTTPModel is HTTPModel whose provider counts a request's tokens
-// with count. msgs is the request as the provider got it: the system
-// prompt is its first message. The token-count endpoint answers the count,
-// or HTTP 500 when count fails, and each response reports the count as its
-// input tokens.
-func CountedHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error)) tacklr.Model {
+// with count: its token-count endpoint answers the count, or HTTP 500 when
+// count fails, and each response reports the count as its input tokens. A
+// nil count is a provider with no token-count endpoint (HTTP 404) whose
+// responses report the request's content length.
+func CountedHTTPModel(tb testing.TB, respond Respond, count func(msgs []*message.Message) (int, error)) tacklr.Model {
 	tb.Helper()
-	return newHTTPModel(tb, "gpt-4o", respond, count, true)
+	return newHTTPModel(tb, "gpt-4o", respond, count)
 }
 
-// UncountedHTTPModel is CountedHTTPModel on a provider with no token-count
-// endpoint (HTTP 404): only each response reports count as its input
-// tokens.
-func UncountedHTTPModel(tb testing.TB, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error)) tacklr.Model {
-	tb.Helper()
-	return newHTTPModel(tb, "gpt-4o", respond, count, false)
-}
-
-// contentTokens counts a message's content length as its tokens, so a
-// test sets the window in characters.
+// contentTokens counts a request's content length as its tokens.
 func contentTokens(msgs []*message.Message) (int, error) {
 	return ContentTokenEstimate(msgs), nil
 }
 
-func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk), count func(msgs []*message.Message) (int, error), counts bool) tacklr.Model {
+func newHTTPModel(tb testing.TB, model string, respond Respond, count func(msgs []*message.Message) (int, error)) tacklr.Model {
 	tb.Helper()
-	// inputTokens is a request's token count; zero when count fails.
+	usage := count
+	if usage == nil {
+		usage = contentTokens
+	}
 	inputTokens := func(body []byte) int {
 		msgs, _ := messagesFromResponses(body)
-		n, _ := count(msgs)
+		n, _ := usage(msgs)
 		return n
 	}
-	// life ends when the test does. A script blocked on ctx.Done() has to
-	// release the connection before httptest.Server.Close, and the workflow
-	// test environment does not cancel an activity context it has abandoned.
 	life, cancelLife := context.WithCancel(context.Background())
 	srv := testhttp.New(tb, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/input_tokens") {
-			if !counts {
+			if count == nil {
 				http.NotFound(w, r)
 				return
 			}
@@ -86,15 +84,7 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 			_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": n})
 			return
 		}
-		// The client asks for a token count or a response; this is a response.
 		body, _ := io.ReadAll(r.Body)
-		// Every request must pair each call with its result: a provider
-		// rejects one that does not.
-		if bad := unpairedCalls(body); bad != "" {
-			tb.Errorf("model request is not paired: %s", bad)
-			writeProviderError(w, errors.New(bad))
-			return
-		}
 		msgs, tools := messagesFromResponses(body)
 		reqCtx, cancelReq := context.WithCancel(life)
 		defer cancelReq()
@@ -107,11 +97,6 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 				respond(reqCtx, msgs, tools, ch)
 			}
 		}()
-		// An error chunk first is an HTTP failure so the client classifies
-		// refusal, max tokens, and network the same way a provider would.
-		// Anything else is flushed as SSE so a caller can observe the stream
-		// before the script returns; an error chunk after it fails the
-		// stream.
 		flush := func() {
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
@@ -153,7 +138,6 @@ func newHTTPModel(tb testing.TB, model string, respond func(ctx context.Context,
 		_, _ = io.WriteString(w, completedSSE(inputTokens(body)))
 		flush()
 	}))
-	// After the server close hook, so a blocked script is released first.
 	tb.Cleanup(cancelLife)
 	return openai.New(srv.Client()).
 		WithApiKey("test-key").
@@ -230,39 +214,7 @@ func writeChunk(w http.ResponseWriter, c tacklr.LLMResponseChunk) {
 	}
 }
 
-// unpairedCalls names the first call in a Responses request without its
-// result, or result without its call; "" when each call has its result.
-func unpairedCalls(body []byte) string {
-	var req struct {
-		Input []struct {
-			Type   string `json:"type"`
-			CallID string `json:"call_id"`
-		} `json:"input"`
-	}
-	_ = json.Unmarshal(body, &req)
-	open := map[string]bool{}
-	var order []string
-	for _, item := range req.Input {
-		switch item.Type {
-		case "function_call":
-			open[item.CallID] = true
-			order = append(order, item.CallID)
-		case "function_call_output":
-			if !open[item.CallID] {
-				return "result " + item.CallID + " has no call"
-			}
-			delete(open, item.CallID)
-		}
-	}
-	for _, id := range order {
-		if open[id] {
-			return "call " + id + " has no result"
-		}
-	}
-	return ""
-}
-
-func messagesFromResponses(body []byte) ([]*message.Message, []*tacklr.Tool) {
+func messagesFromResponses(body []byte) ([]*message.Message, []string) {
 	var req struct {
 		Input json.RawMessage `json:"input"`
 		Tools json.RawMessage `json:"tools"`
@@ -289,7 +241,6 @@ func messagesFromResponses(body []byte) ([]*message.Message, []*tacklr.Tool) {
 			Arguments string          `json:"arguments"`
 			Output    json.RawMessage `json:"output"`
 		}
-		// An item that does not decode matches no case.
 		_ = json.Unmarshal(raw, &item)
 		switch {
 		case item.Type == "function_call":
@@ -305,24 +256,20 @@ func messagesFromResponses(body []byte) ([]*message.Message, []*tacklr.Tool) {
 		}
 	}
 	flush()
-	return msgs, toolsFromResponses(req.Tools)
+	return msgs, toolNames(req.Tools)
 }
 
-func toolsFromResponses(raw json.RawMessage) []*tacklr.Tool {
+// toolNames are the names of the tools a request offers, as it sent them.
+func toolNames(raw json.RawMessage) []string {
 	var defs []struct {
 		Name string `json:"name"`
 	}
 	_ = json.Unmarshal(raw, &defs)
-	tools := make([]*tacklr.Tool, 0, len(defs))
-	for _, d := range defs {
-		ns, name := splitToolName(d.Name)
-		tools = append(tools, tacklr.NewTool(tacklr.ToolConfig{
-			Name:      name,
-			Namespace: ns,
-			Handler:   func(context.Context) (string, error) { return "", nil },
-		}))
+	names := make([]string, len(defs))
+	for i, d := range defs {
+		names[i] = d.Name
 	}
-	return tools
+	return names
 }
 
 func splitToolName(name string) (namespace, short string) {

@@ -307,7 +307,6 @@ func TestSpans_recordToolHandoffAndPlanOutcomes(t *testing.T) {
 	telemetry.PlanInstalled(step, 3, 2, errors.New("install"))
 	telemetry.RecordCheckpointAttempt(global, nil)
 	telemetry.RecordCheckpointAttempt(global, errors.New("save failed"))
-	telemetry.Metrics().RecordConnection(global, "/acp", 1)
 	telemetry.EmitEvent(global, "")
 
 	session := attribute.String(telemetry.AttrGenAIConversationID, "s1")
@@ -332,7 +331,6 @@ func TestSpans_recordToolHandoffAndPlanOutcomes(t *testing.T) {
 		{telemetry.MetricHandoffTotal, []attribute.KeyValue{agent, attribute.String(telemetry.LabelOutcome, telemetry.HandoffOutcomeError)}, 1},
 		{telemetry.MetricCheckpointSave, []attribute.KeyValue{attribute.String(telemetry.LabelOutcome, telemetry.OutcomeOK)}, 1},
 		{telemetry.MetricCheckpointSave, []attribute.KeyValue{attribute.String(telemetry.LabelOutcome, telemetry.OutcomeError)}, 1},
-		{telemetry.MetricConnections, []attribute.KeyValue{attribute.String(telemetry.LabelProtocol, "/acp")}, 1},
 	} {
 		if got := o.count(t, tc.name, tc.attrs...); got != tc.want {
 			t.Errorf("%s %v = %d, want %d", tc.name, tc.attrs, got, tc.want)
@@ -409,31 +407,6 @@ func TestTurn_isASpanOfItsParentsTraceThatLinksWhatResumedIt(t *testing.T) {
 	}
 	if none != nil || linked {
 		t.Fatalf("carrier of no span = %v, link of none = %v; want neither", none, linked)
-	}
-}
-
-// TestRPC_spansAProtocolRequestFromItsRequestToItsAnswer: a request the
-// server answers is a server span of its method, with its session; its
-// error response sets the JSON-RPC code and error.type, and its duration
-// is counted. A request the server sends the client is a client span that
-// ends with the answer's stop reason. A span ends once.
-func TestRPC_spansAProtocolRequestFromItsRequestToItsAnswer(t *testing.T) {
-	o := observe(t)
-
-	ctx, prompt := telemetry.StartRPC(t.Context(), trace.SpanKindServer, "session/prompt", "s1")
-	_, ask := telemetry.StartRPC(prompt.Context(), trace.SpanKindClient, "session/request_permission", "s1", attribute.String(telemetry.AttrInterruptKind, "tool_permission"))
-	ask.End(0, "end_turn")
-	prompt.End(-32603, "")
-	prompt.End(0, "end_turn")
-
-	served := o.span(t, "session/prompt", attribute.String(telemetry.AttrGenAIConversationID, "s1"), attribute.Int(telemetry.AttrJSONRPCError, -32603))
-	asked := o.span(t, "session/request_permission", attribute.String(telemetry.AttrStopReason, "end_turn"), attribute.String(telemetry.AttrInterruptKind, "tool_permission"))
-	if served.SpanKind() != trace.SpanKindServer || served.Status().Code != codes.Error || asked.SpanKind() != trace.SpanKindClient ||
-		asked.Parent().SpanID() != trace.SpanContextFromContext(ctx).SpanID() {
-		t.Fatalf("served = %v %v, asked = %v under %v; want a failed server span and its client span", served.SpanKind(), served.Status(), asked.SpanKind(), asked.Parent())
-	}
-	if n, _ := o.histogram(t, telemetry.MetricRPCCallDuration, attribute.String(telemetry.AttrRPCMethod, "session/prompt"), attribute.String(telemetry.LabelErrorType, "-32603")); n != 1 {
-		t.Fatalf("request duration count = %d, want the server request once", n)
 	}
 }
 

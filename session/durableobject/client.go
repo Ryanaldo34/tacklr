@@ -3,7 +3,6 @@ package durableobject
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/google/uuid"
 
@@ -29,8 +28,8 @@ func NewClient(p Platform) *Client {
 
 // CreateSession implements session.Client.
 func (c *Client) CreateSession(ctx context.Context, req session.CreateSession) (session.ID, error) {
-	if req.Worker != "" && req.Specialist != "" {
-		return "", fmt.Errorf("%w: specialist and worker are exclusive", session.ErrInvalid)
+	if err := req.Validate(); err != nil {
+		return "", err
 	}
 	id := req.SessionID
 	if id == "" {
@@ -129,38 +128,4 @@ func (c *Client) Jobs(ctx context.Context, parent session.ID) ([]session.Status,
 		out = append(out, st)
 	}
 	return out, errors.Join(errs...)
-}
-
-var _ session.Client = (*Client)(nil)
-
-// WireStore is the protocol wire store (server.ProtocolWireStore) of the
-// sessions c reaches: each session's object keeps the session's wire
-// state, and the session's close deletes it.
-func (c *Client) WireStore() WireStore { return WireStore{platform: c.platform} }
-
-// WireStore keeps each session's protocol wire state in its object.
-type WireStore struct{ platform Platform }
-
-// Put implements server.ProtocolWireStore. The session must exist.
-func (s WireStore) Put(ctx context.Context, sessionID string, payload []byte) error {
-	if payload == nil {
-		payload = []byte{}
-	}
-	return s.platform.Object(session.ID(sessionID)).SetWire(ctx, payload)
-}
-
-// Get implements server.ProtocolWireStore: session.ErrNotFound when the
-// session or its wire state is not there.
-func (s WireStore) Get(ctx context.Context, sessionID string) ([]byte, error) {
-	return s.platform.Object(session.ID(sessionID)).Wire(ctx)
-}
-
-// Delete implements server.ProtocolWireStore. A session that is not there
-// has no wire state to delete.
-func (s WireStore) Delete(ctx context.Context, sessionID string) error {
-	err := s.platform.Object(session.ID(sessionID)).SetWire(ctx, nil)
-	if errors.Is(err, session.ErrNotFound) {
-		return nil
-	}
-	return err
 }

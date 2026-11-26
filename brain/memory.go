@@ -18,14 +18,11 @@ import (
 	"github.com/google/uuid"
 )
 
-var _ Store = (*MemoryStore)(nil)
-
 // MemoryStore is an in-process Store for tests, fixtures and offline hosts.
 // It embeds with its own Embedding (none means lexical search only) and
-// fuses its channels with its Ranking.
+// fuses its channels by reciprocal rank.
 type MemoryStore struct {
 	embedding   Embedding
-	ranking     Ranking
 	mu          sync.RWMutex
 	objects     map[uuid.UUID]Object
 	kinds       map[string]ObjectKind
@@ -41,11 +38,6 @@ type MemoryOption func(*MemoryStore)
 // messages and queries.
 func WithMemoryEmbedding(e Embedding) MemoryOption {
 	return func(s *MemoryStore) { s.embedding = e }
-}
-
-// WithMemoryRanking sets how the store fuses its search channels.
-func WithMemoryRanking(r Ranking) MemoryOption {
-	return func(s *MemoryStore) { s.ranking = r }
 }
 
 // NewMemoryStore returns an empty memory-backed store.
@@ -419,7 +411,7 @@ func (s *MemoryStore) ListKinds(_ context.Context) ([]ObjectKind, error) {
 // query's embedding (same model only; a failed query embedding leaves the
 // lexical list alone); q.Exact adds case-fold substring and
 // trigram overlap instead, and puts exact title matches first. The lists
-// are fused with the store's Ranking.
+// are fused by reciprocal rank.
 func (s *MemoryStore) Search(ctx context.Context, scope Scope, q RecordSearch) ([]ScoredID, error) {
 	if err := scope.Namespace.Validate(); err != nil {
 		return nil, err
@@ -456,7 +448,7 @@ func (s *MemoryStore) Search(ctx context.Context, scope Scope, q RecordSearch) (
 	} else if vec != nil {
 		lists = append(lists, vectorScores(parts, s.embedding.Model(), vec))
 	}
-	fused := s.ranking.Fuse(lists...)
+	fused := Ranking{}.Fuse(lists...)
 	if q.Exact {
 		fused = titleFirst(fused, q.Query)
 	}
@@ -649,7 +641,7 @@ func trigrams(s string) map[string]struct{} {
 		}
 		return out
 	}
-	for i := 0; i+3 <= len(s); i++ {
+	for i := range len(s) - 2 {
 		out[s[i:i+3]] = struct{}{}
 	}
 	return out

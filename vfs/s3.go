@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"maps"
-	"os"
 	"path"
 	"slices"
 	"strings"
@@ -48,28 +47,14 @@ type s3Provider struct {
 	prefix string // no leading or trailing slash; may be empty
 }
 
-var _ documentBackend = s3Provider{}
-
-// Validate implements Provider.
-func (p s3Provider) Validate(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Factory Open rejects a missing client or bucket before this runs.
-	return validateS3Prefix(p.prefix)
+// Validate implements Provider. S3 and Blob check the bucket and prefix
+// when they open.
+func (p s3Provider) Validate(context.Context) error {
+	return nil
 }
 
-// objectKey is the key of name under the mount prefix. The mount root's key
-// is the prefix itself.
-func (p s3Provider) objectKey(name string) (string, error) {
-	rel, err := cleanRel(name)
-	if err != nil {
-		return "", err
-	}
-	return p.keyOf(rel), nil
-}
-
-// keyOf is the key of a clean relative name.
+// keyOf is the key of a clean relative name. The mount root's key is the
+// prefix itself.
 func (p s3Provider) keyOf(rel string) string {
 	switch {
 	case rel == "":
@@ -79,9 +64,6 @@ func (p s3Provider) keyOf(rel string) string {
 	}
 	return p.prefix + "/" + rel
 }
-
-// isRoot reports whether key is the mount root.
-func (p s3Provider) isRoot(key string) bool { return key == p.prefix }
 
 // dirPrefix is the list prefix of the directory at key: key with a trailing
 // slash, or empty for the root of a bucket.
@@ -94,20 +76,12 @@ func dirPrefix(key string) string {
 
 // Stat implements Provider.
 func (p s3Provider) Stat(ctx context.Context, name string) (FileInfo, error) {
-	if err := ctx.Err(); err != nil {
-		return FileInfo{}, err
-	}
-	key, err := p.objectKey(name)
-	if err != nil {
-		return FileInfo{}, err
-	}
-	return p.stat(ctx, key)
+	return p.stat(ctx, p.keyOf(name))
 }
 
-// stat is Stat of a key objectKey made.
+// stat is Stat of the key keyOf made.
 func (p s3Provider) stat(ctx context.Context, key string) (FileInfo, error) {
-	// Root of the mount is always a directory.
-	if p.isRoot(key) {
+	if key == p.prefix {
 		return FileInfo{Name: ".", Mode: fs.ModeDir | 0o755, IsDir: true, ModTime: time.Now().UTC()}, nil
 	}
 
@@ -115,16 +89,12 @@ func (p s3Provider) stat(ctx context.Context, key string) (FileInfo, error) {
 	obj, err := p.api.Head(ctx, p.bucket, key)
 	if err == nil {
 		base := path.Base(key)
-		mt := s3KnownType(obj.ContentType)
-		if mt == "" {
-			mt = DetectMediaType(base, nil)
-		}
 		return FileInfo{
 			Name:      base,
 			Size:      obj.Size,
 			Mode:      0o644,
 			ModTime:   obj.ModTime,
-			MediaType: mt,
+			MediaType: mediaTypeOf(obj.ContentType, base, nil),
 			Version:   obj.ETag,
 		}, nil
 	}
@@ -155,30 +125,14 @@ func (p s3Provider) stat(ctx context.Context, key string) (FileInfo, error) {
 	return FileInfo{Name: path.Base(key), Mode: fs.ModeDir | 0o755, IsDir: true, ModTime: time.Now().UTC()}, nil
 }
 
-// PutFile writes a full object with one Put (no intermediate Open buffer).
-func (p s3Provider) PutFile(ctx context.Context, name string, r io.Reader, size int64) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	key, err := p.objectKey(name)
-	if err != nil {
-		return err
-	}
-	if p.isRoot(key) {
-		return fmt.Errorf("vfs: cannot write mount root as file")
-	}
-	return p.api.Put(ctx, p.bucket, key, r, size)
+// PutFile writes a whole object with one Put.
+func (p s3Provider) PutFile(ctx context.Context, name string, data []byte) error {
+	return p.api.Put(ctx, p.bucket, p.keyOf(name), bytes.NewReader(data), int64(len(data)))
 }
 
 // OpenDocument translates an S3 object into Document IR.
 func (p s3Provider) OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	key, err := p.objectKey(name)
-	if err != nil {
-		return nil, err
-	}
+	key := p.keyOf(name)
 	fi, err := p.stat(ctx, key)
 	if err != nil {
 		return nil, err
@@ -201,59 +155,10 @@ func (p s3Provider) OpenDocument(ctx context.Context, name string, reg *ContentR
 	return decodeProviderDocument(ctx, name, fi, data, reg)
 }
 
-// WriteDocument encodes IR and Puts the object immediately.
-func (p s3Provider) WriteDocument(ctx context.Context, name string, doc Document, reg *ContentRegistry) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	data, err := reg.Encode(ctx, doc)
-	if err != nil {
-		return err
-	}
-	return p.PutFile(ctx, name, bytes.NewReader(data), int64(len(data)))
-}
-
-// OpenFile implements Provider.
-func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, _ fs.FileMode) (File, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	key, err := p.objectKey(name)
-	if err != nil {
-		return nil, err
-	}
-	if p.isRoot(key) {
-		return nil, fmt.Errorf("vfs: cannot open mount root as file")
-	}
-
-	write := flag&(os.O_WRONLY|os.O_RDWR|os.O_APPEND) != 0 || flag&os.O_CREATE != 0 || flag&os.O_TRUNC != 0
-
-	if flag&os.O_CREATE != 0 && flag&os.O_EXCL != 0 {
-		if _, err := p.api.Head(ctx, p.bucket, key); err == nil {
-			return nil, ErrExist
-		} else if !errors.Is(err, ErrNotExist) {
-			return nil, err
-		}
-	}
-
-	if write && flag&os.O_TRUNC == 0 && flag&os.O_APPEND != 0 {
-		// Append: load existing then allow write.
-		body, err := p.api.Get(ctx, p.bucket, key, 0, -1)
-		if err != nil && !errors.Is(err, ErrNotExist) {
-			return nil, err
-		}
-		var buf bytes.Buffer
-		if body != nil {
-			_, _ = io.Copy(&buf, body)
-			_ = body.Close()
-		}
-		return &s3WriteFile{buf: buf, ctx: ctx, p: p, key: key}, nil
-	}
-
-	if write {
-		return &s3WriteFile{ctx: ctx, p: p, key: key}, nil
-	}
-
+// OpenFile implements Provider. It opens files for reading only, whatever
+// the flags; MountSession writes with PutFile.
+func (p s3Provider) OpenFile(ctx context.Context, name string, _ int, _ fs.FileMode) (File, error) {
+	key := p.keyOf(name)
 	fi, err := p.stat(ctx, key)
 	if err != nil {
 		return nil, err
@@ -268,14 +173,7 @@ func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, _ fs.Fi
 
 // ReadDir implements Provider.
 func (p s3Provider) ReadDir(ctx context.Context, name string) ([]DirEntry, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	key, err := p.objectKey(name)
-	if err != nil {
-		return nil, err
-	}
-	// Ensure path is a directory (or empty root).
+	key := p.keyOf(name)
 	st, err := p.stat(ctx, key)
 	if err != nil {
 		return nil, err
@@ -312,16 +210,7 @@ func (p s3Provider) ReadDir(ctx context.Context, name string) ([]DirEntry, error
 
 // Remove implements Provider (single object; directory only if empty).
 func (p s3Provider) Remove(ctx context.Context, name string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	key, err := p.objectKey(name)
-	if err != nil {
-		return err
-	}
-	if p.isRoot(key) {
-		return ErrInvalidPath
-	}
+	key := p.keyOf(name)
 	st, err := p.stat(ctx, key)
 	if err != nil {
 		return err
@@ -345,18 +234,8 @@ func (p s3Provider) Remove(ctx context.Context, name string) error {
 
 // MkdirAll implements Provider using zero-byte directory marker objects.
 func (p s3Provider) MkdirAll(ctx context.Context, name string, _ fs.FileMode) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	rel, err := cleanRel(name)
-	if err != nil {
-		return err
-	}
-	if rel == "" {
-		return nil
-	}
 	var cur string
-	for part := range strings.SplitSeq(rel, "/") {
+	for part := range strings.SplitSeq(name, "/") {
 		cur = path.Join(cur, part)
 		key := p.keyOf(cur)
 		marker := key + "/"
@@ -391,29 +270,10 @@ func validateS3Prefix(prefix string) error {
 	return nil
 }
 
-type s3WriteFile struct {
-	buf bytes.Buffer
-	ctx context.Context
-	p   s3Provider
-	key string
-}
-
-func (f *s3WriteFile) Write(p []byte) (int, error) { return f.buf.Write(p) }
-func (f *s3WriteFile) Close() error {
-	data := f.buf.Bytes()
-	return f.p.api.Put(f.ctx, f.p.bucket, f.key, bytes.NewReader(data), int64(len(data)))
-}
-func (f *s3WriteFile) Stat() (FileInfo, error) {
-	return FileInfo{Name: path.Base(f.key), Size: int64(f.buf.Len()), Mode: 0o644}, nil
-}
-
 // S3 opens providers that share one S3API client (HTTP pool).
 // defaultBucket is used when the spec omits params["bucket"].
 func S3(client S3API, defaultBucket string) Open {
-	return func(ctx context.Context, _ string, b mount.Binding) (Provider, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
+	return func(_ context.Context, _ string, b mount.Binding) (Provider, error) {
 		if client == nil {
 			return nil, fmt.Errorf("vfs: s3 client required")
 		}
@@ -430,16 +290,4 @@ func S3(client S3API, defaultBucket string) Open {
 		}
 		return s3Provider{api: client, bucket: bucket, prefix: prefix}, nil
 	}
-}
-
-// s3KnownType keeps Head Content-Type only when S3 actually declared a type.
-// "application/octet-stream" is S3's default for "I don't know" — Stat then
-// classifies from the object key (DetectMediaType) instead.
-func s3KnownType(contentType string) string {
-	t, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(contentType)), ";")
-	t = strings.TrimSpace(t)
-	if t == "" || t == "application/octet-stream" || t == "binary/octet-stream" {
-		return ""
-	}
-	return t
 }

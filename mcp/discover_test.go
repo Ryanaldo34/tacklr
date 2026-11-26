@@ -77,16 +77,13 @@ func TestConnect_skipsServersThatFail(t *testing.T) {
 	}
 }
 
-// TestConnect_closingLogsAServerThatFailsToEndItsSession: closing the
+// TestConnect_closingReportsOnlyAServerThatFailsToEndItsSession: closing the
 // connections ends each server's session. A server that does not allow the
-// session DELETE (405) counts as closed; a server that fails it is logged
+// session DELETE (405) counts as closed; a server that fails it is reported
 // with its status.
-func TestConnect_closingLogsAServerThatFailsToEndItsSession(t *testing.T) {
-	// Not parallel: it reads what the process-wide default logger writes.
+func TestConnect_closingReportsOnlyAServerThatFailsToEndItsSession(t *testing.T) {
+	t.Parallel()
 	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
 	srv := pingServer()
 	mcpHandler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil)
 	deleting := func(status int) string {
@@ -100,17 +97,22 @@ func TestConnect_closingLogsAServerThatFailsToEndItsSession(t *testing.T) {
 		t.Cleanup(hs.Close)
 		return hs.URL
 	}
-	tools, cleanup := Client{}.Connect(t.Context(), []session.MCPServer{
+	tools, cleanup := Client{Logger: slog.New(slog.NewJSONHandler(&logs, nil))}.Connect(t.Context(), []session.MCPServer{
 		{Type: session.MCPHTTP, Name: "refuses", URL: deleting(http.StatusMethodNotAllowed)},
 		{Type: session.MCPHTTP, Name: "fails", URL: deleting(http.StatusInternalServerError)},
 	})
 
 	cleanup()
 
-	out := logs.String()
-	if len(tools) != 2 || !strings.Contains(out, `msg="mcp server close returned 405, treating as successful" server=refuses`) ||
-		!strings.Contains(out, `msg="failed to close MCP client" server=fails`) || !strings.Contains(out, "close: HTTP error (status 500)") {
-		t.Fatalf("tools %v, logs after close:\n%s\nwant the 405 closed and the 500 logged with its status", tools, out)
+	failed := map[string]string{}
+	for line := range strings.Lines(logs.String()) {
+		var rec struct{ Server, Error string }
+		if json.Unmarshal([]byte(line), &rec) == nil && rec.Error != "" {
+			failed[rec.Server] = rec.Error
+		}
+	}
+	if len(tools) != 2 || len(failed) != 1 || !strings.Contains(failed["fails"], "500") {
+		t.Fatalf("tools %v, failures reported on close %v, want only fails reported with its 500", tools, failed)
 	}
 }
 

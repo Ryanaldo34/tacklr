@@ -1,6 +1,8 @@
 package supervisor
 
 import (
+	"archive/zip"
+	"bytes"
 	"io"
 	"net"
 	"os"
@@ -23,9 +25,7 @@ func serve9P(t *testing.T) (string, p9.File) {
 	dir := t.TempDir()
 	ms, err := vfs.Tree(vfs.At("work", vfs.Local(dir))).WithCodecs(adapters.Codecs()...)(t.Context(), t.Name(), vfs.Request{})
 	require.NoError(t, err)
-	spec := "<h1>Title</h1><p>text</p>"
-	_, err = ms.Apply(t.Context(), "/workspace/work/Spec.docx", vfs.Mutation{Content: &spec})
-	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Spec.docx"), specDocument(t), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "names.txt"), []byte("b\na\n"), 0o600))
 	server, conn := net.Pipe()
 	served := make(chan struct{})
@@ -42,6 +42,20 @@ func serve9P(t *testing.T) (string, p9.File) {
 	root, err := client.Attach("")
 	require.NoError(t, err)
 	return dir, root
+}
+
+// specDocument is a Word document of a Title heading and a text paragraph.
+func specDocument(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("word/document.xml")
+	require.NoError(t, err)
+	_, err = io.WriteString(w, `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>`+
+		`<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p><w:p><w:r><w:t>text</w:t></w:r></w:p></w:body></w:document>`)
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
 }
 
 // walk walks from f to names and returns the new fid.

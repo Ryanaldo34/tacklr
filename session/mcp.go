@@ -7,8 +7,7 @@ import (
 	"strings"
 )
 
-// MCP transports for MCPServer.Type. The set mirrors the transports
-// an ACP client may specify in session lifecycle requests.
+// MCP transports for MCPServer.Type.
 const (
 	// MCPStdio launches the MCP server as a subprocess and communicates
 	// over stdin/stdout. It is the default when Type is empty.
@@ -66,10 +65,10 @@ type MCPTool struct {
 	Call func(ctx context.Context, args map[string]any) (string, error)
 }
 
-// MCPServer is one MCP server a session connects to, for the harness or
-// the ACP session lifecycle. It matches the ACP mcpServers wire shape: a stdio server
-// sets Command/Args/Env with no Type, while HTTP and SSE servers set Type plus
-// URL/Headers. The harness connects through AgentOptions.MCP.
+// MCPServer is one MCP server a session connects to, which the session's
+// creator or a prompt names. A stdio server sets Command/Args/Env with no
+// Type, while HTTP and SSE servers set Type plus URL/Headers. The harness
+// connects through AgentOptions.MCP.
 type MCPServer struct {
 	// Name is a human-readable identifier for the server. It is used as the
 	// tool namespace so that tools from this server are grouped together and
@@ -103,7 +102,7 @@ type MCPServer struct {
 	CredentialRef string `json:"credentialRef,omitempty"`
 
 	// HostEnv is a host-only allowlist of environment variable names inherited
-	// by a stdio subprocess. It is never accepted from ACP JSON.
+	// by a stdio subprocess. It is never decoded from JSON.
 	HostEnv []string `json:"-"`
 
 	// InheritHostEnv is a host-only trusted escape hatch. Client-supplied JSON

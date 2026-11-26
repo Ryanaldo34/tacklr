@@ -7,7 +7,7 @@ This guide covers running sessions for real users: the Temporal client and worke
 A deployment on Temporal has two programs, which scale on their own:
 
 ```go
-// Host: serves your clients. It does not link the agent.
+// Your backend: serves your users. It does not link the agent.
 sessions := temporal.Open(c, temporal.Config{Store: store, Secrets: secrets, Live: temporal.Live{Key: liveKey}})
 
 // Worker: runs the sessions.
@@ -18,7 +18,7 @@ w := worker.New(c, worker.Config{
 err := w.Start() // Stop it on shutdown; Run(interruptCh) blocks instead
 ```
 
-- A **host** imports `session/temporal` and the protocol server. It keeps no session state.
+- **Your backend** imports `session/temporal` and drives sessions through the `session.Client` it returns. It keeps no session state.
 - A **worker** imports `session/temporal/worker` and your agent, workspace sources, and tools. Each session is one Temporal workflow (`SessionWorkflow`), and each model request and tool call is an activity. The worker registers them; do not register them yourself.
 - Both use the same `Store`, `Secrets` and `TaskQueue`. In-memory stores work only when both run in one process.
 
@@ -73,10 +73,10 @@ The model runs on a worker, so clients get the text as it streams only when they
 
 ## Prompts, cancel, and close
 
-- **A prompt during a turn** waits in a queue. It enters the window between rounds, never between a tool call and its result. Over ACP, a second `session/prompt` joins the running turn, and the turn's end answers both.
+- **A prompt during a turn** waits in a queue. It enters the window between rounds, never between a tool call and its result, and the running turn answers it.
 - **`Prompt.Auth` and `Prompt.State`** apply at once. New MCP servers apply when the harness is built next.
 - **`Cancel`** stops the turn and the session's children, and drops queued prompts. A commit that is running finishes first. The session stays open for the next prompt.
-- **A client that disconnects** cancels nothing. The turn goes on, and a client that loads the session follows it again.
+- **A subscriber that leaves** cancels nothing. The turn goes on, and a new `Subscribe` follows it again, from a sequence or from now.
 - **`Close`** stops and deletes the children, deletes the session's checkpoint, credentials, and saved messages, and ends the session.
 
 ## Specialists and jobs
@@ -146,9 +146,9 @@ A durable object has no shell, so its agent has no workspace.
 
 ### Cloudflare Workers
 
-Package `session/durableobject/cloudflare` runs each session as a SQLite-backed Durable Object, and serves ACP from a connection object for each WebSocket. It is the only package with a build tag (`js && wasm`).
+Package `session/durableobject/cloudflare` runs each session as a SQLite-backed Durable Object, and serves your backend's routes from the Worker. It is the only package with a build tag (`js && wasm`).
 
-Your Worker's `main` calls `cloudflare.Serve` with the two Durable Object bindings, the `durableobject.Config`, and the same `server.Server` that a host on net/http runs. Your Worker entry imports `shim.js` from the package directory, with Go's `wasm_exec.js` and the compiled program.
+Your Worker's `main` calls `cloudflare.Serve` with the session objects' Durable Object binding, the `durableobject.Config`, and your `Handler`: an `http.Handler` over the `durableobject.Client` of the session objects. A response body streams, so a route can follow a session's events. Your Worker entry imports `shim.js` from the package directory, with Go's `wasm_exec.js` and the compiled program.
 
 - One Go program serves every object in an isolate. At most `App.MaxIdleObjects` (64) idle objects stay in memory; another one starts again from its storage.
 - A value is stored in 1 MiB parts, because a row holds at most 2 MB.

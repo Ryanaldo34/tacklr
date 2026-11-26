@@ -39,10 +39,6 @@ type Event struct {
 	// that text, in bytes, so a reader sees a gap or a repeat.
 	Delta  bool `json:"delta,omitempty"`
 	Offset int  `json:"offset,omitempty"`
-	// Streamed is how many bytes of a complete event's Content the reader
-	// already got as deltas. A protocol server's follow (server.Peer) sets
-	// it, so a protocol sends only the rest. It is not on the wire.
-	Streamed int `json:"-"`
 	// Error is in-process only. Workflow Streams cannot encode error values;
 	// Fail is the durable stand-in (the error's text) and FailKind names the
 	// sentinel a client acts on: encoding the event writes them from Error,

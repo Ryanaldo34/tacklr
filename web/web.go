@@ -15,8 +15,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 )
 
-// Web tools (Exa): web_search for discovery, web_fetch for known URLs.
-
 const (
 	webSearchDefaultResults = 8
 	webSearchMaxResults     = 10
@@ -48,7 +46,6 @@ type webSearchArgs struct {
 	UserLocation       string   `json:"user_location,omitempty" schema:"-"`
 }
 
-// Tool description is the primary guidance surface (not the system prompt).
 const webSearchToolDescription = `Search the live web and return compact result excerpts.
 
 Pass a natural-language question. Optionally set include_domains to stay on specific hosts (census.gov, bls.gov). Do not use site: in the query.
@@ -75,52 +72,40 @@ func WebSearch(client *Exa) *tacklr.Tool {
 
 var siteOperator = regexp.MustCompile(`(?i)\bsite:([^\s]+)`)
 
-type searchPrep struct {
-	req   SearchRequest
-	notes []string
-}
-
 func runWebSearch(ctx context.Context, client *Exa, args webSearchArgs) (string, error) {
-	prep, err := buildExaSearchRequest(args)
+	req, notes, err := coerceSearch(args)
 	if err != nil {
 		return "", err
 	}
-	resp, err := client.Search(ctx, prep.req)
+	resp, err := client.Search(ctx, req)
 	if retryExaConflict(err) {
-		prep.notes = append(prep.notes, "Provider rejected those filters; retried on the open web.")
-		prep.req.Category = ""
-		prep.req.IncludeDomains = nil
-		prep.req.ExcludeDomains = nil
-		resp, err = client.Search(ctx, prep.req)
+		notes = append(notes, "Provider rejected those filters; retried on the open web.")
+		req.Category, req.IncludeDomains, req.ExcludeDomains = "", nil, nil
+		resp, err = client.Search(ctx, req)
 	}
 	if err != nil {
 		return "", mapExaErr("web_search", err)
 	}
-	if emptySearch(resp) && hasSearchFilters(prep.req) {
-		prep.notes = append(prep.notes, "No hits with those filters; retried on the open web.")
-		prep.req.Category = ""
-		prep.req.IncludeDomains = nil
-		prep.req.ExcludeDomains = nil
-		retry, rerr := client.Search(ctx, prep.req)
-		if rerr != nil {
-			return "", mapExaErr("web_search", rerr)
+	if emptySearch(resp) && hasSearchFilters(req) {
+		notes = append(notes, "No hits with those filters; retried on the open web.")
+		req.Category, req.IncludeDomains, req.ExcludeDomains = "", nil, nil
+		resp, err = client.Search(ctx, req)
+		if err != nil {
+			return "", mapExaErr("web_search", err)
 		}
-		resp = retry
 	}
-	return formatWebSearchResult(prep.req.Query, prep.req.Type, resp, prep.notes), nil
+	return formatWebSearchResult(req.Query, req.Type, resp, notes), nil
 }
 
 func retryExaConflict(err error) bool {
-	var st *StatusError
-	if errors.As(err, &st) {
+	if st, ok := errors.AsType[*StatusError](err); ok {
 		return st.PublicationDomain() || st.QueryFixable()
 	}
 	return false
 }
 
 func mapExaErr(name string, err error) error {
-	var st *StatusError
-	if errors.As(err, &st) {
+	if st, ok := errors.AsType[*StatusError](err); ok {
 		if st.PublicationDomain() {
 			return tacklr.Correction(err, name+": category=publication cannot filter by domain. Omit category, or drop include_domains/exclude_domains, then search again")
 		}
@@ -164,10 +149,14 @@ func liftSiteOperators(q string) (query string, hosts []string) {
 	return query, hosts
 }
 
-func buildExaSearchRequest(args webSearchArgs) (searchPrep, error) {
+// coerceSearch turns the agent's arguments into the request Exa takes. It
+// moves site: operators into include_domains and drops filters Exa rejects
+// in combination, with a note for each, and fails on a value Exa does not
+// know.
+func coerceSearch(args webSearchArgs) (SearchRequest, []string, error) {
 	query, sites := liftSiteOperators(strings.TrimSpace(args.Query))
 	if query == "" {
-		return searchPrep{}, fmt.Errorf("web_search: query is required. Pass a natural-language question or sentence")
+		return SearchRequest{}, nil, fmt.Errorf("web_search: query is required. Pass a natural-language question or sentence")
 	}
 
 	searchType := strings.TrimSpace(args.Type)
@@ -177,7 +166,7 @@ func buildExaSearchRequest(args webSearchArgs) (searchPrep, error) {
 	switch searchType {
 	case "auto", "fast", "instant", "deep-lite", "deep", "deep-reasoning":
 	default:
-		return searchPrep{}, fmt.Errorf("web_search: invalid type %q (use auto, fast, instant, deep-lite, deep, deep-reasoning)", searchType)
+		return SearchRequest{}, nil, fmt.Errorf("web_search: invalid type %q (use auto, fast, instant, deep-lite, deep, deep-reasoning)", searchType)
 	}
 
 	var notes []string
@@ -193,7 +182,7 @@ func buildExaSearchRequest(args webSearchArgs) (searchPrep, error) {
 		switch category {
 		case "company", "people", "news", "publication", "personal site", "financial report":
 		default:
-			return searchPrep{}, fmt.Errorf("web_search: invalid category %q (use company, people, news, publication, personal site, financial report — or omit category)", category)
+			return SearchRequest{}, nil, fmt.Errorf("web_search: invalid category %q (use company, people, news, publication, personal site, financial report — or omit category)", category)
 		}
 	}
 
@@ -229,7 +218,7 @@ func buildExaSearchRequest(args webSearchArgs) (searchPrep, error) {
 	switch mode {
 	case "highlights", "text", "both":
 	default:
-		return searchPrep{}, fmt.Errorf("web_search: invalid content_mode %q (use highlights, text, both)", mode)
+		return SearchRequest{}, nil, fmt.Errorf("web_search: invalid content_mode %q (use highlights, text, both)", mode)
 	}
 
 	textCap := args.MaxTextCharacters
@@ -254,22 +243,19 @@ func buildExaSearchRequest(args webSearchArgs) (searchPrep, error) {
 		contents.MaxAgeHours = args.MaxAgeHours
 	}
 
-	return searchPrep{
-		req: SearchRequest{
-			Query:              query,
-			Type:               searchType,
-			NumResults:         n,
-			Category:           category,
-			IncludeDomains:     include,
-			ExcludeDomains:     exclude,
-			StartPublishedDate: start,
-			EndPublishedDate:   end,
-			UserLocation:       strings.TrimSpace(args.UserLocation),
-			SystemPrompt:       strings.TrimSpace(args.SystemPrompt),
-			Contents:           contents,
-		},
-		notes: notes,
-	}, nil
+	return SearchRequest{
+		Query:              query,
+		Type:               searchType,
+		NumResults:         n,
+		Category:           category,
+		IncludeDomains:     include,
+		ExcludeDomains:     exclude,
+		StartPublishedDate: start,
+		EndPublishedDate:   end,
+		UserLocation:       strings.TrimSpace(args.UserLocation),
+		SystemPrompt:       strings.TrimSpace(args.SystemPrompt),
+		Contents:           contents,
+	}, notes, nil
 }
 
 func formatWebSearchResult(query, searchType string, resp *SearchResponse, notes []string) string {
@@ -336,8 +322,6 @@ func formatExaResults(results []SearchResult, textCap int) string {
 }
 
 func formatSynthesisContent(raw json.RawMessage) string {
-	// raw is one JSON value of Exa's decoded answer, so it decodes and
-	// encodes again. A string is unquoted; anything else is pretty JSON.
 	var v any
 	_ = json.Unmarshal(raw, &v)
 	if s, ok := v.(string); ok {
@@ -464,7 +448,6 @@ func normalizeFetchURLs(in []string) []string {
 		if u == "" {
 			continue
 		}
-		// Accept bare hosts by assuming https (agents sometimes omit scheme).
 		if !strings.Contains(u, "://") {
 			u = "https://" + u
 		}
@@ -476,7 +459,6 @@ func normalizeFetchURLs(in []string) []string {
 		if scheme != "http" && scheme != "https" {
 			continue
 		}
-		// Prefer https in the normalized form when the agent omitted scheme.
 		key := parsed.String()
 		if _, ok := seen[key]; ok {
 			continue
@@ -509,7 +491,6 @@ func formatWebFetchResult(requested []string, resp *ContentsResponse) string {
 	}
 
 	fmt.Fprintf(&b, "Pages: %d\n", len(resp.Results))
-	// Reuse the same per-result layout as search (title/url/highlights/text).
 	b.WriteString(formatExaResults(resp.Results, 4000))
 	return strings.TrimRight(b.String(), "\n")
 }

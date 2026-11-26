@@ -49,5 +49,3 @@ func (a *AESGCM) Open(_ context.Context, ciphertext, associated []byte) ([]byte,
 	}
 	return a.aead.Open(nil, ciphertext[:n], ciphertext[n:], associated)
 }
-
-var _ Sealer = (*AESGCM)(nil)

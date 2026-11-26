@@ -171,8 +171,6 @@ type node struct {
 	entries []vfs.DirEntry
 }
 
-var _ p9.File = (*node)(nil)
-
 // child is the guest path of name in n.
 func (n *node) child(name string) string {
 	return path.Join(n.path, name)

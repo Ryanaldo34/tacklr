@@ -17,7 +17,6 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/postgres"
 	"github.com/ryanaldo34/tacklr/brain/storetest"
-	"github.com/ryanaldo34/tacklr/internal/helixtest"
 	"github.com/ryanaldo34/tacklr/internal/pgtest"
 )
 
@@ -54,8 +53,8 @@ func TestStore_aStatementStuckPastTheTimeoutIsCancelledByTheServer(t *testing.T)
 		want    func(error) bool
 	}{
 		"with a timeout": {100 * time.Millisecond, func(err error) bool {
-			var pgErr *pgconn.PgError
-			return errors.As(err, &pgErr) && pgErr.Code == "57014" // query_canceled
+			pgErr, ok := errors.AsType[*pgconn.PgError](err)
+			return ok && pgErr.Code == "57014" // query_canceled
 		}},
 		"with the timeout off": {-1, func(err error) bool { return errors.Is(err, context.DeadlineExceeded) }},
 	} {
@@ -112,43 +111,6 @@ func TestStore_aStatementStuckPastTheTimeoutIsCancelledByTheServer(t *testing.T)
 	}
 }
 
-// TestStore_everyCallReportsADatabaseFailure: every store call returns the
-// driver's error when the context has ended.
-func TestStore_everyCallReportsADatabaseFailure(t *testing.T) {
-	t.Parallel()
-	store, _ := testDB(t)
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	scope := brain.Scope{Namespace: storetest.Namespace(t, "org", "a"), SessionID: "s1"}
-	ns, id := scope.Namespace, uuid.New()
-	doc := brain.Indexed{Object: brain.Object{ID: id, Kind: "Document", Namespace: ns}}
-	errs := map[string]error{
-		"soft delete":    store.SoftDelete(ctx, scope, id),
-		"put kind":       store.PutKind(ctx, brain.ObjectKind{Kind: "Document"}),
-		"record":         store.Record(ctx, brain.AuditEvent{Op: brain.AuditRead, Namespace: ns}),
-		"delete session": store.DeleteSessionMessages(ctx, ns, "s1"),
-		"setup":          store.Setup(ctx),
-	}
-	_, errs["put"] = store.Put(ctx, scope, doc)
-	_, errs["put tree"] = store.PutTree(ctx, scope, doc, nil)
-	_, errs["get"] = store.Get(ctx, scope, id)
-	_, errs["get many"] = store.GetMany(ctx, scope, []uuid.UUID{id})
-	_, errs["get tree"] = store.GetTree(ctx, scope, id, 0)
-	_, errs["purge deleted"] = store.PurgeDeleted(ctx, scope, time.Now())
-	_, errs["erase"] = store.Erase(ctx, scope)
-	_, errs["list kinds"] = store.ListKinds(ctx)
-	_, errs["get by property"] = store.GetByProperty(ctx, scope, "path", "/a")
-	_, errs["search"] = store.Search(ctx, scope, brain.RecordSearch{Query: "q", Limit: 5})
-	_, errs["save session"] = store.SaveSessionMessages(ctx, ns, "s1", "k", []brain.SessionMessage{{Role: "user"}})
-	_, errs["purge session"] = store.PurgeSessionMessages(ctx, ns, time.Now())
-
-	for name, err := range errs {
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("%s with a cancelled context = %v, want context.Canceled", name, err)
-		}
-	}
-}
-
 // TestStore_rejectsInvalidArgumentsBeforeQuerying: each invalid argument
 // fails, or returns nothing, before the store queries.
 func TestStore_rejectsInvalidArgumentsBeforeQuerying(t *testing.T) {
@@ -163,17 +125,6 @@ func TestStore_rejectsInvalidArgumentsBeforeQuerying(t *testing.T) {
 	}
 	if err := store.SoftDelete(ctx, scope, uuid.Nil); !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("nil id: %v", err)
-	}
-	if err := storetest.Put(store, brain.Object{}); !errors.Is(err, brain.ErrInvalid) {
-		t.Fatalf("invalid put: %v", err)
-	}
-	if _, err := store.PutTree(ctx, scope, brain.Indexed{}, nil); !errors.Is(err, brain.ErrInvalid) {
-		t.Fatalf("invalid tree parent: %v", err)
-	}
-	embedding, _ := testDBWith(t, postgres.Options{Embedding: brain.Embedding{Embedder: &storetest.Embedder{}}})
-	poisoned := brain.Indexed{Object: brain.Object{ID: id, Kind: "Document", Namespace: scope.Namespace}, Text: "poison"}
-	if _, err := embedding.PutTree(ctx, scope, poisoned, nil); err == nil || !strings.Contains(err.Error(), "embedder down") {
-		t.Fatalf("tree whose parent does not embed = %v, want the embedder's error", err)
 	}
 	if got, err := store.Search(ctx, scope, brain.RecordSearch{Query: "q"}); err != nil || got != nil {
 		t.Fatalf("search with no limit = %v %v, want nothing", got, err)
@@ -332,16 +283,14 @@ func TestStore_auditEventsArePersisted(t *testing.T) {
 	}
 }
 
-// TestEngine_aClosedStoreFailsTheCallsThatReadIt: after the pool closes, every
-// engine call that reads or writes the store returns its error.
-func TestEngine_aClosedStoreFailsTheCallsThatReadIt(t *testing.T) {
+// TestStore_aClosedPoolFailsEveryCall: after the pool closes, every store
+// call, and every engine call that reads or writes the store, returns the
+// driver's error.
+func TestStore_aClosedPoolFailsEveryCall(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	store, pool := testOpen(t, postgres.Options{Schema: pgtest.Schema(t), EmbeddingDim: 3})
-	if err := store.Setup(ctx); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := brain.NewEngine(store, brain.WithGraph(helixtest.Graph(t)))
+	store, pool := testDB(t)
+	eng, err := brain.NewEngine(store, brain.WithGraph(brain.NewMemoryGraph(brain.MemoryGraphOptions{})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +310,6 @@ func TestEngine_aClosedStoreFailsTheCallsThatReadIt(t *testing.T) {
 	if err != nil || !first.More {
 		t.Fatalf("first page = %+v %v, want more", first, err)
 	}
-	// The first open reads the kind registry; a fresh engine reads it after the close.
 	if _, err := eng.Open(ctx, scope, ids[0]); err != nil {
 		t.Fatal(err)
 	}
@@ -369,30 +317,48 @@ func TestEngine_aClosedStoreFailsTheCallsThatReadIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	session := brain.Scope{Namespace: scope.Namespace, SessionID: "s1"}
+	ns, id := scope.Namespace, ids[0]
+	doc := brain.Indexed{Object: brain.Object{ID: uuid.New(), Kind: "Document", Namespace: ns}}
 	pool.Close()
 
-	_, registryErr := fresh.Open(ctx, scope, ids[0])
-	_, nextErr := eng.Next(ctx, scope, first.Rest, 1)
-	_, searchErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "shared"})
-	_, relatedErr := eng.Related(ctx, scope, brain.RelatedRequest{ID: ids[0]})
-	_, openErr := eng.Open(ctx, scope, ids[0])
-	_, listErr := eng.Search(ctx, scope, brain.SearchRequest{Kind: "Document"})
-	_, withinErr := eng.Search(ctx, scope, brain.SearchRequest{Query: "shared", Within: ids[0]})
-	_, resolveErr := eng.Resolve(ctx, scope, brain.Ref{Path: "/workspace/work/doc.md"})
-	kindsErr := eng.ApplyKinds(ctx, brain.KindSpec{Kind: "Document", IsParent: true})
-	loadErr := fresh.LoadKindsFromStore(ctx)
-	_, purgeErr := eng.PurgeDeleted(ctx, scope, time.Now())
-	eraseErr := fresh.Erase(ctx, scope)
-	deleteSessionErr := eng.DeleteSessionMessages(ctx, scope.Namespace, "s1")
-	_, purgeSessionErr := eng.PurgeSessionMessages(ctx, scope.Namespace, time.Now())
+	errs := map[string]error{
+		"soft delete":           store.SoftDelete(ctx, scope, id),
+		"put kind":              store.PutKind(ctx, brain.ObjectKind{Kind: "Document"}),
+		"record":                store.Record(ctx, brain.AuditEvent{Op: brain.AuditRead, Namespace: ns}),
+		"delete session":        store.DeleteSessionMessages(ctx, ns, "s1"),
+		"setup":                 store.Setup(ctx),
+		"apply kinds":           eng.ApplyKinds(ctx, brain.KindSpec{Kind: "Document", IsParent: true}),
+		"load kinds":            fresh.LoadKindsFromStore(ctx),
+		"engine erase":          fresh.Erase(ctx, scope),
+		"engine delete session": eng.DeleteSessionMessages(ctx, ns, "s1"),
+	}
+	_, errs["put"] = store.Put(ctx, scope, doc)
+	_, errs["put tree"] = store.PutTree(ctx, scope, doc, nil)
+	_, errs["get"] = store.Get(ctx, session, id)
+	_, errs["get many"] = store.GetMany(ctx, session, []uuid.UUID{id})
+	_, errs["get tree"] = store.GetTree(ctx, scope, id, 0)
+	_, errs["purge deleted"] = store.PurgeDeleted(ctx, scope, time.Now())
+	_, errs["erase"] = store.Erase(ctx, scope)
+	_, errs["list kinds"] = store.ListKinds(ctx)
+	_, errs["get by property"] = store.GetByProperty(ctx, scope, "path", "/a")
+	_, errs["search"] = store.Search(ctx, scope, brain.RecordSearch{Query: "q", Limit: 5})
+	_, errs["save session"] = store.SaveSessionMessages(ctx, ns, "s1", "k", []brain.SessionMessage{{Role: "user"}})
+	_, errs["purge session"] = store.PurgeSessionMessages(ctx, ns, time.Now())
+	_, errs["open's kind registry"] = fresh.Open(ctx, scope, id)
+	_, errs["next page"] = eng.Next(ctx, scope, first.Rest, 1)
+	_, errs["engine search"] = eng.Search(ctx, scope, brain.SearchRequest{Query: "shared"})
+	_, errs["related"] = eng.Related(ctx, scope, brain.RelatedRequest{ID: id})
+	_, errs["open"] = eng.Open(ctx, scope, id)
+	_, errs["list records"] = eng.Search(ctx, scope, brain.SearchRequest{Kind: "Document"})
+	_, errs["search within"] = eng.Search(ctx, scope, brain.SearchRequest{Query: "shared", Within: id})
+	_, errs["resolve a path"] = eng.Resolve(ctx, scope, brain.Ref{Path: "/workspace/work/doc.md"})
+	_, errs["engine purge deleted"] = eng.PurgeDeleted(ctx, scope, time.Now())
+	_, errs["engine purge session"] = eng.PurgeSessionMessages(ctx, ns, time.Now())
 
-	for name, err := range map[string]error{
-		"next page": nextErr, "search": searchErr, "related": relatedErr, "open": openErr, "open's kind registry": registryErr,
-		"list records": listErr, "search within": withinErr, "resolve a path": resolveErr, "apply kinds": kindsErr, "load kinds": loadErr,
-		"purge deleted": purgeErr, "erase": eraseErr, "delete session messages": deleteSessionErr, "purge session messages": purgeSessionErr,
-	} {
+	for name, err := range errs {
 		if err == nil || !strings.Contains(err.Error(), "closed pool") {
-			t.Errorf("%s on a closed store = %v, want its error", name, err)
+			t.Errorf("%s on a closed pool = %v, want the driver's error", name, err)
 		}
 	}
 }

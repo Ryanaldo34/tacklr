@@ -1,13 +1,12 @@
 package web
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -29,84 +28,143 @@ func newExaTestClient(t *testing.T, handler http.HandlerFunc) *Exa {
 	return client
 }
 
-// TestWebSearch_searchesAndCoercesFilters: web_search formats Exa's results,
-// rejects arguments it cannot send, and drops or moves filters Exa does not
-// take, with a note that says so.
-func TestWebSearch_searchesAndCoercesFilters(t *testing.T) {
+// TestCoerceSearch_rejectsValuesExaDoesNotKnow: an empty query, or a type,
+// category or content mode Exa does not know, fails before any request.
+func TestCoerceSearch_rejectsValuesExaDoesNotKnow(t *testing.T) {
 	t.Parallel()
-	client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		var body map[string]any
-		_ = json.Unmarshal(b, &body)
-		w.Header().Set("Content-Type", "application/json")
-		q, _ := body["query"].(string)
-		switch q {
-		case "capital of France":
-			_, _ = w.Write([]byte(`{"results":[{"title":"Paris","url":"https://example.com/paris","highlights":["Paris is the capital",""],"text":"Paris is the capital of France.","summary":"Capital city","author":"Ed","publishedDate":"2024-01-01"}],"output":{"content":"Paris is the capital."}}`))
-		case "empty-results":
-			_, _ = w.Write([]byte(`{"results":[]}`))
-		case "census.gov":
-			_, _ = w.Write([]byte(`{"results":[{"title":"Census","url":"https://census.gov","highlights":["` + strings.Repeat("h", 900) + `"]}]}`))
-		case "untitled":
-			_, _ = w.Write([]byte(`{"results":[{"url":"https://example.com/x","highlights":["hit"]}],"output":{"content":{"answer":"ok"}}}`))
-		default:
-			_, _ = w.Write([]byte(`{"results":[{"title":"Hit","url":"https://example.com"}]}`))
+	for name, tc := range map[string]struct {
+		args webSearchArgs
+		want string
+	}{
+		"a blank query":       {webSearchArgs{Query: "  "}, "query is required"},
+		"an unknown type":     {webSearchArgs{Query: "q", Type: "nope"}, "invalid type"},
+		"an unknown category": {webSearchArgs{Query: "q", Category: "nope"}, "invalid category"},
+		"an unknown mode":     {webSearchArgs{Query: "q", ContentMode: "raw"}, "invalid content_mode"},
+	} {
+		_, _, err := coerceSearch(tc.args)
+
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s = %v, want %q", name, err, tc.want)
 		}
-	})
-	ctx := context.Background()
+	}
+}
+
+// TestCoerceSearch_dropsOrMovesFiltersExaRejectsWithANote: a filter Exa
+// rejects in combination is dropped, and a site: operator moves into
+// include_domains, each with a note saying so.
+func TestCoerceSearch_dropsOrMovesFiltersExaRejectsWithANote(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		args webSearchArgs
+		want func(SearchRequest) bool
+		note string
+	}{
+		"exclude_domains on companies": {
+			webSearchArgs{Query: "q", Category: "company", ExcludeDomains: []string{"x.com"}},
+			func(r SearchRequest) bool { return r.Category == "company" && r.ExcludeDomains == nil },
+			"Dropped exclude_domains",
+		},
+		"dates on people": {
+			webSearchArgs{Query: "q", Category: "people", StartPublishedDate: "2024-01-01T00:00:00Z", EndPublishedDate: "2025-01-01T00:00:00Z"},
+			func(r SearchRequest) bool { return r.StartPublishedDate == "" && r.EndPublishedDate == "" },
+			"Dropped published-date",
+		},
+		"publications filtered by domain": {
+			webSearchArgs{Query: "ACS API", Category: "publication", IncludeDomains: []string{"census.gov"}},
+			func(r SearchRequest) bool {
+				return r.Category == "" && slices.Equal(r.IncludeDomains, []string{"census.gov"})
+			},
+			"Dropped category=publication",
+		},
+		"a site: operator": {
+			webSearchArgs{Query: "site:https://census.gov/ ACS 5-year API"},
+			func(r SearchRequest) bool {
+				return r.Query == "ACS 5-year API" && slices.Equal(r.IncludeDomains, []string{"census.gov"})
+			},
+			"Moved site:",
+		},
+		"a query of only a site: operator": {
+			webSearchArgs{Query: "site:census.gov"},
+			func(r SearchRequest) bool {
+				return r.Query == "census.gov" && slices.Equal(r.IncludeDomains, []string{"census.gov"})
+			},
+			"Moved site:",
+		},
+	} {
+		req, notes, err := coerceSearch(tc.args)
+
+		if err != nil || !tc.want(req) || !strings.Contains(strings.Join(notes, " "), tc.note) {
+			t.Errorf("%s = %+v notes %q err %v, want the filter coerced and %q", name, req, notes, err, tc.note)
+		}
+	}
+}
+
+// TestCoerceSearch_fillsDefaultsAndCapsLimits: an unset type, count and mode
+// take their defaults, and a count or text length above the limit is capped.
+func TestCoerceSearch_fillsDefaultsAndCapsLimits(t *testing.T) {
+	t.Parallel()
 	age := 24
+	for name, tc := range map[string]struct {
+		args webSearchArgs
+		want SearchRequest
+	}{
+		"only a query": {
+			webSearchArgs{Query: " q "},
+			SearchRequest{Query: "q", Type: "auto", NumResults: webSearchDefaultResults, Contents: &ContentsOptions{Highlights: true}},
+		},
+		"limits above the caps": {
+			webSearchArgs{Query: "q", Type: "fast", NumResults: 20, ContentMode: "both", MaxTextCharacters: 20000, MaxAgeHours: &age, UserLocation: " US ", SystemPrompt: " cite "},
+			SearchRequest{Query: "q", Type: "fast", NumResults: webSearchMaxResults, UserLocation: "US", SystemPrompt: "cite", Contents: &ContentsOptions{
+				Highlights: true, Text: TextOptions{MaxCharacters: webSearchMaxTextCap, Verbosity: "compact"}, MaxAgeHours: &age,
+			}},
+		},
+		"text only": {
+			webSearchArgs{Query: "q", Category: "news", ContentMode: "text"},
+			SearchRequest{Query: "q", Type: "auto", NumResults: webSearchDefaultResults, Category: "news", Contents: &ContentsOptions{
+				Text: TextOptions{MaxCharacters: webSearchDefaultTextCap, Verbosity: "compact"},
+			}},
+		},
+	} {
+		got, _, err := coerceSearch(tc.args)
+		got.IncludeDomains, got.ExcludeDomains = nil, nil
 
-	got, err := runWebSearch(ctx, client, webSearchArgs{
-		Query: "capital of France", NumResults: 20, Type: "fast", ContentMode: "both",
-		MaxTextCharacters: 20000, UserLocation: "US", SystemPrompt: "prefer primary sources", MaxAgeHours: &age,
-	})
-	if err != nil || !strings.Contains(got, "Paris") || !strings.Contains(got, "capital") {
-		t.Fatalf("search: %q err=%v", got, err)
+		if err != nil || !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s = %+v %v, want %+v", name, got, err, tc.want)
+		}
 	}
+}
 
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "empty-results"})
-	if err != nil || !strings.Contains(got, "No results found") {
-		t.Fatalf("empty: %q err=%v", got, err)
-	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "untitled", ContentMode: "highlights"})
-	if err != nil || !strings.Contains(got, "(untitled)") || !strings.Contains(got, `"answer"`) {
-		t.Fatalf("untitled/synth: %q err=%v", got, err)
-	}
-	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "  "}); err == nil || !strings.Contains(err.Error(), "query is required") {
-		t.Fatalf("empty query: %v", err)
-	}
-	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "q", Type: "nope"}); err == nil {
-		t.Fatal("invalid type")
-	}
-	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "q", Category: "nope"}); err == nil {
-		t.Fatal("invalid category")
-	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "q", Category: "company", ExcludeDomains: []string{"x.com"}})
-	if err != nil || !strings.Contains(got, "Hit") || !strings.Contains(got, "Dropped exclude_domains") {
-		t.Fatalf("company exclude coerced: %q err=%v", got, err)
-	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "q", Category: "people", StartPublishedDate: "2024-01-01T00:00:00Z"})
-	if err != nil || !strings.Contains(got, "Hit") || !strings.Contains(got, "Dropped published-date") {
-		t.Fatalf("people dates coerced: %q err=%v", got, err)
-	}
-	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "q", ContentMode: "raw"}); err == nil {
-		t.Fatal("invalid mode")
-	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "news-q", Type: "auto", ContentMode: "text", Category: "news"})
-	if err != nil || !strings.Contains(got, "Hit") {
-		t.Fatalf("text mode: %q err=%v", got, err)
-	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "ACS API", Category: "publication", IncludeDomains: []string{"census.gov"}})
-	if err != nil || !strings.Contains(got, "Hit") || !strings.Contains(got, "Dropped category=publication") {
-		t.Fatalf("publication+domain coerced: %q err=%v", got, err)
-	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "site:census.gov ACS 5-year API"})
-	if err != nil || !strings.Contains(got, "Hit") || !strings.Contains(got, "Moved site:") {
-		t.Fatalf("site: lift: %q err=%v", got, err)
-	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "site:census.gov"})
-	if err != nil || !strings.Contains(got, "Query: census.gov") || !strings.Contains(got, strings.Repeat("h", 800)+"…") {
-		t.Fatalf("site-only query searches the host, with a long highlight cut: %q err=%v", got, err)
+// TestWebSearch_formatsWhatExaFinds: web_search lists each result with what
+// Exa returned for it, and Exa's synthesized answer, or says it found
+// nothing.
+func TestWebSearch_formatsWhatExaFinds(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		answer string
+		want   []string
+	}{
+		"a full result and a text answer": {
+			`{"results":[{"title":"Paris","url":"https://example.com/paris","highlights":["Paris is the capital",""],"text":"Paris is the capital of France.","summary":"Capital city","author":"Ed","publishedDate":"2024-01-01"}],"output":{"content":"Paris it is."}}`,
+			[]string{"## 1. Paris", "https://example.com/paris", "Published: 2024-01-01 | Author: Ed", "Paris is the capital", "Summary: Capital city", "Text: Paris is the capital of France.", "Paris it is."},
+		},
+		"an untitled result with a long highlight and a structured answer": {
+			`{"results":[{"url":"https://example.com/x","highlights":["` + strings.Repeat("h", 900) + `"]}],"output":{"content":{"answer":"ok"}}}`,
+			[]string{"(untitled)", strings.Repeat("h", 800) + "…", `"answer": "ok"`},
+		},
+		"no results": {`{"results":[]}`, []string{"No results found"}},
+	} {
+		client := newExaTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(tc.answer))
+		})
+
+		got, err := runWebSearch(t.Context(), client, webSearchArgs{Query: "capital of France"})
+
+		for _, want := range tc.want {
+			if err != nil || !strings.Contains(got, want) {
+				t.Errorf("%s = %q %v, want %q", name, got, err, want)
+			}
+		}
 	}
 }
 
@@ -115,11 +173,10 @@ func TestWebSearch_searchesAndCoercesFilters(t *testing.T) {
 // filters; a retry that fails is the tool's failure.
 func TestWebSearch_retriesOnTheOpenWebWhenTheFiltersFail(t *testing.T) {
 	t.Parallel()
-	hit := `{"results":[{"title":"Open web hit","url":"https://example.com"}]}`
 	for name, tc := range map[string]struct {
 		args        webSearchArgs
-		first       func(http.ResponseWriter)
-		retryStatus int // 0 answers the retry with a hit
+		filtered    func(http.ResponseWriter)
+		retryStatus int
 		want        string
 	}{
 		"no hits with a category": {
@@ -135,26 +192,21 @@ func TestWebSearch_retriesOnTheOpenWebWhenTheFiltersFail(t *testing.T) {
 			func(w http.ResponseWriter) { _, _ = w.Write([]byte(`{"results":[]}`)) }, http.StatusBadGateway, "search provider failed",
 		},
 	} {
-		var requests []map[string]any
 		client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			var body map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			requests = append(requests, body)
+			var req SearchRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
 			switch {
-			case len(requests) == 1:
-				tc.first(w)
+			case hasSearchFilters(req):
+				tc.filtered(w)
 			case tc.retryStatus != 0:
 				w.WriteHeader(tc.retryStatus)
 			default:
-				_, _ = w.Write([]byte(hit))
+				_, _ = w.Write([]byte(`{"results":[{"title":"Open web hit","url":"https://example.com"}]}`))
 			}
 		})
 
 		got, err := runWebSearch(t.Context(), client, tc.args)
 
-		if len(requests) != 2 || requests[1]["category"] != nil || requests[1]["includeDomains"] != nil {
-			t.Errorf("%s: requests = %v, want the search, then one without filters", name, requests)
-		}
 		if tc.retryStatus != 0 {
 			if !errors.Is(err, tacklr.ErrFailed) || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("%s = %v, want ErrFailed naming %q", name, err, tc.want)
@@ -164,6 +216,18 @@ func TestWebSearch_retriesOnTheOpenWebWhenTheFiltersFail(t *testing.T) {
 		if err != nil || !strings.Contains(got, "Open web hit") || !strings.Contains(got, tc.want) {
 			t.Errorf("%s = %q %v, want the open-web hit and %q", name, got, err, tc.want)
 		}
+	}
+}
+
+// TestWebSearch_failsWithoutARequestOnArgumentsItCannotSend: arguments
+// coerceSearch rejects fail before the client is used.
+func TestWebSearch_failsWithoutARequestOnArgumentsItCannotSend(t *testing.T) {
+	t.Parallel()
+
+	_, err := runWebSearch(t.Context(), nil, webSearchArgs{Query: " "})
+
+	if err == nil || !strings.Contains(err.Error(), "query is required") {
+		t.Errorf("search with a blank query = %v, want query is required", err)
 	}
 }
 
@@ -203,79 +267,96 @@ func TestWebSearch_mapsProviderFailuresToToolErrors(t *testing.T) {
 	}
 }
 
-// TestWebFetch_readsKnownURLs: web_fetch reads the URLs it can normalize,
-// asks Exa for text, highlights or both, reports a URL Exa could not read,
-// and rejects arguments it cannot send.
-func TestWebFetch_readsKnownURLs(t *testing.T) {
+// TestBuildExaContentsRequest_asksForWhatTheModeNames: web_fetch keeps the
+// http(s) URLs it can normalize, once each, and asks Exa for text,
+// highlights, or both, with highlights on the query when one is given.
+func TestBuildExaContentsRequest_asksForWhatTheModeNames(t *testing.T) {
 	t.Parallel()
-	var highlights any
-	client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/contents" {
-			http.NotFound(w, r)
-			return
+	page := []string{"https://example.gov/code"}
+	defaultText := TextOptions{MaxCharacters: webFetchDefaultTextCap, Verbosity: "compact"}
+	for name, tc := range map[string]struct {
+		args webFetchArgs
+		want ContentsRequest
+	}{
+		"urls to normalize": {
+			webFetchArgs{URLs: []string{"  ", "ftp://x", "example.gov/code", "https://example.gov/code", "not a host"}},
+			ContentsRequest{URLs: page, Text: defaultText},
+		},
+		"highlights": {
+			webFetchArgs{URLs: page, ContentMode: "highlights"},
+			ContentsRequest{URLs: page, Highlights: true},
+		},
+		"highlights on a query": {
+			webFetchArgs{URLs: page, ContentMode: "highlights", HighlightQuery: " setbacks "},
+			ContentsRequest{URLs: page, Highlights: HighlightsOptions{Query: "setbacks"}},
+		},
+		"both": {
+			webFetchArgs{URLs: page, ContentMode: "both"},
+			ContentsRequest{URLs: page, Text: defaultText, Highlights: true},
+		},
+		"both on a query with text above the cap": {
+			webFetchArgs{URLs: page, ContentMode: "both", MaxTextCharacters: 20000, HighlightQuery: "setbacks"},
+			ContentsRequest{URLs: page, Text: TextOptions{MaxCharacters: webFetchMaxTextCap, Verbosity: "compact"}, Highlights: HighlightsOptions{Query: "setbacks"}},
+		},
+	} {
+		got, err := buildExaContentsRequest(tc.args)
+
+		if err != nil || !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s = %+v %v, want %+v", name, got, err, tc.want)
 		}
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		highlights = body["highlights"]
+	}
+}
+
+// TestWebFetch_readsPagesAndReportsOnesExaCouldNotRead: web_fetch returns
+// each page Exa read, and the status of a URL it could not read.
+func TestWebFetch_readsPagesAndReportsOnesExaCouldNotRead(t *testing.T) {
+	t.Parallel()
+	client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var req ContentsRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
-		urls, _ := body["urls"].([]any)
-		if len(urls) == 1 && urls[0] == "https://example.gov/missing" {
+		if req.URLs[0] == "https://example.gov/missing" {
 			_, _ = w.Write([]byte(`{"results":[],"statuses":[{"id":"https://example.gov/missing","status":"error","error":{"tag":"not_found"}}]}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"results":[{"title":"City Code","url":"https://example.gov/code","text":"Section 1.2 setbacks"}]}`))
 	})
-	ctx := t.Context()
-	fetch := func(args webFetchArgs) string {
-		t.Helper()
-		got, err := runWebFetch(ctx, client, args)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return got
-	}
 
-	text := fetch(webFetchArgs{URLs: []string{"https://example.gov/code"}})
-	normalized := fetch(webFetchArgs{URLs: []string{"  ", "ftp://x", "example.gov/code", "https://example.gov/code", "not a host"}})
-	missing := fetch(webFetchArgs{URLs: []string{"https://example.gov/missing"}, ContentMode: "highlights", HighlightQuery: "setbacks"})
-	fetch(webFetchArgs{URLs: []string{"https://example.gov/code"}, ContentMode: "highlights"})
-	anyHighlights := highlights
-	fetch(webFetchArgs{URLs: []string{"https://example.gov/code"}, ContentMode: "both"})
-	textAndAnyHighlights := highlights
-	fetch(webFetchArgs{URLs: []string{"https://example.gov/code"}, ContentMode: "both", MaxTextCharacters: 20000, HighlightQuery: "setbacks"})
-	focused, _ := highlights.(map[string]any)
-	_, noURLs := runWebFetch(ctx, client, webFetchArgs{})
-	_, tooMany := runWebFetch(ctx, client, webFetchArgs{URLs: []string{"https://a", "https://b", "https://c", "https://d", "https://e", "https://f"}})
-	_, badMode := runWebFetch(ctx, client, webFetchArgs{URLs: []string{"https://example.gov/code"}, ContentMode: "raw"})
-	_, noKey := runWebFetch(ctx, NewExa(""), webFetchArgs{URLs: []string{"https://example.gov/code"}})
+	page, pageErr := runWebFetch(t.Context(), client, webFetchArgs{URLs: []string{"https://example.gov/code"}})
+	missing, missingErr := runWebFetch(t.Context(), client, webFetchArgs{URLs: []string{"https://example.gov/missing"}})
+
+	if pageErr != nil || !strings.Contains(page, "City Code") || !strings.Contains(page, "Section 1.2 setbacks") {
+		t.Errorf("fetch = %q %v, want the page", page, pageErr)
+	}
+	if missingErr != nil || !strings.Contains(missing, "error (not_found)") || !strings.Contains(missing, "No content returned") {
+		t.Errorf("fetch a missing page = %q %v, want its status and no content", missing, missingErr)
+	}
+}
+
+// TestWebFetch_failsOnArgumentsItCannotSendAndOnProviderErrors: no URLs, too
+// many, an unknown mode or a client with no key fail before a request, and
+// a provider that fails is ErrFailed.
+func TestWebFetch_failsOnArgumentsItCannotSendAndOnProviderErrors(t *testing.T) {
+	t.Parallel()
+	page := []string{"https://example.gov/code"}
 	down := newExaTestClient(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadGateway) })
-	_, downErr := runWebFetch(ctx, down, webFetchArgs{URLs: []string{"https://example.com"}})
-
-	if !strings.Contains(text, "City Code") || !strings.Contains(text, "setbacks") || !strings.Contains(normalized, "URLs requested: 1") {
-		t.Errorf("fetch = %q, normalized = %q, want the page, and one URL left after normalizing", text, normalized)
-	}
-	if !strings.Contains(missing, "error (not_found)") {
-		t.Errorf("fetch a missing page = %q, want its status", missing)
-	}
-	if anyHighlights != true || textAndAnyHighlights != true || !maps.Equal(focused, map[string]any{"query": "setbacks"}) {
-		t.Errorf("highlights asked for = %v, %v, then %v, want any highlights twice, then highlights on the query", anyHighlights, textAndAnyHighlights, focused)
-	}
 	for name, tc := range map[string]struct {
-		err  error
-		want string
+		client *Exa
+		args   webFetchArgs
+		is     error
+		want   string
 	}{
-		"no urls":          {noURLs, "at least one"},
-		"too many urls":    {tooMany, "at most 5"},
-		"an unknown mode":  {badMode, "invalid content_mode"},
-		"no key":           {noKey, "API key is required"},
-		"a provider error": {downErr, "search provider failed"},
+		"no urls":          {down, webFetchArgs{}, nil, "at least one"},
+		"too many urls":    {down, webFetchArgs{URLs: []string{"https://a", "https://b", "https://c", "https://d", "https://e", "https://f"}}, nil, "at most 5"},
+		"an unknown mode":  {down, webFetchArgs{URLs: page, ContentMode: "raw"}, nil, "invalid content_mode"},
+		"no key":           {NewExa(""), webFetchArgs{URLs: page}, nil, "API key is required"},
+		"a provider error": {down, webFetchArgs{URLs: page}, tacklr.ErrFailed, "search provider failed"},
 	} {
-		if tc.err == nil || !strings.Contains(tc.err.Error(), tc.want) {
-			t.Errorf("%s = %v, want %q", name, tc.err, tc.want)
+		_, err := runWebFetch(t.Context(), tc.client, tc.args)
+
+		if err == nil || (tc.is != nil && !errors.Is(err, tc.is)) || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s = %v, want %v naming %q", name, err, tc.is, tc.want)
 		}
-	}
-	if !errors.Is(downErr, tacklr.ErrFailed) {
-		t.Errorf("fetch from a provider that fails = %v, want ErrFailed", downErr)
 	}
 }
 

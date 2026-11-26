@@ -1,8 +1,9 @@
 // End-to-end test of the Cloudflare bridge: the example Worker runs in
-// workerd (wrangler dev) against a scripted model, and the test is an ACP
-// client on a WebSocket, as an editor is. A restart of wrangler dev is an
-// eviction: only each object's SQLite storage survives it, and the
-// client's socket closes.
+// workerd (wrangler dev) against a scripted model, and the test is a
+// program that drives sessions through the Worker's backend API
+// (examples/backend), following each session's events as server-sent
+// events. A restart of wrangler dev is an eviction: only each object's
+// SQLite storage survives it, and the event streams close.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -60,206 +61,205 @@ afterAll(async () => {
   rmSync(state, { recursive: true, force: true });
 });
 
-type Frame = { id?: number; method?: string; params?: any; result?: any; error?: { code: number; message: string } };
+type Event = { Type: string; MessageID?: string; Content?: string; delta?: boolean };
 
-// Client is an ACP client on one WebSocket: it reads the frames in order.
-class Client {
-  private queue: Frame[] = [];
+// Session is one session of the backend, and the events it follows.
+class Session {
+  private queue: Event[] = [];
   private wake?: () => void;
-  private next = 0;
-  closed = false;
+  private reader?: ReadableStreamDefaultReader<Uint8Array>;
+  ended = false;
 
-  private constructor(private ws: WebSocket) {
-    ws.addEventListener("message", (e) => {
-      this.queue.push(JSON.parse(String(e.data)));
-      this.wake?.();
-    });
-    ws.addEventListener("close", () => {
-      this.closed = true;
-      this.wake?.();
-    });
+  private constructor(readonly id: string) {}
+
+  // create makes a session and follows its events.
+  static async create(): Promise<Session> {
+    const r = await api("POST", "/sessions");
+    expect(r.status).toBe(201);
+    const s = new Session((await r.json()).id);
+    await s.follow();
+    return s;
   }
 
-  // open connects with bearer (none when it is empty) and says hello.
-  static async open(bearer = token): Promise<Client> {
-    const headers: Record<string, string> = bearer ? { authorization: `Bearer ${bearer}` } : {};
-    const ws = new WebSocket(`ws://localhost:${port}/acp`, { headers } as any);
-    await new Promise<void>((resolve, reject) => {
-      ws.addEventListener("open", () => resolve(), { once: true });
-      ws.addEventListener("error", () => reject(new Error("the upgrade was refused")), { once: true });
-    });
-    const c = new Client(ws);
-    await c.call("initialize", { protocolVersion: 1 });
-    return c;
+  // follow reads the session's events after after (from now when it is
+  // undefined).
+  async follow(after?: number) {
+    const query = after === undefined ? "" : `?after=${after}`;
+    const r = await api("GET", `/sessions/${this.id}/events${query}`);
+    expect(r.status).toBe(200);
+    this.reader = r.body!.getReader();
+    this.ended = false;
+    const reader = this.reader;
+    (async () => {
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read().catch(() => ({ value: undefined, done: true }));
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let at;
+        while ((at = buf.indexOf("\n\n")) >= 0) {
+          const line = buf.slice(0, at);
+          buf = buf.slice(at + 2);
+          if (line.startsWith("data: ")) this.queue.push(JSON.parse(line.slice(6)));
+        }
+        this.wake?.();
+      }
+      this.ended = true;
+      this.wake?.();
+    })();
   }
 
-  async frame(): Promise<Frame> {
+  close() {
+    this.reader?.cancel().catch(() => {});
+  }
+
+  async event(): Promise<Event> {
     for (let i = 0; i < 600 && this.queue.length === 0; i++) {
-      if (this.closed) throw new Error("the socket closed");
+      if (this.ended) throw new Error("the event stream ended");
       await new Promise<void>((resolve) => {
         this.wake = resolve;
         setTimeout(resolve, 100);
       });
     }
-    const f = this.queue.shift();
-    if (!f) throw new Error("no frame in 60 seconds");
-    return f;
+    const e = this.queue.shift();
+    if (!e) throw new Error("no event in 60 seconds");
+    return e;
   }
 
-  send(frame: unknown) {
-    this.ws.send(JSON.stringify(frame));
-  }
-
-  // request sends method and returns its id.
-  request(method: string, params: unknown): number {
-    this.send({ jsonrpc: "2.0", id: ++this.next, method, params });
-    return this.next;
-  }
-
-  // until reads frames until the first that done accepts, and returns it
-  // and the frames before it.
-  async until(done: (f: Frame) => boolean): Promise<{ last: Frame; before: Frame[] }> {
-    const before: Frame[] = [];
+  // until reads events until the first that done accepts, and returns it
+  // and the events before it.
+  async until(done: (e: Event) => boolean): Promise<{ last: Event; before: Event[] }> {
+    const before: Event[] = [];
     for (;;) {
-      const f = await this.frame();
-      if (done(f)) return { last: f, before };
-      before.push(f);
+      const e = await this.event();
+      if (done(e)) return { last: e, before };
+      before.push(e);
     }
   }
 
-  async call(method: string, params: unknown) {
-    const id = this.request(method, params);
-    return (await this.until((f) => f.id === id && !f.method)).last;
+  // turn reads events until the turn ends or waits on the user.
+  turn() {
+    return this.until((e) => ["complete", "error", "yield"].includes(e.Type));
   }
 
-  async newSession(): Promise<string> {
-    const r = await this.call("session/new", { cwd: "/edge" });
-    expect(r.error).toBeUndefined();
-    return r.result.sessionId;
+  async prompt(text: string, headers: Record<string, string> = {}) {
+    const r = await api("POST", `/sessions/${this.id}/prompt`, { text }, headers);
+    expect(r.status).toBe(202);
   }
 
-  prompt(sid: string, text: string): number {
-    return this.request("session/prompt", { sessionId: sid, prompt: [{ type: "text", text }] });
-  }
-
-  close() {
-    this.ws.close();
+  async resume(messageID: string, answer: unknown) {
+    const r = await api("POST", `/sessions/${this.id}/resume`, { responses: { [messageID]: answer } });
+    expect(r.status).toBe(202);
   }
 }
 
-// updates is the session/update payloads among frames.
-const updates = (frames: Frame[]) => frames.filter((f) => f.method === "session/update").map((f) => f.params.update);
-const text = (frames: Frame[]) =>
-  updates(frames)
-    .filter((u) => u.sessionUpdate === "agent_message_chunk")
-    .map((u) => u.content.text);
-const output = (frames: Frame[], status = "completed") =>
-  updates(frames).find((u) => u.sessionUpdate === "tool_call_update" && u.status === status)?.rawOutput?.output;
+// api sends a request to the Worker with the token (bearer: another one).
+function api(method: string, path: string, body?: unknown, headers: Record<string, string> = {}, bearer = token) {
+  return fetch(`${base}${path}`, {
+    method,
+    headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json", ...headers },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
 
-const allow = { outcome: { outcome: "selected", optionId: "allow-once" } };
+const deltas = (events: Event[]) => events.filter((e) => e.Type === "message" && e.delta).map((e) => e.Content);
+const said = (events: Event[]) =>
+  events
+    .filter((e) => e.Type === "message" && !e.delta)
+    .map((e) => e.Content)
+    .join("");
+const result = (events: Event[]) => events.find((e) => e.Type === "tool_result")?.Content;
 
-test("a prompt streams its answer in chunks as the model writes it", async () => {
-  const c = await Client.open();
-  const sid = await c.newSession();
-  const id = c.prompt(sid, "hello");
-  const { last, before } = await c.until((f) => f.id === id);
-  c.close();
+const allow = { optionId: "allow-once" };
 
-  expect(last.result?.stopReason).toBe("end_turn");
-  expect(text(before).length).toBeGreaterThan(1);
-  expect(text(before).join("")).toBe("Hello from the edge");
+test("a prompt streams its answer in deltas as the model writes it", async () => {
+  const s = await Session.create();
+  await s.prompt("hello");
+  const { last, before } = await s.turn();
+  s.close();
+
+  expect(last.Type).toBe("complete");
+  expect(deltas(before).length).toBeGreaterThan(1);
+  expect(said(before)).toBe("Hello from the edge");
 }, 60_000);
 
-test("a tool's 3 MB result reaches the model and the client whole", async () => {
-  const c = await Client.open();
-  const id = c.prompt(await c.newSession(), "report");
-  const { last, before } = await c.until((f) => f.id === id);
-  c.close();
+test("a tool's 3 MB result reaches the model and the program whole", async () => {
+  const s = await Session.create();
+  await s.prompt("report");
+  const { last, before } = await s.turn();
+  s.close();
 
-  expect(last.result?.stopReason).toBe("end_turn");
-  expect(output(before)?.length).toBe(3 << 20);
+  expect(last.Type).toBe("complete");
+  expect(result(before)?.length).toBe(3 << 20);
   expect(model.outputs).toContain(3 << 20);
 }, 60_000);
 
-test("a turn is one trace from the client's traceparent, through the session's and the specialist's objects", async () => {
-  const c = await Client.open();
-  const sid = await c.newSession();
-  const traceId = crypto.getRandomValues(new Uint8Array(16)).reduce((s, b) => s + b.toString(16).padStart(2, "0"), "");
+test("a turn is one trace from the program's traceparent, through the session's and the specialist's objects", async () => {
+  const s = await Session.create();
+  const traceId = crypto.getRandomValues(new Uint8Array(16)).reduce((acc, b) => acc + b.toString(16).padStart(2, "0"), "");
   const clientSpan = "00f067aa0ba902b7";
-  const id = c.request("session/prompt", {
-    sessionId: sid,
-    prompt: [{ type: "text", text: "research" }],
-    _meta: { traceparent: `00-${traceId}-${clientSpan}-01` },
-  });
-  const { last } = await c.until((f) => f.id === id && !f.method);
-  c.close();
-  const want = ["session/prompt", "invoke_agent edge", "execute_tool spawn_specialist", "invoke_agent researcher", "execute_tool lookup"];
-  let spans = model.spans.filter((s) => s.traceId === traceId);
-  for (let i = 0; i < 100 && !want.every((n) => spans.some((s) => s.name === n)); i++) {
+  await s.prompt("research", { traceparent: `00-${traceId}-${clientSpan}-01` });
+  const { last } = await s.turn();
+  s.close();
+  const want = ["invoke_agent edge", "execute_tool spawn_specialist", "invoke_agent researcher", "execute_tool lookup"];
+  let spans = model.spans.filter((sp) => sp.traceId === traceId);
+  for (let i = 0; i < 100 && !want.every((n) => spans.some((sp) => sp.name === n)); i++) {
     await Bun.sleep(100);
-    spans = model.spans.filter((s) => s.traceId === traceId);
+    spans = model.spans.filter((sp) => sp.traceId === traceId);
   }
 
-  expect(last.result?.stopReason).toBe("end_turn");
-  expect(spans.map((s) => s.name)).toEqual(expect.arrayContaining([...want, expect.stringMatching(/^chat /)]));
-  const ids = new Set(spans.map((s) => s.spanId));
-  expect(spans.filter((s) => !ids.has(s.parentSpanId ?? "") && s.parentSpanId !== clientSpan)).toEqual([]);
+  expect(last.Type).toBe("complete");
+  expect(spans.map((sp) => sp.name)).toEqual(expect.arrayContaining([...want, expect.stringMatching(/^chat /)]));
+  const ids = new Set(spans.map((sp) => sp.spanId));
+  expect(spans.filter((sp) => !ids.has(sp.parentSpanId ?? "") && sp.parentSpanId !== clientSpan)).toEqual([]);
 }, 60_000);
 
 test("a specialist runs in its own object and its result reaches the parent's call", async () => {
-  const c = await Client.open();
-  const id = c.prompt(await c.newSession(), "research");
-  const { last, before } = await c.until((f) => f.id === id);
-  c.close();
+  const s = await Session.create();
+  await s.prompt("research");
+  const { last, before } = await s.turn();
+  s.close();
 
-  expect(last.result?.stopReason).toBe("end_turn");
-  expect(output(before)).toBe("done: 42");
+  expect(last.Type).toBe("complete");
+  expect(result(before)).toBe("done: 42");
 }, 60_000);
 
-test("a turn parked on a permission asks again after an eviction, and finishes once allowed", async () => {
-  const first = await Client.open();
-  const sid = await first.newSession();
-  first.prompt(sid, "deploy");
-  await first.until((f) => f.method === "session/request_permission");
+test("a turn parked on a permission is still parked after an eviction, and finishes once allowed", async () => {
+  const s = await Session.create();
+  await s.prompt("deploy");
+  const asked = await s.turn();
+  s.close();
   await stop();
   await start();
 
-  const second = await Client.open();
-  const loaded = second.request("session/load", { sessionId: sid, cwd: "/edge" });
-  const asked = await second.until((f) => f.method === "session/request_permission");
-  second.send({ jsonrpc: "2.0", id: asked.last.id, result: allow });
-  const { before } = await second.until((f) => text([f]).includes("done: deployed"));
-  second.close();
+  await s.follow(0);
+  const again = await s.until((e) => e.Type === "yield");
+  await s.resume(again.last.MessageID!, allow);
+  const { before } = await s.until((e) => e.Type === "message" && !e.delta && e.Content === "done: deployed");
+  s.close();
 
-  expect([...asked.before, ...before].some((f) => f.id === loaded && f.result?.sessionId === sid)).toBe(true);
-  expect(asked.last.params.sessionId).toBe(sid);
-  expect(output(before)).toBe("deployed");
+  expect(asked.last.Type).toBe("yield");
+  expect(again.last.MessageID).toBe(asked.last.MessageID);
+  expect(result(before)).toBe("deployed");
 }, 120_000);
 
-test("a cancel while the agent asks for permission ends the prompt cancelled", async () => {
-  const c = await Client.open();
-  const sid = await c.newSession();
-  const id = c.prompt(sid, "deploy");
-  const asked = await c.until((f) => f.method === "session/request_permission");
-  c.send({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: sid } });
-  c.send({ jsonrpc: "2.0", id: asked.last.id, result: { outcome: { outcome: "cancelled" } } });
-  const { last } = await c.until((f) => f.id === id && !f.method);
-  c.close();
+test("a cancel while the agent asks for permission ends the turn", async () => {
+  const s = await Session.create();
+  await s.prompt("deploy");
+  await s.turn();
+  const r = await api("POST", `/sessions/${s.id}/cancel`);
+  const { last } = await s.turn();
+  s.close();
 
-  expect(last.result?.stopReason).toBe("cancelled");
+  expect(r.status).toBe(202);
+  expect(last.Type).not.toBe("yield");
 }, 60_000);
 
-test("the Worker refuses a client without the token", async () => {
-  const wrong = Client.open("wrong").then(
-    () => "opened",
-    (err: Error) => err.message,
-  );
-  const anonymous = await Client.open("");
-  const refused = await anonymous.call("session/new", { cwd: "/edge" });
-  anonymous.close();
-  const plain = await fetch(`${base}/acp`);
+test("the Worker refuses a request without the token", async () => {
+  const wrong = await api("POST", "/sessions", undefined, {}, "wrong");
+  const anonymous = await fetch(`${base}/sessions`, { method: "POST" });
 
-  expect(await wrong).toContain("refused");
-  expect(refused.error?.message).toBe("authentication required");
-  expect(plain.status).toBe(426);
+  expect(wrong.status).toBe(401);
+  expect(anonymous.status).toBe(401);
 });

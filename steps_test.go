@@ -7,10 +7,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
@@ -19,58 +17,39 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 )
 
-// TestInfer_streamsAReplyWhoseRoundTheNextRequestAnswers: Infer streams
-// the reply's text as deltas, then each complete message with its full
-// text, and returns its messages, its calls and each call's tool timeout.
-// Once the round commits, the next request carries the call's result; a
-// request after tools that fails, or that a model cannot send, fails with
-// ErrModelAfterTools. A reply without calls has its text as its result.
-func TestInfer_streamsAReplyWhoseRoundTheNextRequestAnswers(t *testing.T) {
-	t.Parallel()
-	lookup := tacklr.NewTool(tacklr.ToolConfig{
+// lookup is a read tool of a minute's timeout that finds "found".
+func lookup() *tacklr.Tool {
+	return tacklr.NewTool(tacklr.ToolConfig{
 		Name: "lookup", DisplayName: "Look up {q}", Category: message.ToolCategoryRead, Timeout: time.Minute,
 		Handler: func(context.Context) (string, error) { return "found", nil },
 	})
-	model, provider := scripted(t,
-		[]tacklr.LLMResponseChunk{
-			{Type: session.EventReasoning, Content: "think", IsComplete: true},
-			{Type: session.EventMessage, Content: "hel"},
-			{Type: session.EventMessage, Content: "lo", IsComplete: true},
-			// A provider may name a call by its call id alone.
-			calls(message.ToolCall{CallID: "c1", Name: "lookup", Arguments: `{"q":"x"}`}),
-		},
-		// The request after tools fails part way through its stream.
-		[]tacklr.LLMResponseChunk{{Type: session.EventMessage, Content: "part"}, {Type: session.EventError, Content: "upstream"}},
-		[]tacklr.LLMResponseChunk{text("all done")},
-	)
-	opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{lookup}}
-	h := newHarness(t, "infer", opts)
+}
+
+// TestInfer_streamsAReplyAsDeltasThenItsCompleteMessages: Infer streams
+// the reply's text as deltas at their offsets, then each complete message
+// with its full text and each call as its tool presents it, and returns
+// its messages, its calls and each call's tool timeout.
+func TestInfer_streamsAReplyAsDeltasThenItsCompleteMessages(t *testing.T) {
+	t.Parallel()
+	model, _ := scripted(t, []tacklr.LLMResponseChunk{
+		{Type: session.EventReasoning, Content: "think", IsComplete: true},
+		{Type: session.EventMessage, Content: "hel"},
+		{Type: session.EventMessage, Content: "lo", IsComplete: true},
+		calls(message.ToolCall{CallID: "c1", Name: "lookup", Arguments: `{"q":"x"}`}),
+	})
+	h := newHarness(t, "infer", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{lookup()}})
 	prompt(t, h, "go")
 	s := newStream(t)
 
-	first, firstErr := h.Infer(t.Context(), s.out)
-	r := tacklr.NewRound(first)
-	ran, runErr := h.RunCall(t.Context(), r.Calls[0], s.out)
-	r.Calls[0] = ran
-	commitErr := h.Commit(t.Context(), tacklr.CommitIn{Round: r}, s.out)
-	rows, _ := h.Checkpoint()
-	opts.Model = openai.New(http.DefaultClient).WithModel("gpt-4o")
-	keyless := newHarness(t, "infer", opts)
-	restoreErr := keyless.RestoreCheckpoint(rows)
-	_, unsent := keyless.Infer(t.Context(), newStream(t).out)
-	_, failed := h.Infer(t.Context(), s.out)
-	last, lastErr := h.Infer(t.Context(), s.out)
+	got, err := h.Infer(t.Context(), s.out)
 
-	if err := errors.Join(firstErr, runErr, commitErr, restoreErr, lastErr); err != nil {
-		t.Fatal(err)
-	}
-	roles := []message.Role{}
-	for _, m := range first.Messages {
+	var roles []message.Role
+	for _, m := range got.Messages {
 		roles = append(roles, m.Role)
 	}
-	if !slices.Equal(roles, []message.Role{message.RoleReasoning, message.RoleAssistant, message.RoleAssistant}) ||
-		!slices.Equal(contents(first.Messages), []string{"think", "hello", ""}) || first.Calls[0].Name != "lookup" || r.Calls[0].Timeout != time.Minute {
-		t.Fatalf("reply = %+v, want the reasoning, the text, then the call with its tool's timeout", first)
+	if r := tacklr.NewRound(got); err != nil || !slices.Equal(roles, []message.Role{message.RoleReasoning, message.RoleAssistant, message.RoleAssistant}) ||
+		!slices.Equal(contents(got.Messages), []string{"think", "hello", ""}) || got.Calls[0].Name != "lookup" || r.Calls[0].Timeout != time.Minute {
+		t.Fatalf("reply = %+v %v, want the reasoning, the text, then the call with its tool's timeout", got, err)
 	}
 	var texts []string
 	var presented message.ToolCall
@@ -82,15 +61,93 @@ func TestInfer_streamsAReplyWhoseRoundTheNextRequestAnswers(t *testing.T) {
 			presented = ev.ToolCalls[0]
 		}
 	}
-	if !slices.Equal(texts[:3], []string{"true@0:hel", "true@3:lo", "false@0:hello"}) || presented.Title != "Look up x" || presented.Category != message.ToolCategoryRead {
+	if !slices.Equal(texts, []string{"true@0:hel", "true@3:lo", "false@0:hello"}) || presented.Title != "Look up x" || presented.Category != message.ToolCategoryRead {
 		t.Fatalf("events %q, call %+v; want the deltas at their offsets, the full text, and the call as its tool presents it", texts, presented)
 	}
-	if !errors.Is(unsent, tacklr.ErrModelAfterTools) || !errors.Is(failed, tacklr.ErrModelAfterTools) {
-		t.Fatalf("after tools: unsent %v, failed %v, want ErrModelAfterTools", unsent, failed)
+}
+
+// TestInfer_theRequestAfterARoundCarriesItsResults: once a round commits,
+// the next request carries its call's result, and a reply without calls
+// has its text as its result.
+func TestInfer_theRequestAfterARoundCarriesItsResults(t *testing.T) {
+	t.Parallel()
+	model, provider := scripted(t, []tacklr.LLMResponseChunk{calls(call("c1", "lookup", `{"q":"x"}`))}, []tacklr.LLMResponseChunk{text("all done")})
+	h := newHarness(t, "after-round", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{lookup()}})
+	prompt(t, h, "go")
+	out := newStream(t).out
+	first, err := h.Infer(t.Context(), out)
+	if err != nil {
+		t.Fatal(err)
 	}
-	answered := provider.sent()[2].msgs
-	if got := answered[len(answered)-1]; last.Result != "all done" || got.Role != message.RoleTool || got.Content != "found" {
-		t.Fatalf("result %q after a request that ended with %+v, want the call's result sent and the text as the result", last.Result, got)
+	if _, err := runRound(t, h, first.Calls...); err != nil {
+		t.Fatal(err)
+	}
+
+	last, err := h.Infer(t.Context(), out)
+
+	answered := testkit.LastMessage(provider.sent()[1].msgs)
+	if err != nil || last.Result != "all done" || answered.Role != message.RoleTool || answered.Content != "found" {
+		t.Fatalf("result %q %v after a request that ended with %+v, want the call's result sent and the text as the result", last.Result, err, answered)
+	}
+}
+
+// TestInfer_aRequestAfterToolsTheModelCannotSendFailsWithErrModelAfterTools:
+// a request after a tool round that the model cannot send, as any that
+// fails, fails with ErrModelAfterTools.
+func TestInfer_aRequestAfterToolsTheModelCannotSendFailsWithErrModelAfterTools(t *testing.T) {
+	t.Parallel()
+	model, _ := scripted(t)
+	opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{lookup()}}
+	h := newHarness(t, "keyless", opts)
+	prompt(t, h, "go")
+	if _, err := runRound(t, h, call("c1", "lookup", `{"q":"x"}`)); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := h.Checkpoint()
+	opts.Model = openai.New(http.DefaultClient).WithModel("gpt-4o")
+	keyless := newHarness(t, "keyless", opts)
+	if err := keyless.RestoreCheckpoint(rows); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := keyless.Infer(t.Context(), newStream(t).out)
+
+	if !errors.Is(err, tacklr.ErrModelAfterTools) || !errors.Is(err, tacklr.ErrApiKeyNotSet) {
+		t.Fatalf("infer = %v, want ErrModelAfterTools for the missing key", err)
+	}
+}
+
+// TestInfer_eachRequestPairsEveryCallWithItsResult: a provider refuses a
+// request with a call and no result; a round a prompt moved past gives
+// its open call a result before the next request.
+func TestInfer_eachRequestPairsEveryCallWithItsResult(t *testing.T) {
+	t.Parallel()
+	gate := tacklr.NewTool(tacklr.ToolConfig{Name: "gate", OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall}, Handler: func(context.Context) (string, error) { return "gate-ok", nil }})
+	model, provider := scripted(t)
+	h := newHarness(t, "paired", tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{gate, lookup()}})
+	prompt(t, h, "go")
+	out := newStream(t).out
+	r := tacklr.NewRound(reply(call("g1", "gate", "{}"), call("l1", "lookup", "{}")))
+	for i := range r.Calls {
+		r.Calls[i], _ = h.RunCall(t.Context(), r.Calls[i], out)
+	}
+	if err := h.Commit(t.Context(), tacklr.CommitIn{Round: r, Users: []*message.Message{userMsg("instead")}}, out); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := h.Infer(t.Context(), out)
+
+	open := map[string]bool{}
+	for _, m := range provider.sent()[0].msgs {
+		for _, c := range m.ToolCalls {
+			open[c.CallID] = true
+		}
+		if m.Role == message.RoleTool {
+			delete(open, m.ToolCallID)
+		}
+	}
+	if err != nil || len(open) != 0 {
+		t.Fatalf("infer = %v with calls %v open, want each call paired with its result", err, open)
 	}
 }
 
@@ -138,111 +195,18 @@ func TestCommit_aPromptPastAnOpenRoundCancelsItsOpenCalls(t *testing.T) {
 	}
 }
 
-// TestCommit_cutsAResultTooLargeForTheWindow: a result too large for the
-// window even with nothing left to summarize is cut to fit, on a rune
-// boundary, and says to run a narrower command for the rest. A count that
-// fails, or a round with no result to cut, fails the commit.
-func TestCommit_cutsAResultTooLargeForTheWindow(t *testing.T) {
+// TestCommit_failsARoundTooLargeWithNoResultToCut: a prompt too large for
+// the window has no result to cut, so its commit fails and keeps the
+// window.
+func TestCommit_failsARoundTooLargeWithNoResultToCut(t *testing.T) {
 	t.Parallel()
-	ascii, runes := strings.Repeat("x", 2000)+"END", strings.Repeat("─", 700)
-	cases := []struct {
-		name   string
-		full   string
-		count  func([]*message.Message) (int, error)
-		prompt bool
-		note   string // the cut result's note
-		fail   string // the commit's error
-	}{
-		{name: "cut", full: runes, count: windowTokens, note: "Run a narrower command or query to see the rest."},
-		// The prompt's commit counts once, the round's once, then the cut.
-		{name: "a count that fails after a cut", full: ascii, count: failAfter(2), fail: "count tokens"},
-		{name: "a prompt with no result to cut", full: ascii, count: windowTokens, prompt: true, fail: "the round needs 2005 tokens"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			big := tacklr.NewTool(tacklr.ToolConfig{Name: "big", Handler: func(context.Context) (string, error) { return tc.full, nil }})
-			model, _ := counted(t, tc.count)
-			opts := tacklr.AgentOptions{Model: model, MaxWindowSize: 500, Tools: []*tacklr.Tool{big}}
-			h := newHarness(t, "trim", opts)
-			if err := h.Commit(t.Context(), tacklr.CommitIn{Users: []*message.Message{userMsg("go")}}, newStream(t).out); err != nil {
-				t.Fatal(err)
-			}
+	model, _ := counted(t, windowTokens)
+	h := newHarness(t, "too-large", tacklr.AgentOptions{Model: model, MaxWindowSize: 500})
+	prompt(t, h, "go")
 
-			var err error
-			if tc.prompt {
-				err = h.Commit(t.Context(), tacklr.CommitIn{Users: []*message.Message{userMsg(tc.full)}}, newStream(t).out)
-			} else {
-				_, err = runRound(t, h, call("b1", "big", "{}"))
-			}
+	err := h.Commit(t.Context(), tacklr.CommitIn{Users: []*message.Message{userMsg(strings.Repeat("x", 2000))}}, newStream(t).out)
 
-			window := checkpoint(t, h).window
-			cut := window[len(window)-1].Content
-			if tc.fail != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.fail) || len(window) != 1 {
-					t.Fatalf("commit = %v with window %q, want %q and the window kept", err, contents(window), tc.fail)
-				}
-				return
-			}
-			if err != nil || !utf8.ValidString(cut) || cut[:3] != tc.full[:3] || !strings.HasSuffix(cut, tc.note+"]") || len(cut) >= len(tc.full) {
-				t.Fatalf("result = %q %v, want it cut on a rune with %q", cut, err, tc.note)
-			}
-		})
-	}
-}
-
-// TestCommit_countsTokensOnlyNearTheWindow: with the provider's count of
-// the last request, a round far below the window commits without a token
-// count request, and one near it is counted. The count is part of the
-// checkpoint: a session restored from it sizes its next commit the same
-// way.
-func TestCommit_countsTokensOnlyNearTheWindow(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name        string
-		window      uint
-		inputTokens int
-		restore     bool
-		wantCounts  int
-	}{
-		{name: "far below the window", window: 8192, inputTokens: 100},
-		{name: "near the window", window: 8192, inputTokens: 7000, wantCounts: 1},
-		// The system prompt alone is over this window's pressure: only the
-		// saved count keeps the next commit from a count request.
-		{name: "after a restore", window: 1000, inputTokens: 100, restore: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var counts atomic.Int32
-			model, _ := counted(t, func([]*message.Message) (int, error) { counts.Add(1); return tc.inputTokens, nil },
-				[]tacklr.LLMResponseChunk{calls(call("f1", "free", "{}"))})
-			free := tacklr.NewTool(tacklr.ToolConfig{Name: "free", Handler: func(context.Context) (string, error) { return "free-ok", nil }})
-			opts := tacklr.AgentOptions{Model: model, MaxWindowSize: tc.window, Tools: []*tacklr.Tool{free}}
-			h := newHarness(t, "counts", opts)
-			out := newStream(t).out
-			reply, err := h.Infer(t.Context(), out)
-			if err != nil {
-				t.Fatal(err)
-			}
-			r := tacklr.NewRound(reply)
-			if r.Calls[0], err = h.RunCall(t.Context(), r.Calls[0], out); err != nil {
-				t.Fatal(err)
-			}
-			counts.Store(0)
-
-			err = h.Commit(t.Context(), tacklr.CommitIn{Round: r}, out)
-			if tc.restore && err == nil {
-				rows, _ := h.Checkpoint()
-				restored := newHarness(t, "counts", opts)
-				if err := restored.RestoreCheckpoint(rows); err != nil {
-					t.Fatal(err)
-				}
-				err = restored.Commit(t.Context(), tacklr.CommitIn{Users: []*message.Message{userMsg("next")}}, out)
-			}
-
-			if n := int(counts.Load()); err != nil || n != tc.wantCounts {
-				t.Fatalf("commit = %v with %d token count requests, want %d", err, n, tc.wantCounts)
-			}
-		})
+	if window := contents(checkpoint(t, h).window); err == nil || !strings.Contains(err.Error(), "the round needs") || !slices.Equal(window, []string{"go"}) {
+		t.Fatalf("commit = %v with window %q, want it refused and the window kept", err, window)
 	}
 }

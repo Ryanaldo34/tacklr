@@ -10,8 +10,14 @@ import (
 // Provider is a backend attached at a virtual mount point.
 //
 // One interface covers mount validation and path I/O relative to the provider
-// root. Paths use slash-separated relative names ("" = root). Backends that do
-// not support I/O yet return ErrNotSupported from I/O methods.
+// root. Backends that do not support I/O yet return ErrNotSupported from I/O
+// methods.
+//
+// A MountSession Route is the only caller, and it checks each call first,
+// so a provider does not check again: a name is clean, slash-separated and
+// relative ("" is the root; no segment is "." or ".."), the context had not
+// ended at Route, a write, Remove or MkdirAll never names the root, and it
+// reaches only a writable mount.
 //
 // Treat provider values as immutable after a successful FS.Mount.
 type Provider interface {

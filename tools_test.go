@@ -209,7 +209,7 @@ func TestCorrection_isTheModelsToCorrect(t *testing.T) {
 	t.Parallel()
 	empty := tacklr.Correction(nil, "  ")
 	fromCause := tacklr.Correction(vfs.ErrNotExist, "")
-	first := tacklr.Correctionf(vfs.ErrUseHTML, "write %s, not plain text", "HTML")
+	first := tacklr.Correctionf(vfs.ErrReadOnly, "write %s, not plain text", "HTML")
 	again := tacklr.Correction(first, "other")
 	network := tacklr.Network(vfs.ErrNotExist)
 	marks := []error{tacklr.Network(network), tacklr.Network(nil)}
@@ -220,7 +220,7 @@ func TestCorrection_isTheModelsToCorrect(t *testing.T) {
 	if !errors.Is(fromCause, tacklr.ErrCorrection) || !errors.Is(fromCause, vfs.ErrNotExist) || fromCause.Error() != "not found" {
 		t.Fatalf("from its cause = %q", fromCause)
 	}
-	if again.Error() != "write HTML, not plain text" || !errors.Is(again, vfs.ErrUseHTML) {
+	if again.Error() != "write HTML, not plain text" || !errors.Is(again, vfs.ErrReadOnly) {
 		t.Fatalf("already a correction = %v", again)
 	}
 	if !errors.Is(network, tacklr.ErrNetwork) || !errors.Is(network, vfs.ErrNotExist) || network.Error() != vfs.ErrNotExist.Error() ||

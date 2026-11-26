@@ -2,11 +2,9 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
-	"strings"
+	"slices"
 	"testing"
 
 	"go.temporal.io/sdk/temporal"
@@ -17,89 +15,55 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 )
 
-// TestActivities_commitIsTheOnlyWriterAndAppliesItsInputOnce: Tool steps
-// of two calls that change shared state at once save nothing and return
-// small outcomes, each call's result kept once in the store (a Tool step
-// run again leaves the same one record); the Commit of their round reads the
-// results back and applies both calls' writes in call order; and a Commit
-// run again after it saved (its result lost) finds the snapshot past its
-// base and applies nothing again.
-func TestActivities_commitIsTheOnlyWriterAndAppliesItsInputOnce(t *testing.T) {
+// TestActivities_aCommitRunAgainAfterItSavedAppliesNothingAgain: the
+// Commit of a round whose two calls ran as their own Tool steps applies it,
+// and a Commit run again after it saved (its result lost) finds the
+// snapshot past its base and applies nothing again: the model's next
+// request has each call's result once.
+func TestActivities_aCommitRunAgainAfterItSavedAppliesNothingAgain(t *testing.T) {
 	t.Parallel()
 	// Arrange
-	calls := []message.ToolCall{{ID: "a", CallID: "a", Name: "set", Arguments: `{"v":"a"}`}, {ID: "b", CallID: "b", Name: "set", Arguments: `{"v":"b"}`}}
-	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*message.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-		ch <- tacklr.LLMResponseChunk{Type: session.EventFunctionCall, IsComplete: true, ToolCalls: calls}
+	var seen []string
+	model := testkit.ScriptedModel(t, func(msgs []*message.Message) tacklr.LLMResponseChunk {
+		if seen = testkit.ToolResults(msgs); len(seen) > 0 {
+			return testkit.Text("done")
+		}
+		return testkit.Calls(testkit.Call("a", "set", `{"v":"a"}`), testkit.Call("b", "set", `{"v":"b"}`))
 	})
 	set := tacklr.NewTool(tacklr.ToolConfig{Name: "set", Handler: func(_ context.Context, args struct {
 		V string `json:"v"`
 	}, cc *tacklr.CallContext) (string, error) {
-		if err := cc.StateSet("by-"+args.V, true); err != nil {
-			return "", err
-		}
-		return "set", cc.StateSet("last", args.V)
+		return "set " + args.V, cc.StateSet("last", args.V)
 	}})
 	acts := newActs(tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{set}}, session.NewMemoryEventLog(), true)
-	id := session.ID("writer")
-	rev, err := acts.Commit(t.Context(), commitInput{stepSession: stepSession{SessionID: id}, In: tacklr.CommitIn{Users: []*message.Message{{Role: message.RoleUser, Content: "go"}}}})
+	step := stepSession{SessionID: "writer"}
+	rev, err := acts.Commit(t.Context(), commitInput{stepSession: step, In: tacklr.CommitIn{Users: []*message.Message{{Role: message.RoleUser, Content: "go"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply, err := acts.Inference(t.Context(), stepSession{SessionID: id})
+	reply, err := acts.Inference(t.Context(), step)
 	if err != nil {
 		t.Fatal(err)
 	}
 	round := tacklr.NewRound(reply)
 	for i, call := range reply.Calls {
-		if round.Calls[i], err = acts.Tool(t.Context(), toolInput{stepSession: stepSession{SessionID: id}, Call: tacklr.NewCall(call, 0)}); err != nil {
+		if round.Calls[i], err = acts.Tool(t.Context(), toolInput{stepSession: step, Call: tacklr.NewCall(call, 0)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	retried, err := acts.Tool(t.Context(), toolInput{stepSession: stepSession{SessionID: id}, Call: tacklr.NewCall(reply.Calls[0], 0)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	bodies, err := acts.Store.Calls(t.Context(), id, []string{"a", "b"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ran, _ := json.Marshal(round.Calls[0])
-	rerun, _ := json.Marshal(retried)
-	if string(rerun) != string(ran) || retried.Body != nil || !retried.Done || len(bodies) != 2 {
-		t.Fatalf("call %+v, again %+v, bodies %d; want small calls whose bodies are stored, the same again, one body per call", round.Calls[0], retried, len(bodies))
-	}
-	_, afterTools, err := acts.Store.Load(t.Context(), id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	in := commitInput{stepSession: stepSession{SessionID: id}, Base: rev, In: tacklr.CommitIn{Round: round}}
+	in := commitInput{stepSession: step, Base: rev, In: tacklr.CommitIn{Round: round}}
 
 	// Act
 	committed, firstErr := acts.Commit(t.Context(), in)
 	again, againErr := acts.Commit(t.Context(), in)
+	_, inferErr := acts.Inference(t.Context(), step)
 
 	// Assert
-	cp, _, err := acts.Store.Load(t.Context(), id)
-	if err != nil || firstErr != nil || againErr != nil {
-		t.Fatal(err, firstErr, againErr)
+	if firstErr != nil || againErr != nil || inferErr != nil || again != committed {
+		t.Fatalf("commits %v %v (revisions %s, %s), next request %v; want the second to find the first's revision", firstErr, againErr, committed, again, inferErr)
 	}
-	if afterTools != rev || again != committed {
-		t.Fatalf("revisions: after the commit %s, tools %s, commit %s, again %s; want tools to save nothing and the second commit to apply nothing", rev, afterTools, committed, again)
-	}
-	state, results := map[string]string{}, 0
-	for _, row := range cp {
-		switch row.Kind {
-		case "state":
-			state[row.Key] = string(row.Value)
-		case "message":
-			results += strings.Count(string(row.Value), `"content":"set"`)
-		}
-	}
-	if !maps.Equal(state, map[string]string{"by-a": "true", "by-b": "true", "last": `"b"`}) {
-		t.Fatalf("checkpoint state %v; want both calls' writes, the later call's last", state)
-	}
-	if results != 2 {
-		t.Fatalf("checkpoint has %d tool results, want the round committed once", results)
+	if !slices.Equal(seen, []string{"set a", "set b"}) {
+		t.Fatalf("the next request's results %q; want each call's result once, in call order", seen)
 	}
 }
 

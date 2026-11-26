@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,10 +37,7 @@ func NewLocalProvider(dir string) (Provider, error) {
 }
 
 // Validate implements Provider.
-func (p localProvider) Validate(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
+func (p localProvider) Validate(context.Context) error {
 	info, err := os.Stat(p.root)
 	if err != nil {
 		return fmt.Errorf("vfs: local root %q: %w", p.root, err)
@@ -52,181 +48,116 @@ func (p localProvider) Validate(ctx context.Context) error {
 	return nil
 }
 
-// at opens the provider's root for one operation on name, and gives name
-// relative to it.
-func (p localProvider) at(ctx context.Context, name string) (*os.Root, string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, "", err
-	}
-	rel, err := cleanRel(name)
-	if err != nil {
-		return nil, "", err
-	}
+// in runs fn on an os.Root of the provider's directory with name relative
+// to it, and returns fn's error as the vfs error the agent can act on.
+func (p localProvider) in(name string, fn func(r *os.Root, rel string) error) error {
 	r, err := os.OpenRoot(p.root)
 	if err != nil {
-		return nil, "", mapOSError(err)
+		return mapOSError(err)
 	}
-	return r, cmp.Or(rel, "."), nil
+	defer r.Close()
+	return mapOSError(fn(r, cmp.Or(name, ".")))
 }
 
 // Stat implements Provider. A symlink is its target's info under its own
 // name.
-func (p localProvider) Stat(ctx context.Context, name string) (FileInfo, error) {
-	r, rel, err := p.at(ctx, name)
-	if err != nil {
-		return FileInfo{}, err
-	}
-	defer r.Close()
-	info, err := r.Stat(rel)
-	if err != nil {
-		return FileInfo{}, mapOSError(err)
-	}
-	return localFileInfo(info, func() (io.ReaderAt, func() error, error) {
-		f, err := r.Open(rel)
+func (p localProvider) Stat(_ context.Context, name string) (fi FileInfo, err error) {
+	err = p.in(name, func(r *os.Root, rel string) error {
+		info, err := r.Stat(rel)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
-		return f, f.Close, nil
-	}), nil
-}
-
-// OpenFile implements Provider.
-func (p localProvider) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error) {
-	r, rel, err := p.at(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	f, err := r.OpenFile(rel, flag, perm)
-	if err != nil {
-		return nil, mapOSError(err)
-	}
-	// A directory is no file to read, as on every other backend.
-	if fi, err := f.Stat(); err == nil && fi.IsDir() {
-		_ = f.Close()
-		return nil, fmt.Errorf("%w: %s", ErrIsDir, name)
-	}
-	return &localFile{File: f}, nil
-}
-
-// PutFile writes a full file in one shot (used by MountSession.WriteFile).
-func (p localProvider) PutFile(ctx context.Context, name string, r io.Reader, size int64) error {
-	root, rel, err := p.at(ctx, name)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	// 0o644 matches prior WriteFile/OpenFile create mode for workspace files.
-	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) //nolint:gosec // G302: agent workspace files are group/world-readable by design
-	if err != nil {
-		return mapOSError(err)
-	}
-	defer f.Close()
-	if size == 0 {
+		fi = localFileInfo(info, func() (io.ReaderAt, func() error, error) {
+			f, err := r.Open(rel)
+			if err != nil {
+				return nil, nil, err
+			}
+			return f, f.Close, nil
+		})
 		return nil
-	}
-	if _, err := io.Copy(f, io.LimitReader(r, size)); err != nil {
-		return mapOSError(err)
-	}
-	return nil
+	})
+	return fi, err
+}
+
+// OpenFile implements Provider. A directory is no file to open, as on
+// every other backend.
+func (p localProvider) OpenFile(_ context.Context, name string, flag int, perm fs.FileMode) (f File, err error) {
+	err = p.in(name, func(r *os.Root, rel string) error {
+		osf, err := r.OpenFile(rel, flag, perm)
+		if err != nil {
+			return err
+		}
+		if fi, err := osf.Stat(); err == nil && fi.IsDir() {
+			_ = osf.Close()
+			return fmt.Errorf("%w: %s", ErrIsDir, name)
+		}
+		f = &localFile{File: osf}
+		return nil
+	})
+	return f, err
+}
+
+// PutFile writes a whole file in one call.
+func (p localProvider) PutFile(_ context.Context, name string, data []byte) error {
+	return p.in(name, func(r *os.Root, rel string) error {
+		return r.WriteFile(rel, data, 0o644) //nolint:gosec // G306: agent workspace files are group/world-readable by design
+	})
 }
 
 // OpenDocument translates local file bytes into Document IR.
-func (p localProvider) OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error) {
-	fi, err := p.Stat(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	if fi.IsDir {
-		return nil, fmt.Errorf("%w: %s", ErrIsDir, name)
-	}
-	if fi.Size > int64(MaxReadFileBytes) {
-		return nil, errFileExceeds(MaxReadFileBytes)
-	}
-	r, rel, err := p.at(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	data, err := r.ReadFile(rel)
-	if err != nil {
-		return nil, mapOSError(err)
-	}
-	return decodeProviderDocument(ctx, name, fi, data, reg)
-}
-
-// WriteDocument encodes IR and writes the file immediately.
-func (p localProvider) WriteDocument(ctx context.Context, name string, doc Document, reg *ContentRegistry) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	data, err := reg.Encode(ctx, doc)
-	if err != nil {
-		return err
-	}
-	if dir := path.Dir(name); dir != "" && dir != "." {
-		if err := p.MkdirAll(ctx, dir, 0o755); err != nil {
+func (p localProvider) OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (doc Document, err error) {
+	err = p.in(name, func(r *os.Root, rel string) error {
+		info, err := r.Stat(rel)
+		switch {
+		case err != nil:
+			return err
+		case info.IsDir():
+			return fmt.Errorf("%w: %s", ErrIsDir, name)
+		case info.Size() > int64(MaxReadFileBytes):
+			return errFileExceeds(MaxReadFileBytes)
+		}
+		data, err := r.ReadFile(rel)
+		if err != nil {
 			return err
 		}
-	}
-	return p.PutFile(ctx, name, bytes.NewReader(data), int64(len(data)))
+		fi := localFileInfo(info, func() (io.ReaderAt, func() error, error) {
+			return bytes.NewReader(data), func() error { return nil }, nil
+		})
+		doc, err = decodeProviderDocument(ctx, name, fi, data, reg)
+		return err
+	})
+	return doc, err
 }
 
 // ReadDir implements Provider.
-func (p localProvider) ReadDir(ctx context.Context, name string) ([]DirEntry, error) {
-	r, rel, err := p.at(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	dir, err := r.Open(rel)
-	if err != nil {
-		return nil, mapOSError(err)
-	}
-	defer dir.Close()
-	entries, err := dir.ReadDir(-1)
-	if err != nil {
-		return nil, mapOSError(err)
-	}
-	out := make([]DirEntry, len(entries))
-	for i, e := range entries {
-		out[i] = DirEntry{Name: e.Name(), IsDir: e.IsDir(), Type: e.Type()}
-	}
-	return out, nil
+func (p localProvider) ReadDir(_ context.Context, name string) (out []DirEntry, err error) {
+	err = p.in(name, func(r *os.Root, rel string) error {
+		dir, err := r.Open(rel)
+		if err != nil {
+			return err
+		}
+		defer dir.Close()
+		entries, err := dir.ReadDir(-1)
+		if err != nil {
+			return err
+		}
+		out = make([]DirEntry, len(entries))
+		for i, e := range entries {
+			out[i] = DirEntry{Name: e.Name(), IsDir: e.IsDir(), Type: e.Type()}
+		}
+		return nil
+	})
+	return out, err
 }
 
 // Remove implements Provider.
-func (p localProvider) Remove(ctx context.Context, name string) error {
-	r, rel, err := p.at(ctx, name)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	return mapOSError(r.Remove(rel))
+func (p localProvider) Remove(_ context.Context, name string) error {
+	return p.in(name, func(r *os.Root, rel string) error { return r.Remove(rel) })
 }
 
 // MkdirAll implements Provider.
-func (p localProvider) MkdirAll(ctx context.Context, name string, perm fs.FileMode) error {
-	r, rel, err := p.at(ctx, name)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	return mapOSError(r.MkdirAll(rel, perm))
-}
-
-func cleanRel(name string) (string, error) {
-	name = strings.Trim(name, "/")
-	if name == "" || name == "." {
-		return "", nil
-	}
-	// A cleaned relative path has a ".." only at the start, and is "." only
-	// when its segments cancel ("a/..").
-	cleaned := path.Clean(name)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return "", ErrInvalidPath
-	}
-	return cleaned, nil
+func (p localProvider) MkdirAll(_ context.Context, name string, perm fs.FileMode) error {
+	return p.in(name, func(r *os.Root, rel string) error { return r.MkdirAll(rel, perm) })
 }
 
 // safeSegment rejects a session id or member name that would leave its
@@ -345,8 +276,6 @@ func (f *localFile) Stat() (FileInfo, error) {
 	}), nil
 }
 
-var _ documentBackend = localProvider{}
-
 // Local opens providers under a fixed jail. Params: "subpath" (optional),
 // "session_scoped=true" (optional: the session's own directory, as
 // SessionLocal gives). The jail stays in the closure; providers never
@@ -359,10 +288,7 @@ func Local(base string) Open { return local(base, false) }
 func SessionLocal(base string) Open { return local(base, true) }
 
 func local(base string, perSession bool) Open {
-	return func(ctx context.Context, sessionID string, b mount.Binding) (Provider, error) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
+	return func(_ context.Context, sessionID string, b mount.Binding) (Provider, error) {
 		root, err := canonicalizeDir(base)
 		if err != nil {
 			return nil, err

@@ -32,8 +32,6 @@ override:
     threshold: 99
   - path: ^openai$
     threshold: 99
-  - path: ^server/acp$
-    threshold: 99
   # Uncovered: the host failing to make a VM's directory, sockets or
   # configuration file in startProcess, and a supervisor that sends neither
   # ready nor exit first, which our supervisor never does.
@@ -70,17 +68,17 @@ diff:
 
 exclude:
   # Repo-relative paths (matched as regexes against file paths).
-  # cmd/*: mains / local harnesses. testkit/livesess: test doubles.
+  # cmd/*: mains / local harnesses. testkit: test doubles.
   paths:
     - cmd/
     - internal/testkit
     - internal/testdrive
     - internal/testhttp
-    - internal/livesess
-    - internal/acptest
     # Store isolation contract, run from each store's tests.
     - brain/storetest
     - session/storetest
+    # Session runtime contract, run from each runtime's tests.
+    - session/sessiontest
     - vfs/internal/vfstest
     - brain/graphtest
     # In-process git host (HTTP + SSH) for vfs.Git tests.
@@ -92,6 +90,7 @@ exclude:
     - internal/pgtest
     - internal/faultproxy
     - internal/s3test
+    - internal/azuritetest
     # The sandbox supervisor and worker for tests.
     - sandbox/sandboxtest
 

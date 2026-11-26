@@ -12,104 +12,16 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/rest"
 )
 
-// SheetsAPI is the Sheets subset used by the provider. MemorySheets is the
-// in-memory implementation; NewGoogleSheets talks to the service.
+// SheetsAPI is the Sheets subset used by the provider. NewGoogleSheets
+// talks to the service.
 type SheetsAPI interface {
 	Get(ctx context.Context, spreadsheetID string) (SheetsSnapshot, error)
-	BatchUpdateValues(ctx context.Context, spreadsheetID string, req SheetsValuesBatch) error
-	BatchUpdate(ctx context.Context, spreadsheetID string, req SheetsBatch) error
-}
-
-// SheetsBatch is one spreadsheets.batchUpdate (repeatCell userEnteredFormat).
-type SheetsBatch struct {
-	Requests []SheetsRepeatCell
-}
-
-// SheetsRepeatCell is one repeatCell of a format bag.
-type SheetsRepeatCell struct {
-	SheetID            int64
-	StartRow, StartCol int // 0-based inclusive
-	EndRow, EndCol     int // 0-based exclusive
-	Format             CellFormat
 }
 
 // SheetsSnapshot is the checkout used to build TabularDocument.
 type SheetsSnapshot struct {
-	SpreadsheetID string
-	RevisionID    string
-	Sheets        []Sheet
-	Named         []NamedRange
-}
-
-// SheetsValuesBatch is one spreadsheets.values.batchUpdate call.
-type SheetsValuesBatch struct {
-	Data []SheetsValueRange
-}
-
-// SheetsValueRange is one A1 range of string cells (USER_ENTERED).
-type SheetsValueRange struct {
-	Range  string
-	Values [][]string
-}
-
-func snapshotToTabular(path string, snap SheetsSnapshot) (*IR, error) {
-	td, err := NewTabularDocument(path, mimeGoogleSpreadsheet, snap.Sheets, snap.Named)
-	if err != nil {
-		return nil, err
-	}
-	attachPersistHint(td, persistHint{fileID: snap.SpreadsheetID})
-	return td, nil
-}
-
-func tabularOverlayBatch(td *gridBody) SheetsValuesBatch {
-	var data []SheetsValueRange
-	for _, sh := range td.sheets {
-		rows := sh.Rows
-		cols := sh.Cols
-		if rows == 0 || cols == 0 {
-			continue
-		}
-		grid := make([][]string, rows)
-		for r := 0; r < rows; r++ {
-			grid[r] = make([]string, cols)
-			if r < len(sh.Cells) {
-				for c := 0; c < cols && c < len(sh.Cells[r]); c++ {
-					if sh.mergeSlave(r, c) {
-						continue
-					}
-					grid[r][c] = sh.Cells[r][c].Input
-				}
-			}
-		}
-		title := sh.Title
-		if title == "" {
-			title = "Sheet1"
-		}
-		data = append(data, SheetsValueRange{
-			Range:  sheetA1(title, 1, 1, rows, cols),
-			Values: grid,
-		})
-	}
-	return SheetsValuesBatch{Data: data}
-}
-
-func tabularFormatBatch(td *gridBody) SheetsBatch {
-	var reqs []SheetsRepeatCell
-	for _, sh := range td.sheets {
-		id, err := strconv.ParseInt(sh.ID, 10, 64)
-		if err != nil {
-			id = 0
-		}
-		rows, cols := sh.Rows, sh.Cols
-		for _, rec := range formatRects(sh, rows, cols) {
-			reqs = append(reqs, SheetsRepeatCell{
-				SheetID:  id,
-				StartRow: rec.r1, StartCol: rec.c1, EndRow: rec.r2, EndCol: rec.c2,
-				Format: rec.format,
-			})
-		}
-	}
-	return SheetsBatch{Requests: reqs}
+	Sheets []Sheet
+	Named  []NamedRange
 }
 
 // googleSheets implements SheetsAPI with the Sheets v4 REST API.
@@ -128,12 +40,12 @@ func (g googleSheets) Get(ctx context.Context, spreadsheetID string) (SheetsSnap
 	var meta sheets.Spreadsheet
 	q := url.Values{
 		"includeGridData": {"true"},
-		"fields":          {"spreadsheetId,sheets.properties,sheets.merges,sheets.data,namedRanges"},
+		"fields":          {"sheets.properties,sheets.data,namedRanges"},
 	}
 	if err := g.c.Call(ctx, http.MethodGet, "v4/spreadsheets/"+url.PathEscape(spreadsheetID), q, nil, &meta); err != nil {
 		return SheetsSnapshot{}, mapDocsError(err)
 	}
-	snap := SheetsSnapshot{SpreadsheetID: meta.SpreadsheetID}
+	var snap SheetsSnapshot
 	for i, sh := range meta.Sheets {
 		if sh == nil || sh.Properties == nil {
 			continue
@@ -147,15 +59,6 @@ func (g googleSheets) Get(ctx context.Context, spreadsheetID string) (SheetsSnap
 		}
 		if item.Index == 0 {
 			item.Index = i
-		}
-		for _, m := range sh.Merges {
-			if m == nil {
-				continue
-			}
-			item.merges = append(item.merges, gridMerge{
-				r1: int(m.StartRowIndex), c1: int(m.StartColumnIndex),
-				r2: int(m.EndRowIndex), c2: int(m.EndColumnIndex),
-			})
 		}
 		if err := fillSheetGrid(&item, sh.Data); err != nil {
 			return SheetsSnapshot{}, err
@@ -174,49 +77,6 @@ func (g googleSheets) Get(ctx context.Context, spreadsheetID string) (SheetsSnap
 		snap.Named = append(snap.Named, n)
 	}
 	return snap, nil
-}
-
-func (g googleSheets) BatchUpdateValues(ctx context.Context, spreadsheetID string, req SheetsValuesBatch) error {
-	data := make([]*sheets.ValueRange, 0, len(req.Data))
-	for _, r := range req.Data {
-		data = append(data, &sheets.ValueRange{Range: r.Range, Values: r.Values})
-	}
-	err := g.c.Call(ctx, http.MethodPost, "v4/spreadsheets/"+url.PathEscape(spreadsheetID)+"/values:batchUpdate", nil, sheets.BatchUpdateValuesRequest{
-		ValueInputOption: "USER_ENTERED",
-		Data:             data,
-	}, nil)
-	return mapDocsError(err)
-}
-
-func (g googleSheets) BatchUpdate(ctx context.Context, spreadsheetID string, req SheetsBatch) error {
-	if len(req.Requests) == 0 {
-		return nil
-	}
-	calls := make([]*sheets.Request, 0, len(req.Requests))
-	for _, r := range req.Requests {
-		cell, fields := repeatCellPayload(r.Format)
-		if fields == "" {
-			continue
-		}
-		calls = append(calls, &sheets.Request{RepeatCell: &sheets.RepeatCellRequest{
-			Range: &sheets.GridRange{
-				SheetID:          r.SheetID,
-				StartRowIndex:    int64(r.StartRow),
-				StartColumnIndex: int64(r.StartCol),
-				EndRowIndex:      int64(r.EndRow),
-				EndColumnIndex:   int64(r.EndCol),
-			},
-			Cell:   cell,
-			Fields: fields,
-		}})
-	}
-	if len(calls) == 0 {
-		return nil
-	}
-	err := g.c.Call(ctx, http.MethodPost, "v4/spreadsheets/"+url.PathEscape(spreadsheetID)+":batchUpdate", nil, sheets.BatchUpdateSpreadsheetRequest{
-		Requests: calls,
-	}, nil)
-	return mapDocsError(err)
 }
 
 // fillSheetGrid lays the grid data blocks of one sheet into sh.Cells.
@@ -425,25 +285,6 @@ func gridOrigin(startRow, startCol int64) (row, col int, err error) {
 	return int(startRow), int(startCol), nil
 }
 
-func irBorderStyle(s string) string {
-	switch normalizeBorderStyle(s) {
-	case "medium":
-		return "SOLID_MEDIUM"
-	case "thick":
-		return "SOLID_THICK"
-	case "dashed":
-		return "DASHED"
-	case "dotted":
-		return "DOTTED"
-	case "double":
-		return "DOUBLE"
-	case "none":
-		return "NONE"
-	default:
-		return "SOLID"
-	}
-}
-
 func colorHex(c *sheets.Color, style *sheets.ColorStyle) string {
 	if style != nil && style.RGBColor != nil {
 		c = style.RGBColor
@@ -457,196 +298,6 @@ func colorHex(c *sheets.Color, style *sheets.ColorStyle) string {
 // round255 is a 0..1 color component as 0..255, clamped.
 func round255(v float64) uint8 {
 	return uint8(min(max(v*255+0.5, 0), 255))
-}
-
-func hexColor(s string) *sheets.Color {
-	r, g, b, ok := ParseRGB(s)
-	if !ok {
-		return nil
-	}
-	return &sheets.Color{
-		Red:   float64(r) / 255,
-		Green: float64(g) / 255,
-		Blue:  float64(b) / 255,
-	}
-}
-
-func rgbStyle(c *sheets.Color) *sheets.ColorStyle {
-	if c == nil {
-		return nil
-	}
-	return &sheets.ColorStyle{RGBColor: c}
-}
-
-func repeatCellPayload(f CellFormat) (*sheets.CellData, string) {
-	if f.IsZero() {
-		return nil, ""
-	}
-	sf := &sheets.CellFormat{}
-	var fields []string
-	if f.has(fmtNumber) || f.Number != "" {
-		sf.NumberFormat = &sheets.NumberFormat{Type: numberFormatType(f.Number), Pattern: f.Number}
-		fields = append(fields, "userEnteredFormat.numberFormat")
-	}
-	if f.has(fmtBold) || f.has(fmtItalic) || f.has(fmtStrike) || f.has(fmtUnderline) ||
-		f.Bold || f.Italic || f.Strike || f.Underline || f.has(fmtColor) || f.Color != "" {
-		tf := &sheets.TextFormat{
-			Bold: f.Bold, Italic: f.Italic, Strikethrough: f.Strike, Underline: f.Underline,
-		}
-		if c := hexColor(f.Color); c != nil {
-			tf.ForegroundColorStyle = rgbStyle(c)
-		}
-		sf.TextFormat = tf
-		if f.has(fmtBold) || f.Bold {
-			fields = append(fields, "userEnteredFormat.textFormat.bold")
-		}
-		if f.has(fmtItalic) || f.Italic {
-			fields = append(fields, "userEnteredFormat.textFormat.italic")
-		}
-		if f.has(fmtStrike) || f.Strike {
-			fields = append(fields, "userEnteredFormat.textFormat.strikethrough")
-		}
-		if f.has(fmtUnderline) || f.Underline {
-			fields = append(fields, "userEnteredFormat.textFormat.underline")
-		}
-		if f.has(fmtColor) || f.Color != "" {
-			fields = append(fields, "userEnteredFormat.textFormat.foregroundColorStyle")
-		}
-	}
-	if f.has(fmtFill) || f.Fill != "" {
-		if c := hexColor(f.Fill); c != nil {
-			sf.BackgroundColorStyle = rgbStyle(c)
-			fields = append(fields, "userEnteredFormat.backgroundColorStyle")
-		} else if f.has(fmtFill) {
-			sf.BackgroundColorStyle = &sheets.ColorStyle{}
-			fields = append(fields, "userEnteredFormat.backgroundColorStyle")
-		}
-	}
-	if f.has(fmtAlign) || f.Align != "" {
-		if a := normalizeAlign(f.Align); a != "" {
-			sf.HorizontalAlignment = strings.ToUpper(a)
-		} else {
-			sf.HorizontalAlignment = "LEFT"
-		}
-		fields = append(fields, "userEnteredFormat.horizontalAlignment")
-	}
-	if f.has(fmtVAlign) || f.VAlign != "" {
-		if a := normalizeVAlign(f.VAlign); a != "" {
-			sf.VerticalAlignment = strings.ToUpper(a)
-		} else {
-			sf.VerticalAlignment = "BOTTOM"
-		}
-		fields = append(fields, "userEnteredFormat.verticalAlignment")
-	}
-	if f.has(fmtWrap) || f.Wrap != "" {
-		switch f.Wrap {
-		case "wrap":
-			sf.WrapStrategy = "WRAP"
-		case "clip":
-			sf.WrapStrategy = "CLIP"
-		default:
-			sf.WrapStrategy = "OVERFLOW_CELL"
-		}
-		fields = append(fields, "userEnteredFormat.wrapStrategy")
-	}
-	if f.has(fmtBorder) || (f.Border != nil && !f.Border.zero()) {
-		sf.Borders = irBorders(f.Border)
-		fields = append(fields, "userEnteredFormat.borders")
-	}
-	if len(fields) == 0 {
-		return nil, ""
-	}
-	return &sheets.CellData{UserEnteredFormat: sf}, strings.Join(fields, ",")
-}
-
-func irBorders(b *CellBorder) *sheets.Borders {
-	if b == nil || b.zero() {
-		none := &sheets.Border{Style: "NONE"}
-		return &sheets.Borders{Top: none, Bottom: none, Left: none, Right: none}
-	}
-	style := irBorderStyle(b.Style)
-	col := hexColor(b.Color)
-	edge := func() *sheets.Border {
-		return &sheets.Border{Style: style, ColorStyle: rgbStyle(col)}
-	}
-	out := &sheets.Borders{}
-	if borderEdge(b.Edges, "top") {
-		out.Top = edge()
-	}
-	if borderEdge(b.Edges, "bottom") {
-		out.Bottom = edge()
-	}
-	if borderEdge(b.Edges, "left") {
-		out.Left = edge()
-	}
-	if borderEdge(b.Edges, "right") {
-		out.Right = edge()
-	}
-	return out
-}
-
-func borderEdge(edges, name string) bool {
-	return edges == "" || strings.Contains(edges, name)
-}
-
-func numberFormatType(pattern string) string {
-	p := strings.ToLower(pattern)
-	switch {
-	case strings.ContainsAny(p, "$€¥"):
-		return "CURRENCY"
-	case strings.Contains(p, "%"):
-		return "PERCENT"
-	case strings.Contains(p, "e+") || strings.Contains(p, "e-"):
-		return "SCIENTIFIC"
-	}
-	date, time := dateTimeTokens(p)
-	switch {
-	case date && time:
-		return "DATE_TIME"
-	case time:
-		return "TIME"
-	case date:
-		return "DATE"
-	default:
-		return "NUMBER"
-	}
-}
-
-func dateTimeTokens(p string) (date, time bool) {
-	if strings.Contains(p, "am/pm") || strings.Contains(p, "a/p") {
-		time = true
-	}
-	for i := 0; i < len(p); i++ {
-		switch p[i] {
-		case 'h', 's':
-			time = true
-		case 'y', 'd':
-			date = true
-		case 'm':
-			if minuteContext(p, i) {
-				time = true
-			} else {
-				date = true
-			}
-		}
-	}
-	return date, time
-}
-
-func minuteContext(p string, i int) bool {
-	for j := i - 1; j >= 0; j-- {
-		if p[j] == ':' || p[j] == ' ' || p[j] == 'm' {
-			continue
-		}
-		return p[j] == 'h' || p[j] == 's'
-	}
-	for j := i + 1; j < len(p); j++ {
-		if p[j] == ':' || p[j] == ' ' || p[j] == 'm' {
-			continue
-		}
-		return p[j] == 'h' || p[j] == 's'
-	}
-	return false
 }
 
 // numberString is a number cell input: an integer has no fraction.

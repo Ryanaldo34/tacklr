@@ -186,8 +186,6 @@ func (st *snapshots) Delete(_ context.Context, id session.ID) error {
 	return nil
 }
 
-var _ session.Store = (*snapshots)(nil)
-
 // forget drops id's revision from memory, when its checkpoint was deleted
 // in a write of the object's.
 func (st *snapshots) forget(id session.ID) {
@@ -281,8 +279,6 @@ func (st *secretStore) Get(ctx context.Context, id session.ID) (session.Secrets,
 func (st *secretStore) Delete(_ context.Context, id session.ID) error {
 	return st.s.Write(del(key(kindSecrets, id)))
 }
-
-var _ session.SecretStorage = (*secretStore)(nil)
 
 // eventLog is session.EventLog on an object's storage. Appends are numbered
 // without gaps; subscribers read storage at their own pace and wait on
@@ -511,5 +507,3 @@ func (l *eventLog) CloseSession(_ context.Context, id session.ID) error {
 	}
 	return nil
 }
-
-var _ session.EventLog = (*eventLog)(nil)

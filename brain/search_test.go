@@ -13,7 +13,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/storetest"
-	"github.com/ryanaldo34/tacklr/internal/helixtest"
 )
 
 // docWithParts saves a Document titled title with one part per body.
@@ -291,7 +290,7 @@ func TestSearch_listsAKindNewestFirstAndSearchesWithinOrNearOneRecord(t *testing
 	t.Parallel()
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithGraph(helixtest.Graph(t)))
+	eng, err := brain.NewEngine(store, brain.WithGraph(memoryGraph()))
 	if err != nil {
 		t.Fatal(err)
 	}

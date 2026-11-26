@@ -188,7 +188,7 @@ func TestSearch_catalogRestrictsKindsAndFreezesIt(t *testing.T) {
 
 // TestApplyKinds_migrationAddAndModify: each migration replaces the catalog
 // and the durable kinds, a new engine loads them from the store, PersistKinds
-// and SyncKindsToStore write kinds, and a search freezes the catalog.
+// writes kinds, and a search freezes the catalog.
 func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -269,22 +269,6 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	}
 	if _, err := storetest.Kind(ctx, store, "Note"); err != nil {
 		t.Fatal(err)
-	}
-
-	// SyncKindsToStore flushes WithKinds catalog to a durable writer.
-	mem := brain.NewMemoryStore()
-	engSync, err := brain.NewEngine(mem, brain.WithKinds(
-		brain.KindSpec{Kind: "Synced", IsParent: true, Description: "via sync"},
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := engSync.SyncKindsToStore(ctx); err != nil {
-		t.Fatal(err)
-	}
-	row, err = storetest.Kind(ctx, mem, "Synced")
-	if err != nil || row.Description != "via sync" {
-		t.Fatalf("sync: %+v err=%v", row, err)
 	}
 
 	// A search freezes the catalog: loading kinds again fails.

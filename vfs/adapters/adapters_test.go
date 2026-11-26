@@ -15,42 +15,19 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// TestHTMLRoundTripPreservesKindsLevelsMarksTables: HTML blocks encode one
-// block per line and decode back with their kinds, levels, marks and tables.
-func TestHTMLRoundTripPreservesKindsLevelsMarksTables(t *testing.T) {
+// TestHTMLDecodesKindsLevelsMarksTables: HTML blocks decode with their
+// kinds, levels, marks and tables.
+func TestHTMLDecodesKindsLevelsMarksTables(t *testing.T) {
 	t.Parallel()
-	src := []vfs.Block{
-		{Kind: vfs.BlockKindHeading, Text: "Title", Style: vfs.StyleMeta{Level: 1}},
-		{Kind: vfs.BlockKindParagraph, Text: "Hello **world** [link](https://example.com)"},
-		{Kind: vfs.BlockKindListItem, Text: "Item", Style: vfs.StyleMeta{Level: 1, Attributes: map[string]string{"list_type": "ul", "list_id": "l1"}}},
-		{Kind: vfs.BlockKindTable, Text: "A\tB\nC\tD", Style: vfs.StyleMeta{Attributes: map[string]string{"rows": "2", "cols": "2"}}},
-	}
-	out, err := (HTML{}).EncodeBlocks(context.Background(), src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(out)
-	if !strings.Contains(html, "<h1>Title</h1>") || !strings.Contains(html, "<strong>world</strong>") ||
-		!strings.Contains(html, "https://example.com") || !strings.Contains(html, "<li>") ||
-		!strings.Contains(html, "<table>") {
-		t.Fatalf("encode=%q", html)
-	}
-	h1Line, pLine, tableLine := -1, -1, -1
-	for i, line := range strings.Split(html, "\n") {
-		trim := strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(trim, "<h1>"):
-			h1Line = i
-		case strings.HasPrefix(trim, "<p>"):
-			pLine = i
-		case strings.HasPrefix(trim, "<table>"):
-			tableLine = i
-		}
-	}
-	if h1Line < 0 || pLine < 0 || tableLine < 0 || h1Line == pLine || pLine == tableLine || h1Line == tableLine {
-		t.Fatalf("want distinct heading/paragraph/table lines: h1=%d p=%d table=%d html=%q", h1Line, pLine, tableLine, html)
-	}
-	got, err := (HTML{}).DecodeBlocks(context.Background(), "/x.html", htmlMediaType, out)
+	html := `<h1>Title</h1>
+<p>Hello <strong>world</strong> <a href="https://example.com">link</a></p>
+<ul>
+<li>Item</li>
+</ul>
+<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>`
+
+	got, err := (HTML{}).DecodeBlocks(context.Background(), "/x.html", htmlMediaType, []byte(html))
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,9 +93,8 @@ func rawZip(t *testing.T, parts ...rawPart) []byte {
 	return buf.Bytes()
 }
 
-// TestDOCX_marksListMissingAndBadZip: a Word heading, its run marks and a
-// list item decode, encode and decode again the same (a block with no runs
-// encodes its marked text). A style with no value
+// TestDOCX_marksListMissingAndBadZip: a Word heading, its run marks, a bold
+// run and a list item decode. A style with no value
 // is a paragraph, and text outside a run is not read. Bytes that are not a
 // zip, a zip without the document part, a part with an unknown method or a
 // bad checksum, and a part that is not XML fail.
@@ -130,23 +106,20 @@ func TestDOCX_marksListMissingAndBadZip(t *testing.T) {
 <w:p><w:pPr><w:numPr/></w:pPr><w:r><w:t>Item</w:t></w:r></w:p>
 <w:p></w:p>
 <w:p><w:pPr><w:pStyle/></w:pPr><w:t>stray</w:t><w:r><w:t>Plain</w:t></w:r></w:p>
+<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r></w:p>
 </w:body></w:document>`)
 
-	doc, decodeErr := (DOCX{}).DecodeBlocks(ctx, "/x.docx", DOCXMediaType, input)
-	out, encodeErr := (DOCX{}).EncodeBlocks(ctx, append(slices.Clone(doc), vfs.Block{Kind: vfs.BlockKindParagraph, Text: "**Bold**"}))
-	again, againErr := (DOCX{}).DecodeBlocks(ctx, "/x.docx", DOCXMediaType, out)
+	doc, err := (DOCX{}).DecodeBlocks(ctx, "/x.docx", DOCXMediaType, input)
 
-	if decodeErr != nil || encodeErr != nil || againErr != nil || len(again) != 4 {
-		t.Fatalf("decode %v, encode %v, decode again = %#v %v", decodeErr, encodeErr, again, againErr)
+	if err != nil || len(doc) != 4 {
+		t.Fatalf("decode = %#v %v", doc, err)
 	}
-	if bold := again[3]; bold.Text != "**Bold**" || bold.Runs[0].Marks[vfs.MarkBold] != "true" {
-		t.Fatalf("block with no runs = %#v, want a bold run", bold)
+	if doc[0].Kind != vfs.BlockKindHeading || doc[0].Style.Level != 2 || doc[1].Kind != vfs.BlockKindListItem || doc[1].Text != "Item" ||
+		doc[2].Kind != vfs.BlockKindParagraph || doc[2].Text != "Plain" {
+		t.Fatalf("blocks = %#v, want a level-2 heading, a list item and a paragraph", doc)
 	}
-	for _, blocks := range [][]vfs.Block{doc, again[:3]} {
-		if len(blocks) != 3 || blocks[0].Kind != vfs.BlockKindHeading || blocks[0].Style.Level != 2 || blocks[1].Kind != vfs.BlockKindListItem || blocks[1].Text != "Item" ||
-			blocks[2].Kind != vfs.BlockKindParagraph || blocks[2].Text != "Plain" {
-			t.Fatalf("blocks = %#v, want a level-2 heading, a list item and a paragraph", blocks)
-		}
+	if bold := doc[3]; bold.Text != "**Bold**" || bold.Runs[0].Marks[vfs.MarkBold] != "true" {
+		t.Fatalf("bold paragraph = %#v, want a bold run", bold)
 	}
 	for name, data := range map[string][]byte{
 		"bytes that are not a zip":          []byte("not-zip"),
@@ -171,20 +144,11 @@ func TestCodecs_canceledContext(t *testing.T) {
 	if _, err := (HTML{}).DecodeBlocks(ctx, "/x.html", htmlMediaType, []byte("<p>x</p>")); err == nil {
 		t.Fatal("html decode")
 	}
-	if _, err := (HTML{}).EncodeBlocks(ctx, nil); err == nil {
-		t.Fatal("html encode")
-	}
 	if _, err := (DOCX{}).DecodeBlocks(ctx, "/x.docx", DOCXMediaType, []byte("PK")); err == nil {
 		t.Fatal("docx decode")
 	}
-	if _, err := (DOCX{}).EncodeBlocks(ctx, nil); err == nil {
-		t.Fatal("docx encode")
-	}
 	if _, _, err := (XLSX{}).DecodeSheets(ctx, "/x.xlsx", XLSXMediaType, nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("xlsx decode: %v", err)
-	}
-	if _, err := (XLSX{}).EncodeSheets(ctx, nil, nil); !errors.Is(err, context.Canceled) {
-		t.Fatalf("xlsx encode: %v", err)
 	}
 }
 
@@ -205,43 +169,42 @@ func TestCodecs_registerWordAndExcel(t *testing.T) {
 	}
 }
 
-// TestMountSession_xlsxCreateFormatPersists: a workbook created from CSV
-// keeps a format patch, a cell write needs a value or a format, and HTML
-// at a .html path or a path with no extension stays HTML.
-func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
+// budgetWorkbook is the parts of an Excel workbook of two sheets: Budget,
+// with values, a formula and its computed value, a string with edge
+// spaces, a value with no input, and formats (one used twice, a border with
+// no color), and Sheet2 with one string.
+var budgetWorkbook = map[string]string{
+	"xl/workbook.xml":            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Budget" sheetId="1" r:id="rId1"/><sheet name="Sheet2" sheetId="2" r:id="rId2"/></sheets></workbook>`,
+	"xl/_rels/workbook.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+	"xl/worksheets/sheet1.xml":   `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" s="1"><v>42</v></c></row><row r="2"><c r="A2"><f>A1+1</f><v>43</v></c><c r="B2" s="1"><v>7</v></c></row><row r="3"><c r="A3" t="s"><v>0</v></c><c r="B3" t="s"><v>1</v></c><c r="C3" s="2" t="s"><v>2</v></c></row></sheetData></worksheet>`,
+	"xl/worksheets/sheet2.xml":   `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>3</v></c></row></sheetData></worksheet>`,
+	"xl/sharedStrings.xml":       `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="4" uniqueCount="4"><si><t>Amount</t></si><si><t>computed</t></si><si><t xml:space="preserve"> edge </t></si><si><t>x</t></si></sst>`,
+	"xl/styles.xml":              `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="$#,##0.00"/></numFmts><fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><i/><strike/><u/><color rgb="FF003366"/><sz val="11"/><name val="Calibri"/></font><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFCC00"/></patternFill></fill><fill><patternFill patternType="none"/></fill></fills><borders count="3"><border><left/><right/><top/><bottom/><diagonal/></border><border><left/><right/><top/><bottom style="thin"><color rgb="FF000000"/></bottom><diagonal/></border><border><left/><right/><top style="thin"/><bottom/><diagonal/></border></borders><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="164" fontId="1" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="middle" wrapText="1"/></xf><xf numFmtId="0" fontId="2" fillId="3" borderId="2" xfId="0" applyBorder="1"/></cellXfs></styleSheet>`,
+}
+
+// TestMountSession_readsAWorkbookAndKeepsHTMLAsText: a mounted Excel
+// workbook reads as a grid with its formats, and HTML at a .html path or a
+// path with no extension stays HTML text.
+func TestMountSession_readsAWorkbookAndKeepsHTMLAsText(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir()))).WithCodecs(Codecs()...)(ctx, "xlsx-create", vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir()))).WithCodecs(Codecs()...)(ctx, "xlsx-read", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := "Amount,Note\n42,ok"
-	_, err = ms.Apply(ctx, "/workspace/work/Budget.xlsx", vfs.Mutation{Content: &body})
-	if err != nil {
-		t.Fatal(err)
+	html := "<h1>x</h1>"
+	for p, body := range map[string][]byte{
+		"/workspace/work/Budget.xlsx": xlsxOf(t, budgetWorkbook),
+		"/workspace/work/notes.html":  []byte(html),
+		"/workspace/work/SPIKE":       []byte(html),
+	} {
+		if err := ms.Route(ctx, p).WriteFile(ctx, body); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	doc, err := ms.Route(ctx, "/workspace/work/Budget.xlsx").
-		ReadText(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ms.Apply(ctx, "/workspace/work/Budget.xlsx", vfs.Mutation{
-		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2",
-	}); err == nil || !strings.Contains(err.Error(), "sheet cell needs a value") {
-		t.Fatalf("block_id without value or format: %v", err)
-	}
-	on := true
-	_, err = ms.Apply(ctx, "/workspace/work/Budget.xlsx", vfs.Mutation{
-		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2",
-		Format: &vfs.FormatPatch{Bold: &on, Number: strPtr("$#,##0.00")},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	got, err := ms.Route(ctx, "/workspace/work/Budget.xlsx").ReadText(ctx)
 
-	got, err := ms.Route(ctx, "/workspace/work/Budget.xlsx").
-		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,81 +212,33 @@ func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
 	if !ok {
 		t.Fatalf("type %T", got)
 	}
-	cell, err := g.Cell("Budget", "B2")
-	if err != nil || cell.Display() != "ok" || !cell.Format.Bold || cell.Format.Number != "$#,##0.00" {
-		t.Fatalf("persisted B2 = %+v err=%v", cell, err)
+	if b1 := g.Sheets()[0].Cells[0][1]; b1.Display() != "42" || !b1.Format.Bold || b1.Format.Number != "$#,##0.00" {
+		t.Fatalf("B1 = %+v", b1)
 	}
-	html := "<h1>x</h1>"
-	if _, err := ms.Apply(ctx, "/workspace/work/notes.html", vfs.Mutation{Content: &html}); err != nil {
-		t.Fatal(err)
-	}
-
-	st, err := ms.Route(ctx, "/workspace/work/notes.html").
-		Stat(ctx)
-	if err != nil || st.MediaType != htmlMediaType {
-		t.Fatalf("notes.html Stat=%+v err=%v", st, err)
-	}
-
-	if raw, err := ms.Route(ctx, "/workspace/work/notes.html").
-		ReadText(ctx); err != nil || raw.Text() != html {
-		t.Fatalf("notes.html body=%q err=%v", raw.Text(), err)
-	}
-	if _, err := ms.Apply(ctx, "/workspace/work/SPIKE", vfs.Mutation{Content: &html}); err != nil {
-		t.Fatal(err)
-	}
-
-	if st, err := ms.Route(ctx, "/workspace/work/SPIKE").
-		Stat(ctx); err != nil || st.MediaType != htmlMediaType {
-		t.Fatalf("SPIKE Stat=%+v err=%v", st, err)
-	}
-
-	if spike, err := ms.Route(ctx, "/workspace/work/SPIKE").
-		ReadText(ctx); err != nil || spike.Text() != html {
-		t.Fatalf("SPIKE body=%q err=%v", spike.Text(), err)
+	for _, p := range []string{"/workspace/work/notes.html", "/workspace/work/SPIKE"} {
+		st, statErr := ms.Route(ctx, p).Stat(ctx)
+		text, textErr := ms.Route(ctx, p).ReadText(ctx)
+		if statErr != nil || st.MediaType != htmlMediaType || textErr != nil || text.Text() != html {
+			t.Fatalf("%s: Stat = %+v %v, text = %v %v", p, st, statErr, text, textErr)
+		}
 	}
 }
 
-func strPtr(s string) *string { return &s }
-
-// TestXLSX_usedRangeFormulaFormatRoundTrip: the Excel codec writes a
-// workbook and reads back its sheets (an untitled one is SheetN), values,
-// formulas, computed values, strings with edge spaces and formats (a format
-// or a string used twice, a border with no color). A workbook with no
-// sheets is one Sheet1.
-func TestXLSX_usedRangeFormulaFormatRoundTrip(t *testing.T) {
+// TestXLSX_readsUsedRangeFormulasAndFormats: the Excel codec reads a
+// workbook's sheets, values, formulas, computed values, strings with edge
+// spaces and formats (a format or a string used twice, a border with no
+// color).
+func TestXLSX_readsUsedRangeFormulasAndFormats(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	reg, err := vfs.NewContentRegistry(Codecs()...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	money := vfs.CellFormat{
-		Number: "$#,##0.00", Bold: true, Italic: true, Strike: true, Underline: true,
-		Fill: "#ffcc00", Color: "#003366", Align: "right", VAlign: "middle", Wrap: "wrap",
-		Border: &vfs.CellBorder{Style: "thin", Edges: "bottom", Color: "#000000"},
-	}
-	src, err := vfs.NewTabularDocument("/work/Budget.xlsx", XLSXMediaType, []vfs.Sheet{
-		{
-			ID: "1", Title: "Budget",
-			Cells: [][]vfs.Cell{
-				{{Input: "Amount", Value: "Amount"}, {Input: "42", Value: "42", Format: money}},
-				{{Input: "=A1+1", Value: "43"}, {Input: "7", Value: "7", Format: money}},
-				{{Input: "Amount"}, {Value: "computed"}, {Input: " edge ", Format: vfs.CellFormat{Border: &vfs.CellBorder{Style: "thin", Edges: "top"}}}},
-			},
-		},
-		{Cells: [][]vfs.Cell{{{Input: "x"}}}},
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	doc, decodeErr := reg.Decode(ctx, "/work/Budget.xlsx", XLSXMediaType, xlsxOf(t, budgetWorkbook))
 
-	raw, encodeErr := reg.Encode(ctx, src)
-	doc, decodeErr := reg.Decode(ctx, "/work/Budget.xlsx", XLSXMediaType, raw)
-	empty, emptyErr := (XLSX{}).EncodeSheets(ctx, nil, nil)
-	none, _, noneErr := (XLSX{}).DecodeSheets(ctx, "/work/None.xlsx", XLSXMediaType, empty)
-
-	if encodeErr != nil || decodeErr != nil {
-		t.Fatalf("encode %v, decode %v", encodeErr, decodeErr)
+	if decodeErr != nil {
+		t.Fatalf("decode %v", decodeErr)
 	}
 	td, _ := vfs.AsGrid(doc)
 	sh := td.Sheets()[0]
@@ -344,9 +259,6 @@ func TestXLSX_usedRangeFormulaFormatRoundTrip(t *testing.T) {
 	}
 	if b := sh.Cells[2][2].Format.Border; b == nil || b.Edges != "top" || b.Color != "" {
 		t.Fatalf("border with no color = %+v", b)
-	}
-	if emptyErr != nil || noneErr != nil || len(none) != 1 || none[0].Title != "Sheet1" {
-		t.Fatalf("no sheets = %+v err=%v %v", none, emptyErr, noneErr)
 	}
 }
 
